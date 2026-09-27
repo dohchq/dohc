@@ -10,37 +10,45 @@ const definition = {formatVersion:1,datasetId:id(1),name:"Equipment",schemaPath:
   operations:[{operationId:id(4),name:"list",label:"List equipment",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3)]}]};
 const cursor = {workspaceId:"workspace",datasetId:id(1),hostEpoch:"epoch",approvedRevisionHash:"a".repeat(64),revision:0,digest:"b".repeat(64)};
 const requests: unknown[] = [
-  {action:"deletePreview",workspaceId:"workspace",datasetId:id(1),limit:10},
-  {action:"delete",workspaceId:"workspace",datasetId:id(1),expected:cursor,reviewToken:"c".repeat(64),acknowledge:true},
-  {action:"cancelAttempt",workspaceId:"workspace",datasetId:id(1),reference:"b".repeat(64),acknowledge:true},
-  {action:"pendingAttempts",workspaceId:"workspace",datasetId:id(1),after:0,limit:10},
-  {action:"reconcileAttempt",workspaceId:"workspace",datasetId:id(1),reference:"b".repeat(64),acknowledge:true},
-  {action:"archive",workspaceId:"workspace",datasetId:id(1)},
-  {action:"restore",workspaceId:"workspace",datasetId:id(1)},
-  {action:"lifecycle",workspaceId:"workspace",datasetId:id(1),limit:50},
+  {action:"deletePreview",workspaceId:"workspace",datasetPath:"equipment/dataset.json",limit:10},
+  {action:"delete",workspaceId:"workspace",datasetPath:"equipment/dataset.json",expected:cursor,reviewToken:"c".repeat(64),acknowledge:true},
+  {action:"cancelAttempt",workspaceId:"workspace",datasetPath:"equipment/dataset.json",reference:"b".repeat(64),acknowledge:true},
+  {action:"pendingAttempts",workspaceId:"workspace",datasetPath:"equipment/dataset.json",after:0,limit:10},
+  {action:"reconcileAttempt",workspaceId:"workspace",datasetPath:"equipment/dataset.json",reference:"b".repeat(64),acknowledge:true},
+  {action:"archive",workspaceId:"workspace",datasetPath:"equipment/dataset.json"},
+  {action:"restore",workspaceId:"workspace",datasetPath:"equipment/dataset.json"},
+  {action:"lifecycle",workspaceId:"workspace",datasetPath:"equipment/dataset.json",limit:50},
   {action:"list",workspaceId:"workspace",includeArchived:true},
   {action:"list",workspaceId:"workspace"},
-  {action:"describe",workspaceId:"workspace",datasetId:id(1)},
-  {action:"export",workspaceId:"workspace",datasetId:id(1),savePath:"C:/private/fundraiser.dohc-recovery"},
+  {action:"describe",workspaceId:"workspace",datasetPath:"equipment/dataset.json"},
+  {action:"export",workspaceId:"workspace",datasetPath:"equipment/dataset.json",savePath:"C:/private/fundraiser.dohc-recovery"},
   {action:"create",workspaceId:"workspace",definition},
   {action:"prepare",workspaceId:"workspace",descriptorPath:"equipment/dataset.json"},
   {action:"approve",workspaceId:"workspace",preparationId:id(5),revisionSha256:"a".repeat(64)},
   {action:"discard",workspaceId:"workspace",preparationId:id(5)},
-  {action:"invoke",workspaceId:"workspace",datasetId:id(1),operationId:id(4),revision:1,revisionSha256:"a".repeat(64),input:{limit:10},idempotencyKey:"read-1"},
+  {action:"invoke",workspaceId:"workspace",datasetPath:"equipment/dataset.json",operationId:id(4),revision:1,revisionSha256:"a".repeat(64),input:{limit:10},idempotencyKey:"read-1"},
 ];
 describe("dataset CLI", () => {
+  it("requires a dataset.json address instead of an ID or folder", async () => {
+    const send = vi.fn();
+    for (const selection of [{ datasetId: id(1) }, { datasetPath: id(1) }, { datasetPath: "equipment" }, { datasetPath: "../equipment/dataset.json" }]) {
+      const result = await executeCli({ argv: ["dataset", "describe", JSON.stringify({ workspaceId: "workspace", ...selection })], request: send });
+      expect(result.exitCode).toBe(1);
+    }
+    expect(send).not.toHaveBeenCalled();
+  });
   it("uses the dataset field envelope for forms and parses explicit relation preparation", () => {
-    const form = { action: "createForm", workspaceId: "workspace", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64),
+    const form = { action: "createForm", workspaceId: "workspace", datasetPath: "equipment/dataset.json", revision: 1, revisionSha256: "a".repeat(64),
       tableId: id(2), createOperationId: id(4), appRoot: "form", fieldIds: Array.from({ length: 128 }, (_, index) => id(index + 10)),
       relationChoices: [{ fieldId: id(10), operationId: id(5), labelFieldId: id(3) }] };
     expect(DatasetRequest.parse(form)).toEqual(form);
     expect(() => DatasetRequest.parse({ ...form, fieldIds: [...form.fieldIds, id(999)] })).toThrow();
-    const prepare = { action: "prepareRelationChoices", workspaceId: "workspace", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64), tableId: id(2), fieldId: id(3), labelFieldId: id(4) };
+    const prepare = { action: "prepareRelationChoices", workspaceId: "workspace", datasetPath: "equipment/dataset.json", revision: 1, revisionSha256: "a".repeat(64), tableId: id(2), fieldId: id(3), labelFieldId: id(4) };
     expect(DatasetRequest.parse(prepare)).toEqual(prepare);
     expect(() => DatasetRequest.parse({ ...prepare, access: "owner" })).toThrow();
   });
   it("prepares a button as a name on a table, with no column, type or operation", () => {
-    const request = { action: "prepareSchemaChange", workspaceId: "workspace", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64),
+    const request = { action: "prepareSchemaChange", workspaceId: "workspace", datasetPath: "equipment/dataset.json", revision: 1, revisionSha256: "a".repeat(64),
       change: { kind: "addButton", tableId: id(2), name: "Send receipt" } };
     expect(DatasetRequest.parse(request)).toEqual(request);
     for (const extra of [{ sqlColumn: "send_receipt" }, { type: "button" }, { fieldIds: [id(3)] }, { operationId: id(4) }]) {
@@ -91,20 +99,20 @@ describe("dataset CLI", () => {
     expect(await help("create")).toContain("Fields: workspaceId, definition");
     expect(await help("approve")).toContain("Fields: workspaceId, preparationId, revisionSha256");
     expect(await help("invoke")).toContain("same input and idempotencyKey");
-    expect(await help("export")).toContain("Fields: workspaceId, datasetId, savePath Optional fields: overwrite");
+    expect(await help("export")).toContain("Fields: workspaceId, datasetPath, savePath Optional fields: overwrite");
     expect(send).not.toHaveBeenCalled();
   });
   it("requires a chosen export destination and returns no private archive bytes", async () => {
     const send = vi.fn(async () => ({kind:"exported",savedPath:"C:/private/backup.dohc-recovery"}));
-    const missing = await executeCli({argv:["dataset","export",JSON.stringify({workspaceId:"workspace",datasetId:id(1)})],request:send});
+    const missing = await executeCli({argv:["dataset","export",JSON.stringify({workspaceId:"workspace",datasetPath:"equipment/dataset.json"})],request:send});
     expect(missing.exitCode).toBe(1); expect(send).not.toHaveBeenCalled();
-    const saved = await executeCli({argv:["dataset","export",JSON.stringify({workspaceId:"workspace",datasetId:id(1),savePath:"C:/private/backup.dohc-recovery"})],request:send});
+    const saved = await executeCli({argv:["dataset","export",JSON.stringify({workspaceId:"workspace",datasetPath:"equipment/dataset.json",savePath:"C:/private/backup.dohc-recovery"})],request:send});
     expect(saved.exitCode).toBe(0); expect(saved.stdout).toContain("savedPath");
   });
 });
 
 it("requires an exact deletion review and explicit acknowledgment before transport", async () => {
-  const request = {workspaceId:"workspace",datasetId:id(1),expected:cursor,reviewToken:"c".repeat(64),acknowledge:true};
+  const request = {workspaceId:"workspace",datasetPath:"equipment/dataset.json",expected:cursor,reviewToken:"c".repeat(64),acknowledge:true};
   const send = vi.fn(async () => ({kind:"deleted",deleted:true,datasetId:id(1)}));
   for (const invalid of [{...request,acknowledge:false},{...request,acknowledge:undefined},{...request,expected:undefined},
     {...request,expected:{...cursor,digest:"invalid"}},{...request,reviewToken:undefined},{...request,force:true}]) {

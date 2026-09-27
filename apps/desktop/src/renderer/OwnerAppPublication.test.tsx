@@ -32,6 +32,7 @@ async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPubl
   return { kind: "cancelled" };
 }
 const api = {
+  dataset: vi.fn(async () => ({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json" }], nextCursor: null })),
   listRelayShareLinks: vi.fn(async (): Promise<ListRelayShareLinksResult> => page),
   publishOwnerApp: vi.fn(answer),
   openExternalUrl: vi.fn(async () => undefined),
@@ -54,6 +55,7 @@ describe("owner app publication", () => {
   beforeEach(() => { vi.stubGlobal("dohcDesktop", api); });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.listRelayShareLinks.mockResolvedValue(page);
     api.publishOwnerApp.mockImplementation(answer);
+    api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json" }], nextCursor: null });
   });
 
   it("opens approval from the form empty state and restores focus after closing", async () => {
@@ -569,5 +571,6 @@ it("reviews a chosen read and its fields, with approval off by default", async (
   fireEvent.click(choice);
   await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
   expect(api.publishOwnerApp).toHaveBeenCalledWith(expect.objectContaining({ action: "approve", linkReads: [{ operationId: read.operationId, fieldIds: read.fields.map(field => field.fieldId) }] }));
-  cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.publishOwnerApp.mockImplementation(answer); api.listRelayShareLinks.mockResolvedValue(page);
+  cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.publishOwnerApp.mockImplementation(answer);
+    api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json" }], nextCursor: null }); api.listRelayShareLinks.mockResolvedValue(page);
 });

@@ -110,7 +110,7 @@ globalThis.operations.count=(ctx)=>{if(ctx.caller.kind!=='owner')ctx.refuse('for
     if (prepared.kind !== "prepared") throw Error("Expected prepared performance fixture.");
     const approved = await page.evaluate(input => window.dohcDesktop!.dataset({ action: "approve", ...input }), { workspaceId, preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
     if (approved.kind !== "approved") throw Error("Expected approved performance fixture.");
-    const selection = { workspaceId, datasetId: definition.datasetId, revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256 };
+    const selection = { workspaceId, datasetPath: "performance/dataset.json", revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256 };
     const seed = await page.evaluate(async ({ selection, operationId, countOperationId, rowCount }) => {
       const started = performance.now();
       let head = 0;
@@ -123,7 +123,7 @@ globalThis.operations.count=(ctx)=>{if(ctx.caller.kind!=='owner')ctx.refuse('for
       if (count.kind !== "invoked" || JSON.stringify(count.result) !== JSON.stringify([{ count: rowCount }])) throw Error("The fixture row count differs.");
       return { elapsedMs: performance.now() - started, head };
     }, { selection, operationId: id(7), countOperationId: id(8), rowCount });
-    const checkpoint = await page.evaluate(input => window.dohcDesktop!.dataset({ ...input, action: "prepareMigration", descriptorPath: "performance/dataset.json", migrationPath: "performance/checkpoint.sql" }), { workspaceId, datasetId: definition.datasetId });
+    const checkpoint = await page.evaluate(input => window.dohcDesktop!.dataset({ ...input, action: "prepareMigration", descriptorPath: "performance/dataset.json", migrationPath: "performance/checkpoint.sql" }), { workspaceId, datasetPath: "performance/dataset.json" });
     if (checkpoint.kind !== "migration-prepared") throw Error("Expected a fixture checkpoint candidate.");
     const migrated = await page.evaluate(input => window.dohcDesktop!.dataset({ ...input, action: "approveMigration" }), { workspaceId, preparationId: checkpoint.preparationId, revisionSha256: checkpoint.revision.revisionSha256, approvalDigest: checkpoint.approvalDigest });
     if (migrated.kind !== "migrated") throw Error("Expected a fixture checkpoint.");

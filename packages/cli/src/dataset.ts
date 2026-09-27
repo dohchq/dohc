@@ -1,11 +1,14 @@
 import { z } from "zod";
 import { APP_BACKEND_UPLOAD_BYTES, parseAppBackendFile, parseAppBackendJson } from "@dohc/security-contract/app-backend";
-import { DATASET_MAX_FIELDS, parseDatasetDefinition, parseDatasetRevision, parseDatasetDescription, parseDatasetBindingReference } from "@dohc/security-contract/dataset";
+import { DATASET_MAX_FIELDS, parseDatasetDefinition, parseDatasetRevision, parseDatasetDescription, parseDatasetBindingReference, parseDatasetPath } from "@dohc/security-contract/dataset";
 
 const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const workspace = { workspaceId: z.string().min(1).max(128) };
-const selection = { ...workspace, datasetId: identity };
+const datasetPath = z.string().min(1).max(1024).describe("Workspace-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference.").superRefine((value, context) => {
+  try { parseDatasetPath(value); } catch { context.addIssue({ code: "custom", message: "Use the workspace-relative dataset.json path." }); }
+});
+const selection = { ...workspace, datasetPath };
 const pinned = { ...selection, revision: z.number().int().positive(), revisionSha256: sha256 };
 const file = z.unknown().transform((value, context) => {
   try { return parseAppBackendFile(value); }
@@ -24,7 +27,7 @@ const revision = z.unknown().transform((value, context) => {
   try { return parseDatasetRevision(value); }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection revision." }); return z.NEVER; }
 });
-export const DatasetCursor = z.object({ ...selection, hostEpoch: z.string().min(1).max(256), approvedRevisionHash: sha256,
+export const DatasetCursor = z.object({ ...workspace, datasetId: identity, hostEpoch: z.string().min(1).max(256), approvedRevisionHash: sha256,
   revision: z.number().int().nonnegative(), digest: sha256 }).strict();
 export const DatasetRecoveryPreparation = z.object({ transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, revision }).strict();
 export type DatasetRecoveryPreparation = z.infer<typeof DatasetRecoveryPreparation>;
@@ -72,7 +75,7 @@ export const DatasetPendingAttemptsPage = z.object({ datasetId: identity, entrie
 export type DatasetPendingAttemptsPage = z.infer<typeof DatasetPendingAttemptsPage>;
 export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...workspace, action: z.literal("prepareRecovery"), sourcePath: z.string().min(1).max(4096).optional() }).strict(),
-  z.object({ ...selection, action: z.literal("claimRecovery"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, oldHostStopped: z.literal(true) }).strict(),
+  z.object({ ...workspace, action: z.literal("claimRecovery"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, oldHostStopped: z.literal(true) }).strict(),
   z.object({ ...workspace, action: z.literal("discardRecovery"), transferId: identity }).strict(),
   z.object({ ...selection, action: z.literal("history"), beforeRevision: z.number().int().positive().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...workspace, action: z.literal("list"), after: identity.optional(), limit: z.number().int().min(1).max(100).optional(), includeArchived: z.boolean().optional() }).strict(),
@@ -142,9 +145,13 @@ export const DatasetHistoryPage = z.object({ datasetId: identity, headRevision: 
   nextBeforeRevision: z.number().int().positive().nullable() }).strict();
 export type DatasetHistoryPage = z.infer<typeof DatasetHistoryPage>;
 const description = z.unknown().transform((value, context) => {
-  try { return parseDatasetDescription(value); }
+  try {
+    const { datasetPath: path, ...metadata } = value as Record<string, unknown>;
+    return { ...parseDatasetDescription(metadata), datasetPath: path === null ? null : parseDatasetPath(path) };
+  }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });
+export type AddressedDatasetDescription = z.infer<typeof description>;
 export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetHistoryRevision.extend({ kind: z.literal("history-revision") }).strict(),
   DatasetDeletePreview.extend({ kind: z.literal("delete-preview") }).strict(),
@@ -155,7 +162,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("attempt-reconciled"), cleared: z.literal(true) }).strict(),
   z.object({ kind: z.literal("attempt-cancelled"), cancelled: z.literal(true) }).strict(),
   z.object({ kind: z.literal("recovery-prepared"), recovery: DatasetRecoveryPreparation.nullable() }).strict(),
-  z.object({ kind: z.literal("recovery-claimed"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, targetCursor: DatasetCursor }).strict(),
+  z.object({ kind: z.literal("recovery-claimed"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, targetCursor: DatasetCursor, datasetPath: datasetPath.nullable(), sourceError: z.string().max(1024).optional() }).strict(),
   z.object({ kind: z.literal("recovery-discarded") }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),

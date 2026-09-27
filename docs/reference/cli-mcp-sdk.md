@@ -25,7 +25,7 @@ A tool or command that cannot do what was asked returns `{ ok: false, reason }`,
 
 ### `dohc_dataset`
 
-Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
+Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its workspace-relative dataset.json path. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -561,7 +561,7 @@ dohc dataset <verb> '<JSON>'
 
 Create, change, and use transactional Collections.
 
-Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root. These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity.
+Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root. datasetPath is the workspace-relative dataset.json path. List and describe return it alongside the internal datasetId. After moving the file, update commands and app manifests. An old path reports a broken reference. These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity.
 
 #### `dohc dataset list`
 
@@ -581,7 +581,7 @@ Show a Collection's tables, fields, and operations.
 Use describe to find approved operation IDs.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `includeArchived`: `boolean`
 
 Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages" } }`.
@@ -591,7 +591,7 @@ Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?:
 List saved operations, with values to undo edits.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `beforeRevision`: `integer`
 - `limit`: `integer`
 
@@ -602,7 +602,7 @@ Returns `{ kind: "history", datasetId, headRevision, entries: { revision, operat
 Show the saved source of one past revision.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 
 Returns `{ kind: "history-revision", revision, schemaSql, operationSource }`.
@@ -614,7 +614,7 @@ Prepare a change that reverses one saved change.
 Set `targetRevisionSha256` to `entries[].schema.previousRevisionHash` from `history`. Set `changedRevisionSha256` to `entries[].schema.revisionHash` from `history`. Review the result, then approve it with approveMigration.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `targetRevisionSha256`: `SHA-256 hex`. Required.
@@ -627,7 +627,7 @@ Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision
 List app bindings and explicit data grants.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `after`: `string`
 - `limit`: `integer`
 
@@ -640,7 +640,7 @@ Add or change an explicit data grant.
 grant names revision, revisionSha256, operationIds, and discover.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `grantId`: `string`. Required.
 - `grant`: `{ revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean }`. Required.
 
@@ -653,7 +653,7 @@ Remove an explicit data grant.
 Set `principalKey` to `permissions[].principal` from `permissions`.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `principalKey`: `string`. Required.
 
 Returns `{ kind: "grant-updated" }`.
@@ -663,7 +663,7 @@ Returns `{ kind: "grant-updated" }`.
 Show a Collection's archive state and its apps.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `after`: `string`
 - `limit`: `integer`
 
@@ -674,7 +674,7 @@ Returns `{ kind: "lifecycle", archived, generation, reason, apps: { appId, bindi
 Stop a Collection's operations and keep its records.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 
 Returns `{ kind: "lifecycle-updated", archived, generation, reason? }`.
 
@@ -683,7 +683,7 @@ Returns `{ kind: "lifecycle-updated", archived, generation, reason? }`.
 Restore an archived Collection under its rules.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 
 Returns `{ kind: "lifecycle-updated", archived, generation, reason? }`.
 
@@ -694,7 +694,7 @@ Review what deleting a Collection affects.
 The result lists affected apps and holds what delete needs.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `after`: `string`
 - `limit`: `integer`
 
@@ -707,7 +707,7 @@ Permanently delete a Collection and all its data.
 Set `expected` to `cursor` from `deletePreview`. Set `reviewToken` to `reviewToken` from `deletePreview`. This removes the Collection's private data and history. Set acknowledge to true. Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `expected`: `{ workspaceId: string, datasetId: UUID, hostEpoch: string, approvedRevisionHash: SHA-256 hex, revision: integer, digest: SHA-256 hex }`. Required.
 - `reviewToken`: `SHA-256 hex`. Required.
 - `acknowledge`: `true`. Required.
@@ -719,7 +719,7 @@ Returns `{ kind: "deleted", deleted: true, datasetId }`.
 List pending responses that still hold a retry.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `after`: `integer`
 - `limit`: `integer`
 
@@ -732,7 +732,7 @@ Clear the retry of a saved pending response.
 Set `reference` to `entries[].reference` from `pendingAttempts`. Set acknowledge to true. This cannot be undone.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `reference`: `SHA-256 hex`. Required.
 - `acknowledge`: `true`. Required.
 
@@ -745,7 +745,7 @@ Cancel an unconfirmed pending response.
 Set `reference` to `entries[].reference` from `pendingAttempts`. Set acknowledge to true.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `reference`: `SHA-256 hex`. Required.
 - `acknowledge`: `true`. Required.
 
@@ -758,7 +758,7 @@ Save a private recovery archive of a Collection.
 savePath is an absolute path ending in .dohc-recovery. Set overwrite to true to replace a file. Recovery archives contain private records, uploaded files, history, and retry credentials. Store them privately.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `savePath`: `string`. Required.
 - `overwrite`: `boolean`
 
@@ -779,16 +779,15 @@ Returns `{ kind: "recovery-prepared", recovery: { transferId, manifestSha256, so
 
 Restore a Collection from a prepared archive.
 
-Set `workspaceId` to `recovery.sourceCursor.workspaceId` from `prepareRecovery`. Set `datasetId` to `recovery.sourceCursor.datasetId` from `prepareRecovery`. Set `transferId` to `recovery.transferId` from `prepareRecovery`. Set `manifestSha256` to `recovery.manifestSha256` from `prepareRecovery`. Set `sourceCursor` to `recovery.sourceCursor` from `prepareRecovery`. Stop the old host first, then set oldHostStopped to true. Copy only these fields.
+Set `workspaceId` to `recovery.sourceCursor.workspaceId` from `prepareRecovery`. Set `transferId` to `recovery.transferId` from `prepareRecovery`. Set `manifestSha256` to `recovery.manifestSha256` from `prepareRecovery`. Set `sourceCursor` to `recovery.sourceCursor` from `prepareRecovery`. Stop the old host first, then set oldHostStopped to true. Copy only these fields.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
 - `transferId`: `UUID`. Required.
 - `manifestSha256`: `SHA-256 hex`. Required.
 - `sourceCursor`: `{ workspaceId: string, datasetId: UUID, hostEpoch: string, approvedRevisionHash: SHA-256 hex, revision: integer, digest: SHA-256 hex }`. Required.
 - `oldHostStopped`: `true`. Required.
 
-Returns `{ kind: "recovery-claimed", transferId, manifestSha256, sourceCursor: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, targetCursor: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest } }`.
+Returns `{ kind: "recovery-claimed", transferId, manifestSha256, sourceCursor: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, targetCursor: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, datasetPath, sourceError? }`.
 
 #### `dohc dataset discardRecovery`
 
@@ -808,7 +807,7 @@ Upload a file for a file field.
 bytesBase64 holds the file as base64. Retry an uncertain upload with the same idempotencyKey.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `fieldId`: `UUID`. Required.
@@ -824,7 +823,7 @@ Returns `{ kind: "uploaded", file, replayed }`.
 Read an uploaded file.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `fileId`: `string`. Required.
@@ -837,7 +836,7 @@ Returns `{ kind: "file", file, bytesBase64 }`.
 Create a form app that adds records to a Collection.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `tableId`: `UUID`. Required.
@@ -856,7 +855,7 @@ Prepare public choices for a relation field.
 Review the result, then approve it with approveMigration.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `tableId`: `UUID`. Required.
@@ -911,7 +910,7 @@ Prepare new source and migration SQL for review.
 Read more changed records with migrationPreviewPage. Review the result, then approve it with approveMigration.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `descriptorPath`: `string`. Required.
 - `migrationPath`: `string`. Required.
 
@@ -935,7 +934,7 @@ Prepare one field, table, or name change.
 change.kind is one of renameCollection, renameTable, renameField, changeField, addButton, addField. Review the result, then approve it with approveMigration.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `change`: `{ kind: "renameCollection", name: string } | { kind: "renameTable", tableId: UUID, name: string } | { kind: "renameField", tableId: UUID, fieldId: UUID, name: string } | { kind: "changeField", tableId: UUID, fieldId: UUID, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation", required: boolean } | { kind: "addButton", tableId: UUID, name: string } | { kind: "addField", tableId: UUID, field: { name: string, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment", required: boolean, unique: boolean, default?: any JSON, options?: string[] } }`. Required.
@@ -971,7 +970,7 @@ Run an approved operation.
 Use describe to find approved operation IDs. Retry an uncertain write with the same input and idempotencyKey.
 
 - `workspaceId`: `string`. Required.
-- `datasetId`: `UUID`. Required.
+- `datasetPath`: `string`. Required.
 - `operationId`: `UUID`. Required.
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.

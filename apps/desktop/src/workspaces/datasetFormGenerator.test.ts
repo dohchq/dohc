@@ -14,7 +14,7 @@ const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name
     { fieldId: id(6), name: "Private note", sqlColumn: "note", type: "text", required: false, unique: false },
   ] }], operations: [{ operationId: id(7), name: "register", label: "Register", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4), id(5)] }] };
 const approvedRevision = describeDatasetRevision({ definition, revision: 1, schemaSql: "PRIVATE_SQL", operationSource: "PRIVATE_RULES" });
-const generate = (input: Partial<DatasetFormInput> = {}) => generateDatasetFormSources({ approvedRevision, tableId: id(2), createOperationId: id(7),
+const generate = (input: Partial<DatasetFormInput> = {}) => generateDatasetFormSources({ datasetPath: "data/dataset.json", approvedRevision, tableId: id(2), createOperationId: id(7),
   appRoot: "apps/register", fieldIds: [id(4), id(5)], ...input });
 
 describe("dataset form generation", () => {
@@ -23,7 +23,7 @@ describe("dataset form generation", () => {
     expect(generate().files).toEqual(files);
     expect(Object.keys(files).sort()).toEqual(["app.publish.json", "dohc.json", "frontend.css", "frontend.js"]);
     const manifest = JSON.parse(files["app.publish.json"]!);
-    expect(manifest.dataset).toEqual({ kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: approvedRevision.revisionSha256, operationIds: [id(7)], createFields: [{ operationId: id(7), fieldIds: [id(4), id(5)] }] });
+    expect(manifest.dataset).toEqual({ kind: "dataset", datasetPath: "data/dataset.json", revision: 1, revisionSha256: approvedRevision.revisionSha256, operationIds: [id(7)], createFields: [{ operationId: id(7), fieldIds: [id(4), id(5)] }] });
     expect(manifest.inputs).toEqual(["frontend.js", "frontend.css"]);
     const built = await compileClosedApp({ entryPath: manifest.entryPath, packageMap: {}, inputs: manifest.inputs.map((path: string) => {
       const bytes = new TextEncoder().encode(files[path]!);

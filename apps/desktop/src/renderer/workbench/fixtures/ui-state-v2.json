@@ -21,7 +21,7 @@
         "dohc://versions/compare/try%2Fone",
         "dohc://moment-diff/moment%20one",
         "dohc://collection/notes%2F%E6%97%85",
-        "dohc://data-collection/123e4567-e89b-42d3-a456-426614174001/123e4567-e89b-42d3-a456-426614174002"
+        "dohc://data-collection/data%2Fdataset.json/123e4567-e89b-42d3-a456-426614174002"
       ],
       "activeTab": "dohc://collection/notes%2F%E6%97%85",
       "size": 0.35

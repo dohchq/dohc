@@ -69,8 +69,9 @@ function withDataset(h: ReturnType<typeof harness>, includeRead = false) {
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "PRIVATE_SQL", operationSource: includeRead ? generateDatasetOperations(definition) : "PRIVATE_SOURCE" });
   const approved = { revision, schemaSql: "PRIVATE_SQL", operationSource: includeRead ? generateDatasetOperations(definition) : "PRIVATE_SOURCE", active: true,
     cursor: { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", approvedRevisionHash: revision.revisionSha256, revision: 0, digest: "0".repeat(64) } };
+  h.source.set("private/dataset.json", Buffer.from(JSON.stringify(definition)));
   h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {},
-    dataset: { kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds: includeRead ? [id(5), id(6)] : [id(5)], createFields: [{ operationId: id(5), fieldIds: [id(4)] }] } })));
+    dataset: { kind: "dataset", datasetPath: "private/dataset.json", revision: 1, revisionSha256: revision.revisionSha256, operationIds: includeRead ? [id(5), id(6)] : [id(5)], createFields: [{ operationId: id(5), fieldIds: [id(4)] }] } })));
   const original = h.relay.getMockImplementation()!;
   h.relay.mockImplementation(async (...args) => {
     if (args[1].endsWith("/artifacts")) return approved;

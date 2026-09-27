@@ -574,7 +574,6 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Restore a Collection from a prepared archive.",
     take: [
       { field: "workspaceId", from: "prepareRecovery", path: "recovery.sourceCursor.workspaceId" },
-      { field: "datasetId", from: "prepareRecovery", path: "recovery.sourceCursor.datasetId" },
       { field: "transferId", from: "prepareRecovery", path: "recovery.transferId" },
       { field: "manifestSha256", from: "prepareRecovery", path: "recovery.manifestSha256" },
       { field: "sourceCursor", from: "prepareRecovery", path: "recovery.sourceCursor" },
@@ -734,7 +733,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
   },
   dataset: {
     summary: "Create, change, and use transactional Collections.",
-    notes: [workspaceNote, "These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity."],
+    notes: [workspaceNote, "datasetPath is the workspace-relative dataset.json path. List and describe return it alongside the internal datasetId.", "After moving the file, update commands and app manifests. An old path reports a broken reference.", "These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity."],
     verbs: DATASET_VERBS,
   },
   app: {

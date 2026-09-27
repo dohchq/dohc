@@ -8,7 +8,7 @@ import { inputClass } from "./collections/FieldForm";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 
 interface Props {
-  workspaceId: string;
+  workspaceId: string; datasetPath: string;
   dataset: DatasetDescription;
   onClose(): void;
   onError(fallback: string, cause: unknown, retry?: (() => void) | null): void;
@@ -16,14 +16,14 @@ interface Props {
 export function CollectionPermissionsDialog(props: Props) {
   return <Permissions key={`${props.workspaceId}:${props.dataset.datasetId}:${props.dataset.revisionSha256}`} {...props} />;
 }
-function Permissions({ workspaceId, dataset, onClose, onError }: Props) {
+function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Props) {
   const [page, setPage] = useState<DatasetPermissionsPage | null>(null);
   const [recipients, setRecipients] = useState<RelayShareGrantedRow[]>([]);
   const [grantId, setGrantId] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const alive = useRef(true), request = useRef(0), locked = useRef(false);
-  const target = { workspaceId, datasetId: dataset.datasetId };
+  const target = { workspaceId, datasetPath };
   const actions = dataset.operations.filter(operation => operation.access !== "owner");
   async function load(after?: string) {
     if (!alive.current || locked.current) return;

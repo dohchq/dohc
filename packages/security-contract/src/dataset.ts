@@ -11,6 +11,14 @@ export const DATASET_MAX_TABLES = 64;
 export const DATASET_MAX_FIELDS = 128;
 export const DATASET_MAX_OPERATIONS = 128;
 
+/** A workspace-relative source address, never an authorization grant. */
+export function parseDatasetPath(value: unknown): string {
+  if (typeof value !== "string" || value.length > 1024 || (value !== "dataset.json" && !value.endsWith("/dataset.json"))) throw new Error("Use the workspace-relative dataset.json path.");
+  const checked = validateUserWritePath(value);
+  if (!checked.ok || checked.normalized !== value || classifyEngineFilePath(value).kind !== "tracked") throw new Error("Use the workspace-relative dataset.json path.");
+  return value;
+}
+
 export type DatasetColumnFieldType = "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "relation" | "attachment";
 export type DatasetFieldType = DatasetColumnFieldType | "button";
 export type DatasetOperationKind = "read" | "create" | "edit" | "delete" | "action";
@@ -373,7 +381,18 @@ export function parseDatasetRevision(value: unknown): DatasetRevision {
 export function parseDatasetBindingReference(value: unknown): AppDatasetBinding {
   const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds"], ["createFields", "linkReads"]);
   if (row.kind !== "dataset") fail();
-  const result: AppDatasetBinding = { kind: "dataset", datasetId: uuid(row.datasetId), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
+  return { ...parseBindingFields(row), datasetId: uuid(row.datasetId) };
+}
+
+export type AppDatasetReference = Omit<AppDatasetBinding, "datasetId"> & { datasetPath: string };
+export function parseAppDatasetReference(value: unknown): AppDatasetReference {
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetPath", "revision", "revisionSha256", "operationIds"], ["createFields", "linkReads"]);
+  if (row.kind !== "dataset") fail();
+  return { ...parseBindingFields(row), datasetPath: parseDatasetPath(row.datasetPath) };
+}
+
+function parseBindingFields(row: Record<string, unknown>): Omit<AppDatasetBinding, "datasetId"> {
+  const result: Omit<AppDatasetBinding, "datasetId"> = { kind: "dataset", revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
     operationIds: boundedArray(row.operationIds, DATASET_MAX_OPERATIONS, 1).map(uuid) };
   unique(result.operationIds);
   if (Object.hasOwn(row, "linkReads")) {

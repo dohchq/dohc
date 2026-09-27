@@ -17,12 +17,12 @@ it("grants only selected shareable actions from the displayed revision to a work
     { workspaceId: "w", grantId: "grant", recipientUserId: "person", recipientEmail: "friend@example.test", revokedAtMs: null },
     { workspaceId: "elsewhere", grantId: "other", recipientUserId: "other", recipientEmail: "other@example.test", revokedAtMs: null },
   ] });
-  render(<CollectionPermissionsDialog workspaceId="w" dataset={dataset} onClose={vi.fn()} onError={vi.fn()} />);
+  render(<CollectionPermissionsDialog datasetPath="data/dataset.json" workspaceId="w" dataset={dataset} onClose={vi.fn()} onError={vi.fn()} />);
   await screen.findByRole("option", { name: /friend@example.test/ });
   expect(screen.queryByText("Owner action")).toBeNull(); expect(screen.queryByRole("option", { name: /other@example.test/ })).toBeNull();
   fireEvent.change(screen.getByLabelText("Collection access person"), { target: { value: "grant" } });
   fireEvent.click(screen.getByRole("checkbox", { name: /Read orders/ }));
   fireEvent.click(screen.getByRole("button", { name: "Save access" }));
-  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith({ workspaceId: "w", datasetId: id(1), action: "setGrant", grantId: "grant",
+  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith({ workspaceId: "w", datasetPath: "data/dataset.json", action: "setGrant", grantId: "grant",
     grant: { revision: 2, revisionSha256: "a".repeat(64), operationIds: [id(2)], discover: true } }));
 });
