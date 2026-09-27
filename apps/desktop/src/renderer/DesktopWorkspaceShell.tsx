@@ -1,4 +1,4 @@
-import { AgentSettingsContext } from "./workbench/AgentBadge";
+import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { hasBlockingModal } from "./modalFocus";
@@ -4567,7 +4567,7 @@ export function DesktopWorkspaceShell(props: {
     [dismissShellError, shellErrors, syncFailureNotice],
   );
   return (
-    <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
+    <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <div
       data-testid="workspace-shell"
@@ -6043,6 +6043,6 @@ export function DesktopWorkspaceShell(props: {
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
     </CollectionFieldMarksProvider>
-    </AgentSettingsContext.Provider>
+    </AgentSettingsProvider>
   );
 }

@@ -131,7 +131,7 @@ export function AddAgentForm(props: {
         className="dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex items-center gap-2">
-          <ChatAvatar name={preview} kind="agent" size="strip" />
+          <ChatAvatar name={preview} kind="agent" own size="strip" />
           <h3 id="chats-add-agent-title" className="m-0 text-sm font-semibold text-ink">
             Add an agent
           </h3>

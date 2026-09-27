@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentBadge, AgentSettingsContext } from "./AgentBadge";
+import { AgentBadge, AgentSettingsContext, isOwnAuthor } from "./AgentBadge";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 
 afterEach(cleanup);
@@ -37,5 +37,28 @@ describe("agent badge", () => {
     fireEvent.click(screen.getByTestId("chats-post-agent-badge"));
     expect(screen.getByRole("tooltip").textContent).toContain("Owned by Ada");
     expect(onOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe("whose message it is", () => {
+  const profile = { preferredName: "Ada", agentName: "Nova" };
+
+  it("trusts the verified id on a signed-in message over its name", () => {
+    expect(isOwnAuthor("human", { authorDisplayName: "Ada", authorUserId: "user-1" }, "user-1", profile)).toBe(true);
+    // Someone else named Ada.
+    expect(isOwnAuthor("human", { authorDisplayName: "Ada", authorUserId: "user-2" }, "user-1", profile)).toBe(false);
+    // The viewer's id has not loaded yet.
+    expect(isOwnAuthor("human", { authorDisplayName: "Ada", authorUserId: "user-1" }, undefined, profile)).toBe(false);
+    expect(isOwnAuthor("agent", { authorDisplayName: "Nova", authorUserId: "user-1" }, "user-1", profile)).toBe(true);
+  });
+
+  it("goes by your names on a signed-out message", () => {
+    expect(isOwnAuthor("human", { authorDisplayName: "Ada" }, undefined, profile)).toBe(true);
+    expect(isOwnAuthor("human", { authorDisplayName: "You" }, undefined, {})).toBe(true);
+    expect(isOwnAuthor("human", { authorDisplayName: "Grace" }, undefined, profile)).toBe(false);
+    expect(isOwnAuthor("agent", { authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }, undefined, profile)).toBe(true);
+    expect(isOwnAuthor("agent", { authorDisplayName: "Nova", authorOwnerDisplayName: "Grace" }, undefined, profile)).toBe(false);
+    // Before you name yourself or your agent, main records "You" and "Agent".
+    expect(isOwnAuthor("agent", { authorDisplayName: "Agent", authorOwnerDisplayName: "You" }, undefined, {})).toBe(true);
   });
 });

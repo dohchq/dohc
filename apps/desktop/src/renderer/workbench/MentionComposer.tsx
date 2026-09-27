@@ -314,7 +314,7 @@ export function MentionComposer(props: {
     >
       {isPost && props.authorName ? (
         <div className={`flex items-center gap-2.5 ${expanded ? "mb-2" : ""}`}>
-          <ChatAvatar name={props.authorName} kind={props.authorKind ?? "human"} />
+          <ChatAvatar name={props.authorName} kind={props.authorKind ?? "human"} own />
           {expanded ? (
             <span className="text-[14px] font-semibold text-ink">{props.authorName}</span>
           ) : (

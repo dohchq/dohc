@@ -7,6 +7,8 @@ import { DesktopRoot } from "./DesktopRoot";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 
+const shellRenders = vi.hoisted(() => ({ count: 0 }));
+
 vi.mock("./WorkspaceManager", () => ({
   WorkspaceManager: (props: {
     workspaces: Workspace[];
@@ -47,7 +49,9 @@ vi.mock("./DesktopWorkspaceShell", () => ({
     onShareHandoffOpened: () => void;
     onSwitchWorkspace: (workspace: Workspace, openPath?: string) => void;
     openPathOnReady?: string;
-  }) => (
+  }) => {
+    shellRenders.count += 1;
+    return (
     <div data-testid="workspace-shell">
       <span data-testid="active-workspace">{props.workspace.workspaceId}</span>
       <span data-testid="workspace-count">{props.workspaces.length}</span>
@@ -72,7 +76,8 @@ vi.mock("./DesktopWorkspaceShell", () => ({
         Complete handoff
       </button>
     </div>
-  ),
+    );
+  },
 }));
 
 // The notice list DesktopRoot keeps for the window. Empty unless a test
@@ -364,6 +369,57 @@ describe("DesktopRoot", () => {
     });
     await waitFor(() => expect(getUserSettings).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(getWorkspaceRegistry).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("a settings file save", () => {
+  it("restyles the window without rendering the shell when only the look changed", async () => {
+    type Read = { settings: typeof DEFAULT_USER_SETTINGS; source: "stored" };
+    let onDisk: Read = { settings: DEFAULT_USER_SETTINGS, source: "stored" };
+    let settingsChanged: ((result: Read) => void) | null = null;
+    const getUserSettings = vi.fn(async () => onDisk);
+    vi.stubGlobal("dohcDesktop", {
+      ...noticeBridge(),
+      getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [workspace("a")] })),
+      getUserSettings,
+      onUserSettingsChanged: vi.fn((callback: typeof settingsChanged) => {
+        settingsChanged = callback;
+        return () => undefined;
+      }),
+      onWorkspaceActivity: vi.fn(() => () => undefined),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+    });
+    const save = async (settings: typeof DEFAULT_USER_SETTINGS) => {
+      onDisk = { settings, source: "stored" };
+      const reads = getUserSettings.mock.calls.length;
+      act(() => settingsChanged?.(onDisk));
+      // The broadcast is followed by a backstop read; wait until it lands.
+      await waitFor(() => expect(getUserSettings.mock.calls.length).toBe(reads + 1));
+      await act(async () => undefined);
+    };
+
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(getUserSettings).toHaveBeenCalledTimes(1));
+    await act(async () => undefined);
+    const settled = shellRenders.count;
+
+    await save({
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, accentColor: "#224488" },
+      editor: { ...DEFAULT_USER_SETTINGS.editor, fontFamily: "serif", fontSize: 18 },
+    });
+    const style = document.documentElement.style;
+    expect(style.getPropertyValue("--dohc-accent")).not.toBe("");
+    expect(style.getPropertyValue("--dohc-editor-font-size")).toBe("18px");
+    expect(shellRenders.count).toBe(settled);
+
+    // A setting the shell reads renders it.
+    await save({ ...onDisk.settings, profile: { preferredName: "Ada" } });
+    expect(shellRenders.count).toBeGreaterThan(settled);
   });
 });
 
