@@ -170,17 +170,13 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           cargo --version
 
-      - name: Prepare the checkout
-        run: pnpm setup:worktree
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       # The jobs build different subsets, so keep their target caches separate.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: js-daemon
-
-      # Install Xvfb before the runner starts the desktop proof's display.
-      - name: Desktop system dependencies
-        run: pnpm exec playwright install-deps chromium
 
       # The runner owns Postgres, native preparation, and every mandatory proof,
       # including accounts and self-host onboarding when selected.
@@ -188,11 +184,11 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: xvfb-run -a pnpm verify:pr --base "$PR_BASE_SHA" --job js
+        run: pnpm verify:pr --base "$PR_BASE_SHA" --job js
 
       - name: Full JavaScript gate
         if: github.event_name == 'workflow_dispatch'
-        run: xvfb-run -a pnpm verify:pr --base HEAD --job js --full
+        run: pnpm verify:pr --base HEAD --job js --full
 
       - name: Verification evidence
         if: always()
@@ -236,8 +232,8 @@ jobs:
           rustc -vV
           cargo --version
 
-      - name: Prepare the checkout
-        run: pnpm setup:worktree
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:

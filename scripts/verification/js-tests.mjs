@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { cancellationScope } from "./cancellation.mjs";
@@ -8,14 +8,23 @@ import { startTiming, timed } from "./timing.mjs";
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 const longestFirst = ["@dohc/ydoc-projection", "@dohc/desktop", "@dohc/sync-relay", "@dohc/app-backend-runtime"];
 
-export function testPlan(packages) {
+export function testPlan(packages, testFiles = {}) {
+  for (const name of Object.keys(testFiles)) {
+    if (!packages.some(pkg => pkg.name === name && pkg.manifest.scripts?.test)) throw new Error(`No selected test package owns file selection: ${name}.`);
+  }
   return packages.filter(({ manifest }) => manifest.scripts?.test).map(({ name, manifest }) => {
     const script = name === "@dohc/desktop" ? "test:unit" : name === "@dohc/app-backend-runtime" ? "test:prepared" : "test";
     if (!manifest.scripts[script]) throw new Error(`Missing ${script} in ${name}.`);
     const workers = name === "@dohc/app-backend-runtime" ? 2
       : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4;
-    return { name, script, resource: databasePackages.has(name) ? "postgres" : null,
-      args: ["--filter", name, "run", script, ...(/^vitest run(?: |$)/u.test(manifest.scripts[script]) ? [`--maxWorkers=${workers}`] : [])] };
+    const vitest = /^vitest run(?: |$)/u.test(manifest.scripts[script]);
+    const files = testFiles[name];
+    if (files && (!vitest || !Array.isArray(files) || !files.length || files.some(file =>
+      typeof file !== "string" || !/^src\/(?:[\w.-]+\/)*[\w.-]+\.test\.[cm]?[jt]sx?$/u.test(file) || file.split("/").includes("..")))) {
+      throw new Error(`Invalid test file selection for ${name}.`);
+    }
+    return { name, script, ...(files ? {files} : {}), resource: databasePackages.has(name) ? "postgres" : null,
+      args: ["--filter", name, "run", script, ...(vitest ? [`--maxWorkers=${workers}`] : []), ...(files ?? [])] };
   }).sort((a, b) => {
     const priority = name => longestFirst.includes(name) ? longestFirst.indexOf(name) : longestFirst.length;
     return priority(a.name) - priority(b.name) || a.name.localeCompare(b.name);
@@ -45,7 +54,7 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {} } = {}) {
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
@@ -70,10 +79,14 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (selectedPackages && selectedPackages.some(name => !packages.some(pkg => pkg.name === name))) {
       throw new Error("A selected workspace package is missing from the installed inventory.");
     }
-    const tasks = testPlan(packages.filter(pkg => !selectedPackages || selectedPackages.includes(pkg.name)));
+    const tasks = testPlan(packages.filter(pkg => !selectedPackages || selectedPackages.includes(pkg.name)), testFiles);
+    for (const task of tasks) for (const file of task.files ?? []) {
+      const pkg = packages.find(pkg => pkg.name === task.name);
+      if (!existsSync(join(pkg.path, file))) throw new Error(`Selected test file is missing: ${task.name}/${file}.`);
+    }
     if (!tasks.length && !selectedPackages) throw new Error("No workspace package tests were discovered.");
     report.selectedPackages = selectedPackages ?? packages.map(pkg => pkg.name);
-    report.packages = tasks.map(({name, script, resource}) => ({name, script, resource}));
+    report.packages = tasks.map(({name, script, resource, files}) => ({name, script, resource, ...(files ? {files} : {})}));
     save();
     await runBounded(tasks, task => command(task.name, task.args), report.concurrency);
     // Packaging tests rebuild runtime output. No package may read dist during

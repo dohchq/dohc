@@ -39,6 +39,25 @@ test("desktop changes cover the site consumer and native delivery test inputs", 
   assert.deepEqual(plan.affected, ["@dohc/desktop", "@dohc/site"]);
   assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/share-web", "@dohc/site", "@dohc/ydoc-projection"]);
   assert.deepEqual(plan.proofs, { accounts: false, selfHostNative: true, desktop: true });
+  assert.deepEqual(plan.testFiles, {"@dohc/ydoc-projection": ["src/liveRestoreDrain.test.ts", "src/ownerDesktopTransport.test.ts"]});
+});
+
+test("projection and shared inputs override desktop-only compatibility selection", () => {
+  const desktop = "apps/desktop/src/renderer/Toolbar.tsx";
+  for (const input of ["packages/ydoc-projection/src/import-export.ts", "services/sync-relay/src/storage.ts",
+    "packages/workspace-engine-client/src/daemon/engineClient.ts", "services/share-web/src/deviceControlBridge.ts",
+    "packages/workspace-contracts/src/index.ts", "crates/dohc-engine-collab/src/lib.rs", "pnpm-lock.yaml", "unknown/input.ts"]) {
+    assert.deepEqual(select([desktop, input]).testFiles, {}, input);
+  }
+  assert.deepEqual(select([desktop], {full: true}).testFiles, {});
+});
+
+test("new desktop imports cannot silently escape the selected compatibility files", () => {
+  const source = 'import "../../../apps/desktop/src/ipc/ownerRestoreContract.js";';
+  for (const path of ["packages/ydoc-projection/src/new.test.ts", "packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.ts"]) {
+    assert.deepEqual(uncoveredWorkspaceInputs([{path, source}], packages).map(finding => finding.path), [path]);
+  }
+  assert.deepEqual(uncoveredWorkspaceInputs([{path: "packages/ydoc-projection/src/liveRestoreDrain.test.ts", source}], packages), []);
 });
 
 test("database migrations include consumers that read SQL outside their manifests", () => {
