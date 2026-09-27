@@ -53,7 +53,6 @@ export function useDismiss(options: {
       if (event.key !== "Escape") return;
       event.preventDefault();
       close();
-      trigger.current?.focus();
     }
     const release = holdMenuOpen();
     document.addEventListener("pointerdown", onPointerDown);

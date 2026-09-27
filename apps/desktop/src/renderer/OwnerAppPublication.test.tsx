@@ -112,7 +112,7 @@ describe("owner app publication", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.publishOwnerApp).toHaveBeenLastCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish app" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish app" })));
   });
   it.each([approvedCollection, "unavailable" as const])("confirms revocation of %s, sends the displayed revision, and keeps the app published", async currentCapability => {
     let revision = 7;

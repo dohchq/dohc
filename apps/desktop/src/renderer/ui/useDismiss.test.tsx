@@ -68,7 +68,7 @@ describe("useDismiss", () => {
     expect(document.documentElement.dataset.menuOpen).toBeUndefined();
   });
 
-  it("takes Escape only while focus is inside, and returns focus to the trigger", () => {
+  it("takes Escape only while focus is inside, and returns focus to the trigger", async () => {
     render(<Menu />);
     const escape = fireEvent.keyDown(document.body, { key: "Escape" });
     expect(escape).toBe(true);
@@ -78,7 +78,7 @@ describe("useDismiss", () => {
     item.focus();
     fireEvent.keyDown(item, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Trigger" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Trigger" })));
   });
 });
 

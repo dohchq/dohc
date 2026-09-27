@@ -1699,13 +1699,20 @@ describe("notices sent to you", () => {
     expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
 
     rerender(noticeElement({ workspaceErrors: [error], onDismissWorkspaceError, sentNotices: [sentRow("b")], onDismissSentNotice }));
-    await userEvent.click(screen.getByTestId("notice-e1-dismiss"));
-    expect(onDismissWorkspaceError).toHaveBeenCalledWith("e1");
+    await act(async () => {});
     expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
 
-    rerender(noticeElement({ onDismissWorkspaceError, sentNotices: [sentRow("b")], onDismissSentNotice }));
-    // The last row gives focus back to the panel.
+    // The last of two rows gives focus to the previous row.
     await userEvent.click(screen.getByTestId("sent-notice-b-dismiss"));
+    rerender(noticeElement({ workspaceErrors: [error], onDismissWorkspaceError, sentNotices: [], onDismissSentNotice }));
+    await act(async () => {});
+    expect(document.activeElement).toBe(screen.getByTestId("notice-e1"));
+
+    // The last row gives focus back to the panel.
+    await userEvent.click(screen.getByTestId("notice-e1-dismiss"));
+    expect(onDismissWorkspaceError).toHaveBeenCalledWith("e1");
+    rerender(noticeElement({ workspaceErrors: [], onDismissWorkspaceError, sentNotices: [], onDismissSentNotice }));
+    await act(async () => {});
     expect(document.activeElement).toBe(screen.getByTestId("notice-center"));
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByTestId("notice-center")).toBeNull();

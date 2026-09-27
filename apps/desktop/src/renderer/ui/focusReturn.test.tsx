@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, expect, it } from "vitest";
 import { useFocusReturn, useFocusSurface } from "./focusReturn";
@@ -62,4 +62,53 @@ it("does not steal focus when a removed child had already yielded it", async () 
   view.rerender(<Surface show={false} />);
   await waitFor(() => expect(screen.queryByText("Transient")).toBeNull());
   expect(document.activeElement).toBe(screen.getByText("Destination"));
+});
+
+it("restores a surface when only a descendant renders to remove focus", async () => {
+  function Child() {
+    const [show, setShow] = useState(true);
+    return <>{show && <button onClick={() => setShow(false)}>Remove child</button>}</>;
+  }
+  function Surface() {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1} data-testid="surface"><Child /></section>;
+  }
+  render(<Surface />);
+  const child = screen.getByText("Remove child");
+  child.focus();
+  fireEvent.click(child);
+  await act(async () => {});
+  expect(document.activeElement).toBe(screen.getByTestId("surface"));
+});
+it("keeps a deliberate blur when the previously focused child is later removed", async () => {
+  function Surface({ show }: { show: boolean }) {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1}>{show && <button>Transient</button>}</section>;
+  }
+  const view = render(<Surface show />);
+  const child = screen.getByText("Transient");
+  child.focus();
+  child.blur();
+  expect(document.activeElement).toBe(document.body);
+  view.rerender(<Surface show={false} />);
+  await act(async () => {});
+  expect(document.activeElement).toBe(document.body);
+});
+
+it("preserves removal recovery when focusout leaves the same active element", async () => {
+  function Surface({ show }: { show: boolean }) {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1} data-testid="surface">{show && <button>Transient</button>}</section>;
+  }
+  const view = render(<Surface show />);
+  const child = screen.getByText("Transient");
+  child.focus();
+  fireEvent.focusOut(child, { relatedTarget: null });
+  expect(document.activeElement).toBe(child);
+  view.rerender(<Surface show={false} />);
+  await act(async () => {});
+  expect(document.activeElement).toBe(screen.getByTestId("surface"));
 });

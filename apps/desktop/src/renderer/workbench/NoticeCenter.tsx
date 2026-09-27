@@ -1457,7 +1457,6 @@ export function NoticeCenter(props: {
             event.preventDefault();
             event.stopPropagation();
             setOpen(false);
-            toggleRef.current?.focus();
           }}
           className={`dohc-popover dohc-pop-in fixed ${PANEL_POSITION_CLASS[host]} z-20 flex max-h-[calc(100vh-100px)] flex-col rounded-lg border border-line bg-panel text-xs text-ink`}
         >

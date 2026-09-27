@@ -72,27 +72,38 @@ export function useFocusSurface(
   const focused = useRef<HTMLElement | null>(null);
   const surfaces = useRef<HTMLElement[]>([]);
   useLayoutEffect(() => {
-    if (focused.current && !focused.current.isConnected && document.activeElement === document.body) {
-      focused.current = null;
-      const surface = container.current;
-      const nearest = surfaces.current;
-      queueMicrotask(() => {
-        if (surface?.isConnected && document.activeElement === document.body) {
-          focusSurface(latest.current(), ...nearest, surface.dataset.focusSurface === "workspace" ? null : surface);
-        }
-      });
-    }
-  });
-  useLayoutEffect(() => {
     const element = container.current;
     if (!element) return;
+    const restoreRemovedFocus = () => {
+      if (!focused.current || focused.current.isConnected || document.activeElement !== document.body) return;
+      focused.current = null;
+      const nearest = surfaces.current;
+      queueMicrotask(() => {
+        if (element.isConnected && document.activeElement === document.body) {
+          focusSurface(latest.current(), ...nearest, element.dataset.focusSurface === "workspace" ? null : element);
+        }
+      });
+    };
     const remember = (event: FocusEvent) => {
       focused.current = event.target instanceof HTMLElement ? event.target : null;
       surfaces.current = focused.current ? ancestors(focused.current) : [];
     };
+    const forget = (event: FocusEvent) => {
+      if (event.target instanceof HTMLElement && event.target.isConnected && document.activeElement !== event.target) {
+        focused.current = null;
+        surfaces.current = [];
+      }
+    };
+    // Descendants can remove focus without rendering the surface's owner.
+    const observer = new MutationObserver(restoreRemovedFocus);
+    observer.observe(element, { childList: true, subtree: true });
+    restoreRemovedFocus();
     element.addEventListener("focusin", remember);
+    element.addEventListener("focusout", forget);
     return () => {
+      observer.disconnect();
       element.removeEventListener("focusin", remember);
+      element.removeEventListener("focusout", forget);
     };
   });
 }
