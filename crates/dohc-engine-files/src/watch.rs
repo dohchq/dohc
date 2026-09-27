@@ -132,6 +132,37 @@ enum ThreadMessage {
     Stop,
 }
 
+#[derive(Default)]
+struct Debounce {
+    // First event and the quiet-period deadline for the current burst.
+    burst: Option<(Instant, Instant)>,
+}
+
+impl Debounce {
+    fn next_deadline(&self) -> Option<Instant> {
+        self.burst
+            .map(|(first, settle)| settle.min(first + WATCH_HARD_DEADLINE))
+    }
+
+    /// Returns true when this event completes a burst at its hard deadline.
+    fn event(&mut self, now: Instant) -> bool {
+        if let Some((first, _)) = self.burst {
+            if now.saturating_duration_since(first) >= WATCH_HARD_DEADLINE {
+                self.burst = None;
+                return true;
+            }
+            self.burst = Some((first, now + WATCH_SETTLE));
+        } else {
+            self.burst = Some((now, now + WATCH_SETTLE));
+        }
+        false
+    }
+
+    fn flush(&mut self) -> bool {
+        self.burst.take().is_some()
+    }
+}
+
 /// A started native watcher plus the initial serialized reconcile result. The
 /// watcher is already attached before the scan begins, so changes racing the
 /// initial scan leave a subsequent sticky dirty signal rather than disappearing
@@ -366,8 +397,7 @@ fn watcher_thread(
         return;
     }
 
-    let mut first_event: Option<Instant> = None;
-    let mut settle_at: Option<Instant> = None;
+    let mut debounce = Debounce::default();
     loop {
         // Consume the non-droppable backend-error signal first, so a re-attach
         // request set by the callback is never lost to a full event queue.
@@ -380,26 +410,21 @@ fn watcher_thread(
             watched_root = WatchedRoot::bind(&root);
             attempt_reattach(&mut watcher, &root, &unavailable);
         }
-        let message = match (first_event, settle_at) {
-            (Some(first), Some(settle)) => {
-                let deadline = first + WATCH_HARD_DEADLINE;
-                let next = settle.min(deadline);
-                match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
-                    Ok(message) => Some(message),
-                    Err(RecvTimeoutError::Timeout) => {
-                        handle.notify_overflow();
-                        first_event = None;
-                        settle_at = None;
-                        None
-                    }
-                    Err(RecvTimeoutError::Disconnected) => break,
+        let message = match debounce.next_deadline() {
+            Some(next) => match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
+                Ok(message) => Some(message),
+                Err(RecvTimeoutError::Timeout) => {
+                    handle.notify_overflow();
+                    debounce.flush();
+                    None
                 }
-            }
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
             // Idle: no burst in progress. Wake periodically (rather than
             // blocking on `rx.recv()` forever) to independently verify the
             // watched root is still the same directory object the watch was
             // bound to -- see `WATCH_ROOT_HEALTH_POLL_INTERVAL`.
-            _ => match rx.recv_timeout(WATCH_ROOT_HEALTH_POLL_INTERVAL) {
+            None => match rx.recv_timeout(WATCH_ROOT_HEALTH_POLL_INTERVAL) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
                     if !unavailable.load(Ordering::Acquire) && !watched_root.still_bound(&root) {
@@ -421,24 +446,16 @@ fn watcher_thread(
         };
         match message {
             Some(ThreadMessage::Event) => {
-                let now = Instant::now();
-                if first_event.is_some_and(|first| {
-                    now.saturating_duration_since(first) >= WATCH_HARD_DEADLINE
-                }) {
+                if debounce.event(Instant::now()) {
                     // A ready queued event must not postpone the hard bound:
                     // publish the whole burst even when the queue never drains.
                     handle.notify_overflow();
-                    first_event = None;
-                    settle_at = None;
-                } else {
-                    first_event.get_or_insert(now);
-                    settle_at = Some(now + WATCH_SETTLE);
                 }
             }
             Some(ThreadMessage::Stop) => {
                 // Final-flush parity: pending evidence is published before the
                 // thread exits; join guarantees it cannot publish afterward.
-                if first_event.is_some() {
+                if debounce.flush() {
                     handle.notify_overflow();
                 }
                 break;
@@ -569,6 +586,43 @@ mod tests {
     use super::*;
     use dohc_test_scratch::ScratchDir;
     use std::time::Instant;
+
+    #[test]
+    fn continuous_events_flush_at_exactly_the_hard_deadline() {
+        let mut debounce = Debounce::default();
+        let start = Instant::now();
+        let interval = WATCH_SETTLE / 10;
+        assert_eq!(debounce.next_deadline(), None);
+
+        // Repeat to prove that flushing resets the next burst's hard deadline.
+        for first in [start, start + WATCH_HARD_DEADLINE + interval] {
+            let hard_deadline = first + WATCH_HARD_DEADLINE;
+            let mut now = first;
+            while now < hard_deadline {
+                assert!(!debounce.event(now), "flushed before the hard deadline");
+                assert_eq!(
+                    debounce.next_deadline(),
+                    Some((now + WATCH_SETTLE).min(hard_deadline))
+                );
+                now += interval;
+            }
+            assert!(!debounce.event(hard_deadline - Duration::from_nanos(1)));
+            assert_eq!(debounce.next_deadline(), Some(hard_deadline));
+            assert!(debounce.event(hard_deadline));
+            assert_eq!(debounce.next_deadline(), None);
+            assert!(!debounce.flush());
+        }
+    }
+
+    #[test]
+    fn quiet_burst_flushes_at_the_settle_deadline() {
+        let mut debounce = Debounce::default();
+        let first = Instant::now();
+        assert!(!debounce.event(first));
+        assert_eq!(debounce.next_deadline(), Some(first + WATCH_SETTLE));
+        assert!(debounce.flush());
+        assert_eq!(debounce.next_deadline(), None);
+    }
 
     /// A fresh, existing, watchable temp directory (removed on drop).
     struct TempRoot(ScratchDir);
