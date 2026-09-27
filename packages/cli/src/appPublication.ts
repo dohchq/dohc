@@ -30,7 +30,7 @@ export const OwnerAppPublicationRequest = z.discriminatedUnion("action", [
   z.object({ action: z.literal("launchLocal"), workspaceId: id, publicationId: hash }).strict(),
   z.object({ action: z.literal("list"), workspaceId: id, appRoot: z.string().min(1).max(1024), cursor: hash.optional() }).strict(),
   z.object({ action: z.literal("prepare"), workspaceId: id, appRoot: z.string().min(1).max(1024), shareId: id, grantId: id }).strict(),
-  z.object({ action: z.literal("approve"), workspaceId: id, approvalId: z.string().uuid(), candidateDigest: hash }).strict(),
+  z.object({ action: z.literal("approve"), workspaceId: id, approvalId: z.string().uuid(), candidateDigest: hash, linkReads: z.array(z.object({ operationId: z.string().uuid(), fieldIds: z.array(z.string().uuid()).max(128) }).strict()).max(128).optional() }).strict(),
   z.object({ action: z.literal("cancel"), workspaceId: id, approvalId: z.string().uuid() }).strict(),
   z.object({ action: z.literal("withdraw"), workspaceId: id, publicationId: hash, expectedAuthorityRevision: z.number().int().positive() }).strict(),
   z.object({ action: z.literal("revokeCollection"), workspaceId: id, publicationId: hash, expectedAuthorityRevision: z.number().int().positive() }).strict(),

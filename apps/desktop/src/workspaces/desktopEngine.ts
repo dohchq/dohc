@@ -47,6 +47,7 @@ type EngineAuthorityState = {
 /** The Collection automation executor's part in an engine restart. */
 interface CollectionAutomationsLifecycle {
   notifyClaimed(): void;
+  failuresChanged(): void;
   pauseForEngineRestart(): void;
   resumeAfterEngineRestart(): void;
 }
@@ -72,9 +73,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
       work: (lease: WorkspaceAuthorityLease<RegistryEntry, State>) => Result | Promise<Result>,
     ): Promise<Result>;
   };
-  collectionAutomations: { current(workspaceId: string): Pick<CollectionAutomationsLifecycle, "notifyClaimed"> | undefined };
+  collectionAutomations: { current(workspaceId: string): Pick<CollectionAutomationsLifecycle, "notifyClaimed" | "failuresChanged"> | undefined };
   notifyRenderer(scope?: WorkspaceActivityScope): void;
-  notifyAutomationFailuresChanged(workspaceId: string): void;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
@@ -87,7 +87,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const {
     app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
     isQuitting, recordEngineProblem, workspaceAuthorities, notifyRenderer,
-    notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
+    launchMarks, desktopMarks, logLaunchMarksOnce,
   } = dependencies;
 
   let rustEngineDaemon: EngineDaemonLifecycle | null = null;
@@ -458,7 +458,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // automations (ADR 0008); its automation.claimed events wake the owning
       // workspace's executors to drain the durable claim table, and a claim
       // inserted already failed (the depth cap's chain-stopped stop report)
-      // pokes the owner's failure notice instead.
+      // tells the executor, which sends its failure notice.
       bridgeAutomationClaimsToExecutors(
         rustEngineDaemon,
         (workspaceId) => ({
@@ -466,7 +466,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             dependencies.collectionAutomations.current(workspaceId)?.notifyClaimed();
           },
         }),
-        notifyAutomationFailuresChanged,
+        (workspaceId) => dependencies.collectionAutomations.current(workspaceId)?.failuresChanged(),
       );
       const relaySource = new RelayConfiguredDaemonClientSource(
         rustEngineDaemon,

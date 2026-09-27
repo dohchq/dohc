@@ -1,5 +1,5 @@
 import { EMOJI_DATA } from "../editor/emojiData";
-import { AgentBadge } from "./AgentBadge";
+import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
@@ -289,7 +289,7 @@ export function MentionText(props: {
           aria-label={`Open ${fileToken.path}${
             fileToken.headingAnchor ? ` at #${fileToken.headingAnchor}` : ""
           }`}
-          className={`${className} cursor-pointer hover:bg-line hover:text-ink`}
+          className={`${className} cursor-pointer hover:bg-hover hover:text-ink`}
           title={fileToken.text}
           onClick={() =>
             props.onOpenPath?.(
@@ -338,7 +338,7 @@ const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀
 // One-click reactions on the row's hover toolbar.
 const QUICK_REACTION_EMOJIS = ["👍", "🙌"] as const;
 const TOOLBAR_BUTTON =
-  "grid size-6 place-items-center rounded-md transition-colors duration-75 hover:bg-line/50 hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default";
+  "grid size-6 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default";
 const SINGLE_EMOJI = new RegExp("^(?:\\p{RGI_Emoji}|\\p{Extended_Pictographic})$", "v");
 
 export interface ChatReactionControls {
@@ -510,7 +510,7 @@ export function MessageReactions(props: {
       className={
         props.hoverToolbar
           ? `${TOOLBAR_BUTTON} text-muted`
-          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-panel-2 hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default"
+          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default"
       }
     >
       <SmilePlus size={16} aria-hidden />
@@ -562,7 +562,7 @@ export function MessageReactions(props: {
           </button>
         );
       })}
-      {choices.length > visibleCount ? <button type="button" className="col-span-8 rounded-md p-2 text-[12px] text-muted hover:bg-panel-2" onClick={() => setVisibleCount((count) => count + 96)}>More emoji</button> : null}
+      {choices.length > visibleCount ? <button type="button" className="col-span-8 rounded-md p-2 text-[12px] text-muted hover:bg-hover" onClick={() => setVisibleCount((count) => count + 96)}>More emoji</button> : null}
       </div>
       {choices.length === 0 ? <p className="m-0 p-2 text-[12px] text-muted">No matching emoji. Paste an emoji to use it.</p> : null}
     </div>
@@ -682,6 +682,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   // A "New" hairline sits before this message, the first the reader has not seen.
   firstUnreadMessageId?: string | null;
 }) {
+  const isOwn = useIsOwnAuthor();
   const candidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
   const reactionsByMessage = useMemo(() => {
     const grouped = new Map<string, ChatReactionRecord[]>();
@@ -825,7 +826,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             New
           </span>
         ) : null}
-        <div className="group -mx-2 flex gap-2.5 rounded-md px-2 hover:bg-panel/60">
+        <div className="group -mx-2 flex gap-2.5 rounded-md px-2 hover:bg-hover">
           <span className="flex h-5 w-9 shrink-0 items-start justify-end">
             {continues ? (
               <time
@@ -839,6 +840,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
               <ChatAvatar
                 name={message.authorDisplayName}
                 kind={message.authorKind}
+                own={isOwn(message.authorKind, message, props.reactionControls?.viewerAuthorId)}
                 size="comment"
               />
             )}
@@ -899,7 +901,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         </div>
       </li>
     );
-  }, [props, candidates, reactionsByMessage]);
+  }, [props, candidates, reactionsByMessage, isOwn]);
   if (props.loading || props.messages.length === 0) {
     return <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
       <p className={`m-0 text-center text-[11px] text-subtle ${props.loading ? "" : "pt-4"}`}>

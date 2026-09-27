@@ -4,7 +4,7 @@ import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import { CollectionTableView, readTableViews, validateTableView, writeTableViews, type TableViewsSnapshot } from "./collectionTableViews";
-import { supportsSort, type TransactionalField } from "./transactionalCollectionModel";
+import { isGeneratedRecordIdField, supportsSort, type TransactionalField } from "./transactionalCollectionModel";
 
 function FilterValue({field,value,disabled,onChange}:{field?:TransactionalField;value:CollectionTableView["filters"][number]["value"];disabled:boolean;onChange(value:CollectionTableView["filters"][number]["value"]):void}) {
   if(field?.type==="checkbox"||field?.type==="select")return <select aria-label="Filter value" className={selectClass} disabled={disabled} value={value===null?"":String(value)} onChange={event=>onChange(event.target.value===""?null:field.type==="checkbox"?event.target.value==="true":event.target.value)}><option value="">Empty</option>{field.type==="checkbox"?<><option value="true">Yes</option><option value="false">No</option></>:field.options?.map(option=><option key={option} value={option}>{option}</option>)}</select>;
@@ -18,7 +18,7 @@ export function CollectionTableViewsControl(props:{disabled?:boolean;workspaceId
   const current=useRef(0),controller=useRef(new AbortController()),saving=useRef(false);
   const selectionKey=JSON.stringify(["dohc-collection-view",workspaceId,dataset.datasetId,tableId]);
   const table=dataset.tables.find(table=>table.tableId===tableId),read=dataset.operations.find(operation=>operation.tableId===tableId&&operation.kind==="read"&&operation.readOnly);
-  const fields=table?datasetColumnFields(table).filter(field=>read?.fieldIds.includes(field.fieldId)):[];
+  const fields=table?datasetColumnFields(table).filter(field=>read?.fieldIds.includes(field.fieldId)&&!isGeneratedRecordIdField(field)):[];
   const filterFields=fields.filter(field=>!["relation","attachment","multi-select"].includes(field.type));
   function select(view:CollectionTableView|null) {
     try {if(view)validateTableView(view,dataset,tableId);setSelected(view?.viewId??"");props.onSelect(view);localStorage.setItem(selectionKey,view?.viewId??"");}

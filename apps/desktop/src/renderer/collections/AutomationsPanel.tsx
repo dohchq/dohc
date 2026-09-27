@@ -511,7 +511,7 @@ function RowMenu(props: { label: string; items: readonly MenuItem[] }) {
               aria-disabled={item.disabled ? true : undefined}
               onMouseEnter={(event) => event.currentTarget.focus()}
               onClick={() => pick(item)}
-              className="flex h-7 w-full items-center rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-panel-2 hover:text-ink focus:bg-line focus:text-ink aria-disabled:opacity-50"
+              className="flex h-7 w-full items-center rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink focus:bg-selected focus:text-ink aria-disabled:opacity-50"
             >
               {item.label}
             </button>
@@ -571,6 +571,13 @@ export function AutomationsPanel(props: {
   closeAsk?: number;
   /** A notice asked to open one automation's runs; `seq` rises with each ask. */
   focus: { automationId: string; seq: number } | null;
+  /**
+   * The page asked to build a new automation from this draft, as for a button
+   * nothing uses yet; `seq` rises with each ask.
+   */
+  start?: { automation: Automation; seq: number } | null;
+  /** The panel took the start request; the page forgets it, so a new panel does not take it again. */
+  onStarted?: () => void;
   onClose: () => void;
   onOpenFile: (path: string) => void;
   /** Opens the setting where the owner chooses which computer runs schedules. */
@@ -630,13 +637,26 @@ export function AutomationsPanel(props: {
     const reload = (event: { workspaceId: string }) => {
       if (event.workspaceId === workspaceId) void load();
     };
-    const offFailures = bridge().onAutomationFailuresChanged(reload);
+    const offFailures = bridge().onAutomationRunsChanged(reload);
     const offHolds = bridge().onAutomationHoldsChanged(reload);
     return () => {
       offFailures();
       offHolds();
     };
   }, [workspaceId, load]);
+
+  useEffect(() => {
+    const ask = props.start;
+    // The builder opens once the list is read, so it can be edited and take focus.
+    if (!ask || file === null) return;
+    props.onStarted?.();
+    leave(() => {
+      setRunsOf(null);
+      // Steps the page filled in are a change, so leaving asks before it drops them.
+      setEditing({ session: nextSession(), start: ask.automation, baseline: { ...ask.automation, do: [] }, original: null, cannotRun: null, reach: null });
+    });
+    // Only a new ask opens the builder; a reload does not.
+  }, [props.start?.seq, file === null]);
 
   useEffect(() => {
     if (!props.focus) return;
@@ -662,7 +682,12 @@ export function AutomationsPanel(props: {
     leave(props.onClose);
   }, [props.closeAsk]);
 
-  const { retry, dialog: retryDialog } = useAutomationRetry({ workspaceId, onError, onQueued: () => void load() });
+  const requestRetry = useCallback(
+    (target: { automationId: string; claimId: string }, startOver: boolean) =>
+      bridge().retryCollectionAutomation({ workspaceId, ...target, startOver }),
+    [workspaceId],
+  );
+  const { retry, dialog: retryDialog } = useAutomationRetry({ workspaceId, request: requestRetry, onError, onQueued: () => void load() });
 
   /**
    * Saves `change` of the automations over the file the panel read. A file

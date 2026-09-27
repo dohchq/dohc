@@ -123,7 +123,7 @@ export function ShareReadFailureNotice(props: {
           type="button"
           data-testid={`${props.testId}-retry`}
           onClick={props.onRetry}
-          className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+          className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
         >
           Try again
         </button>
@@ -152,7 +152,7 @@ export function ChatHeader(props: {
           aria-label="Back"
           title="Back"
           onClick={props.onBack}
-          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
         >
           <ArrowLeft size={13} aria-hidden />
         </button>

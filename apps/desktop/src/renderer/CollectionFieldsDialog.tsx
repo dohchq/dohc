@@ -3,7 +3,8 @@ import { datasetColumnFields, type DatasetDescription } from "@dohc/security-con
 import { DatasetSchemaChange, type DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { Overlay } from "./Overlay";
 import { CollectionMigrationReviewDialog, type CollectionMigrationReviewDialogProps } from "./CollectionMigrationReviewDialog";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
+import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 import { inputClass, selectClass, parseOptionsText } from "./collections/FieldForm";
 
 export interface CollectionFieldsDialogProps {
@@ -17,6 +18,12 @@ export interface CollectionFieldsDialogProps {
   onError: CollectionMigrationReviewDialogProps["onError"];
   onClose(): void;
   onReviewSource(): void;
+  /** What each of the table's Button fields does now, by name; null while main has not answered. */
+  buttonStates?: ReadonlyMap<string, AutomationButtonState> | null;
+  /** Opens the ⚡ builder on a button nothing uses, with its trigger filled in. */
+  onChooseButton?(field: string): void;
+  /** A button named for an action was approved: the ⚡ builder opens on what it does. */
+  onButtonAdded?(field: string): void;
 }
 type FieldType = Extract<DatasetSchemaChange, { kind: "changeField" }>["type"];
 const types: Array<[FieldType, string]> = [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"], ["date", "Date"],
@@ -34,6 +41,10 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
   const [required, setRequired] = useState(false), [unique, setUnique] = useState(false), [hasDefault, setHasDefault] = useState(false);
   const [defaultText, setDefaultText] = useState(""), [options, setOptions] = useState("");
   const [review, setReview] = useState<{ preparation: DatasetMigrationPreparation; change: DatasetSchemaChange } | null>(null);
+  // Each button and what it does, and each action no field is named for yet, which can become a button.
+  const buttonFields = table?.fields.filter(field => field.type === "button") ?? [];
+  const actions = props.onButtonAdded ? props.dataset.operations.filter(operation => operation.tableId === props.tableId && operation.kind === "action" &&
+    !operation.readOnly && !table?.fields.some(field => field.name === operation.label)) : [];
   const [pending, setPending] = useState(false), [invalid, setInvalid] = useState<string | null>(null);
   const lifetime = useRef<AbortController | null>(null), active = useRef(true), locked = useRef(false);
   const selectedField = columns.find(field => field.fieldId === fieldId);
@@ -63,10 +74,11 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
     if (unique && hasDefault) throw new Error("A new unique field cannot give every record the same default.");
     return DatasetSchemaChange.parse({ kind, tableId: props.tableId, field });
   }
-  async function prepare() {
+  async function prepare(button?: string) {
     if (locked.current || !active.current) return;
     let change: DatasetSchemaChange;
-    try { change = changeFromDraft(); setInvalid(null); } catch (error) { setInvalid(error instanceof Error ? error.message : "Check the field values."); return; }
+    try { change = button ? DatasetSchemaChange.parse({ kind: "addButton", tableId: props.tableId, name: button }) : changeFromDraft(); setInvalid(null); }
+    catch (error) { setInvalid(error instanceof Error ? error.message : "Check the field values."); return; }
     locked.current = true; setPending(true); const abort = new AbortController(); lifetime.current = abort;
     try {
       const preparation = await props.onPrepare(change, abort.signal);
@@ -75,11 +87,15 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
           || preparation.previousRevision.revisionSha256 !== props.dataset.revisionSha256) throw new Error("This review belongs to another Collection revision. Refresh the Collection.");
         setReview({ preparation, change });
       }
-    } catch (error) { if (active.current && !abort.signal.aborted) props.onError("dohc could not prepare this field change.", error, () => { if (active.current) void prepare(); }); }
+    } catch (error) { if (active.current && !abort.signal.aborted) props.onError("dohc could not prepare this field change.", error, () => { if (active.current) void prepare(button); }); }
     finally { if (active.current) { locked.current = false; setPending(false); } }
   }
   if (review) return <CollectionMigrationReviewDialog workspaceId={props.workspaceId} datasetId={props.dataset.datasetId} initialPreparation={review.preparation} generatedChange
-    onPrepare={(_input, signal) => props.onPrepare(review.change, signal)} onApprove={props.onApprove} onDiscard={props.onDiscard} onLoadPreview={props.onLoadPreview} onClose={props.onClose} onError={props.onError} />;
+    onPrepare={(_input, signal) => props.onPrepare(review.change, signal)} onApprove={async (input, signal) => {
+      await props.onApprove(input, signal);
+      // The button exists now. What it does is chosen in the builder, where it can be saved.
+      if (review.change.kind === "addButton") props.onButtonAdded?.(review.change.name);
+    }} onDiscard={props.onDiscard} onLoadPreview={props.onLoadPreview} onClose={props.onClose} onError={props.onError} />;
   return <Overlay onClose={pending ? undefined : props.onClose}><form role="dialog" aria-modal="true" aria-labelledby="collection-fields-title"
     onSubmit={event => { event.preventDefault(); void prepare(); }} className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
     <h2 id="collection-fields-title" className="m-0 text-sm font-semibold text-ink">Fields and names</h2>
@@ -108,6 +124,19 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
       {hasDefault && <label className="text-[12px] text-muted">Default{type === "checkbox" ? <select aria-label="Default" className={`${selectClass} mt-1 w-full`} disabled={pending} value={defaultText || "false"} onChange={event => setDefaultText(event.target.value)}><option value="false">Unchecked</option><option value="true">Checked</option></select> : <input aria-label="Default" className={`${inputClass} mt-1`} type={type === "number" ? "number" : type === "date" ? "date" : "text"} disabled={pending} value={defaultText} onChange={event => setDefaultText(event.target.value)} />}</label>}
       <p className="m-0 text-[12px] text-muted">New fields do not expand shared access. Custom rules stay unchanged; edit their source to use a new field.</p>
     </>}
+    {buttonFields.length > 0 || actions.length > 0 ? <section aria-label="Buttons" className="flex flex-col gap-1 border-t border-line pt-3">
+      <SectionLabel>Buttons</SectionLabel>
+      {buttonFields.map(field => <div key={field.fieldId} className="flex h-8 items-center gap-2 rounded-md px-2">
+        <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{field.name}</span>
+        {props.onChooseButton && props.buttonStates?.get(field.name)?.kind === "no-automation" ? <SecondaryButton type="button" aria-label={`Choose what it does: ${field.name}`} disabled={pending}
+          onClick={() => props.onChooseButton?.(field.name)}>Choose what it does</SecondaryButton> : null}
+      </div>)}
+      {actions.map(operation => <div key={operation.operationId} className="flex h-8 items-center gap-2 rounded-md px-2">
+        <span className="min-w-0 flex-1 truncate text-[13px] text-muted">{operation.label}</span>
+        <SecondaryButton type="button" aria-label={`Add as button: ${operation.label}`} disabled={pending}
+          onClick={() => void prepare(operation.label)}>Add as button</SecondaryButton>
+      </div>)}
+    </section> : null}
     {invalid && <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p>}
     <div className="flex flex-wrap items-center justify-end gap-2"><SecondaryButton type="button" disabled={pending} onClick={props.onReviewSource}>Review source change</SecondaryButton><SecondaryButton type="button" disabled={pending} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={pending}>{pending ? "Preparing…" : "Review change"}</PrimaryButton></div>
   </form></Overlay>;

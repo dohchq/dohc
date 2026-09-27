@@ -157,7 +157,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
                 onFocus={() => setFocusedId(computer.installId)}
                 onClick={() => { if (!chosen) choose(computer); }}
                 className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 disabled:cursor-default ${
-                  chosen ? "bg-line/60 text-ink" : "text-muted hover:bg-panel-2 hover:text-ink"
+                  chosen ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink"
                 }`}
               >
                 <span className="grid size-4 place-items-center" aria-hidden>

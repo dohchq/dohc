@@ -103,17 +103,6 @@ export function acknowledgeWorkspaceShareSkips(
   store().acknowledgeShareSkips(workspaceId, shareId, generation);
 }
 
-// The user has seen an automation's failures up to `generation`: hide the
-// notice, keep the engine's failed claim rows. See
-// registryStore.acknowledgeAutomationFailure.
-export function acknowledgeWorkspaceAutomationFailure(
-  workspaceId: string,
-  automationId: string,
-  generation: number,
-): void {
-  store().acknowledgeAutomationFailure(workspaceId, automationId, generation);
-}
-
 // The relay's latest answer for which computer runs the workspace's
 // schedules. See registryStore.setAutomationHost.
 export function setWorkspaceAutomationHost(workspaceId: string, host: RelayAutomationHost | null): void {

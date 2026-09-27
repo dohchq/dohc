@@ -230,7 +230,7 @@ export function EmailShareForm(props: {
               type="button"
               data-testid="share-code-copy"
               onClick={() => void copyCode()}
-              className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+              className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-ink"
             >
               {copied ? (
                 <Check size={12} aria-hidden />

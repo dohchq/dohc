@@ -90,6 +90,9 @@ Parameters are strings, finite numbers, or null. The host verifies `ctx.caller`.
 `ctx.caller.kind` says who asked: `owner`, `named` for a person the owner granted access, `link` for someone with a share link, or `automation` for an automation on the Collection.
 An automation caller has `automationId`, such as `collection:Invoices#mark-paid`.
 It is not the owner: an operation that allows only the owner refuses it.
+An action can name its reverse with `"reversedBy": "<action name>"` in the dataset descriptor.
+It then returns `{ undo }`, at most 16 KB: the input its reverse takes.
+The host refuses to commit a result without it, and an automation run's Undo runs the reverse with that input.
 The request identity and operation context stay stable during host retries.
 `ctx.files.attach(fileId)` associates an admitted upload with the transaction.
 `ctx.refuse(code, message)` rolls back a business-rule failure.

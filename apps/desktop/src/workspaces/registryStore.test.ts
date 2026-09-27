@@ -17,7 +17,6 @@ import {
   acknowledgeShareSkips,
   createRegistryStore,
   mergeShareSkippedOps,
-  unacknowledgedAutomationFailures,
   type RemoteIdentity,
 } from "./registryStore";
 // The predicate the RENDERER acts on, asserted here against the records this
@@ -82,61 +81,6 @@ function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
     Object.defineProperty(process, "platform", descriptor);
   }
 }
-
-// Automation failure acknowledgments (ADR 0008, Phase 4): the engine's
-// failed claim rows are the durable record; the registry stores only how
-// far the owner has seen, per automation. Same rules as the share skip
-// record above: an acknowledgment hides, never deletes, and never moves
-// backwards.
-describe("automation failure acknowledgments", () => {
-  const failure = (generation: number, automationId = "hello/triage") => ({
-    automationId,
-    datasetInstance: null,
-    error: "handler exploded",
-    updatedAtMs: 1_000,
-    generation,
-  });
-
-  it("serves a failure until its generation is acknowledged, then again past it", () => {
-    store.register(personal);
-    const seen = failure(3);
-    expect(unacknowledgedAutomationFailures([seen], undefined)).toEqual([seen]);
-
-    store.acknowledgeAutomationFailure("ws-1", "hello/triage", 3);
-    const acks = store.find("ws-1")?.automationFailureAcks;
-    expect(acks).toEqual({ "hello/triage": 3 });
-    expect(
-      unacknowledgedAutomationFailures([seen], acks),
-      "an acknowledged generation keeps warning forever",
-    ).toEqual([]);
-
-    // A newer failure has a higher generation: unacknowledged again.
-    expect(
-      unacknowledgedAutomationFailures([failure(4)], acks),
-      "one acknowledgment silencing every future failure",
-    ).toEqual([failure(4)]);
-    // Another automation's failures are untouched by this acknowledgment.
-    expect(
-      unacknowledgedAutomationFailures([failure(1, "hello/other")], acks),
-    ).toEqual([failure(1, "hello/other")]);
-  });
-
-  it("never lowers an acknowledgment and survives a reopen", () => {
-    store.register(personal);
-    store.acknowledgeAutomationFailure("ws-1", "hello/triage", 5);
-    store.acknowledgeAutomationFailure("ws-1", "hello/triage", 2);
-    expect(
-      store.find("ws-1")?.automationFailureAcks,
-      "a stale click un-seeing a newer acknowledgment",
-    ).toEqual({ "hello/triage": 5 });
-
-    const reopened = createRegistryStore(registryPath);
-    expect(
-      reopened.find("ws-1")?.automationFailureAcks,
-      "an acknowledgment that dies with the process re-raises every dismissed notice",
-    ).toEqual({ "hello/triage": 5 });
-  });
-});
 
 describe("share roster", () => {
   const grant = (grantId: string) => ({

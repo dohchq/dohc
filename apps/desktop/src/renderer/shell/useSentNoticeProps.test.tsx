@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
@@ -25,6 +25,7 @@ function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
     target: { path: "Trips/Japan/report.md" },
     createdAtMs: 1_000,
     readAtMs: null,
+    postedHere: false,
     ...overrides,
   };
 }
@@ -42,7 +43,8 @@ const RECEIVED = {
 };
 
 const getRelayReceivedShare = vi.fn();
-beforeEach(() => vi.stubGlobal("dohcDesktop", { getRelayReceivedShare }));
+const retryAutomationNotice = vi.fn();
+beforeEach(() => vi.stubGlobal("dohcDesktop", { getRelayReceivedShare, retryAutomationNotice }));
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -78,6 +80,7 @@ function setup(
     workspaceId,
     workspaces,
     openFile: vi.fn(),
+    openAutomation: vi.fn(),
     onSwitchWorkspace: vi.fn(),
     onOpenShare: vi.fn(),
     reportShellError: vi.fn(),
@@ -192,6 +195,48 @@ describe("opening a sent notice", () => {
     const { result, sentNotices } = setup([notice()], [workspace("notes")]);
     await act(async () => result.current.onDismissSentNotice(notice()));
     expect(sentNotices.dismiss).toHaveBeenCalledWith({ store: "account", noticeId: "n1" });
+  });
+});
+
+describe("a failed run's notice", () => {
+  const failed = notice({
+    kind: "automation-failed", workspaceId: "notes", recipientShareId: null,
+    target: { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml", run: "atc_1" },
+  });
+
+  it("opens its automation in the panel here, and its file from another workspace", async () => {
+    const { result, openAutomation, openFile, onSwitchWorkspace } = setup([failed], [workspace("notes")]);
+    await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBeNull();
+    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp");
+    expect(openFile).not.toHaveBeenCalled();
+    cleanup();
+    const trip = workspace("trip");
+    const elsewhere = setup([failed], [workspace("notes"), trip], "trip");
+    await elsewhere.result.current.onOpenSentNotice(failed, live());
+    expect(elsewhere.onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), "Tasks/automations.yaml");
+    expect(onSwitchWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("asks main to run it again for the list's account, and confirms first when it would start over", async () => {
+    retryAutomationNotice.mockImplementation(async ({ startOver }: { startOver: boolean }) =>
+      startOver ? { status: "queued", press: false } : { status: "definition-changed", repeatsMessages: false });
+    const { result, reportShellError } = setup([failed], [workspace("notes")], "notes", { account: "account-1" });
+    function Dialog() {
+      return <>{result.current.retryDialog}</>;
+    }
+    await act(async () => result.current.onRetrySentNotice(failed));
+    expect(retryAutomationNotice).toHaveBeenCalledWith({ account: "account-1", notice: { store: "account", noticeId: "n1" }, startOver: false });
+    render(<Dialog />);
+    await act(async () => screen.getByTestId("automation-start-over-confirm").click());
+    expect(retryAutomationNotice).toHaveBeenLastCalledWith({ account: "account-1", notice: { store: "account", noticeId: "n1" }, startOver: true });
+    expect(reportShellError).not.toHaveBeenCalled();
+  });
+
+  it("reports why main did not run it, as on another computer", async () => {
+    retryAutomationNotice.mockResolvedValue({ status: "refused", reason: "Only the computer this run failed on can try it again." });
+    const { result, reportShellError } = setup([failed], [workspace("notes")]);
+    await act(async () => result.current.onRetrySentNotice(failed));
+    expect(reportShellError).toHaveBeenCalledWith("Only the computer this run failed on can try it again.", expect.any(Error));
   });
 });
 

@@ -190,6 +190,15 @@ describe("owner dataset publication", () => {
     expect(candidate.capabilities).toEqual([{ ...binding, operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }] }]);
   });
 
+  it("does not accept link read approval from app source", async () => {
+    const revision = structuredClone(approved);
+    revision.definition.operations[1]!.access = "helper";
+    const h = harness(async () => revision);
+    h.setDeclaration({ ...declaration, dataset: { ...binding, operationIds: [id(5)], linkReads: [{ operationId: id(5), fieldIds: [id(3)] }] } });
+    const { candidate } = await h.prepare();
+    expect(candidate.capabilities[0]).not.toHaveProperty("linkReads");
+  });
+
   it("does not treat a source declaration as dataset approval", async () => {
     const h = harness(); h.setDeclaration(declaration);
     await expect(h.prepare()).rejects.toThrow(/Collection is unavailable/);

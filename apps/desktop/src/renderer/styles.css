@@ -19,16 +19,24 @@
   --font-sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 
+  /* The editor's type. The settings file sets both (theme.ts); these are its
+   * defaults, and the editor's other sizes keep their ratio to the body. */
+  --dohc-editor-font: var(--font-sans);
+  --dohc-editor-font-size: 15px;
+
   --dohc-bg: #faf9f5;
   --dohc-panel: #f3f1ea;
   --dohc-panel-2: #ebe8e0;
   --dohc-line: #e4e1d8;
   --dohc-ink: #1c1b18;
+  --dohc-hover: color-mix(in srgb, var(--dohc-ink) 5%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
+  --dohc-scrim: rgba(0, 0, 0, 0.20);
   --dohc-muted: #55524a;
   --dohc-subtle: #7f7b6e;
   --dohc-accent: #2d342e;
   --dohc-agent: #5c6250;
-  --dohc-match: #3a7ee9;
+  --dohc-match: #397be4;
   --dohc-success: #38684e;
   --dohc-warning: #8a6420;
   --dohc-danger: #a6402c;
@@ -53,6 +61,9 @@
   --dohc-panel-2: #181715;
   --dohc-line: #2a2925;
   --dohc-ink: #f6f4ee;
+  --dohc-hover: color-mix(in srgb, var(--dohc-ink) 5%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
+  --dohc-scrim: rgba(0, 0, 0, 0.20);
   --dohc-muted: #a9a599;
   --dohc-subtle: #7d7a6e;
   --dohc-accent: #d7d0c0;
@@ -79,6 +90,9 @@
   --color-panel: var(--dohc-panel);
   --color-panel-2: var(--dohc-panel-2);
   --color-ink: var(--dohc-ink);
+  --color-hover: var(--dohc-hover);
+  --color-selected: var(--dohc-selected);
+  --color-scrim: var(--dohc-scrim);
   --color-muted: var(--dohc-muted);
   --color-subtle: var(--dohc-subtle);
   --color-accent: var(--dohc-accent);
@@ -332,7 +346,8 @@ body {
   padding: 6px 56px 120px;
   color: var(--dohc-ink);
   cursor: text;
-  font-size: 15px;
+  font-family: var(--dohc-editor-font);
+  font-size: var(--dohc-editor-font-size);
   line-height: 1.65;
   letter-spacing: -0.006em;
   outline: none;
@@ -412,7 +427,7 @@ body {
  * column (the shorthand would otherwise beat the `> *` centering rule). */
 .dohc-notion-editor h1 {
   margin: 32px auto 12px;
-  font-size: 31px;
+  font-size: calc(var(--dohc-editor-font-size) * 31 / 15);
   font-weight: 700;
   letter-spacing: -0.021em;
   line-height: 1.15;
@@ -420,7 +435,7 @@ body {
 
 .dohc-notion-editor h2 {
   margin: 30px auto 10px;
-  font-size: 22px;
+  font-size: calc(var(--dohc-editor-font-size) * 22 / 15);
   font-weight: 650;
   letter-spacing: -0.014em;
   line-height: 1.25;
@@ -428,7 +443,7 @@ body {
 
 .dohc-notion-editor h3 {
   margin: 24px auto 8px;
-  font-size: 17px;
+  font-size: calc(var(--dohc-editor-font-size) * 17 / 15);
   font-weight: 650;
   letter-spacing: -0.008em;
 }
@@ -573,7 +588,7 @@ body {
   color: var(--dohc-ink);
   padding: 2px 0 2px 18px;
   font-family: var(--font-serif);
-  font-size: 16px;
+  font-size: calc(var(--dohc-editor-font-size) * 16 / 15);
   font-style: italic;
 }
 
@@ -604,7 +619,7 @@ body {
   background: var(--dohc-panel-2);
   padding: 1px 5px;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: calc(var(--dohc-editor-font-size) * 12.5 / 15);
 }
 
 .dohc-notion-editor pre {
@@ -622,7 +637,7 @@ body {
   border: 0;
   background: transparent;
   padding: 0;
-  font-size: 13px;
+  font-size: calc(var(--dohc-editor-font-size) * 13 / 15);
   line-height: 1.6;
 }
 
@@ -680,7 +695,7 @@ body {
   padding: 8px 10px;
   vertical-align: top;
   text-align: left;
-  font-size: 14px;
+  font-size: calc(var(--dohc-editor-font-size) * 14 / 15);
   overflow-wrap: anywhere;
 }
 
@@ -839,7 +854,7 @@ body {
 
 .dohc-block-gutter-btn:hover {
   border-color: var(--dohc-line);
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -999,7 +1014,7 @@ body {
 .dohc-code-language-select:hover,
 .dohc-code-copy-btn:hover {
   border-color: var(--dohc-line);
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -1058,15 +1073,10 @@ body {
   padding: 6px 7px;
 }
 
-/* Selected/hover fill across the whole editor menu family is --dohc-line, NOT
- * --dohc-panel-2: these menus paint on a --dohc-panel surface, and in dark
- * panel-2 (#181715) is DARKER than panel (#1b1d1a) — a keyboard-selected row
- * would recede into a barely-visible well. --dohc-line (#2a2925) is lighter
- * than panel, so selection reads clearly in both themes, and it matches the
- * canonical list-row recipe (the dohc-interface skill: active `bg-line`). */
+/* Ink-alpha fills keep menu states visible on panel surfaces in both themes. */
 .dohc-slash-menu__item.is-selected,
 .dohc-wikilink-picker__item.is-active {
-  background: var(--dohc-line);
+  @apply bg-selected;
 }
 
 .dohc-slash-menu__glyph {
@@ -1211,7 +1221,7 @@ body {
 }
 
 .dohc-bubble-menu__button:hover {
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -1380,7 +1390,7 @@ body {
 }
 
 .dohc-link-menu__button:hover:not(:disabled) {
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -1486,7 +1496,7 @@ body {
 
 .dohc-find-replace__icon-btn:hover:not(:disabled) {
   border-color: var(--dohc-line);
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -1512,7 +1522,7 @@ body {
 }
 
 .dohc-find-replace__text-btn:hover:not(:disabled) {
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -1577,7 +1587,7 @@ body {
 }
 
 .dohc-block-menu__item.is-selected {
-  background: var(--dohc-line);
+  @apply bg-selected;
 }
 
 .dohc-block-menu__item.is-danger.is-selected,
@@ -1694,7 +1704,7 @@ body {
 .dohc-table-grip:hover,
 .dohc-table-grip:focus-visible,
 .dohc-table-grip.is-open {
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -1949,10 +1959,7 @@ body {
 .dohc-table-menu-btn:hover,
 .dohc-table-menu-btn:focus-visible {
   border-color: var(--dohc-line);
-  /* --dohc-line, not --dohc-panel-2: matches the menu-family unification (see
-   * the note above .dohc-slash-menu__item) — panel-2 is darker than the panel
-   * surface in dark mode and would make the hovered chip nearly invisible. */
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -1978,7 +1985,7 @@ body {
 
 .dohc-table-append:hover,
 .dohc-table-append:focus-visible {
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -2038,9 +2045,12 @@ body {
   cursor: pointer;
 }
 
-.dohc-table-menu__item.is-selected,
 .dohc-table-menu__item:hover {
-  background: var(--dohc-panel-2);
+  @apply bg-hover;
+}
+
+.dohc-table-menu__item.is-selected {
+  @apply bg-selected;
 }
 
 .dohc-table-menu__item--danger {
@@ -2114,7 +2124,7 @@ body {
 
 .dohc-turn-into__trigger:hover,
 .dohc-turn-into__trigger[aria-expanded='true'] {
-  background: var(--dohc-line);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -2181,7 +2191,7 @@ body {
 }
 
 .dohc-turn-into-menu__item.is-selected {
-  background: var(--dohc-line);
+  @apply bg-selected;
 }
 
 .dohc-turn-into-menu__glyph {
@@ -2463,7 +2473,7 @@ body {
 }
 
 .dohc-outline-item:hover {
-  background: var(--dohc-panel-2);
+  @apply bg-hover;
   color: var(--dohc-ink);
 }
 
@@ -2540,7 +2550,7 @@ body {
 }
 
 .dohc-page-identity__icon:hover {
-  background: var(--dohc-panel-2);
+  @apply bg-hover;
 }
 
 .dohc-page-identity__add-icon {
@@ -2631,7 +2641,7 @@ body {
 }
 
 .dohc-page-identity__picker-emoji:hover {
-  background: var(--dohc-panel-2);
+  @apply bg-hover;
 }
 
 .dohc-page-identity__picker-actions {
@@ -2671,7 +2681,7 @@ body {
 
 .dohc-page-identity__picker-remove:hover {
   color: var(--dohc-ink);
-  background: var(--dohc-panel-2);
+  @apply bg-hover;
 }
 
 [data-theme='dark'] .dohc-page-identity__picker {
@@ -2743,7 +2753,7 @@ body {
 
 .dohc-page-properties__key:hover,
 .dohc-page-properties__value:hover {
-  background: var(--dohc-panel-2);
+  @apply bg-hover;
 }
 
 .dohc-page-properties__key:focus,
@@ -2786,7 +2796,7 @@ body {
 }
 
 .dohc-page-properties__remove:hover {
-  background: var(--dohc-panel-2);
+  @apply bg-hover;
   color: var(--dohc-danger);
 }
 
@@ -3016,10 +3026,14 @@ body {
   text-align: left;
   cursor: pointer;
 }
-.dohc-callout-type-option:hover,
+.dohc-callout-type-option:hover {
+  @apply bg-hover;
+  outline: none;
+}
+
 .dohc-callout-type-option:focus-visible,
 .dohc-callout-type-option[aria-selected='true'] {
-  background: var(--dohc-line);
+  @apply bg-selected;
   outline: none;
 }
 
@@ -3233,7 +3247,7 @@ mark.dohc-highlight,
 }
 
 .dohc-backlinks__source-link:hover {
-  background: var(--dohc-panel-2);
+  @apply bg-hover;
 }
 
 .dohc-backlinks__source-title {
@@ -3328,7 +3342,7 @@ mark.dohc-highlight,
 }
 
 .dohc-emoji-picker__item.is-active {
-  background: var(--dohc-line);
+  @apply bg-selected;
 }
 
 .dohc-emoji-picker__item-glyph {
@@ -3410,7 +3424,7 @@ mark.dohc-highlight,
 }
 
 .dohc-document-menu-item.is-selected {
-  background: var(--dohc-line);
+  @apply bg-selected;
 }
 
 /* The menu's status line: a refusal's next step, wrapped rather than

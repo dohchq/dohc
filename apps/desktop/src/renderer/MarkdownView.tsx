@@ -1977,7 +1977,7 @@ export function MarkdownView(props: {
                 aria-pressed={showSource}
                 title="Toggle markdown source (Ctrl+/)"
                 onClick={toggleSourceView}
-                className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 {showSource ? "Editor" : "Source"}
               </button>
@@ -2043,7 +2043,7 @@ export function MarkdownView(props: {
           data-testid="view-markdown"
           data-dohc-doc-pane=""
           hidden={showSource}
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)]"
         >
           {/* Title + inline properties are one top-matter zone (hovering it
               reveals the quiet "Add a property" affordance on empty docs). */}
@@ -2181,7 +2181,7 @@ export function MarkdownView(props: {
                 }
                 toggleEditorMode();
               }}
-              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
             >
               {surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG"}
             </button>
@@ -2268,7 +2268,7 @@ export function MarkdownView(props: {
           ref={localDocPaneRef}
           data-testid="view-markdown"
           data-dohc-doc-pane=""
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)]"
         >
           <div className="dohc-page-topmatter">
             <PageIdentity
@@ -2376,7 +2376,7 @@ export function MarkdownView(props: {
           </div>
           <div
             ref={readDocumentRef}
-            className="dohc-readable-text p-6 text-[15px]"
+            className="dohc-readable-text p-6 text-[length:var(--dohc-editor-font-size)] [font-family:var(--dohc-editor-font)]"
           >
             {renderedDocument}
           </div>

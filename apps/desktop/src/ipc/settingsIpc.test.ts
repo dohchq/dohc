@@ -19,7 +19,7 @@ import { deferred } from "../testing/deferred";
 
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
 const state = WorkspaceUiState.parse({
-  version: 2, activeView: "explorer", sidebarVisible: true, sidebarWidth: 320,
+  version: 3, activeView: "explorer", sidebarVisible: true, sidebarWidth: 320,
   editorGroups: [{ id: "main", tabs: [], activeTab: null, size: 1 }], activeEditorGroup: "main",
 });
 const settingsPayload = { settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SETTINGS };
@@ -338,7 +338,7 @@ describe("registered settings IPC", () => {
     }));
     await h.reload();
     const applied = {
-      settings: { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" }, appearance: { themeMode: "dark", zoomLevel: 3 } },
+      settings: { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark", zoomLevel: 3 } },
       source: "stored",
       ignored: [{ key: "fancyBorders", reason: "unknown" }],
     };

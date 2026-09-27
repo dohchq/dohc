@@ -1,3 +1,4 @@
+import { parseShareHandoffUrl } from "@dohc/workspace-contracts/deep-links";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -5,7 +6,6 @@ import {
   createShareHandoffIntentSlot,
   focusShareHandoffWindow,
   focusShareHandoffWindowWhenReady,
-  parseShareHandoffUrl,
   receiveShareHandoffArguments,
   registerShareHandoffProtocol,
 } from "./shareHandoffIngress";

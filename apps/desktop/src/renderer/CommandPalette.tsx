@@ -125,11 +125,10 @@ export function CommandPalette(props: {
                   type="button"
                   onClick={() => runCommand(command)}
                   className={`flex h-8 w-full items-center rounded-md px-2.5 text-left text-[13px] transition-colors duration-75 ${
-                    // Active row gets the stronger line-family tint (D-E5);
-                    // panel-2 is reserved for hover only.
+                    // Keyboard selection stays stronger than hover.
                     index === selected
-                      ? "bg-line text-ink"
-                      : "text-muted hover:bg-panel-2 hover:text-ink"
+                      ? "bg-selected text-ink"
+                      : "text-muted hover:bg-hover hover:text-ink"
                   }`}
                 >
                   {command.label}
