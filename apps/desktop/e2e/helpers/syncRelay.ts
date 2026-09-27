@@ -101,13 +101,15 @@ export async function spawnSyncRelay(input: {
   let stdout = "";
   let stderr = "";
   const baseUrl = await new Promise<string>((resolve, reject) => {
+    // A hang guard, not a speed bound: a loaded gate can take well over 20 s to start
+    // the relay, and a relay that dies is reported at once by the exit handler below.
     const timeout = setTimeout(() => {
       reject(
         new Error(
           `sync relay did not report a port ${startupStatus()}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
         ),
       );
-    }, 20_000);
+    }, 120_000);
     child.stdout?.on("data", (chunk) => {
       stdout += String(chunk);
       const match = /SYNC_RELAY_LISTENING host=([^\s]+) port=(\d+)/u.exec(stdout);
