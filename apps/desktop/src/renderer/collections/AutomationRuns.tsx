@@ -40,6 +40,7 @@ export function undoSentence(undone: Undone): string {
   if (undone.irreversible > 0) {
     parts.push(`The Collection's rules do not let dohc undo ${count(undone.irreversible, "change", "changes")}.`);
   }
+  if (undone.actions > 0) parts.push(`${count(undone.actions, "action", "actions")} can't be undone.`);
   return parts.join(" ");
 }
 
@@ -56,6 +57,7 @@ function valueText(value: unknown): string {
 function writeText(write: RunWrite): string {
   if (write.kind === "notice") return `Notified ${write.name}`;
   if (write.kind === "message") return `Sent a message to ${write.name}`;
+  if (write.kind === "dataset-action") return `Ran ${write.name}`;
   const record = "path" in write ? recordName(write.path) : String(write.recordId);
   switch (write.kind) {
     case "field":
@@ -81,7 +83,9 @@ function runSummary(run: Run): string {
   const added = run.writes.filter((write) => write.kind === "created" || write.kind === "dataset-created").length;
   const messages = run.writes.filter((write) => write.kind === "message").length;
   const notices = run.writes.filter((write) => write.kind === "notice").length;
+  const actions = run.writes.filter((write) => write.kind === "dataset-action").length;
   const parts = [
+    ...(actions > 0 ? [`ran ${count(actions, "action", "actions")}`] : []),
     ...(notices > 0 ? [`sent ${count(notices, "notice", "notices")}`] : []),
     ...(messages > 0 ? [`sent ${count(messages, "message", "messages")}`] : []),
     ...(fields > 0 ? [`changed ${count(fields, "field", "fields")}`] : []),

@@ -2715,7 +2715,7 @@ export class CollectionAutomations {
     const collection = collectionNamed(id.collectionPath);
     const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => held.source === "engine"
       ? runCollectionAutomation(this.runDependencies(), { claim: held.claim, automation, collection, roster, signal, stopped: stop })
-      : runDatasetAutomation({ ...this.runDependencies(), withHost: (work) => this.withLiveHost(work) },
+      : runDatasetAutomation({ ...this.runDependencies(), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
         { claim: held.claim, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
     // A pause or close stopped the run; its progress is saved, and the next
@@ -2727,6 +2727,7 @@ export class CollectionAutomations {
         // now would reach nobody.
         if (outcome.reason === "session") return { kind: "release", waitsFor: "session" };
         if (outcome.reason === "held") return { kind: "release", waitsFor: "held" };
+        if (outcome.reason === "roster") return { kind: "release", waitsFor: "roster" };
         if (outcome.reason !== "busy") return release;
         this.scheduleBusyRetry();
         return { kind: "release", waitsFor: "busy" };

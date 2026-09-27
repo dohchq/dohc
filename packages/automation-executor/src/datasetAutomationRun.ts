@@ -104,6 +104,8 @@ export interface DatasetAutomationRunDependencies extends Pick<
 > {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
+  /** Who can edit the workspace's Collections now, as last read, for the check before each record effect. */
+  cachedRoster(): Promise<ReachRoster>;
 }
 
 /** The person who pressed the button a claim runs for, or null for a change. */
@@ -162,7 +164,7 @@ function runRecordOf(row: Row, datasetId: string, table: DatasetTable, readable:
     // Formulas see only what every editor can read.
     if (Object.hasOwn(row.values, field.fieldId) && readable.has(field.fieldId)) values[field.name] = row.values[field.fieldId] ?? null;
   }
-  return { id: String(row.id), path: datasetRecordKey(datasetId, table.tableId, row.id), values };
+  return { id: String(row.id), key: row.id, path: datasetRecordKey(datasetId, table.tableId, row.id), values };
 }
 
 /** One invocation as this run's automation, with the automation caller. */
@@ -353,7 +355,7 @@ async function plan(
       // Operations someone wrote are not read for the run's own purposes, so
       // the record is its id alone.
       const { recordId } = claim.fact;
-      record = { id: String(recordId), path: datasetRecordKey(rules.datasetId, steps.table.tableId, recordId), values: {} };
+      record = { id: String(recordId), key: recordId, path: datasetRecordKey(rules.datasetId, steps.table.tableId, recordId), values: {} };
     }
     const found = new Map<number, RunRecord[]>();
     const truncatedFinds = new Set<number>();
@@ -447,6 +449,7 @@ function datasetEffects(
       if (effect.kind === "message" || effect.kind === "wake") return effect;
       if (effect.kind === "notice") return datasetNotice(effect, collectionPath);
       const { operation, table } = steps.steps.get(ordinal)!;
+      if (effect.kind === "invoke") return { kind: "dataset-action", rules, operationId: operation.operationId, tableId: table.tableId, input: effect.input };
       const fieldId = (name: string) => table.fields.find((field) => field.name === name)!.fieldId;
       if (effect.kind === "add") {
         return {
@@ -470,6 +473,30 @@ function datasetEffects(
   }));
 }
 
+/**
+ * Why the run must stop before its next record effect, from who can edit the
+ * Collection now, or null when it may go on. With no roster to check, it
+ * waits for one, as a claim does before its run starts.
+ */
+async function reachNow(
+  dependencies: DatasetAutomationRunDependencies,
+  input: DatasetAutomationRunInput,
+  host: DatasetRunHost,
+  datasetRules: DatasetRules,
+  chat: ChatDirectory | null,
+): Promise<CollectionAutomationRunOutcome | null> {
+  const roster = await dependencies.cachedRoster();
+  if (roster.kind === "unknown") return { kind: "wait", reason: "roster" };
+  const { automation, collection, claim } = input;
+  const steps = datasetReachSteps(automation, collection, datasetRules, host.dataGrants(claim.datasetId), chat);
+  const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps });
+  for (const [index, verdict] of verdicts.entries()) {
+    // A field an editor can no longer read stops the plan through readableFields; it is checked at resume.
+    if (!verdict.allowed && steps[index]!.kind !== "dataset-field") return failed(verdict.reason);
+  }
+  return null;
+}
+
 async function applyPlan(
   dependencies: DatasetAutomationRunDependencies,
   input: DatasetAutomationRunInput,
@@ -488,10 +515,18 @@ async function applyPlan(
       if (input.stopped.aborted) return stopped;
       if (signal.aborted) return failed(DEADLINE_ERROR, true);
       const { ordinal, effect } = effects[index]!;
-      if (effect.kind === "set" || effect.kind === "add") return failed("This automation's saved steps do not match this Collection. Ask the owner to check the automation.");
+      if (effect.kind === "set" || effect.kind === "add" || effect.kind === "invoke") return failed("This automation's saved steps do not match this Collection. Ask the owner to check the automation.");
+      if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") {
+        // Reach (ADR 0012) again, just before each record effect, so an
+        // editor added since the plan stops what is left instead of it
+        // landing. It still cannot close the time between this check and the
+        // host's commit: that needs the host to check a roster version.
+        const stoppedNow = await reachNow(dependencies, input, host, datasetRules, chat);
+        if (stoppedNow !== null) return stoppedNow;
+      }
       let writes: RunWrite[];
       try {
-        writes = effect.kind === "dataset-edit" || effect.kind === "dataset-create"
+        writes = effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action"
           ? await applyEffect({ dependencies, host, context, run, index, ordinal, signal, datasetRules }, effect, automation)
           : await applyChatEffect(dependencies, { run, signal, automationName: automation.name, depth, chat }, effect);
       } catch (error) {
@@ -544,6 +579,16 @@ async function applyEffect(
 ): Promise<RunWrite[]> {
   const { dependencies, host, run, index, ordinal, signal } = context;
   const keyOf = (recordId: DatasetRecordId | null, replan: number) => datasetEffectKey(run.claimId, run.keySeed, ordinal, recordId, replan);
+  if (effect.kind === "dataset-action") {
+    // One invocation per step. Its key and input are saved in the plan, so a
+    // resumed run sends the same request, and a commit that landed before a
+    // crash replays its receipt instead of running twice. A refusal commits
+    // nothing, so Try again runs the action again under the same key.
+    const label = context.datasetRules.definition.operations.find((operation) => operation.operationId === effect.operationId)?.label ?? "The action";
+    const result = await send(() => invoke(host, context.context, effect.rules, effect.operationId, effect.input, keyOf(null, 0), signal));
+    if ("refused" in result) throw new Error(`${label} refused this run: ${result.refused.message}`);
+    return [{ kind: "dataset-action", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, name: label, revision: result.value.revision }];
+  }
   if (effect.kind === "dataset-create") {
     const values: JsonObject = Object.fromEntries(effect.values.map(({ fieldId, value }) => [fieldId, value]));
     const result = await send(() => invoke(host, context.context, effect.rules, effect.operationId, { values }, keyOf(null, 0), signal));
