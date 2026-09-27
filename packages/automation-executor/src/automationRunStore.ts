@@ -157,7 +157,9 @@ const WriteSchema = z.union([
     recordId: DatasetRecordIdSchema,
     version: z.number().int().positive(),
   }),
-  // An action that ran, by its label then, and the dataset revision its commit made.
+  // An action that ran, by its label then, and the dataset revision its
+  // commit made. `undo` is what its reverse action takes, for an action the
+  // rules say can be reversed, and `reverseOperationId` is that reverse.
   z.object({
     kind: z.literal("dataset-action"),
     rules: DatasetRulesSchema,
@@ -165,6 +167,9 @@ const WriteSchema = z.union([
     tableId: z.string(),
     name: z.string(),
     revision: z.number().int().nonnegative(),
+    undo: JsonValueSchema.optional(),
+    // The reverse action the rules named when this one ran; Undo runs that one or none.
+    reverseOperationId: z.string().optional(),
   }),
   z.object({ kind: z.literal("dataset-kept"), recordId: DatasetRecordIdSchema, fieldId: z.string(), field: z.string(), planned: JsonValueSchema, current: JsonValueSchema }),
   z.object({ kind: z.literal("dataset-skipped"), recordId: DatasetRecordIdSchema, reason: z.string() }),

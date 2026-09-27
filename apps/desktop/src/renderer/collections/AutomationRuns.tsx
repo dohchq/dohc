@@ -31,6 +31,7 @@ export function undoSentence(undone: Undone): string {
   const parts: string[] = [];
   if (undone.reverted > 0) parts.push(`Undid ${count(undone.reverted, "change", "changes")}.`);
   if (undone.removed > 0) parts.push(`Moved ${count(undone.removed, "added record", "added records")} to the trash.`);
+  if (undone.actionsReversed > 0) parts.push(`Undid ${count(undone.actionsReversed, "action", "actions")}.`);
   if (parts.length === 0) parts.push("Nothing was left to undo.");
   if (undone.kept > 0) parts.push(`${count(undone.kept, "added record stays", "added records stay")}.`);
   if (undone.changedSince > 0) parts.push(`${count(undone.changedSince, "field", "fields")} changed since then.`);
@@ -112,7 +113,8 @@ function RunRow(props: {
   const [open, setOpen] = useState(false);
   const canRetry = run.state === "failed" && !run.chainStopped && !run.undone;
   const canUndo = (run.state === "done" || run.state === "failed") && !run.undone &&
-    run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit");
+    run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit" ||
+      (write.kind === "dataset-action" && write.undo !== undefined));
   return (
     <li data-testid={`automation-run-${run.claimId}`} className="border-b border-line px-3 py-2 last:border-b-0">
       <div className="flex items-start gap-2">

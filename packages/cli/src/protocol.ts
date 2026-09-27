@@ -882,7 +882,8 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
     recordId: automationDatasetRecordIdSchema,
     version: z.number().int().positive(),
   }).strict(),
-  // An action that ran, by its label then, and the dataset revision its commit made. dohc cannot undo it.
+  // An action that ran, by its label then, and the dataset revision its commit made. When the
+  // rules named a reverse action, `reverseOperationId` is it and `undo` is its input; Undo runs that or nothing.
   z.object({
     kind: z.literal("dataset-action"),
     rules: automationDatasetRulesSchema,
@@ -890,6 +891,8 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
     tableId: z.string(),
     name: z.string(),
     revision: z.number().int().nonnegative(),
+    undo: z.json().optional(),
+    reverseOperationId: z.string().optional(),
   }).strict(),
   z.object({
     kind: z.literal("dataset-kept"),
