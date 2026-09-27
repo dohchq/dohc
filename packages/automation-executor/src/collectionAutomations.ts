@@ -1076,7 +1076,7 @@ export class CollectionAutomations {
     const dataset = this.datasets.get(collectionPath);
     if (dataset === undefined) return [...automations];
     const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
-    return automations.map((automation) => pinDatasetOperations(automation, dataset.definition, (step) => held.has(JSON.stringify(step))));
+    return automations.map((automation) => pinDatasetOperations(automation, dataset, (step) => held.has(JSON.stringify(step))));
   }
 
   /** Every step that waits for a current editor, and whether dohc could read what was allowed. */
@@ -1270,10 +1270,10 @@ export class CollectionAutomations {
     if (this.opened === null) return [];
     await this.opened;
     const home = await this.datasetFolder(datasetId);
-    const definition = home === null ? undefined : this.datasets.get(home)?.definition;
-    if (definition === undefined) return [];
+    const dataset = home === null ? undefined : this.datasets.get(home);
+    if (dataset === undefined) return [];
     return await this.marksOf(this.writableCollections(), ({ collectionPath, automation }) => collectionPath !== home ? [] :
-      datasetFieldWritesOf(automation, definition).flatMap((write) => (write.table === table ? [write.field] : [])));
+      datasetFieldWritesOf(automation, dataset).flatMap((write) => (write.table === table ? [write.field] : [])));
   }
 
   /** Each field `fieldsOf` names for a switched-on automation that can run, with those automations' names in file order. */
@@ -1591,7 +1591,11 @@ export class CollectionAutomations {
     const pressed = await this.withLiveHost(async (ledger) => {
       // A dataset that moved to a server says so before anything reads it.
       ledger.assertPressable(datasetId, { tableId, fieldId });
-      if (!(await datasetRecordExists(ledger, datasetId, automation, recordId))) throw new Error(`This record is no longer in ${input.table}.`);
+      // Operations someone wrote are not read for dohc's own checks; the run
+      // passes the record's id, and the operation it invokes finds the record.
+      if (ledger.generated(datasetId) && !(await datasetRecordExists(ledger, datasetId, automation, recordId))) {
+        throw new Error(`This record is no longer in ${input.table}.`);
+      }
       return ledger.press(datasetId, {
         pressId: input.pressId, request, automationId: button.state.automationId, definitionHash: definitionDigest(automation),
         tableId, fieldId, recordId, pressedBy: input.pressedBy,
@@ -1620,8 +1624,9 @@ export class CollectionAutomations {
     | { state: Extract<AutomationButtonState, { kind: "ready" }>; checked: { automation: Automation; datasetId: string; tableId: string; fieldId: string } }
   > {
     const disabled = (reason: string) => ({ state: { kind: "disabled" as const, reason } });
-    const definition = this.datasets.get(collectionPath)?.definition;
-    if (definition === undefined) return disabled(DATASET_NOT_APPROVED);
+    const dataset = this.datasets.get(collectionPath);
+    if (dataset === undefined) return disabled(DATASET_NOT_APPROVED);
+    const { definition } = dataset;
     const table = datasetTableNamed(definition, button.table);
     // A description of another dataset grants nothing here.
     if (table === undefined || description.datasetId !== definition.datasetId || !datasetButtonAccess(description, table.name, [])) {
@@ -1643,7 +1648,7 @@ export class CollectionAutomations {
       (named) => named === table.name || (named === null && definition.tables.length === 1), definition.name);
     if (resolved.kind === "state") return { state: resolved.state };
     const { automation } = resolved;
-    if (!datasetButtonAccess(description, table.name, datasetOperationsOf(automation, definition))) return disabled(noAccessReason(table.name));
+    if (!datasetButtonAccess(description, table.name, datasetOperationsOf(automation, dataset))) return disabled(noAccessReason(table.name));
     const state = await this.runnableButtonState(collectionPath, automation, roster);
     return state.kind === "ready"
       ? { state, checked: { automation, datasetId: definition.datasetId, tableId: table.tableId, fieldId: field.fieldId } }
@@ -2099,7 +2104,7 @@ export class CollectionAutomations {
     const collection = collectionNamed(collectionPath);
     const dataset = this.datasets.get(collectionPath);
     return dataset !== undefined
-      ? datasetReachSteps(automation, collection, dataset.definition, dataset.grants, this.chat)
+      ? datasetReachSteps(automation, collection, dataset, dataset.grants, this.chat)
       : reachStepsOf(automation, collection, collectionNamed, this.chat);
   }
 
@@ -2710,7 +2715,7 @@ export class CollectionAutomations {
     const collection = collectionNamed(id.collectionPath);
     const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => held.source === "engine"
       ? runCollectionAutomation(this.runDependencies(), { claim: held.claim, automation, collection, roster, signal, stopped: stop })
-      : runDatasetAutomation({ ...this.runDependencies(), withHost: (work) => this.withLiveHost(work) },
+      : runDatasetAutomation({ ...this.runDependencies(), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
         { claim: held.claim, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
     // A pause or close stopped the run; its progress is saved, and the next
@@ -2722,6 +2727,7 @@ export class CollectionAutomations {
         // now would reach nobody.
         if (outcome.reason === "session") return { kind: "release", waitsFor: "session" };
         if (outcome.reason === "held") return { kind: "release", waitsFor: "held" };
+        if (outcome.reason === "roster") return { kind: "release", waitsFor: "roster" };
         if (outcome.reason !== "busy") return release;
         this.scheduleBusyRetry();
         return { kind: "release", waitsFor: "busy" };

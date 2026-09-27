@@ -3,7 +3,7 @@ import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
-import type { DatasetDefinition, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
+import type { DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import {
@@ -41,6 +41,7 @@ import {
   datasetRunClaim,
   datasetStepsOf,
   type DatasetRecordId,
+  type DatasetRules,
   type DatasetSteps,
 } from "./datasetAutomationPlan";
 
@@ -61,9 +62,10 @@ import {
 // A button press's run reads its record as it is now, and formulas see the
 // person who pressed. It runs only the automation the press was checked
 // against, from the button that was pressed, in the table it was pressed
-// in. Its steps use the owner caller, as every run here does: this
-// computer's datasets are its person's own, so that authority is the
-// presser's.
+// in. Its steps use the automation caller, as every run here does. The host
+// holds that caller to the owner's approved operations, and this computer's
+// datasets are its person's own, so the run never does more than the
+// presser could.
 
 export const RULES_CHANGED_ERROR = "Collection rules changed after this run started.";
 export const ACCESS_NARROWED_ERROR = "Someone who edits this automation can no longer read a field it used, so dohc stopped the rest of this run.";
@@ -102,6 +104,8 @@ export interface DatasetAutomationRunDependencies extends Pick<
 > {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
+  /** Who can edit the workspace's Collections now, as last read, for the check before each record effect. */
+  cachedRoster(): Promise<ReachRoster>;
 }
 
 /** The person who pressed the button a claim runs for, or null for a change. */
@@ -160,10 +164,10 @@ function runRecordOf(row: Row, datasetId: string, table: DatasetTable, readable:
     // Formulas see only what every editor can read.
     if (Object.hasOwn(row.values, field.fieldId) && readable.has(field.fieldId)) values[field.name] = row.values[field.fieldId] ?? null;
   }
-  return { id: String(row.id), path: datasetRecordKey(datasetId, table.tableId, row.id), values };
+  return { id: String(row.id), key: row.id, path: datasetRecordKey(datasetId, table.tableId, row.id), values };
 }
 
-/** One invocation as this run's automation, with the owner caller. */
+/** One invocation as this run's automation, with the automation caller. */
 async function invoke(
   host: DatasetRunHost,
   context: DatasetAutomationContext,
@@ -223,7 +227,7 @@ export async function datasetRecordExists(
   recordId: DatasetRecordId,
 ): Promise<boolean> {
   const approved = host.revision(datasetId);
-  const { triggerRead, table } = datasetStepsOf(automation, approved.definition);
+  const { triggerRead, table } = datasetStepsOf(automation, { definition: approved.definition, generated: true });
   if (triggerRead === null) return false;
   const rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
   return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), triggerRead, table, recordId)) !== null;
@@ -252,10 +256,11 @@ export async function runDatasetAutomation(
   // read reach never saw.
   const checked = await dependencies.withHost((host) => {
     const approved = host.revision(claim.datasetId);
-    return { approved, steps: datasetReachSteps(automation, collection, approved.definition, host.dataGrants(claim.datasetId), chat) };
+    const datasetRules: DatasetRules = { definition: approved.definition, generated: host.generated(claim.datasetId) };
+    return { approved, datasetRules, steps: datasetReachSteps(automation, collection, datasetRules, host.dataGrants(claim.datasetId), chat) };
   });
   if (checked === null) return { kind: "wait", reason: "engine" };
-  const { approved, steps } = checked;
+  const { approved, datasetRules, steps } = checked;
   // An automation that resolves under these rules has a field to check at
   // least, since every table has its primary key. None means it no longer
   // resolves, so reach cannot vouch for a saved step such as a wake.
@@ -280,7 +285,7 @@ export async function runDatasetAutomation(
   if (run === null) {
     let planned: Awaited<ReturnType<typeof plan>>;
     try {
-      planned = await plan(dependencies, input, keySeed, readable, approved, chat);
+      planned = await plan(dependencies, input, keySeed, readable, approved, datasetRules, chat);
     } catch (error) {
       return input.stopped.aborted ? stopped : failed(errorText(error));
     }
@@ -296,7 +301,7 @@ export async function runDatasetAutomation(
   }
   const messages = await checkPlannedMessages(dependencies, { automationId: claim.automationId, automation, collection, roster }, run, chat);
   if ("outcome" in messages) return messages.outcome;
-  const outcome = await applyPlan(dependencies, input, run, approved.definition, messages.chat);
+  const outcome = await applyPlan(dependencies, input, run, datasetRules, messages.chat);
   if (outcome.kind === "wait") return outcome;
   if (outcome.kind === "failed") {
     run.outcome = { state: "failed", error: outcome.error, run: claim.run };
@@ -315,6 +320,7 @@ async function plan(
   keySeed: string,
   readable: ReadonlySet<string>,
   approved: DatasetRevision,
+  datasetRules: DatasetRules,
   chat: ChatDirectory | null,
 ): Promise<{ kind: "plan"; steps: StoredStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
   const { claim, automation, collection, signal } = input;
@@ -330,10 +336,7 @@ async function plan(
     }
   }
   const read = await dependencies.withHost(async (host) => {
-    if (!host.generated(claim.datasetId)) {
-      throw new Error(`${approved.definition.name}'s operations were written or changed outside dohc, so automations cannot use them yet.`);
-    }
-    const steps = datasetStepsOf(automation, approved.definition);
+    const steps = datasetStepsOf(automation, datasetRules);
     const rules: Rules = { datasetId: claim.datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
     const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth: claim.depth + 1 });
     // Each record the plan read, by identity, with the version it read.
@@ -348,6 +351,11 @@ async function plan(
       // The record was removed before its automation ran.
       if (row === null) return { removed: true } as const;
       record = remember(row, steps.table);
+    } else if (!datasetRules.generated && claim.fact !== null && claim.fact.kind !== "removed") {
+      // Operations someone wrote are not read for the run's own purposes, so
+      // the record is its id alone.
+      const { recordId } = claim.fact;
+      record = { id: String(recordId), key: recordId, path: datasetRecordKey(rules.datasetId, steps.table.tableId, recordId), values: {} };
     }
     const found = new Map<number, RunRecord[]>();
     const truncatedFinds = new Set<number>();
@@ -377,7 +385,14 @@ async function plan(
   if (read.removed) return stop({ kind: "skipped" });
   const pressedBy = datasetPresser(claim);
   const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
-  const inputs: RunInputs = { person, message: null, chat, automation, claim: datasetRunClaim(claim, collection.path, read.steps.table, readable), record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
+  const runClaim = datasetRunClaim(claim, collection.path, read.steps.table, readable);
+  const inputs: RunInputs = { person, message: null, chat, automation, claim: runClaim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds,
+    // Without a read, the record is its id: a formula that reads a field stops instead of reading nothing.
+    ...(datasetRules.generated ? {} : { recordKeys: ["id"] }) };
+  if (!datasetRules.generated) {
+    const problem = unreadComparison(automation, runClaim);
+    if (problem !== null) return stop(failed(problem));
+  }
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
   const request = evaluationRequest(inputs, claim.createdAtMs);
   const results = request.formulas.length === 0 ? [] : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
@@ -394,6 +409,20 @@ async function plan(
   if (planned.kind === "skip") return stop({ kind: "skipped" });
   if (planned.kind === "failed") return stop(failed(planned.error, planned.timedOut));
   return { kind: "plan", steps: datasetEffects(planned.steps, read.steps, read.rules, read.versions, collection.path) };
+}
+
+/**
+ * Why a field-changed trigger cannot compare the new value, or null. A claim
+ * leaves out a value too large for it, and a run that reads the record takes
+ * the value from there instead. A run that cannot read the record must not
+ * compare an absent value as if it were empty.
+ */
+function unreadComparison(automation: Automation, claim: RunInputs["claim"]): string | null {
+  const trigger = automation.when;
+  if (trigger.kind !== "field-changed" || trigger.to === null || claim.change.kind !== "changed") return null;
+  const fact = claim.change.fields.find((candidate) => candidate.field === trigger.field);
+  const truncated = fact === undefined ? claim.change.fieldsOmitted > 0 : fact.next !== null && "truncated" in fact.next;
+  return truncated ? `The new value of ${trigger.field} is too large for dohc to compare without reading the record.` : null;
 }
 
 /**
@@ -420,6 +449,7 @@ function datasetEffects(
       if (effect.kind === "message" || effect.kind === "wake") return effect;
       if (effect.kind === "notice") return datasetNotice(effect, collectionPath);
       const { operation, table } = steps.steps.get(ordinal)!;
+      if (effect.kind === "invoke") return { kind: "dataset-action", rules, operationId: operation.operationId, tableId: table.tableId, input: effect.input };
       const fieldId = (name: string) => table.fields.find((field) => field.name === name)!.fieldId;
       if (effect.kind === "add") {
         return {
@@ -443,11 +473,35 @@ function datasetEffects(
   }));
 }
 
+/**
+ * Why the run must stop before its next record effect, from who can edit the
+ * Collection now, or null when it may go on. With no roster to check, it
+ * waits for one, as a claim does before its run starts.
+ */
+async function reachNow(
+  dependencies: DatasetAutomationRunDependencies,
+  input: DatasetAutomationRunInput,
+  host: DatasetRunHost,
+  datasetRules: DatasetRules,
+  chat: ChatDirectory | null,
+): Promise<CollectionAutomationRunOutcome | null> {
+  const roster = await dependencies.cachedRoster();
+  if (roster.kind === "unknown") return { kind: "wait", reason: "roster" };
+  const { automation, collection, claim } = input;
+  const steps = datasetReachSteps(automation, collection, datasetRules, host.dataGrants(claim.datasetId), chat);
+  const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps });
+  for (const [index, verdict] of verdicts.entries()) {
+    // A field an editor can no longer read stops the plan through readableFields; it is checked at resume.
+    if (!verdict.allowed && steps[index]!.kind !== "dataset-field") return failed(verdict.reason);
+  }
+  return null;
+}
+
 async function applyPlan(
   dependencies: DatasetAutomationRunDependencies,
   input: DatasetAutomationRunInput,
   run: StoredRun,
-  definition: DatasetDefinition,
+  datasetRules: DatasetRules,
   chat: ChatDirectory | null,
 ): Promise<CollectionAutomationRunOutcome> {
   const { claim, signal, automation } = input;
@@ -461,11 +515,19 @@ async function applyPlan(
       if (input.stopped.aborted) return stopped;
       if (signal.aborted) return failed(DEADLINE_ERROR, true);
       const { ordinal, effect } = effects[index]!;
-      if (effect.kind === "set" || effect.kind === "add") return failed("This automation's saved steps do not match this Collection. Ask the owner to check the automation.");
+      if (effect.kind === "set" || effect.kind === "add" || effect.kind === "invoke") return failed("This automation's saved steps do not match this Collection. Ask the owner to check the automation.");
+      if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") {
+        // Reach (ADR 0012) again, just before each record effect, so an
+        // editor added since the plan stops what is left instead of it
+        // landing. It still cannot close the time between this check and the
+        // host's commit: that needs the host to check a roster version.
+        const stoppedNow = await reachNow(dependencies, input, host, datasetRules, chat);
+        if (stoppedNow !== null) return stoppedNow;
+      }
       let writes: RunWrite[];
       try {
-        writes = effect.kind === "dataset-edit" || effect.kind === "dataset-create"
-          ? await applyEffect({ dependencies, host, context, run, index, ordinal, signal, definition }, effect, automation)
+        writes = effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action"
+          ? await applyEffect({ dependencies, host, context, run, index, ordinal, signal, datasetRules }, effect, automation)
           : await applyChatEffect(dependencies, { run, signal, automationName: automation.name, depth, chat }, effect);
       } catch (error) {
         if (input.stopped.aborted) return stopped;
@@ -510,13 +572,23 @@ async function applyEffect(
     ordinal: number;
     signal: AbortSignal;
     /** The rules reach checked for this run. */
-    definition: DatasetDefinition;
+    datasetRules: DatasetRules;
   },
   effect: DatasetEffect,
   automation: Automation,
 ): Promise<RunWrite[]> {
   const { dependencies, host, run, index, ordinal, signal } = context;
   const keyOf = (recordId: DatasetRecordId | null, replan: number) => datasetEffectKey(run.claimId, run.keySeed, ordinal, recordId, replan);
+  if (effect.kind === "dataset-action") {
+    // One invocation per step. Its key and input are saved in the plan, so a
+    // resumed run sends the same request, and a commit that landed before a
+    // crash replays its receipt instead of running twice. A refusal commits
+    // nothing, so Try again runs the action again under the same key.
+    const label = context.datasetRules.definition.operations.find((operation) => operation.operationId === effect.operationId)?.label ?? "The action";
+    const result = await send(() => invoke(host, context.context, effect.rules, effect.operationId, effect.input, keyOf(null, 0), signal));
+    if ("refused" in result) throw new Error(`${label} refused this run: ${result.refused.message}`);
+    return [{ kind: "dataset-action", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, name: label, revision: result.value.revision }];
+  }
   if (effect.kind === "dataset-create") {
     const values: JsonObject = Object.fromEntries(effect.values.map(({ fieldId, value }) => [fieldId, value]));
     const result = await send(() => invoke(host, context.context, effect.rules, effect.operationId, { values }, keyOf(null, 0), signal));
@@ -556,7 +628,7 @@ async function applyEffect(
     }
     if (result.refused.code !== "stale_record") throw new Error(result.refused.message);
     // Someone changed the record since the plan read it. Read it again.
-    const steps = datasetStepsOf(automation, context.definition);
+    const steps = datasetStepsOf(automation, context.datasetRules);
     const reader = steps.rereads.get(ordinal);
     const table = steps.steps.get(ordinal)!.table;
     if (reader === undefined) throw new Error(`${table.name} changed, and dohc has no approved read of it to check the record again.`);

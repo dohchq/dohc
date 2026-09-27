@@ -512,3 +512,11 @@ it("rejects generated identity markers on other fields and user-supplied keys", 
   value.operations[0]!.fieldIds.push(primary.fieldId);
   expect(() => parseDatasetDefinition(value)).toThrow();
 });
+
+it("does not grant an automation the app's approved link reads", () => {
+  const approved = revision();
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const request = { ...binding(approved), linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }] };
+  expect(effectiveDatasetOperations(request, approved, { kind: "automation", automationId: "collection:people#notify" }).map(operation => operation.name)).toEqual(["submit"]);
+});

@@ -27,6 +27,7 @@ describe("verified app backend callers", () => {
     { kind: "named", userId: "person", grantId: "grant", access: "edit", helper: false },
     { kind: "named", userId: "person", grantId: "grant", access: "edit", helper: true },
     { kind: "owner", userId: "owner" },
+    { kind: "automation", automationId: "collection:Invoices#mark-paid" },
   ];
 
   it("parses verified caller records", () => {
@@ -39,6 +40,9 @@ describe("verified app backend callers", () => {
     { kind: "named", userId: "person", grantId: "grant", access: "edit" },
     { kind: "owner", userId: "owner", grantId: "grant" },
     { kind: "owner", userId: "" },
+    { kind: "automation", automationId: "collection:Invoices#mark-paid", userId: "owner" },
+    { kind: "automation", automationId: "collection:Invoices#mark-paid", depth: 1 },
+    { kind: "automation", automationId: "" },
   ])("rejects widened or incomplete caller records: %j", caller => {
     expect(() => parseAppBackendCaller(caller)).toThrow();
   });

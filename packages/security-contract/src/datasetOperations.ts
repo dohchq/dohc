@@ -78,7 +78,7 @@ function projected(table, fields, row) {
   return { id: row[table.primaryKey], version: row._record_version, values: Object.fromEntries(fields.map(field => [field.fieldId, decode(field, row[field.sqlColumn])])) };
 }
 globalThis.operations = Object.fromEntries(definition.operations.map(operation => [operation.name, (ctx, input) => {
-  if (ctx.caller.kind !== 'owner' && operation.access !== 'link' && !(operation.kind === 'read' && operation.access === 'helper' && (ctx.caller.kind === 'link' || ctx.caller.kind === 'named') && ctx.caller.approvedRead === operation.operationId) && !(operation.access === 'helper' && ctx.caller.kind === 'named' && ctx.caller.helper === true)) ctx.refuse('forbidden', 'You do not have access to this operation.');
+  if (ctx.caller.kind !== 'owner' && ctx.caller.kind !== 'automation' && operation.access !== 'link' && !(operation.kind === 'read' && operation.access === 'helper' && (ctx.caller.kind === 'link' || ctx.caller.kind === 'named') && ctx.caller.approvedRead === operation.operationId) && !(operation.access === 'helper' && ctx.caller.kind === 'named' && ctx.caller.helper === true)) ctx.refuse('forbidden', 'You do not have access to this operation.');
   if (!object(input)) invalid(ctx);
   const table = definition.tables.find(table => table.tableId === operation.tableId);
   const primary = table.fields.find(field => field.sqlColumn === table.primaryKey);

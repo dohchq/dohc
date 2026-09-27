@@ -844,3 +844,38 @@ it("keeps generated verdicts private to each host and drops them on archive", as
   f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
   await expect(reopened.invoke("friend", request)).rejects.toThrow("access");
 });
+
+const automationAuthority: Pick<DatasetHostOptions<Context>, "resolveAuthority"> = {
+  resolveAuthority(context, request) {
+    return context === "owner"
+      ? { principalKey: "owner", caller: { kind: "owner", userId: "owner" } }
+      : { principalKey: "automation", caller: { kind: "automation", automationId: "collection:orders#notify" }, chainDepth: 1,
+          ...(request.access.kind === "app" ? { appId: request.access.appId } : {}) };
+  },
+};
+it("keeps automation authority separate from an app's approved generated reads", async () => {
+  const f = await linkReadFixture(automationAuthority);
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  const invoke = vi.spyOn(f.supervisor, "invoke");
+  await expect(f.invoke("helper", id(7))).rejects.toThrow("access");
+  expect(invoke).not.toHaveBeenCalled();
+  await expect(f.invoke("helper", id(7), {}, false)).resolves.toMatchObject({ result: { rows: [] } });
+  const request = invoke.mock.calls[0]![0];
+  expect(request.caller).toEqual({ kind: "automation", automationId: "collection:orders#notify" });
+  expect(request.restrictTables).toBeUndefined();
+  expect(request.tables).toEqual(["items", "other"]);
+});
+it("runs an automation's custom action without link read approval", async () => {
+  const f = await fixture(automationAuthority);
+  const custom = structuredClone(definition);
+  custom.operations[2]!.kind = "action";
+  const source = operationSource.replace("return {changed:true};", "return ctx.caller;");
+  const revision = describeDatasetRevision({ definition: custom, revision: 1, schemaSql, operationSource: source });
+  await f.host.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql, operationSource: source });
+  const binding = { ...f.binding([id(8)]), revisionSha256: revision.revisionSha256 };
+  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...binding, linkReads: [{ operationId: id(8), fieldIds: [id(4)] }] } })).toThrow();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding });
+  const request = { ...scope, revision: 1, revisionSha256: revision.revisionSha256, operationId: id(8), input: { value: "changed", id: "missing" }, idempotencyKey: "action" };
+  await expect(f.host.invoke("helper", { ...request, access: { kind: "app", appId: "form" } })).rejects.toThrow("access");
+  expect((await f.host.invoke("helper", request)).result).toEqual({ kind: "automation", automationId: "collection:orders#notify" });
+});

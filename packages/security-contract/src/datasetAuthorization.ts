@@ -61,7 +61,7 @@ export function effectiveDatasetOperations(binding: unknown, approvedRevision: D
   const parsed = parseDatasetBinding(binding, approved, lookup);
   const principal = parseAppBackendCaller(caller);
   const allowed = new Set(parsed.operationIds);
-  const reads = new Set(parsed.linkReads?.map(read => read.operationId));
+  const reads = new Set(principal.kind === "link" || principal.kind === "named" ? parsed.linkReads?.map(read => read.operationId) : []);
   return approved.definition.operations.filter(operation => allowed.has(operation.operationId) && (
     principal.kind === "owner" || operation.access === "link" || reads.has(operation.operationId) ||
     (operation.access === "helper" && principal.kind === "named" && principal.helper)

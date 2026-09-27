@@ -84,6 +84,17 @@ describe("initial dataset source", { timeout: 60_000 }, () => {
     expect((await app.call("read", {})).result).toMatchObject({ rows: [] });
   });
 
+  it("lets an automation use generated operations under its own caller", async () => {
+    const definition = fixture();
+    definition.operations.find(operation => operation.name === "read")!.access = "owner";
+    const app = await runtime(definition);
+    const automation = { kind: "automation", automationId: "collection:registrations#approve" };
+    const created = (await app.call("submit", { values: { [id(4)]: "Alice" } }, automation)).result as { id: string };
+    await app.call("edit", { id: created.id, expectedVersion: 1, values: { [id(5)]: "Approved" } }, automation);
+    expect((await app.call("read", {}, automation)).result).toMatchObject({ rows: [{ version: 2, values: { [id(5)]: "Approved" } }] });
+    await expect(app.call("read", {}, { ...link, approvedRead: id(21) })).rejects.toThrow("do not have access");
+  });
+
   it("derives access from the host caller and never filters or sorts hidden fields", async () => {
     const app = await runtime();
     await app.call("submit", { values: { [id(4)]: "Alice" } }, link);
