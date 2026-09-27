@@ -4632,7 +4632,8 @@ export function DesktopWorkspaceShell(props: {
         >
           <Eye size={12} aria-hidden className="shrink-0" />
           {shareView.subjectName && <span className="max-w-64 truncate font-medium">{shareView.subjectName}</span>}
-          <span className="min-w-0 flex-1 truncate">
+          {shareView.granterEmail && <span className="shrink-0 font-mono text-[11px]">{shareView.granterEmail}</span>}
+          <span className="min-w-0 flex-1 truncate" title={shareGranterName ?? undefined}>
             {shareViewEnded
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
               : shareViewDamaged
