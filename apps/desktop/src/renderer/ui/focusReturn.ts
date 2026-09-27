@@ -104,7 +104,13 @@ function createSurfaceTracker() {
   };
   const restoreRemovedFocus = () => {
     const memory = remembered;
-    if (!memory || memory.element.isConnected) return;
+    if (!memory) return;
+    if (memory.element.isConnected) {
+      if (!blurredByPointer && document.hasFocus() && document.activeElement === document.body) {
+        memory.element.focus({ preventScroll: true });
+      }
+      return;
+    }
     observer.disconnect();
     queueMicrotask(() => {
       if (remembered !== memory) return;
@@ -157,6 +163,12 @@ function createSurfaceTracker() {
     if (blurredByPointer) forget();
     pointerDown = true;
   };
+  const onWindowBlur = () => {
+    forget();
+    pointerDown = false;
+    clearTimeout(completion);
+  };
+  window.addEventListener("blur", onWindowBlur);
   document.addEventListener("focusin", onFocusIn, true);
   document.addEventListener("focusout", onFocusOut, true);
   document.addEventListener("pointerdown", onPointerDown, true);
@@ -169,6 +181,7 @@ function createSurfaceTracker() {
     dispose() {
       forget();
       clearTimeout(completion);
+      window.removeEventListener("blur", onWindowBlur);
       document.removeEventListener("focusin", onFocusIn, true);
       document.removeEventListener("focusout", onFocusOut, true);
       document.removeEventListener("pointerdown", onPointerDown, true);

@@ -138,6 +138,65 @@ it("forgets a blank-area pointer click before the surface content closes later",
   expect(document.activeElement).toBe(document.body);
 });
 
+it("does not restore focus after the window blurs and a focused child is removed", async () => {
+  function Surface({ show }: { show: boolean }) {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1}>{show && <button>Transient</button>}</section>;
+  }
+  const view = render(<Surface show />);
+  const child = screen.getByText("Transient");
+  child.focus();
+  fireEvent.pointerDown(child);
+  fireEvent.focusOut(child, { relatedTarget: null });
+  vi.spyOn(document, "hasFocus").mockReturnValue(false);
+  fireEvent(window, new Event("blur"));
+  expect(document.activeElement).toBe(child);
+  view.rerender(<Surface show={false} />);
+  await act(async () => {});
+  expect(document.activeElement).toBe(document.body);
+});
+
+it("keeps focus on a row reinserted during a reorder", async () => {
+  function Surface({ rows }: { rows: string[] }) {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1}>
+      {rows.map((row) => <button key={row}>{row}</button>)}
+    </section>;
+  }
+  render(<Surface rows={["First", "Second"]} />);
+  const row = screen.getByText("First");
+  row.focus();
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  const focus = vi.spyOn(row, "focus");
+  // Reinsert the keyed node without React's commit-time focus restoration.
+  row.parentElement!.append(row);
+  expect(screen.getByText("First")).toBe(row);
+  expect(row.isConnected).toBe(true);
+  expect(document.activeElement).toBe(document.body);
+  await act(async () => {});
+  expect(document.activeElement).toBe(row);
+  expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+});
+
+it("keeps a pointer blur when sibling content changes during the press", async () => {
+  function Surface() {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1}><button>Row</button><div>Blank area</div></section>;
+  }
+  render(<Surface />);
+  const row = screen.getByText("Row");
+  row.focus();
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  fireEvent.pointerDown(screen.getByText("Blank area"));
+  row.blur();
+  row.parentElement!.append(document.createElement("div"));
+  await act(async () => {});
+  expect(document.activeElement).toBe(document.body);
+});
+
 it("shares removal tracking and ignores contenteditable typing and sibling tree updates", async () => {
   const callbacks = vi.fn();
   const NativeObserver = MutationObserver;
