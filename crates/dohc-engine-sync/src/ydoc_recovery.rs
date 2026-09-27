@@ -633,7 +633,7 @@ pub(crate) fn recover_lineage_in_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_recovery_in_tx(
+pub(crate) fn create_recovery_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     original_path: &str,

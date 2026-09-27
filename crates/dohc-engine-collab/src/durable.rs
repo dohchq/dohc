@@ -1734,6 +1734,17 @@ pub fn replace_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
 ) -> Result<SuccessorInstallOutcome, CollabError> {
+    replace_reviewed_lineage_with_successor_in_tx(tx, replacement, None)
+}
+
+/// Install a reviewed successor while guarding the receiver's alternate lineage.
+/// The successor retains its author's causal parent. The caller must establish
+/// that the alternate lineage is an unchanged side of the same review.
+pub fn replace_reviewed_lineage_with_successor_in_tx(
+    tx: &Transaction<'_>,
+    replacement: SuccessorReplacement<'_>,
+    reviewed_local_predecessor: Option<(&str, &str)>,
+) -> Result<SuccessorInstallOutcome, CollabError> {
     crate::live_update_application::require_restore_open(tx, replacement.key)?;
     let SuccessorReplacement {
         key,
@@ -1793,12 +1804,12 @@ pub fn replace_lineage_with_successor_in_tx(
             successor_claim_id: successor.lineage_claim_id.clone(),
         });
     }
-    let (marker, predecessor, predecessor_state_vector) = load_exact_active_lineage(
-        tx,
-        key,
+    let (local_claim, local_vector) = reviewed_local_predecessor.unwrap_or((
         expected_predecessor_claim_id,
         expected_predecessor_state_vector_sha256,
-    )?;
+    ));
+    let (marker, predecessor, predecessor_state_vector) =
+        load_exact_active_lineage(tx, key, local_claim, local_vector)?;
 
     let predecessor_full_state_sha = put_binary_blob(tx, &predecessor.encode_full_state())?;
     let predecessor_state_vector_sha = put_binary_blob(tx, &predecessor_state_vector)?;
@@ -1811,7 +1822,7 @@ pub fn replace_lineage_with_successor_in_tx(
             key.workspace_id,
             key.version_id,
             key.object_id,
-            expected_predecessor_claim_id,
+            local_claim,
             marker.lineage_parent_claim_id,
             marker.content_kind.as_str(),
             marker.path,

@@ -420,6 +420,14 @@ fn apply_deferred_base(
     let bytes = bytes.to_vec();
     let origin_id = origin_id.to_owned();
     let outcome = store.write_with(faults, move |tx| {
+        let already_preserved: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-conflict')",
+            [ydoc_conflict_coordinate_id(&key.workspace_id, &origin_id, origin_seq)],
+            |row| row.get(0),
+        ).map_err(SyncError::corrupt)?;
+        if already_preserved {
+            return Ok(None);
+        }
         let marker_before =
             dohc_engine_collab::read_marker_in(tx, &key).map_err(map_collab_hard_error)?;
         let last_settled_sha: Option<String> = tx.query_row(
@@ -451,6 +459,13 @@ fn apply_deferred_base(
                 ));
             }
         };
+        if let Some(result) = preserve_incomplete_base_in_tx(
+            tx, &key, &payload, &incoming_doc, relay_seq, &origin_id, origin_seq,
+            recorded_at_ms, search_policy,
+        )? {
+            record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, result.conflicts_opened)?;
+            return Ok(result.lineage_replacement);
+        }
         let unpublished_claim_id = if local_unpublished {
             let doc = losing_doc
                 .as_ref()
@@ -2267,6 +2282,105 @@ fn preserve_base_sides_in_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn preserve_incomplete_base_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+    incoming_doc: &dohc_engine_collab::Ydoc,
+    relay_seq: i64,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<Option<YdocApplyResult>, SyncError> {
+    let Some(marker) =
+        dohc_engine_collab::read_marker_in(tx, key).map_err(map_collab_hard_error)?
+    else {
+        return Ok(None);
+    };
+    if marker.lineage_claim_id.as_deref() == Some(payload.lineage_claim_id.as_str())
+        || (marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+            && !marker.base_relay_confirmed_absent
+            && marker.base_relay_seq.is_none_or(|local| local <= relay_seq))
+    {
+        return Ok(None);
+    }
+    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_collab_hard_error)?;
+    if !doc.has_pending_dependencies() {
+        return Ok(None);
+    }
+    // Keep the pending bytes in their durable log so their missing predecessor
+    // can still arrive. A projection or a full-state encode would omit them.
+    let local = project_ydoc_with_store(tx, key, &doc, marker.content_kind)?.content;
+    let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind)
+        .map_err(map_collab_hard_error)?;
+    let incoming = project_ydoc_with_store(tx, key, incoming_doc, kind)?.content;
+    let current = validate_retryable_ydoc_identity(tx, key, &payload.path)?;
+    let snapshot = current.snapshot.as_ref();
+    let open = open_sync_conflict_id(tx, key)?.is_some();
+    let external = snapshot.filter(|snapshot| {
+        snapshot.blob_sha256 != hex_sha256(local.as_bytes())
+            && snapshot.blob_sha256 != hex_sha256(incoming.as_bytes())
+    });
+    let mut recovered_paths = Vec::new();
+    if open || external.is_some() {
+        let preserved = if open {
+            incoming.clone()
+        } else {
+            tx.query_row(
+                "SELECT text FROM blobs WHERE sha256=?1",
+                [&external.unwrap().blob_sha256],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?
+        };
+        let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
+            tx,
+            key,
+            &payload.path,
+            crate::ydoc_recovery::RecoveryEnvelopeBinding {
+                content_kind: &payload.content_kind,
+                update_blob_sha256: &payload.update_blob_sha256,
+                lineage_claim_id: &payload.lineage_claim_id,
+                is_base_state: true,
+            },
+            &payload.lineage_claim_id,
+            &preserved,
+            origin_id,
+            origin_seq,
+            now_ms,
+            search_policy,
+        )?;
+        recovered_paths.push(recovery.path);
+    }
+    // The active lineage belongs on incoming: later dependencies coalesce
+    // there while the complete competing base stays visible on current.
+    let opened = conflict_replaced_lineage_in_tx(
+        tx,
+        key,
+        &payload.path,
+        &incoming,
+        snapshot.map(|snapshot| snapshot.blob_sha256.as_str()),
+        &local,
+        origin_id,
+        origin_seq,
+        now_ms,
+        search_policy,
+    )?
+    .unwrap_or(0);
+    Ok(Some(YdocApplyResult {
+        deferred: false,
+        reason: Some("ydoc-base-conflict"),
+        conflicts_opened: opened,
+        lineage_replacement: marker.lineage_claim_id.map(|claim| YdocLineageReplacement {
+            winner_lineage_claim_id: claim,
+            recovered_paths,
+        }),
+        record_facts: Vec::new(),
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn conflict_replaced_lineage_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
@@ -3084,6 +3198,7 @@ pub fn apply_ydoc_envelope(
             lineage_claim_id: &payload.lineage_claim_id,
             is_base_state: payload.is_base_state,
         };
+        let base_payload = &payload;
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
             let coordinate = dohc_engine_collab::BaseRelayCoordinate::new(
                 op.origin_id.clone(),
@@ -3183,6 +3298,20 @@ pub fn apply_ydoc_envelope(
                 marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
                     && (marker.head_update_seq > 0 || marker.head_snapshot_seq > 0)
             });
+            if let Some(result) = preserve_incomplete_base_in_tx(
+                tx,
+                &claim_key,
+                base_payload,
+                &incoming_doc,
+                relay_seq,
+                &op.origin_id,
+                op.origin_seq,
+                op.recorded_at_ms,
+                search_policy.as_ref(),
+            )? {
+                record_ydoc_conflicts_opened(tx, op, result.conflicts_opened)?;
+                return Ok(result);
+            }
             let losing_projection = if local_unpublished
                 || marker_before.as_ref().is_some_and(|marker| {
                     marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact

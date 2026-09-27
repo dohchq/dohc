@@ -4574,6 +4574,277 @@ fn seed_resolution_ops(store: &EngineStore, origin: &str) -> Vec<ReplicationEnve
 }
 
 #[test]
+fn winner_with_unsettled_or_net_zero_edits_reviews_resolution_without_retrying() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    for (net_zero, keep_current) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (_sa, _pa, mut a) = open_store();
+        let (_sb, _pb, mut b) = open_store();
+        let key = DocKey::new("ws", "main", "changed-winner").unwrap();
+        let path = "notes/changed-winner.md";
+        let loser = Ydoc::wire();
+        loser.plaintext_insert(0, "local seed");
+        let winner = Ydoc::wire();
+        winner.plaintext_insert(0, "remote seed");
+        for (store, doc, text, origin, relay) in [
+            (&mut a, &loser, "local seed", "loser", 20),
+            (&mut b, &winner, "remote seed", "winner", 10),
+        ] {
+            seed_identity(store);
+            VersionedTextStore::new(store)
+                .ensure_main_version("ws", "main", 1000, &NoFaults)
+                .unwrap();
+            seed_resolution_head(store, &key.object_id, path, text);
+            dohc_engine_collab::claim_base_at_relay(
+                store,
+                &key,
+                ContentKind::Plaintext,
+                &doc.encode_full_state(),
+                &dohc_engine_collab::BaseRelayCoordinate::new(origin, 0, relay).unwrap(),
+                &NoFaults,
+                1100,
+            )
+            .unwrap();
+        }
+        let sha = a.put_binary_blob(&winner.encode_full_state()).unwrap();
+        let mut base = envelope(
+            "winner",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId":"main","objectId":key.object_id,"path":path,"contentKind":"plaintext",
+                "updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true
+            }),
+        );
+        base.relay_seq = Some(10);
+        apply_ydoc_envelope(
+            &mut a,
+            &mut WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        let update = winner.plaintext_insert(0, "new ");
+        for bytes in std::iter::once(update).chain(net_zero.then(|| winner.plaintext_delete(0, 4)))
+        {
+            dohc_engine_collab::record_local_update(
+                &mut b,
+                &mut WriterDocCache::new(),
+                &key,
+                &bytes,
+                dohc_engine_collab::LocalAppend::default(),
+                &NoFaults,
+                1200,
+                |_tx, _outcome, _sha| Ok(()),
+            )
+            .unwrap();
+        }
+        let before = dohc_engine_collab::load_persisted(&b, &key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .encode_full_state();
+        resolve_seed_conflict(&mut a, &key, keep_current);
+        copy_seed_blobs(&a, &mut b);
+        for op in seed_resolution_ops(&a, "resolver") {
+            let applied = crate::apply_replication_envelope(
+                &mut b,
+                &mut WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            assert!(
+                matches!(applied.primary, ApplyDisposition::Applied(_)),
+                "{applied:?}"
+            );
+            assert!(applied.refusals.is_empty());
+            let replay = crate::apply_replication_envelope(
+                &mut b,
+                &mut WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            assert!(matches!(replay.primary, ApplyDisposition::Skipped));
+        }
+        assert_eq!(
+            before,
+            dohc_engine_collab::load_persisted(&b, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .encode_full_state()
+        );
+        let open: i64 = b
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(open, 1);
+        if !net_zero {
+            let recovered: i64 = b
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                 WHERE s.object_id <> 'changed-winner' AND b.text='new remote seed'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                recovered, 1,
+                "unsettled edits remain visible as a recovery file"
+            );
+        }
+    }
+}
+
+#[test]
+fn equal_base_projection_preserves_pending_dependencies_until_review() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    for deferred in [false, true] {
+        let (_scratch, db_path, mut store) = open_store();
+        seed_identity(&mut store);
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1000, &NoFaults)
+            .unwrap();
+        let key = DocKey::new("ws", "main", "pending-seed").unwrap();
+        let path = "notes/pending-seed.md";
+        seed_resolution_head(&mut store, &key.object_id, path, "same");
+        let local = Ydoc::wire();
+        local.plaintext_insert(0, "same");
+        let claim = store.put_binary_blob(&local.encode_full_state()).unwrap();
+        dohc_engine_collab::claim_base_at_relay(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            &local.encode_full_state(),
+            &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(),
+            &NoFaults,
+            1100,
+        )
+        .unwrap();
+        let dependency = Ydoc::wire();
+        let predecessor = dependency.plaintext_insert(0, "dependency");
+        let pending = dependency.plaintext_insert(0, "pending ");
+        let pending_sha = store.put_binary_blob(&pending).unwrap();
+        let delta = |sha: &str, origin: &str| {
+            envelope(
+                origin,
+                0,
+                "ydoc.update",
+                json!({
+                    "versionId":"main","objectId":key.object_id,"path":path,"contentKind":"plaintext",
+                    "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false
+                }),
+            )
+        };
+        apply_ydoc_envelope(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &delta(&pending_sha, "pending"),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        let incoming = Ydoc::wire();
+        incoming.plaintext_insert(0, "same");
+        let sha = store
+            .put_binary_blob(&incoming.encode_full_state())
+            .unwrap();
+        let mut base = envelope(
+            "remote",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId":"main","objectId":key.object_id,"path":path,"contentKind":"plaintext",
+                "updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true
+            }),
+        );
+        base.relay_seq = Some(10);
+        apply_ydoc_envelope(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            if deferred { &AlwaysLive } else { &NoLiveLeases },
+        )
+        .unwrap();
+        if deferred {
+            let crashed = drain_deferred_ydoc_for_key(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &key,
+                ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck).as_ref(),
+            );
+            assert!(crashed.is_err());
+        }
+        drop(store);
+        let mut store = EngineStore::open(&db_path, 2000).unwrap();
+        if deferred {
+            drain_deferred_ydoc_for_key(&mut store, &mut WriterDocCache::new(), &key, &NoFaults)
+                .unwrap();
+        }
+        let persisted = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        assert!(persisted.doc.has_pending_dependencies());
+        assert_eq!(
+            persisted.marker.lineage_claim_id.as_deref(),
+            Some(claim.as_str())
+        );
+        let replay = apply_ydoc_envelope(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(matches!(replay.primary, ApplyDisposition::Skipped));
+        let predecessor_sha = store.put_binary_blob(&predecessor).unwrap();
+        apply_ydoc_envelope(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &delta(&predecessor_sha, "predecessor"),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        let persisted = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        assert!(!persisted.doc.has_pending_dependencies());
+        assert!(
+            persisted
+                .doc
+                .plaintext_string()
+                .contains("pending dependency")
+        );
+        let incoming_text: String = store.read_with(|conn| conn.query_row(
+            "SELECT b.text FROM conflicts c JOIN blobs b ON b.sha256=c.incoming_blob_sha256 WHERE c.status='open'", [], |row| row.get(0))).unwrap();
+        assert!(incoming_text.contains("pending dependency"));
+        resolve_seed_conflict(&mut store, &key, false);
+        assert!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .plaintext_string()
+                .contains("pending dependency")
+        );
+    }
+}
+
+#[test]
 fn seed_resolution_converges_on_both_peers_in_both_delivery_orders_after_restart() {
     use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
     for keep_current in [false, true] {
@@ -4724,7 +4995,14 @@ fn seed_resolution_converges_on_both_peers_in_both_delivery_orders_after_restart
 #[test]
 fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choices() {
     use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
-    for same_choice in [true, false] {
+    for (same_choice, resolve_on_a, keep_next, edited) in [
+        (true, true, true, false),
+        (true, true, true, true),
+        (false, true, true, false),
+        (false, true, false, false),
+        (false, false, true, false),
+        (false, false, false, false),
+    ] {
         let (_sa, _pa, mut a) = open_store();
         let (_sb, _pb, mut b) = open_store();
         let key = DocKey::new("ws", "main", "concurrent-seeds").unwrap();
@@ -4789,10 +5067,36 @@ fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choi
         );
         let a_ops = seed_resolution_ops(&a, "resolution-a");
         let b_ops = seed_resolution_ops(&b, "resolution-b");
+        if edited {
+            let doc = dohc_engine_collab::load_persisted(&a, &key)
+                .unwrap()
+                .unwrap()
+                .doc;
+            let update = doc.plaintext_insert(0, "unsettled ");
+            dohc_engine_collab::record_local_update(
+                &mut a,
+                &mut WriterDocCache::new(),
+                &key,
+                &update,
+                dohc_engine_collab::LocalAppend::default(),
+                &NoFaults,
+                10_002,
+                |_tx, _outcome, _sha| Ok(()),
+            )
+            .unwrap();
+        }
         copy_seed_blobs(&a, &mut b);
         copy_seed_blobs(&b, &mut a);
         for (store, ops, expected) in [
-            (&mut a, &b_ops, "local seed"),
+            (
+                &mut a,
+                &b_ops,
+                if edited {
+                    "unsettled local seed"
+                } else {
+                    "local seed"
+                },
+            ),
             (
                 &mut b,
                 &a_ops,
@@ -4826,13 +5130,30 @@ fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choi
                     )
                 })
                 .unwrap();
-            assert_eq!(reviews, if same_choice { 0 } else { 1 });
+            assert_eq!(
+                reviews,
+                if !same_choice || expected.starts_with("unsettled ") {
+                    1
+                } else {
+                    0
+                }
+            );
             let doc = dohc_engine_collab::load_persisted(store, &key)
                 .unwrap()
                 .unwrap();
             assert_eq!(doc.doc.plaintext_string(), expected);
         }
-        if same_choice {
+        if edited {
+            resolve_seed_conflict_with_faults(
+                &mut a,
+                &key,
+                true,
+                &NoFaults,
+                false,
+                "after-equivalent-choice",
+                11_000,
+            );
+        } else if same_choice {
             assert_eq!(
                 dohc_engine_collab::read_marker(&a, &key)
                     .unwrap()
@@ -4844,6 +5165,52 @@ fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choi
                     .lineage_claim_id
             );
             assert_seed_heads_and_delete_converge(&mut a, &mut b, &key, path);
+        } else {
+            let (resolver, receiver) = if resolve_on_a {
+                (&mut a, &mut b)
+            } else {
+                (&mut b, &mut a)
+            };
+            resolve_seed_conflict_with_faults(
+                resolver,
+                &key,
+                keep_next,
+                &NoFaults,
+                false,
+                "second-choice",
+                11_000,
+            );
+            let mut ops = seed_resolution_ops(resolver, "second-resolver");
+            ops.retain(|op| op.recorded_at_ms == 11_000);
+            assert!(!ops.is_empty());
+            copy_seed_blobs(resolver, receiver);
+            for (seq, op) in ops.iter_mut().enumerate() {
+                op.origin_seq = seq as i64;
+                let applied = crate::apply_replication_envelope(
+                    receiver,
+                    &mut WriterDocCache::new(),
+                    op,
+                    &NoFaults,
+                    &NoLiveLeases,
+                )
+                .unwrap();
+                assert!(
+                    matches!(applied.primary, ApplyDisposition::Applied(_)),
+                    "{applied:?}"
+                );
+                assert!(applied.refusals.is_empty());
+            }
+            assert_eq!(
+                dohc_engine_collab::read_marker(resolver, &key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_id,
+                dohc_engine_collab::read_marker(receiver, &key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_id,
+            );
+            assert_seed_heads_and_delete_converge(resolver, receiver, &key, path);
         }
     }
 }
