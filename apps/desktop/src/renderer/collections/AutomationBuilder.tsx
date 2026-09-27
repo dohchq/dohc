@@ -99,7 +99,7 @@ const DIAGNOSTIC_SENTENCES: Partial<Record<AutomationDiagnostic["code"], string>
   "too-many-steps": "An automation can have at most 25 steps.",
   "if-too-deep": "If steps can sit at most three deep.",
   "unexpected-formula-marker": "Only a value can be a formula, so this cannot start with =.",
-  "invalid-template": "Close each { with }. To write a brace itself, type {{ or }}.",
+  "invalid-template": "Check each {expression} in the message: close its brace and fix its formula. To write a brace itself, type {{ or }}.",
   "optional-chain-needs-parentheses": "Put parentheses around an expression with ?. before a /, as in {(record?.of) / 2}.",
 };
 
