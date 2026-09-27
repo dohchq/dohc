@@ -167,8 +167,11 @@ Run the smallest check that proves the change.
 
 ## Pull requests and merging
 
-PR verification runs locally because cloud CI costs remain out of budget.
-GitHub PR checks stay dispatch-only and require self-hosted runners. Do not enable cloud runners.
+Blacksmith stays off until Ice enables the repository variable `BLACKSMITH_ENABLED`.
+While off, run PR verification locally. Manual GitHub checks use self-hosted Linux runners.
+When enabled, ready PRs from this repository use Blacksmith. Fork PRs still need local verification.
+Use passing cloud evidence instead of repeating full gates locally when it covers the change.
+Before changing CI activation, read [the Blacksmith setup procedure](docs/how-to/enable-blacksmith.md).
 Keep one concern per PR. Keep required contract, caller, and test changes together.
 Finish implementation, self-simplification, and focused checks before requesting independent review.
 
@@ -180,7 +183,7 @@ The plan narrows JavaScript packages and integration proofs through workspace de
 Shared configuration and unknown code inputs retain full verification.
 
 - One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
-- Before merging, require passing local evidence that covers the PR's changes.
+- Before merging, require passing canonical gate evidence that covers the PR's changes.
 - After a rebase or merge, inspect the delta and reuse passing evidence when it still covers the change.
 - Rerun only checks affected by source, dependency, configuration, or conflict-resolution changes. Advancing main alone does not require another gate run.
 - Require every selected job to pass. A missing, cancelled, or failed run is not a pass.

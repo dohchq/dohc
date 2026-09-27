@@ -1,4 +1,4 @@
-import { AgentSettingsContext } from "./workbench/AgentBadge";
+import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { hasBlockingModal } from "./modalFocus";
@@ -71,11 +71,9 @@ import {
   DEFAULT_SIDEBAR_SETTINGS,
   type DesktopUserSettings,
 } from "../settings/userSettings";
-import { useAutomationFailures } from "./shell/useAutomationFailures";
 import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
-import { useAutomationRetry } from "./collections/useAutomationRetry";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
@@ -83,6 +81,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
+import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
@@ -784,6 +783,7 @@ export function DesktopWorkspaceShell(props: {
     hideShellError,
     reportShellError,
     reportShellFailure,
+    clearKind,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
@@ -803,6 +803,7 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
   } = useShellError(workspaceId);
+  useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
   // polls and subscriptions off onError, so a fresh arrow per shell render
@@ -3875,27 +3876,6 @@ export function DesktopWorkspaceShell(props: {
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [props.refreshWorkspaceRegistry, workspaceId]);
   const {
-    automationFailures,
-    dismissAutomationFailure,
-    reloadAutomationFailures,
-    automationFailureToast,
-    hideAutomationFailureToast,
-  } = useAutomationFailures(
-    workspaceId,
-    workspaceIsReady,
-    reportShellError,
-  );
-  // A notice's Try again. Main wakes the drain; the notices read again here
-  // too, because a repeated retry sends no failure event.
-  const rereadAutomationFailures = useCallback(() => {
-    void reloadAutomationFailures().catch(() => undefined);
-  }, [reloadAutomationFailures]);
-  const automationFailureRetry = useAutomationRetry({
-    workspaceId,
-    onError: reportShellError,
-    onQueued: rereadAutomationFailures,
-  });
-  const {
     automationHolds, automationHoldsUnreadable, allowAutomationHold, resetAutomationHolds, revealAutomationHolds,
     automationStops, dismissAutomationStops,
   } = useAutomationHolds(
@@ -4163,11 +4143,12 @@ export function DesktopWorkspaceShell(props: {
     reloadShareProposals,
     workspaceIsReady,
   ]);
-  const sentNoticeProps = useSentNoticeProps({
+  const { retryDialog: sentNoticeRetryDialog, ...sentNoticeProps } = useSentNoticeProps({
     sentNotices: props.sentNotices,
     workspaceId,
     workspaces: props.workspaces,
     openFile,
+    openAutomation,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,
@@ -4246,7 +4227,7 @@ export function DesktopWorkspaceShell(props: {
               reportShellError("Could not refresh history.", error),
             )
           }
-          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
         >
           Try again
         </button>
@@ -4626,7 +4607,7 @@ export function DesktopWorkspaceShell(props: {
     [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, syncFailureNotice],
   );
   return (
-    <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
+    <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <div
       data-testid="workspace-shell"
@@ -4895,13 +4876,7 @@ export function DesktopWorkspaceShell(props: {
                 : {
                     onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
                   })}
-              automationFailures={automationFailures}
-              onDismissAutomationFailure={dismissAutomationFailure}
               {...crashReportNotice}
-              onRetryAutomationFailure={automationFailureRetry.retry}
-              onOpenAutomation={openAutomation}
-              automationFailureToast={automationFailureToast}
-              onHideAutomationFailureToast={hideAutomationFailureToast}
               automationHolds={automationHolds}
               onAllowAutomationHold={allowAutomationHold}
               automationHoldsUnreadable={automationHoldsUnreadable}
@@ -4933,7 +4908,7 @@ export function DesktopWorkspaceShell(props: {
                   aria-label="Open history in tab"
                   title="Open history in tab"
                   onClick={openHistoryTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
@@ -4944,7 +4919,7 @@ export function DesktopWorkspaceShell(props: {
                   aria-label="Open graph in tab"
                   title="Open graph in tab"
                   onClick={openGraphTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
@@ -4955,7 +4930,7 @@ export function DesktopWorkspaceShell(props: {
                   aria-label="Refresh apps"
                   title="Refresh apps"
                   onClick={refreshSites}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
                 >
                   <RefreshCw size={13} aria-hidden />
                 </button>
@@ -5313,11 +5288,12 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="collection" />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
                   datasetId={groupDataCollection.datasetId} tableId={groupDataCollection.tableId}
-                  onOpenSource={openFile}
+                  onOpenFile={(path) => openFile(path)}
+                  onOpenScheduleSettings={() => openSettings("advanced")}
                   owner={!isShareView}
                   onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
-                  onError={reportShellError}
-                  onNotice={showSuccessNotice}
+                  onError={collectionReports.onError}
+                  onNotice={collectionReports.onNotice}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
                     openVirtualTab(siteTabPath(appRoot));
@@ -5421,21 +5397,21 @@ export function DesktopWorkspaceShell(props: {
                   <button
                     type="button"
                     onClick={() => setNewFileOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
+                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
                   >
                     Ctrl N · new file
                   </button>
                   <button
                     type="button"
                     onClick={() => setPaletteOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
+                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
                   >
                     Ctrl K · commands
                   </button>
                   <button
                     type="button"
                     onClick={() => setQuickOpenOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
+                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
                   >
                     Ctrl P · go to
                   </button>
@@ -5483,7 +5459,7 @@ export function DesktopWorkspaceShell(props: {
                   aria-label="Open chats in tab"
                   title="Open chats in tab"
                   onClick={openChatsTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
@@ -5744,7 +5720,7 @@ export function DesktopWorkspaceShell(props: {
         </Overlay>
       ) : null}
 
-      {automationFailureRetry.dialog}
+      {sentNoticeRetryDialog}
 
       {engineRebuild ? (
         <Overlay
@@ -6107,6 +6083,6 @@ export function DesktopWorkspaceShell(props: {
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
     </CollectionFieldMarksProvider>
-    </AgentSettingsContext.Provider>
+    </AgentSettingsProvider>
   );
 }

@@ -36,9 +36,6 @@ import {
 import type {
   SitePackageInfo,
   AgentRunStatusResult,
-  DismissAutomationFailurePayload,
-  ListAutomationFailuresPayload,
-  ListAutomationFailuresResult,
   ReadCrashReportResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
@@ -120,7 +117,6 @@ import {
 } from "./workspaceActivityCoalescer";
 import {
   CHATS_TAB_PATH,
-  chatTabPath,
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
@@ -208,7 +204,7 @@ const READY_UPDATE_STATE: UpdateStateEvent = {
 };
 
 const STORED_STATE: WorkspaceUiState = {
-  version: 2,
+  version: 3,
   activeView: "explorer",
   sidebarVisible: true,
   sidebarWidth: 320,
@@ -344,9 +340,6 @@ function makeBaseBridge(
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
   const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
-  const automationFailuresCallbacks = new Set<
-    (event: { workspaceId: string }) => void
-  >();
   const crashReportCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
@@ -478,6 +471,9 @@ function makeBaseBridge(
     writeClipboardText: vi.fn(async () => undefined),
     setTitlebarTheme: vi.fn(async () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
+    onChatDispatchNotices: vi.fn(() => () => {}),
+    registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
+    dismissChatDispatchNotice: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
       settings: {
         ...DEFAULT_USER_SETTINGS,
@@ -665,13 +661,8 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
-    listAutomationFailures: vi.fn(
-      async (
-        _payload: ListAutomationFailuresPayload,
-      ): Promise<ListAutomationFailuresResult> => ({ failures: [] }),
-    ),
-    dismissAutomationFailure: vi.fn(
-      async (_payload: DismissAutomationFailurePayload) => undefined,
+    retryAutomationNotice: vi.fn(
+      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
     listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
     resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
@@ -691,15 +682,7 @@ function makeBaseBridge(
     retryCollectionAutomation: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
-    emitAutomationFailuresChanged: (event: { workspaceId: string }) => {
-      for (const callback of [...automationFailuresCallbacks]) callback(event);
-    },
-    onAutomationFailuresChanged: vi.fn(
-      (listener: (event: { workspaceId: string }) => void) => {
-        automationFailuresCallbacks.add(listener);
-        return () => automationFailuresCallbacks.delete(listener);
-      },
-    ),
+    onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
     readCrashReport: vi.fn(
       async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
         report: null,
@@ -1929,7 +1912,7 @@ describe("editor groups", () => {
       ),
     );
 
-    await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    await screen.findByTestId("tab-dohc://chats");
     expect(
       (screen.getByTestId("create-editor-group-right") as HTMLButtonElement)
         .disabled,
@@ -1944,7 +1927,7 @@ describe("editor groups", () => {
       ),
     );
 
-    await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    await screen.findByTestId("tab-dohc://chats");
     expect(
       (screen.getByTestId("create-editor-group-right") as HTMLButtonElement)
         .disabled,
@@ -2092,7 +2075,7 @@ describe("editor groups", () => {
     }));
     renderShell(bridge);
 
-    await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    await screen.findByTestId("tab-dohc://chats");
     fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
 
     expect(
@@ -2700,7 +2683,7 @@ describe("editor groups", () => {
     },
     {
       destination: "Compare with Main",
-      tabPath: versionCompareTabPath("v-old"),
+      tabPath: "dohc://versions/compare/v-old",
       navigate: async (user: ReturnType<typeof userEvent.setup>) => {
         await user.click(await screen.findByTestId("version-menu-button"));
         await user.click(await screen.findByTestId("version-compare"));
@@ -5038,7 +5021,7 @@ describe("ui-state merge-on-load", () => {
       sync.resolve(dmSyncResult());
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
   });
 
@@ -5081,7 +5064,7 @@ describe("ui-state merge-on-load", () => {
       sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
   });
 
@@ -5124,13 +5107,13 @@ describe("ui-state merge-on-load", () => {
     const afterNav = await screen.findAllByTestId("graph-file-row");
     await user.click(afterNav.find((row) => row.dataset.path === fileThreadNode.path)!);
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
-    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
 
     await act(async () => {
       sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
   });
 
   // The third seam of the same kind, and the reason the predicate now lives at
@@ -5173,7 +5156,7 @@ describe("ui-state merge-on-load", () => {
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === first.path)!);
-    const chatsTab = await screen.findByTestId(`tab-${chatTabPath({kind: "channel", id: first.channelId})}`);
+    const chatsTab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(first.channelId)}`);
     expect(chatsTab.dataset.active).toBe("true");
 
     // Start a canonical DM navigation and leave it in flight.
@@ -5190,7 +5173,7 @@ describe("ui-state merge-on-load", () => {
         (row) => row.dataset.path === second.path,
       )!,
     );
-    expect(screen.getByTestId(`tab-${chatTabPath({kind: "channel", id: second.channelId})}`).dataset.active).toBe("true");
+    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent(second.channelId)}`).dataset.active).toBe("true");
 
     // Collapse the sidebar so the graph's own row labels stop matching, and
     // only the Chats surface answers the queries below. Re-selecting the
@@ -5238,7 +5221,7 @@ describe("ui-state merge-on-load", () => {
       await sync.promise;
     });
 
-    expect(await screen.findByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
+    expect(await screen.findByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeTruthy();
   });
 
   // Cancelling on every workbench write would make this seam hostile: a user
@@ -5286,7 +5269,7 @@ describe("ui-state merge-on-load", () => {
       await sync.promise;
     });
 
-    expect(await screen.findByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
+    expect(await screen.findByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeTruthy();
   });
 
   // A destination change inside the active file moves no tab, so the check
@@ -5350,7 +5333,7 @@ describe("ui-state merge-on-load", () => {
       sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
   });
 
@@ -5394,7 +5377,7 @@ describe("ui-state merge-on-load", () => {
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === channel.path)!);
-    expect((await screen.findByTestId(`tab-${chatTabPath({kind: "channel", id: channel.channelId})}`)).dataset.active).toBe("true");
+    expect((await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(channel.channelId)}`)).dataset.active).toBe("true");
 
     // Start a canonical DM navigation and leave it in flight.
     await user.click(
@@ -5411,7 +5394,7 @@ describe("ui-state merge-on-load", () => {
         (row) => row.dataset.path === channel.path,
       )!,
     );
-    expect(screen.getByTestId(`tab-${chatTabPath({kind: "channel", id: channel.channelId})}`).dataset.active).toBe("true");
+    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent(channel.channelId)}`).dataset.active).toBe("true");
 
     // Collapse the sidebar so the graph's own row labels stop matching and
     // only the Chats surface answers the query below.
@@ -5648,12 +5631,12 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(bridge.syncDms.mock.calls.length).toBe(callsBefore + 1));
     await act(async () => bridge.syncAnswers.at(-1)!(dmSyncResult([])));
     expect(await screen.findByTestId("workspace-shell-error-retry")).toBeTruthy();
-    expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe("true");
+    expect(screen.getByTestId("tab-dohc://chats").dataset.active).toBe("true");
     expect(screen.getByTestId("chats-personal-feed")).toBeTruthy();
     expect(screen.queryByTestId("chats-page-empty")).toBeNull();
     await user.click(screen.getByTestId("workspace-shell-error-retry"));
     await act(async () => bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM])));
-    expect(await screen.findByTestId(`tab-${chatTabPath({ kind: "dm", id: CANONICAL_DM.channelId })}`)).toBeTruthy();
+    expect(await screen.findByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeTruthy();
   });
 
   // The Chats PAGE's feed/backlink click is a COMMAND. It must cancel a
@@ -5700,7 +5683,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
     // The feed click opens its channel once; the delayed DM opens no tab.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
-    expect(screen.queryByTestId(`tab-${chatTabPath({ kind: "dm", id: CANONICAL_DM.channelId })}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
 
   });
 
@@ -5957,7 +5940,7 @@ describe("ui-state merge-on-load", () => {
       sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
   });
 
@@ -8575,193 +8558,6 @@ describe("share changes review", () => {
 // generation on screen. Modelled on the share-refusal banner above: the
 // read comes from main on open and on every failure poke, so a restart
 // re-raises anything unacknowledged.
-describe("automation failure notices", () => {
-  const FAILURE = {
-    automationId: "collection:tasks#triage",
-    claimId: "atc_failed",
-    chainStopped: false,
-    name: null,
-    error: "handler exploded",
-    updatedAtMs: 5_000,
-    generation: 1,
-    datasetInstance: null,
-  };
-  const NOTICE_ID = "notice-automation-failure-collection:tasks#triage";
-
-  it("raises the notice from the engine's failed claims and dismisses by the generation on screen", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listAutomationFailures.mockResolvedValue({ failures: [FAILURE] });
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    const notice = await screen.findByTestId(NOTICE_ID);
-    expect(notice.textContent).toContain('Automation "triage" failed');
-    expect(notice.textContent).toContain("handler exploded");
-
-    // Dismiss sends the generation ON SCREEN — a failure recorded since
-    // this render has a higher one, so a stale click cannot hide it — and
-    // re-reads either way.
-    bridge.listAutomationFailures.mockResolvedValue({ failures: [] });
-    await user.click(screen.getByTestId(`${NOTICE_ID}-dismiss`));
-    await waitFor(() => {
-      expect(screen.queryByTestId(NOTICE_ID)).toBeNull();
-    });
-    expect(bridge.dismissAutomationFailure).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId,
-      automationId: "collection:tasks#triage",
-      generation: 1,
-      datasetInstance: null,
-    });
-  });
-
-  it("re-raises a dismissed notice when a newer failure arrives on the poke", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    // Acknowledged: main serves nothing at open.
-    bridge.listAutomationFailures.mockResolvedValue({ failures: [] });
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    await screen.findByTestId("notice-center");
-    expect(screen.queryByTestId(NOTICE_ID)).toBeNull();
-
-    // A newer failure lands: the poke re-reads, and the higher generation
-    // is unacknowledged again.
-    bridge.listAutomationFailures.mockResolvedValue({
-      failures: [
-        {
-          ...FAILURE,
-          chainStopped: true,
-          error: "chain-stopped",
-          generation: 2,
-          updatedAtMs: 9_000,
-        },
-      ],
-    });
-    act(() => {
-      bridge.emitAutomationFailuresChanged({
-        workspaceId: WORKSPACE.workspaceId,
-      });
-    });
-    const notice = await screen.findByTestId(NOTICE_ID);
-    // The chain-stop copy must not claim the handler threw: it never ran.
-    expect(notice.textContent).toContain("An automation chain stopped");
-    expect(notice.textContent).toContain("did not run");
-    expect(notice.textContent).toContain("2 failures so far.");
-  });
-
-  it("tries a failed Collection automation again from its notice, and opens its runs", async () => {
-    const failure = {
-      automationId: "collection:tasks#stamp", claimId: "atc_failed", chainStopped: false,
-      name: "Stamp the finish date", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
-    };
-    const noticeId = "notice-automation-failure-collection:tasks#stamp";
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
-    }));
-    bridge.listAutomationFailures.mockResolvedValue({ failures: [failure] });
-    bridge.listCollectionAutomationRuns.mockResolvedValue({ status: "listed", runs: [{
-      claimId: "atc_failed", state: "failed", error: failure.error, createdAtMs: 5_000, updatedAtMs: 5_000,
-      writes: [], definitionChanged: false, chainStopped: false, undone: false,
-    }] });
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    const notice = await screen.findByTestId(noticeId);
-    expect(notice.textContent).toContain('Automation "Stamp the finish date" failed');
-    const reads = bridge.listAutomationFailures.mock.calls.length;
-    await user.click(within(notice).getByRole("button", { name: "Try again" }));
-    expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId, automationId: failure.automationId, claimId: "atc_failed", startOver: false,
-    });
-    // A repeated retry sends no failure event, so the notice reads again itself.
-    await waitFor(() => expect(bridge.listAutomationFailures.mock.calls.length).toBe(reads + 1));
-
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    await user.click(within(await screen.findByTestId(noticeId)).getByRole("button", { name: "Open automation" }));
-    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
-    expect(await screen.findByTestId("automation-run-atc_failed", undefined, { timeout: 15_000 })).toBeTruthy();
-    expect(bridge.listCollectionAutomationRuns).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId, automationId: failure.automationId,
-    });
-  });
-
-  it("moves an open panel to the next automation a notice opens", async () => {
-    const failure = (id: string, claimId: string) => ({
-      automationId: `collection:tasks#${id}`, claimId, chainStopped: false,
-      name: id, error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
-    });
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
-    }));
-    bridge.listAutomationFailures.mockResolvedValue({ failures: [failure("first", "atc_first"), failure("second", "atc_second")] });
-    bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
-      claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
-      error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
-      writes: [], definitionChanged: false, chainStopped: false, undone: false,
-    }] }));
-    renderShell(bridge);
-
-    const open = async (id: string) => {
-      await user.click(await screen.findByTestId("notice-center-toggle"));
-      await user.click(within(await screen.findByTestId(`notice-automation-failure-collection:tasks#${id}`))
-        .getByRole("button", { name: "Open automation" }));
-    };
-    await open("first");
-    expect(await screen.findByTestId("automation-run-atc_first", undefined, { timeout: 15_000 })).toBeTruthy();
-    // The page cleared the first ask; the second still reaches the open panel.
-    await open("second");
-    expect(await screen.findByTestId("automation-run-atc_second")).toBeTruthy();
-    expect(screen.queryByTestId("automation-run-atc_first")).toBeNull();
-  });
-
-  it("toasts a Collection automation failure that arrives while the window is open, but not the ones it opened with", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    const old = {
-      automationId: "collection:tasks#old", claimId: "atc_old", chainStopped: false,
-      name: "Old", error: "An earlier failure.", updatedAtMs: 1_000, generation: 1, datasetInstance: null,
-    };
-    bridge.listAutomationFailures.mockResolvedValue({ failures: [old] });
-    renderShell(bridge);
-    await waitFor(() => expect(bridge.listAutomationFailures).toHaveBeenCalled());
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    await screen.findByTestId("notice-automation-failure-collection:tasks#old");
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    expect(screen.queryByTestId("automation-failure-toast")).toBeNull();
-
-    const fresh = { ...old, automationId: "collection:tasks#stamp", claimId: "atc_new", name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 9_000 };
-    bridge.listAutomationFailures.mockResolvedValue({ failures: [old, fresh] });
-    act(() => bridge.emitAutomationFailuresChanged({ workspaceId: WORKSPACE.workspaceId }));
-    const toast = await screen.findByTestId("automation-failure-toast");
-    expect(toast.textContent).toContain('Automation "Stamp" failed.');
-    await user.click(within(toast).getByRole("button", { name: "Try again" }));
-    expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith(expect.objectContaining({ claimId: "atc_new" }));
-    await waitFor(() => expect(screen.queryByTestId("automation-failure-toast")).toBeNull());
-  });
-
-  it("ignores a poke for another workspace", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    renderShell(bridge);
-    await waitFor(() => {
-      expect(bridge.onAutomationFailuresChanged).toHaveBeenCalled();
-    });
-    const reads = bridge.listAutomationFailures.mock.calls.length;
-    act(() => {
-      bridge.emitAutomationFailuresChanged({ workspaceId: "ws-elsewhere" });
-    });
-    expect(
-      bridge.listAutomationFailures.mock.calls.length,
-      "another workspace's failures repainting this one",
-    ).toBe(reads);
-  });
-});
-
 describe("crash report notice", () => {
   const REPORT = {
     revision: 3,
@@ -8879,6 +8675,7 @@ describe("notices sent to you", () => {
     target: { path: "b.md" },
     createdAtMs: 5_000,
     readAtMs: null,
+    postedHere: false,
   };
 
   function renderWithNotices(
@@ -8929,6 +8726,57 @@ describe("notices sent to you", () => {
     expect(row.textContent).toContain("Japan");
     await user.click(within(row).getByRole("button", { name: "Open" }));
     expect(onSwitchWorkspace).toHaveBeenCalledWith(trip, "Japan/day-1.md");
+  });
+
+  const FAILED = (id: string, claimId: string): NoticeRow => ({
+    ...MENTION,
+    noticeId: `automation-failed:${id}`,
+    kind: "automation-failed",
+    senderKind: "automation",
+    title: `Automation "${id}" failed`,
+    body: "The record is open elsewhere. It ran on this computer.",
+    target: { automation: `collection:tasks#${id}`, path: "tasks/automations.yaml", run: claimId },
+    postedHere: true,
+  });
+  function withRuns(bridge: ReturnType<typeof makeBridge>) {
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
+      claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
+      error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
+      trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, chainStopped: false, undone: false,
+    }] }));
+    return bridge;
+  }
+
+  it("tries a failed run again through main, for the notice on screen", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    renderWithNotices(bridge, { sentNotices: sentNotices([FAILED("first", "atc_first")]) });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("sent-notice-automation-failed:first-retry"));
+    expect(bridge.retryAutomationNotice).toHaveBeenCalledWith({
+      account: null, notice: { store: "account", noticeId: "automation-failed:first" }, startOver: false,
+    });
+    expect(bridge.retryCollectionAutomation).not.toHaveBeenCalled();
+  });
+
+  it("opens a failed run's automation with its runs, and moves an open panel to the next one", async () => {
+    const user = userEvent.setup();
+    const bridge = withRuns(makeBridge(Promise.resolve(null)));
+    renderWithNotices(bridge, { sentNotices: sentNotices([FAILED("first", "atc_first"), FAILED("second", "atc_second")]) });
+    const open = async (id: string) => {
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId(`sent-notice-automation-failed:${id}-open`));
+    };
+    await open("first");
+    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    expect(await screen.findByTestId("automation-run-atc_first", undefined, { timeout: 15_000 })).toBeTruthy();
+    // The page cleared the first ask; the second still reaches the open panel.
+    await open("second");
+    expect(await screen.findByTestId("automation-run-atc_second")).toBeTruthy();
+    expect(screen.queryByTestId("automation-run-atc_first")).toBeNull();
   });
 
   it("opens the file a notice named once the workspace it switched to is ready", async () => {
@@ -10283,7 +10131,7 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     const tabPath = momentDiffTabPath("m-1");
-    await screen.findByTestId(`tab-${tabPath}`);
+    await screen.findByTestId("tab-dohc://moment-diff/m-1");
     fireEvent(window, new Event("beforeunload"));
 
     await waitFor(() =>
@@ -10430,7 +10278,7 @@ describe("history page", () => {
 
     const momentPath = momentDiffTabPath("m-1");
     await waitFor(() =>
-      expect(within(left).getByTestId(`tab-${momentPath}`).dataset.active).toBe(
+      expect(within(left).getByTestId("tab-dohc://moment-diff/m-1").dataset.active).toBe(
         "true",
       ),
     );
@@ -10490,7 +10338,7 @@ describe("history page", () => {
     );
     expect(
       within(group).queryByTestId(
-        `tab-${momentDiffTabPath("m-1")}`,
+        "tab-dohc://moment-diff/m-1",
       ),
     ).toBeNull();
   });
@@ -10552,7 +10400,7 @@ describe("history page", () => {
     });
 
     expect(
-      screen.queryByTestId(`tab-${momentDiffTabPath("m-1")}`),
+      screen.queryByTestId("tab-dohc://moment-diff/m-1"),
     ).toBeNull();
     expect(screen.getByRole("region", { name: "Editor group 1" })).toBe(right);
   });
@@ -14345,16 +14193,16 @@ describe("open editors", () => {
 
     await screen.findAllByTestId("tree-row");
     expect(screen.getByTestId("open-editors-header").className).toContain(
-      "hover:bg-line/40",
+      "hover:bg-hover",
     );
     expect(screen.getByTestId("explorer-files-header").className).toContain(
-      "hover:bg-line/40",
+      "hover:bg-hover",
     );
     expect(screen.getByTestId("open-editors-toggle").className).not.toContain(
-      "hover:bg-line/40",
+      "hover:bg-hover",
     );
     expect(screen.getByTestId("explorer-files-toggle").className).not.toContain(
-      "hover:bg-line/40",
+      "hover:bg-hover",
     );
   });
 
@@ -14700,7 +14548,7 @@ describe("chats panel (right side)", () => {
 
     // The panel is a navigator: the channel opens in the Chats tab and the
     // panel keeps its list.
-    const tab = await screen.findByTestId(`tab-${chatTabPath({kind: "channel", id: "channel-1"})}`);
+    const tab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`);
     expect(tab.dataset.active).toBe("true");
     expect(tab.textContent).toContain("#General");
     const channelView = await screen.findByTestId("chats-channel-view");
@@ -14722,7 +14570,7 @@ describe("chats panel (right side)", () => {
       expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
     });
     expect(tab.textContent).toContain("#General");
-    expect(screen.getByTestId(`tab-${chatTabPath({kind: "channel", id: "channel-2"})}`).textContent).toContain("#random");
+    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-2")}`).textContent).toContain("#random");
     expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
     expect(bridge.listChannelThreads).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
@@ -14731,7 +14579,7 @@ describe("chats panel (right side)", () => {
     await user.type(screen.getByTestId("chats-new-thread-composer"), "Random draft");
     await user.click(within(panel).getByTestId("chats-feed-link"));
     await screen.findByTestId("chats-personal-feed");
-    expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).textContent).toContain("Home");
+    expect(screen.getByTestId("tab-dohc://chats").textContent).toContain("Home");
     await user.click(within(panel).getAllByTestId("chats-channel")[0]!);
     await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("General draft"));
     await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
@@ -16938,7 +16786,7 @@ describe("workbench render cost", () => {
       await user.click(screen.getByTestId("chats-dm-item"));
       await screen.findByTestId("chats-dm-view");
       await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
-      expect(screen.getByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
+      expect(screen.getByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeTruthy();
 
       await act(async () => {
         markRead.resolve();
@@ -16949,7 +16797,7 @@ describe("workbench render cost", () => {
       );
       // The page sits at the DM, so the one overview root is the panel's.
       expect(screen.getByTestId("chats-view").dataset.variant).toBe("panel");
-      expect(screen.getByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
+      expect(screen.getByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }

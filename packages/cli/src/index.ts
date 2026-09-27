@@ -7,6 +7,7 @@ import { renderCliHelp } from "./help";
 import {
   CLI_JSON_SCHEMA_VERSION,
   CLI_PROTOCOL_VERSION,
+  documentEditTextSchema,
   parseCliResult,
   type CliRequestWithoutToken,
   type CliResultByVerb,
@@ -42,6 +43,11 @@ async function bodyForCommand(
   command: ParsedCliCommand,
   readStdin: () => Promise<string>,
 ): Promise<string | undefined> {
+  if (command.verb === "documentEdit" || command.verb === "documentCreate") {
+    const text = command.stdin ? await readStdin() : command.text;
+    if (!documentEditTextSchema.safeParse(text).success) throw new DohcCliError("document text is at most 256 KiB as UTF-8");
+    return text;
+  }
   if (command.verb !== "post" && command.verb !== "reply") return undefined;
   if (command.body !== "-") return command.body;
   const body = await readStdin();
@@ -61,6 +67,22 @@ function buildCliRequest(
     actor: command.actor,
   } as const;
   switch (command.verb) {
+    case "documentRead":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
+    case "documentEdit":
+    case "documentCreate": {
+      const args = {
+        cwd: common.cwd, actor: common.actor, path: command.path,
+        ...(command.agent === undefined ? {} : { agent: command.agent }),
+      };
+      return command.verb === "documentCreate"
+        ? { verb: command.verb, protocolVersion: common.protocolVersion, args: { ...args, markdown: stdinBody ?? command.text } }
+        : { verb: command.verb, protocolVersion: common.protocolVersion, args: {
+            ...args, replacement: stdinBody ?? command.text,
+            ...(command.find === undefined ? {} : { find: command.find }),
+            ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
+          } };
+    }
     case "dataset":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "appPublication":
@@ -184,8 +206,50 @@ function buildCliRequest(
         protocolVersion: common.protocolVersion,
         args: { cwd: common.cwd, actor: common.actor, id: command.id },
       };
+    case "automationRuns":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath, automation: command.automation },
+      };
+    case "automationRun":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          collectionPath: command.collectionPath,
+          automation: command.automation,
+          run: command.run,
+        },
+      };
+    case "automationRetry":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          collectionPath: command.collectionPath,
+          automation: command.automation,
+          run: command.run,
+          startOver: command.startOver,
+        },
+      };
   }
 }
+
+// A verb that could not do what was asked exits with its reason. A refused
+// Try again for another computer's run adds the notice that names it.
+function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
+  if (!("ok" in result) || result.ok !== false) return null;
+  return "notice" in result && result.notice
+    ? `${result.reason} ${result.notice.title}: ${result.notice.body}`
+    : result.reason;
+}
+
+const REFUSING_VERBS = new Set(["moment", "documentRead", "documentEdit", "documentCreate", "automationRuns", "automationRun", "automationRetry"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -218,7 +282,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     } catch {
       throw new DohcCliError("desktop app returned an invalid response");
     }
-    if (command.verb === "moment" && "ok" in result && result.ok === false) throw new DohcCliError(result.reason);
+    const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
+    if (refused !== null) throw new DohcCliError(refused);
     const output = command.json
       ? jsonOutput(result)
       : renderCliResult(command.verb, result, {
@@ -228,8 +293,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
         });
     return {
       exitCode: 0,
-      // A change's text prints byte for byte, so `history show > file` restores it.
-      stdout: command.verb === "moment" && !command.json
+      // Markdown prints byte for byte so redirection preserves it.
+      stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
         ? output
         : output ? `${output.replace(/\n$/, "")}\n` : "",
       stderr: "",

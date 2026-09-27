@@ -1,3 +1,4 @@
+import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -8,7 +9,7 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError } from "./ipc/errorWords";
-import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
+import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
   devToolsEnabled,
@@ -23,7 +24,7 @@ import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection"
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
-import { RECORD_NOT_FOUND } from "./automations/collectionAutomationRun";
+import { RECORD_NOT_FOUND } from "@dohc/automation-executor/collection-automation-run";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -117,8 +118,10 @@ import {
   crashReportOperations,
   noticeOperations,
   scheduleHostOperations,
+  chatDispatchNoticeOperations,
   type ScheduleHostResult,
   type NoticeRef,
+  type NoticeRow,
   workspaceSearchOperations,
   workspaceVersionOperations,
 } from "./ipc/bridgeContract";
@@ -127,7 +130,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
-import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
+import { collectionRecordWrites, type CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
@@ -151,6 +154,9 @@ import {
   type PublicUpdateState,
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
+import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
+import { confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
+import { finishLaunch } from "./launch/launchMarker";
 import {
   createExitRounds,
   createQuitGuard,
@@ -187,7 +193,6 @@ import {
   registerWorkspace,
   removeWorkspace,
   setWorkspaceRemote,
-  acknowledgeWorkspaceAutomationFailure,
   acknowledgeWorkspaceShareSkips,
   endWorkspaceShareView,
   setWorkspaceShareMounts,
@@ -199,9 +204,13 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
-import { CollectionAutomations } from "./automations/collectionAutomations";
-import { parseCollectionAutomationId } from "./automations/automationPlan";
-import { AutomationScheduler } from "./automations/automationScheduler";
+import {
+  CollectionAutomations,
+  type AutomationSwitchedOff,
+  type CollectionAutomationRetry,
+} from "@dohc/automation-executor/collection-automations";
+import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
+import { AutomationScheduler } from "@dohc/automation-executor/automation-scheduler";
 import {
   computerLabel,
   computersOfAnswer,
@@ -212,15 +221,26 @@ import {
   relayUnreachable,
 } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
-import { skippedRunsNotice } from "./automations/skippedRunsNotice";
-import { groupMessagesNotice } from "./automations/groupMessagesNotice";
+import { skippedRunsNotice } from "@dohc/automation-executor/skipped-runs-notice";
+import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
-import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
-import { createAutomationRunStore } from "./automations/automationRunStore";
-import { readChatDirectory } from "./automations/automationChat";
+import {
+  retryAutomationRun,
+  retryFromFailureNotice,
+  sendFailureNotices,
+  switchedOffNotice,
+  switcherNameFor,
+  whoChangedLast,
+  whoSwitchedOff,
+} from "./automations/automationNotices";
+import { automationFailedNoticeId } from "@dohc/automation-executor/automation-failed-notice";
+import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { resolveWorkspaceMetadataDir } from "./workspaces/workspaceMetadata";
+import { readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent } from "./automations/automationAgentWake";
 import { configuredRunnerCommand } from "./agents/agentToolCatalog";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
@@ -300,7 +320,7 @@ import {
   WorkspaceActivityState,
 } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
-import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
+import { AuthoredTextChangedError, probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
@@ -378,6 +398,7 @@ import {
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
   writeWorkspaceText,
+  withOrderedWorkspaceTextPath,
 } from "./workspaces/workspaceAssets";
 import {
   createShareViewFiles,
@@ -570,6 +591,7 @@ function assertAgentRunnableWorkspace(workspaceId: string): void {
 }
 
 let autoUpdateController: AutoUpdateController | null = null;
+let autoUpdateStartup: Promise<AutoUpdateController | null> | null = null;
 
 // app.getAppPath() is unreliable here: when Electron is launched with a
 // direct script path (as the e2e harness does, and as a plain built binary
@@ -590,12 +612,10 @@ function resourcesBasePath(): string {
     : join(desktopPackageRootInDev(), "resources");
 }
 
-// An automation claim failed (settled by this desktop's executor, or
-// inserted failed by the engine at the depth cap): poke the windows on that
-// workspace to re-read the failure notices. A poke, not the record — the
-// renderer re-lists through CHANNELS.listAutomationFailures, so nothing
-// here can go stale or leak across workspaces.
-function notifyAutomationFailuresChanged(workspaceId: string): void {
+// An automation claim failed or a retry queued one: poke the windows on
+// that workspace to read its run history again. A poke, not the record, so
+// nothing here can go stale or leak across workspaces.
+function notifyAutomationRunsChanged(workspaceId: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (
       rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
@@ -603,7 +623,7 @@ function notifyAutomationFailuresChanged(workspaceId: string): void {
     ) {
       continue;
     }
-    win.webContents.send(CHANNELS.automationFailuresChanged, { workspaceId });
+    win.webContents.send(CHANNELS.automationRunsChanged, { workspaceId });
   }
 }
 
@@ -778,6 +798,7 @@ const desktopWindows = createDesktopWindows({
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
   preloadArguments: devToolsPreloadArguments(devToolsGranted),
+  afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
   > { return rendererWorkspaceSessions; },
@@ -1560,6 +1581,7 @@ function registerReservedPhysicalWorkspace(
 // manifest and its identity.
 async function forgetWorkspace(workspaceId: string): Promise<void> {
   await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
+  chatDispatchNotices.clearWorkspace(workspaceId);
   notifyRenderer();
 }
 
@@ -1741,6 +1763,7 @@ function testCaptureSeams(): {
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
+  accountId: string;
   attachmentId?: symbol;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient {
@@ -1772,6 +1795,7 @@ function engineForWorkspace(
   const daemonRelay = relayClientForWorkspace({
     workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
+    accountId: credentials.userId,
     attachmentId: workspace.attachmentId,
     relay,
   });
@@ -1779,6 +1803,7 @@ function engineForWorkspace(
     rootDir: workspace.rootPath,
     relay,
     operations: {
+      claim: () => daemonRelay.claim(),
       push: () => daemonRelay.push(),
       // Each page's files, once written, go to the Collection automation
       // executor: a pull need not leave a watcher batch.
@@ -2825,7 +2850,18 @@ function rememberPendingCliRunMessageLink(
   lease.release();
 }
 
+const chatDispatchNotices = createChatDispatchNotices((event) => {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.webContents.isDestroyed()) continue;
+    if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId !== event.workspaceId) continue;
+    window.webContents.send(CHANNELS.chatDispatchNotices, event);
+  }
+});
+
 const chatDispatchService = createChatDispatchService({
+  onDispatchNotice: (workspace, notice) => {
+    withWorkspaceAttachment(workspace, () => chatDispatchNotices.report(workspace.workspaceId, notice));
+  },
   runNotices: {
     post: (input) => noticeStore().postNotice(input),
     owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),
@@ -2883,31 +2919,6 @@ const chatDispatchService = createChatDispatchService({
     }
     return release;
   },
-  authorizeServiceNote: (workspace, threadId, verifiedUserId) =>
-    withWorkspaceAttachmentAsync(workspace, async (lease) => {
-      try {
-        const store = linkedChatStoreFor(lease);
-        const registered = canonicalWorkspaceFor(lease);
-        await assertSharedChannelWritable({
-          workspaceId: registered.workspaceId,
-          sharedChannels: registered.sharedChannels,
-          store,
-          target: { threadId },
-        });
-        const identity = await chatRelayIdentityFor(
-          workspace.workspaceId,
-          { threadId },
-          store,
-        );
-        return (
-          identity.authorUserId === verifiedUserId &&
-          (identity.joinedChannel === null || verifiedUserId !== undefined)
-        );
-      } catch (error) {
-        if (!(error instanceof SharedChannelReadOnlyError)) throw error;
-        return false;
-      }
-    }),
   onMessagePosted: (workspace, threadId) => {
     withWorkspaceAttachment(workspace, () => {
       notifyRenderer({ workspaceId: workspace.workspaceId });
@@ -3246,6 +3257,78 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
   }
 }
 
+// Try again from a failed run's notice, on the computer that ran it. A
+// workspace no window has open opens the way a due schedule's does, and
+// stays open until the run settles.
+async function retryAutomationFromNotice(
+  notice: NoticeRow,
+  input: { automationId: string; claimId: string; startOver: boolean },
+): Promise<CollectionAutomationRetry> {
+  const workspace = notice.workspaceId !== null
+    ? findWorkspace(notice.workspaceId)
+    : listWorkspaces().find((entry) => entry.shareView?.shareId === notice.recipientShareId) ?? null;
+  if (!workspace) return { status: "refused", reason: "This workspace isn't on this computer anymore." };
+  await desktopEngine.startup;
+  const release = await acquireDispatchRunActivity(workspace);
+  const automations = withWorkspaceAttachment(workspace, (held) => held.state.collectionAutomations);
+  let result: CollectionAutomationRetry | null = null;
+  try {
+    if (!automations) return { status: "refused", reason: "dohc could not open this workspace to run the automation." };
+    await automations.open();
+    result = await automations.retry(input);
+    return result;
+  } finally {
+    if (automations && result?.status === "queued") {
+      void automations.idle().finally(release).catch((error: unknown) =>
+        console.warn(`[desktop] Try again in ${workspace.workspaceId}:`, error));
+    } else {
+      await release();
+    }
+  }
+}
+
+// Someone switched off an automation. The person who changed it last hears
+// who did, as History names them, unless they did it themselves. Only the
+// owner's computer keeps that History, and only a synced workspace has
+// anyone else to tell.
+async function sendSwitchedOffNotice(workspaceId: string, switched: AutomationSwitchedOff): Promise<void> {
+  const history = ownerHistory(workspaceId);
+  if (history === null) return;
+  const path = `${switched.collectionPath}/automations.yaml`;
+  const { capture, ownerUserId, grants } = history;
+  const found = await whoSwitchedOff(capture, { path, id: switched.id, ownerUserId });
+  if (found === null) return;
+  const switcherName = switcherNameFor({
+    switchedOffBy: found.switchedOffBy,
+    recipient: found.lastChangedBy,
+    ownerUserId,
+    ownerName: cachedPreferredName ?? null,
+    emailOf: (userId) => grants.find((grant) => grant.recipientUserId === userId && grant.recipientEmail !== null)?.recipientEmail ?? null,
+  });
+  const notice = switchedOffNotice({ workspaceId, switched, path, ...found, switcherName });
+  if (notice !== null) await noticeStore().postNotice(notice);
+}
+
+// Who changed an automation last, as the owner's History names them. Null
+// on any other computer, which does not keep who changed what.
+async function automationLastChangedBy(workspaceId: string, automationId: string): Promise<string | null> {
+  const history = ownerHistory(workspaceId);
+  const parsed = parseCollectionAutomationId(automationId);
+  if (history === null || parsed === null) return null;
+  return await whoChangedLast(history.capture, {
+    path: `${parsed.collectionPath}/automations.yaml`, id: parsed.id, ownerUserId: history.ownerUserId,
+  });
+}
+
+// The History of a synced workspace this computer owns, where it records
+// who changed each file; null for any other, which has nobody else to tell.
+function ownerHistory(workspaceId: string) {
+  const entry = findWorkspace(workspaceId);
+  const capture = activity.engineCaptureFor(workspaceId);
+  if (!entry?.remote || entry.shareView !== undefined || !capture) return null;
+  return { capture, ownerUserId: entry.remote.ownerUserId, grants: entry.shareRoster?.grants ?? [] };
+}
+
 // Every Run now a crash or a lost answer left unfinished.
 let resumingRunNow: Promise<void> | null = null;
 function resumeRunNow(): void {
@@ -3532,17 +3615,44 @@ function createCollectionAutomationsFor(
         }
         const capture = activity.engineCaptureFor(workspaceId);
         if (!capture) throw new Error(captureRefusal("Automations"));
-        return work(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal])));
+        return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
       }),
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
-    writeText: (path, text, expectedContentHash) =>
-      writeWorkspaceText(rootPath, path, text, expectedContentHash),
+    writeText: async (path, text, expectedContentHash, automationId) => {
+      const capture = activity.engineCaptureFor(workspaceId);
+      // A shared view keeps no History, so it writes the way it always does.
+      if (!capture || findWorkspace(workspaceId)?.shareView !== undefined) {
+        return await writeWorkspaceText(rootPath, path, text, expectedContentHash);
+      }
+      // In the editor's own order for the file, so neither save overwrites the other.
+      return await withOrderedWorkspaceTextPath(rootPath, path, async () => {
+        try {
+          await capture.writeAuthoredTextFile(join(rootPath, path), text,
+            { kind: "automation", automationId, onBehalfOf: "local", depth: 1 }, { expectedContentHash });
+          return { status: "written" as const };
+        } catch (error) {
+          if (error instanceof AuthoredTextChangedError) return { status: "conflict" as const };
+          throw error;
+        }
+      });
+    },
     pathExists: (path) => lstat(join(rootPath, path)).then(() => true, () => false),
     roster: () => shareRosters.forRun(workspaceId),
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
-    store: createAutomationRunStore(rootPath),
-    onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
+    store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir),
+    onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
+    reportFailure: (report) => sendFailureNotices({
+      notices: noticeStore(),
+      computer: { installId: localReactorFallbackId(), label: computerLabel(hostname()) },
+      throughShare: findWorkspace(workspaceId)?.shareView !== undefined,
+      lastChangedBy: (automationId) => automationLastChangedBy(workspaceId, automationId),
+      onError: (context, error) => console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
+    }, workspaceId, report),
+    withdrawFailure: (failure) =>
+      noticeStore().withdraw(automationFailedNoticeId({ workspaceId, installId: localReactorFallbackId(), failure })),
+    onSwitchedOff: (switched) => void sendSwitchedOffNotice(workspaceId, switched).catch((error: unknown) =>
+      console.warn(`[desktop] Collection automations in ${workspaceId}: tell who changed "${switched.name}" last that it was switched off:`, error)),
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
     chat: {
@@ -3727,6 +3837,26 @@ const { startDesktopCliServer } = createDesktopCliServer({
     if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
     return ownerAppResponsesForCli(input);
   },
+  // The executor calls the Automations panel's IPC makes. A CLI request
+  // opened the workspace, and each call waits for its automations to load.
+  automations: (workspace) => {
+    const opened = async () => {
+      const automations = collectionAutomationsOf(workspace.workspaceId);
+      if (!automations) throw new Error("This workspace was closed.");
+      await automations.open();
+      return automations;
+    };
+    return {
+      runs: async (automationId) => (await opened()).runs(automationId),
+      run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
+      retry: (input) => retryAutomationRun({
+        notices: noticeStore(),
+        installId: localReactorFallbackId(),
+        holds: async (run) => (await (await opened()).run(run.automationId, run.claimId)) !== null,
+        retry: async (run) => (await opened()).retry(run),
+      }, { workspaceId: workspace.workspaceId, ...input }),
+    };
+  },
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
@@ -3837,6 +3967,33 @@ function currentUpdateState(): UpdateStateEvent {
   );
 }
 
+// Auto-updates: packaged builds use electron-builder's baked app-update.yml
+// feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
+// Failures are absorbed — updates must never take the app down. Starting
+// twice returns the first start.
+function startUpdates(): Promise<AutoUpdateController | null> {
+  autoUpdateStartup ??= startAutoUpdates({
+    isPackaged: app.isPackaged,
+    currentVersion: app.getVersion(),
+    // A restart already staged has no install left to make — quitAndInstall
+    // started its own quit on the first call and has none left to start.
+    // Main makes it, so the fact lives here and not in a renderer module a
+    // reload would reset. The quit is already approved:
+    // the IPC handler approves before asking the controller.
+    quitForStagedRestart: () => app.quit(),
+    onState: (_state, state) => {
+      broadcastUpdateState(state);
+    },
+  })
+    .then((controller) => {
+      autoUpdateController = controller;
+      broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
+      return controller;
+    })
+    .catch(() => null);
+  return autoUpdateStartup;
+}
+
 function broadcastUpdateState(state: PublicUpdateState): void {
   const payload = parseUpdateStateForIpc(state);
   if (!payload) return;
@@ -3874,7 +4031,7 @@ const desktopEngine = createDesktopEngine({
   recordEngineProblem: (error, stage) => crashReports.record({ kind: "engine", error, stage }),
   workspaceAuthorities, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
-  notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
+  launchMarks, desktopMarks, logLaunchMarksOnce,
   noteNoAtomicPlacement: (workspaceId) => {
     try {
       withWorkspaceActivityState(workspaceId, (lease) =>
@@ -4303,11 +4460,25 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     create: () => trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        afterRendererCrashLoop,
         preloadArguments: devToolsPreloadArguments(devToolsGranted),
       }),
     ),
-    whenLoaded: (window) => new Promise<void>((resolve) => {
-      window.webContents.once("did-finish-load", resolve);
+    whenLoaded: (window) => new Promise<boolean>((resolve) => {
+      const contents = window.webContents;
+      const settle = (loaded: boolean) => {
+        contents.off("did-finish-load", onLoad);
+        contents.off("did-fail-load", onFail);
+        resolve(loaded);
+      };
+      const onLoad = () => settle(true);
+      const onFail = (_event: unknown, errorCode: number, _description: string, _url: string, isMainFrame: boolean) => {
+        // ERR_ABORTED (-3) is a load that another navigation replaced; that
+        // one still finishes or fails on its own.
+        if (isMainFrame && errorCode !== -3) settle(false);
+      };
+      contents.on("did-finish-load", onLoad);
+      contents.on("did-fail-load", onFail);
     }),
     current: () => targetWindow(undefined),
     hasWorkspace: () => liveWorkspaceWindow() !== undefined,
@@ -4398,30 +4569,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     reportTrayFailure: (error) => console.error("[desktop] dispatch tray:", error),
     warmCredentials: warmCredentialCache,
     reconcileCloud: () => { activity.reconcileCloud(); },
-    startUpdates: () => {
-      // Auto-updates: packaged builds use electron-builder's baked app-update.yml
-      // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
-      // Failures are absorbed — updates must never take the app down.
-      void startAutoUpdates({
-        isPackaged: app.isPackaged,
-        currentVersion: app.getVersion(),
-        // A restart already staged has no install left to make — quitAndInstall
-        // started its own quit on the first call and has none left to start.
-        // Main makes it, so the fact lives here and not in a renderer module a
-        // reload would reset. The quit is already approved:
-        // the IPC handler approves before asking the controller.
-        quitForStagedRestart: () => app.quit(),
-        onState: (_state, state) => {
-          broadcastUpdateState(state);
-        },
-      })
-        .then((controller) => {
-          autoUpdateController = controller;
-          broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
-        })
-        .catch(() => undefined);
-    },
+    startUpdates: () => { void startUpdates(); },
+    updateAfterStartupFailure: () => updateAfterFailure("startup"),
+    updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
+  launch: { finished: finishLaunch },
   beforeQuit: (event) => { quitGuard.beforeQuit(event); },
   shutdown: {
     budgetMs: WILL_QUIT_BUDGET_MS,
@@ -4582,7 +4734,7 @@ const senderWorkspaceAuthority = {
 // window opens a MAIN-side dialog that names the loss — it never proceeds by
 // itself.
 const exitRounds = createExitRounds<BrowserWindow>({
-  participants: () => workspaceWindows.allLive(),
+  participants: () => workspaceWindows.answering(),
   participantId: (window) => window.webContents.id,
   send: (window, message) => {
     if (!window.isDestroyed()) window.webContents.send(CHANNELS.exitRound, message);
@@ -4627,6 +4779,24 @@ const quitGuard = createQuitGuard({
     app.quit();
   },
 });
+
+const installUpdate = createUpdateInstall<BrowserWindow>({
+  currentUpdateState, exitRounds, quitGuard,
+  get autoUpdateController() { return autoUpdateController; },
+});
+
+// A failing build checks the feed before it gives up, so a person on a bad
+// release can still reach the release that fixes it.
+const updateAfterFailure = createUpdateAfterFailure({
+  controller: startUpdates,
+  showDownloading: (failure, version, signal) => showDownloadingDialog(dialog, failure, version, signal),
+  confirmRestart: (failure, version) => confirmRestartDialog(dialog, failure, version),
+  install: installUpdate,
+});
+
+function afterRendererCrashLoop(): void {
+  void updateAfterFailure("window-crash");
+}
 
 // The owner of the user settings file: every save, zoom step, reset, and
 // edit made in the file goes through it and takes effect there.
@@ -5103,20 +5273,15 @@ function registerIpcHandlers(): void {
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
-    datasetAutomationFailures: async (workspaceId) =>
-      ((await collectionAutomationsOf(workspaceId)?.datasetFailures()) ?? []).map(({ neverStarted, ...failure }) => ({ ...failure, chainStopped: neverStarted })),
     detectAgentTools,
     registerHandler: handleIpc,
-    assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine, withEngineAdapter,
-    acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged, requireEngineCapture,
-    automationNameOf: (workspaceId, automationId) => collectionAutomationsOf(workspaceId)?.nameOf(automationId) ?? null,
+    assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
     linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
     assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     agentIntegration, mcpShareAccessOf, mcpConfigFor,
     senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
     openWorkspaceActivity,
   });
-  agentRunsIpc.registerAutomationFailures();
   registerCollectionAutomationsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, sharedViewOf,
@@ -5448,17 +5613,23 @@ function registerIpcHandlers(): void {
     }),
   });
 
+  registerOperations(operationBoundary, chatDispatchNoticeOperations, {
+    registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
+    dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
+  });
+
   registerOperations(operationBoundary, noticeOperations, {
     listNotices: () => noticeStore().list(),
     markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
     runSkippedScheduleNow: async (input) => ({ note: await runSkippedScheduleNow(input.notice, input.account) }),
+    retryAutomationNotice: (input) => retryFromFailureNotice({ notices: noticeStore(), retry: retryAutomationFromNotice }, input),
   });
 
   workspaceEngineIpc.registerYDoc();
 
   registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
     registerHandler: handleIpc,
-    assertTrustedSender, currentUpdateState, exitRounds, quitGuard,
+    assertTrustedSender, currentUpdateState, installUpdate,
     get autoUpdateController() { return autoUpdateController; },
   });
 

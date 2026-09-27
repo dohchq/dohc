@@ -1,5 +1,5 @@
+import type { ShareHandoffIntent } from "@dohc/workspace-contracts/deep-links";
 import type {
-  ShareHandoffIntent,
   ShareHandoffIntentSlot,
 } from "./shareHandoffIngress";
 import type { ShareHandoffStatus } from "./ipc/bridgeContract";

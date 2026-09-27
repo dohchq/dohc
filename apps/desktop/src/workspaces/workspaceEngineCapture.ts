@@ -446,12 +446,16 @@ export interface WorkspaceEngineCapture {
   // Writes one text file with an explicit per-operation author, or none when
   // the writer did not name itself. This never reads or changes the
   // workspace's ambient agent slot. Returns the resolved path where the
-  // write landed.
+  // write landed. With `expectedContentHash`, it first settles every change
+  // the daemon has seen, so none lands over this write, then writes only
+  // while the file on disk still hashes to it, and otherwise throws
+  // AuthoredTextChangedError. A caller that replaces a file the editor can
+  // save holds that file's editor ordering around this call.
   writeAuthoredTextFile(
     absolutePath: string,
     text: string,
     author: MomentWriteAuthor | null,
-    options?: { createOnly?: boolean; signal?: AbortSignal },
+    options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string },
   ): Promise<{ resolvedAbsolutePath: string }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
@@ -1021,6 +1025,13 @@ export class RestoreFolderInUseError extends Error {
 }
 
 // A guarded restore found the file changed since its caller checked it.
+export class AuthoredTextChangedError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} changed since dohc read it.`);
+    this.name = "AuthoredTextChangedError";
+  }
+}
+
 export class RestoreHeadChangedError extends Error {
   constructor(readonly path: string) {
     super(`${path} changed since dohc checked it.`);
@@ -1568,6 +1579,7 @@ export function createWorkspaceEngineCapture(
   let secretStore: SecretFileStore | null = options.secretStore ?? null;
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
+  const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
   // A healthy watcher batch cannot clear the workspace notice while any dead
@@ -3456,6 +3468,13 @@ export function createWorkspaceEngineCapture(
           throw new Error("The write was cancelled.");
         }
         const engine = await engineStore();
+        if (writeOptions.expectedContentHash !== undefined) {
+          await engine.flushCapture?.();
+          const current = await readFile(resolvedAbsolute).catch(() => null);
+          if (current === null || createHash("sha256").update(current).digest("hex") !== writeOptions.expectedContentHash) {
+            throw new AuthoredTextChangedError(path);
+          }
+        }
         const versionId = await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {
           origin: "api",
@@ -3506,6 +3525,7 @@ export function createWorkspaceEngineCapture(
         options.rustEngineSessions.withRetryBudget(
           YDOC_OPEN_RETRY_DEADLINE_MS,
           openYDocSessionTask,
+          captureWaitAbort.signal,
         ),
       );
 
@@ -6513,6 +6533,7 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only new work is refused.
       stopped = true;
+      captureWaitAbort.abort();
       if (daemonCaptureHealthTimer !== null) {
         clearTimeout(daemonCaptureHealthTimer);
         daemonCaptureHealthTimer = null;

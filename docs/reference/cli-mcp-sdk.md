@@ -243,11 +243,11 @@ Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, upda
 
 ### `dohc_read_chat`
 
-Read one dohc Chat thread: its messages (with author kind and display name) and a read-only text projection.
+Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.
 
 - `threadId`: `string`. Required.
 
-Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId? }[], projection: { path, readOnly: true, text } } | { ok: false, reason }`.
+Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId? }[], projection: { path, readOnly: true, text } } | { ok: false, reason }`.
 
 ### `dohc_list_groups`
 
@@ -353,6 +353,42 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, recordId, recordPath } | { ok: false, reason }`.
 
+### `dohc_list_automation_runs`
+
+List an automation's 20 newest runs on this computer, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. Each computer keeps the runs of the automations it ran.
+
+A shared view keeps no automation runs, so it does not offer this tool.
+
+- `collectionPath`: `string`. Required.
+- `automation`: `string`. Required.
+
+Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, changes }[] } | { ok: false, reason }`.
+
+### `dohc_read_automation_run`
+
+Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
+
+A shared view keeps no automation runs, so it does not offer this tool.
+
+- `collectionPath`: `string`. Required.
+- `automation`: `string`. Required.
+- `run`: `string`. Required.
+
+Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, steps, failedStep, startsOver } } | { ok: false, reason }`.
+
+### `dohc_retry_automation_run`
+
+Try a failed automation run again, as Try again does in dohc. It resumes after the last step that finished. If the automation changed since the run failed, it refuses unless startOver is true, which runs it from the first step and can repeat changes the run already made. Only the computer that ran it can try a run again; anywhere else the refusal names that computer.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `collectionPath`: `string`. Required.
+- `automation`: `string`. Required.
+- `run`: `string`. Required.
+- `startOver`: `boolean`
+
+Returns `{ ok: true, status: "queued" } | { ok: false, status, repeatsMessages, reason } | { ok: false, reason, notice?: { title, body } }`.
+
 ## CLI
 
 ```sh
@@ -369,6 +405,56 @@ Two environment variables also change what the CLI does:
 
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
+
+### `dohc document`
+
+Read, edit, and create live Markdown documents.
+
+Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
+
+#### `dohc document read`
+
+```sh
+dohc document read <path> [options]
+```
+
+Read the current Markdown, including edits in an open editor.
+
+Read before editing. Without --json, prints the Markdown byte for byte.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, markdown }`.
+
+#### `dohc document edit`
+
+```sh
+dohc document edit <path> [-] [options]
+```
+
+Replace matching text or append Markdown through the live document.
+
+Use - as the body to read it from stdin. Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8. Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind. Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document.
+
+- `--text <markdown>`: Use this Markdown as the body. An empty string is allowed.
+- `--agent <name>`: Record this agent name with the change.
+- `--find <markdown>`: Replace this exact, unique match. Omit to append.
+- `--request-id <key>`: Reuse this key when retrying the same edit, as with dohc_edit_document.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, changed, warning? }`.
+
+#### `dohc document create`
+
+```sh
+dohc document create <path> [-] [options]
+```
+
+Create a Markdown document without overwriting an existing file.
+
+Use - as the body to read it from stdin. Use --text instead to supply Markdown. With neither, create an empty document. The path must end in .md or .markdown. Frontmatter is refused.
+
+- `--text <markdown>`: Use this Markdown as the body. An empty string is allowed.
+- `--agent <name>`: Record this agent name with the change.
+
+With `--json`, prints `{ schemaVersion, ok: true, path }`.
 
 ### `dohc chat`
 
@@ -416,7 +502,7 @@ Show a thread or message and mark the thread read.
 
 - `--peek`: Show it without changing what is marked read. A read-only shared view requires it.
 
-With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId? }[] }`.
+With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId? }[] }`.
 
 #### `dohc chat post`
 
@@ -1003,6 +1089,7 @@ Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactiv
 - `workspaceId`: `string`. Required.
 - `approvalId`: `UUID`. Required.
 - `candidateDigest`: `SHA-256 hex`. Required.
+- `linkReads`: `({ operationId: UUID, fieldIds: UUID[] })[]`
 
 Returns `{ kind: "published", publicationId, authorityRevision, local?: true }`.
 
@@ -1110,6 +1197,50 @@ Find the change's ID with history list. With --json, print both sides and the ch
 - `--before`: Print the text from before the change instead.
 
 With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files, before, after } }`.
+
+### `dohc automation`
+
+Read an automation's runs and try a failed run again.
+
+Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml. Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.
+
+#### `dohc automation runs`
+
+```sh
+dohc automation runs <collection> <automation> [options]
+```
+
+List an automation's runs on this computer, newest first.
+
+Lists the 20 newest runs, as the Automations panel does. Each line starts with the run's ID.
+
+With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, changes }[] }`.
+
+#### `dohc automation run`
+
+```sh
+dohc automation run <collection> <automation> <run> [options]
+```
+
+Show one run: what started it, what each step changed, and why it failed.
+
+Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
+
+With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, steps, failedStep, startsOver } }`.
+
+#### `dohc automation retry`
+
+```sh
+dohc automation retry <collection> <automation> <run> [options]
+```
+
+Try a failed run again. It resumes after the last step that finished.
+
+Only the computer that ran it can try a run again. Anywhere else, the command names that computer.
+
+- `--start-over`: Run it from the first step when the automation changed since the run failed. This can repeat changes the run already made.
+
+With `--json`, prints `{ schemaVersion, ok: true, status: "queued" }`.
 
 ## App channel
 

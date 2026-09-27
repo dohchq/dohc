@@ -1,5 +1,268 @@
 use super::*;
 
+#[derive(Default)]
+struct ClaimRelay {
+    relay: FakeRelay,
+    refusal: Mutex<Option<RelayError>>,
+    claims: Mutex<Vec<ClaimRequest>>,
+}
+
+impl RelayTransport for ClaimRelay {
+    fn claim_workspace(&self, req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
+        self.claims.lock().unwrap().push(req);
+        match self.refusal.lock().unwrap().clone() {
+            Some(error) => Err(error),
+            None => Ok(ClaimResponse),
+        }
+    }
+    fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        self.relay.push(req)
+    }
+    fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError> {
+        self.relay.pull(req)
+    }
+    fn lookup_log_coordinate(
+        &self,
+        req: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        self.relay.lookup_log_coordinate(req)
+    }
+    fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
+        self.relay.probe(req)
+    }
+    fn rotate_epoch(&self, req: EpochRequest) -> Result<EpochResponse, RelayError> {
+        self.relay.rotate_epoch(req)
+    }
+    fn blobs_have(&self, req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        self.relay.blobs_have(req)
+    }
+    fn upload_blob(&self, req: BlobUploadRequest) -> Result<(), RelayError> {
+        self.relay.upload_blob(req)
+    }
+    fn download_blobs(
+        &self,
+        req: BlobDownloadBatchRequest,
+    ) -> Result<BlobDownloadBatchResponse, RelayError> {
+        self.relay.download_blobs(req)
+    }
+    fn upload_key_envelope(
+        &self,
+        req: KeyEnvelopeRequest,
+    ) -> Result<KeyEnvelopeResponse, RelayError> {
+        self.relay.upload_key_envelope(req)
+    }
+    fn download_key_envelope(
+        &self,
+        req: KeyEnvelopeDownloadRequest,
+    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
+        self.relay.download_key_envelope(req)
+    }
+    fn shared_channel_pull(
+        &self,
+        req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        self.relay.shared_channel_pull(req)
+    }
+    fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
+        self.relay.share_log_push(req)
+    }
+    fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
+        self.relay.share_view_pull(req)
+    }
+    fn share_blob(&self, req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        self.relay.share_blob(req)
+    }
+    fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError> {
+        self.relay.share_blob_upload(req)
+    }
+    fn share_proposal_submit(
+        &self,
+        req: ShareProposalSubmitRequest,
+    ) -> Result<ShareProposalSubmitResponse, RelayError> {
+        self.relay.share_proposal_submit(req)
+    }
+    fn share_collection_write(
+        &self,
+        req: ShareCollectionWriteRequest,
+    ) -> Result<ShareCollectionWriteResponse, RelayError> {
+        self.relay.share_collection_write(req)
+    }
+}
+
+#[test]
+fn relay_claim_refusal_survives_restart_until_successful_retry() {
+    for refusal in [
+        RelayError::WorkspaceUnavailable,
+        RelayError::EpochSuperseded,
+        RelayError::IdentityNotRecognized,
+        RelayError::IdentityRequired,
+        RelayError::StreamIdentityMismatch,
+    ] {
+        let (_scratch, path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+        let request = ClaimRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: identity.replication_epoch.clone(),
+            stream_identity: identity.stream_identity.clone(),
+        };
+        let client = RelaySyncClient::new(ClaimRelay::default());
+        *client.transport().refusal.lock().unwrap() = Some(refusal.clone());
+        assert_eq!(
+            client.claim_workspace(&mut engine, request.clone(), Some("account-a"), &NoFaults),
+            Err(refusal.clone())
+        );
+        drop(engine);
+
+        let mut reopened = EngineStore::open(&path, 2_000).unwrap();
+        assert_eq!(
+            reopened
+                .read_with(|conn| conn.query_row(
+                    "SELECT claim_account_id FROM sync_identity WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                ))
+                .unwrap(),
+            "account-a"
+        );
+        let restarted = RelaySyncClient::new(ClaimRelay::default());
+        assert_eq!(
+            restarted.push_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 2_001, 0),
+            Err(RelayError::ClaimRefused(Box::new(refusal.clone())))
+        );
+        assert!(
+            restarted
+                .transport()
+                .relay
+                .pushes
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(restarted.transport().claims.lock().unwrap().is_empty());
+        *restarted.transport().refusal.lock().unwrap() = Some(RelayError::Partitioned);
+        assert_eq!(
+            restarted.claim_workspace(&mut reopened, request.clone(), Some("account-a"), &NoFaults),
+            Err(RelayError::Partitioned)
+        );
+        drop(reopened);
+        let mut reopened = EngineStore::open(&path, 2_002).unwrap();
+        assert_eq!(
+            restarted.push_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 2_003, 0),
+            Err(RelayError::ClaimRefused(Box::new(refusal)))
+        );
+        *restarted.transport().refusal.lock().unwrap() = None;
+        restarted
+            .claim_workspace(&mut reopened, request.clone(), Some("account-a"), &NoFaults)
+            .unwrap();
+        assert_eq!(read_sync_identity(&reopened, "ws").unwrap(), Some(identity));
+        assert_eq!(
+            reopened
+                .read_with(|conn| conn.query_row(
+                    "SELECT claim_account_id FROM sync_identity WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                ))
+                .unwrap(),
+            None
+        );
+        drop(reopened);
+        let mut reopened = EngineStore::open(&path, 2_004).unwrap();
+        restarted
+            .push_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 2_005, 0)
+            .unwrap();
+        assert_eq!(
+            *restarted.transport().claims.lock().unwrap(),
+            vec![request.clone(), request]
+        );
+    }
+}
+
+#[test]
+fn relay_interrupted_claim_survives_restart_as_identity_required() {
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let client = RelaySyncClient::new(ClaimRelay::default());
+    *client.transport().refusal.lock().unwrap() = Some(RelayError::Partitioned);
+    assert_eq!(
+        client.claim_workspace(
+            &mut engine,
+            ClaimRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: identity.replication_epoch,
+                stream_identity: identity.stream_identity,
+            },
+            Some("account-a"),
+            &NoFaults
+        ),
+        Err(RelayError::Partitioned)
+    );
+    drop(engine);
+    let mut reopened = EngineStore::open(&path, 2_000).unwrap();
+    assert_eq!(
+        client.push_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 2_001, 0),
+        Err(RelayError::IdentityRequired)
+    );
+}
+
+#[test]
+fn push_without_identity_requests_enrollment() {
+    let (_scratch, _path, mut engine) = open_store();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    let result =
+        client.push_workspace(&mut engine, "ws", &NoFaults, &crate::NoLiveLeases, 1_000, 0);
+    assert!(matches!(result, Err(RelayError::IdentityRequired)));
+    assert!(
+        client
+            .transport()
+            .pushes
+            .lock()
+            .expect("push calls")
+            .is_empty()
+    );
+}
+
+#[test]
+fn locally_journaled_identity_requires_claim_before_push() {
+    let (_scratch, path, mut store) = open_store();
+    journal_local_replication_op(
+        &mut store,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "probe.local",
+        &json!({}),
+        1_000,
+        &NoFaults,
+    )
+    .unwrap();
+    drop(store);
+    let mut store = EngineStore::open(&path, 2_000).unwrap();
+    let client = RelaySyncClient::new(ClaimRelay::default());
+    assert_eq!(
+        client.push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 2_001, 0),
+        Err(RelayError::IdentityRequired)
+    );
+    client
+        .claim_workspace(
+            &mut store,
+            ClaimRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch-1".to_owned(),
+                stream_identity: "stream-1".to_owned(),
+            },
+            Some("account-a"),
+            &NoFaults,
+        )
+        .unwrap();
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 2_002, 0)
+        .unwrap();
+    assert_eq!(client.transport().claims.lock().unwrap().len(), 1);
+}
+
 struct FirstLeaseCheckLive(AtomicUsize);
 
 impl LeaseProbe for FirstLeaseCheckLive {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage, ChatReaction } from "@dohc/workspace-contracts/engine";
 import { createChatWrites, type ChatWriter, type PersonWriter, type ChatWriteStore } from "./chatWrites";
-import { AutomationChatSessionWait } from "../automations/automationChat";
+import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { JoinedSharedChannel, RegistryEntry } from "./registryStore";
 import { deferred, type Deferred } from "../testing/deferred";

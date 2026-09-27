@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rmdir } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   claimWorkspace,
@@ -20,11 +20,24 @@ import {
   NOTICE_SENDER_LABEL_MAX_CHARS,
   type NoticeReach,
 } from "@dohc/workspace-contracts/relay";
+import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { ListNoticesResult } from "../ipc/bridgeContract";
+import {
+  FAILED_ELSEWHERE_BODY,
+  RETRY_ELSEWHERE,
+  retryAutomationRun,
+  retryFromFailureNotice,
+  sendFailureNotices,
+  switchedOffNotice,
+  switcherNameFor,
+  whoChangedLast,
+  whoSwitchedOff,
+  type AutomationsFileHistory,
+} from "../automations/automationNotices";
 import { createTestScratch } from "../workspaces/testTemp";
+import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   createNoticeStore,
-  NoticeNotSentError,
   type NoticeAccount,
   type NoticeStore,
   type PostNoticeInput,
@@ -481,6 +494,8 @@ describe("notices on one person's computers", () => {
 
       await rmdir(join(laptop.directory, `${name}.tmp`));
       await laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }));
+      // dohc runs one store per profile; let this one's background sync finish before the next opens.
+      await laptop.store.sync();
       const restarted = await computer(signedIn, { directory: laptop.directory });
       expect(await titles(restarted)).toEqual([`${where}:First`, `${where}:Second`]);
     }
@@ -491,6 +506,8 @@ describe("notices on one person's computers", () => {
     const first = await computer(account(server, "ana"));
     server.online = false;
     await first.store.postNotice(notice());
+    // dohc runs one store per profile; let this one's background sync finish before the next opens.
+    await first.store.sync();
 
     const restarted = await computer(first.signedIn, { directory: first.directory });
     expect(await titles(restarted)).toEqual(["account:Your agent finished"]);
@@ -928,4 +945,329 @@ describe("notices for another person", () => {
     }))).rejects.toThrow(new NoticeNotSentError("This person has too many unread notices to get this one."));
     // Filling a list of 1,000 rows takes seconds on a loaded machine.
   }, 60_000);
+});
+
+
+describe("automation notices reach the people involved", () => {
+  const AUTOMATION = "collection:trip/tasks#stamp";
+  const failure = (generation: number, claimId = "atc_1") => ({
+    automationId: AUTOMATION, claimId, chainStopped: false,
+    error: "The record is open elsewhere", updatedAtMs: 1_000, generation, datasetInstance: null,
+  });
+  const report = (
+    generation: number,
+    options: { replaces?: ReturnType<typeof failure>; startedBy?: string; claimId?: string } = {},
+  ) => ({
+    failure: failure(generation, options.claimId), name: "Stamp the finish date",
+    startedBy: options.startedBy ?? null, replaces: options.replaces ?? null,
+  });
+  const sender = (store: NoticeStore, installId: string, extra: { throughShare?: boolean; lastChangedBy?: string } = {}) => ({
+    notices: store,
+    computer: { installId, label: `Computer ${installId}` },
+    throughShare: extra.throughShare ?? false,
+    lastChangedBy: async () => extra.lastChangedBy ?? null,
+    onError: vi.fn(),
+  });
+  const refOf = (row: { store: "local" | "account"; noticeId: string }) => ({ store: row.store, noticeId: row.noticeId });
+  const failedIn = async (each: Computer) => (await each.store.list()).notices.filter((row) => row.kind === "automation-failed");
+
+  it("reaches the owner's other computer, tries again only where it ran, and dismisses everywhere once queued", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "owner"), { installId: "install-a" });
+    const desktop = await computer(account(server, "owner"), { installId: "install-b" });
+    await sendFailureNotices(sender(laptop.store, "install-a"), WORKSPACE, report(1));
+    await laptop.store.sync();
+    await desktop.store.sync();
+    const [row] = (await desktop.store.list()).notices;
+    expect(row).toMatchObject({
+      kind: "automation-failed",
+      title: 'Automation "Stamp the finish date" failed',
+      body: "The record is open elsewhere. It ran on Computer install-a.",
+      target: { automation: AUTOMATION, path: "trip/tasks/automations.yaml", run: "atc_1" },
+      postedHere: false,
+    });
+    expect((await laptop.store.list()).notices).toEqual([expect.objectContaining({ postedHere: true })]);
+
+    const retry = vi.fn(async () => ({ status: "queued" as const, press: false }));
+    await expect(retryFromFailureNotice(
+      { notices: desktop.store, retry },
+      { notice: refOf(row!), account: desktop.signedIn!.key, startOver: false },
+    )).resolves.toEqual({ status: "refused", reason: RETRY_ELSEWHERE });
+    expect(retry).not.toHaveBeenCalled();
+
+    await expect(retryFromFailureNotice(
+      { notices: laptop.store, retry },
+      { notice: refOf(row!), account: laptop.signedIn!.key, startOver: false },
+    )).resolves.toEqual({ status: "queued", press: false });
+    expect(retry).toHaveBeenCalledWith(expect.objectContaining({ noticeId: row!.noticeId }), {
+      automationId: AUTOMATION, claimId: "atc_1", startOver: false,
+    });
+    await laptop.store.sync();
+    await desktop.store.sync();
+    expect((await laptop.store.list()).notices).toEqual([]);
+    expect((await desktop.store.list()).notices).toEqual([]);
+  });
+
+  it("refuses an agent's Try again for another computer's run with the notice that names it, even once dismissed", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "owner"), { installId: "install-a" });
+    const desktop = await computer(account(server, "owner"), { installId: "install-b" });
+    await sendFailureNotices(sender(laptop.store, "install-a"), WORKSPACE, report(1));
+    await laptop.store.sync();
+    await desktop.store.sync();
+    const run = { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false };
+    const retry = vi.fn(async () => ({ status: "queued" as const, press: false }));
+    const elsewhere = {
+      status: "refused",
+      reason: RETRY_ELSEWHERE,
+      notice: { title: 'Automation "Stamp the finish date" failed', body: "The record is open elsewhere. It ran on Computer install-a." },
+    };
+    const onDesktop = { notices: desktop.store, installId: "install-b", holds: async () => false, retry };
+
+    await expect(retryAutomationRun(onDesktop, run)).resolves.toEqual(elsewhere);
+    // Dismissed on this computer, the notice still names where the run is.
+    const [row] = (await desktop.store.list()).notices;
+    await desktop.store.mark([refOf(row!)], "dismissed", desktop.signedIn!.key);
+    expect((await desktop.store.list()).notices).toEqual([]);
+    await expect(retryAutomationRun(onDesktop, run)).resolves.toEqual(elsewhere);
+    expect(retry).not.toHaveBeenCalled();
+
+    // A run no notice names goes to this computer's executor, which says why it cannot.
+    await expect(retryAutomationRun(onDesktop, { ...run, claimId: "atc_9" })).resolves.toEqual({ status: "queued", press: false });
+    expect(retry).toHaveBeenLastCalledWith({ automationId: AUTOMATION, claimId: "atc_9", startOver: false });
+
+    // The computer that holds the claim runs it, as the panel's Try again does, without reading notices.
+    const sentFailure = vi.fn(laptop.store.sentFailure);
+    await expect(retryAutomationRun({ notices: { sentFailure }, installId: "install-a", holds: async () => true, retry }, run))
+      .resolves.toEqual({ status: "queued", press: false });
+    expect(retry).toHaveBeenLastCalledWith({ automationId: AUTOMATION, claimId: "atc_1", startOver: false });
+    expect(sentFailure).not.toHaveBeenCalled();
+  });
+
+  it("names another computer only from a notice this person sent", async () => {
+    const server = await relay();
+    const shareId = await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const owner = await computer(account(server, "owner"), { installId: "install-a" });
+    // Someone the owner shared with names the owner's run, and the owner reads it in their own workspace.
+    server.storage.postNotice({
+      noticeId: "automation-failed:ana", recipientUserId: "owner", reach: { shareId }, kind: "automation-failed",
+      title: "Stamp failed", body: "It ran on Ana's laptop.",
+      target: { automation: AUTOMATION, path: "trip/tasks/automations.yaml", run: "atc_1" },
+      originInstallId: "install-c", senderUserId: "ana", senderLabel: "Ana", nowMs: clock,
+    });
+    await owner.store.sync();
+    expect((await owner.store.list()).notices).toEqual([expect.objectContaining({ workspaceId: WORKSPACE, target: expect.objectContaining({ run: "atc_1" }) })]);
+    const retry = vi.fn(async () => ({ status: "queued" as const, press: false }));
+    await expect(retryAutomationRun(
+      { notices: owner.store, installId: "install-a", holds: async () => false, retry },
+      { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false },
+    )).resolves.toEqual({ status: "queued", press: false });
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a run's notice on this computer while nobody is signed in, and tries it again here", async () => {
+    const alone = await computer(null, { installId: "install-a" });
+    await sendFailureNotices(sender(alone.store, "install-a"), WORKSPACE, report(1));
+    const [row] = (await alone.store.list()).notices;
+    expect(row).toMatchObject({ store: "local", kind: "automation-failed", postedHere: true });
+    const retry = vi.fn(async () => ({ status: "definition-changed" as const, repeatsMessages: false }));
+    await expect(retryFromFailureNotice(
+      { notices: alone.store, retry },
+      { notice: refOf(row!), account: null, startOver: false },
+    )).resolves.toEqual({ status: "definition-changed", repeatsMessages: false });
+    // Nothing ran, so the notice stays.
+    expect((await alone.store.list()).notices).toHaveLength(1);
+  });
+
+  it("replaces an automation's older failure with its newer one on every computer", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "owner"), { installId: "install-a" });
+    const desktop = await computer(account(server, "owner"), { installId: "install-b" });
+    await sendFailureNotices(sender(laptop.store, "install-a"), WORKSPACE, report(1));
+    await laptop.store.sync();
+    // Try again of run 2 left run 1 the newest failed one: its notice comes back.
+    await sendFailureNotices(sender(laptop.store, "install-a"), WORKSPACE, report(1, { claimId: "atc_2", replaces: failure(1) }));
+    await laptop.store.sync();
+    await desktop.store.sync();
+    for (const each of [laptop, desktop]) {
+      expect((await failedIn(each)).map((row) => row.target?.run)).toEqual(["atc_2"]);
+    }
+  });
+
+  it("tells the owner and the person who changed it last when it fails on the computer of someone it was shared with", async () => {
+    const server = await relay();
+    const shareId = await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const ana = await computer(account(server, "ana"), { installId: "install-c" });
+    ana.reach = new Map([["ana-trip", { shareId }]]);
+    const owner = await computer(account(server, "owner"), { installId: "install-a" });
+    // Ana's computer cannot read who changed it last; the relay finds the owner, who did.
+    await sendFailureNotices(sender(ana.store, "install-c", { throughShare: true }), "ana-trip", report(1));
+    await ana.store.sync();
+    await owner.store.sync();
+    expect(await failedIn(ana)).toEqual([expect.objectContaining({
+      postedHere: true, body: "The record is open elsewhere. It ran on Computer install-c.",
+    })]);
+    const [ownerCopy] = await failedIn(owner);
+    expect(ownerCopy).toMatchObject({
+      senderKind: "automation", workspaceId: WORKSPACE, postedHere: false,
+      body: FAILED_ELSEWHERE_BODY, target: { automation: AUTOMATION, path: "trip/tasks/automations.yaml" },
+    });
+    expect(ownerCopy?.target?.run).toBeUndefined();
+  });
+
+  it("tells whoever changed it last and whoever's message started it, without this computer's name or the error", async () => {
+    const server = await relay();
+    await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ben" });
+    const owner = await computer(account(server, "owner"), { installId: "install-a" });
+    const ana = await computer(account(server, "ana"));
+    const ben = await computer(account(server, "ben"));
+    await sendFailureNotices(sender(owner.store, "install-a", { lastChangedBy: "ben" }), WORKSPACE, report(1, { startedBy: "ana" }));
+    for (const each of [ana, ben]) {
+      await each.store.sync();
+      const [copy] = await failedIn(each);
+      expect(copy).toMatchObject({ body: FAILED_ELSEWHERE_BODY, postedHere: false });
+      expect(copy?.target?.run).toBeUndefined();
+    }
+    // The owner, who changed it last, gets only their own notice.
+    await sendFailureNotices(sender(owner.store, "install-a", { lastChangedBy: "owner" }), WORKSPACE, report(2));
+    await owner.store.sync();
+    expect((await failedIn(owner)).map((row) => row.postedHere)).toEqual([true, true]);
+  });
+
+  it("sends a copy again when the connection drops, and never runs a notice someone else sent", async () => {
+    const server = await relay();
+    await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const owner = await computer(account(server, "owner"), { installId: "install-a" });
+    const ana = await computer(account(server, "ana"), { installId: "install-a" });
+    server.online = false;
+    await expect(sendFailureNotices(sender(owner.store, "install-a"), WORKSPACE, report(1, { startedBy: "ana" })))
+      .rejects.toBeInstanceOf(TypeError);
+    server.online = true;
+    await sendFailureNotices(sender(owner.store, "install-a"), WORKSPACE, report(1, { startedBy: "ana" }));
+    await owner.store.sync();
+    expect(await failedIn(owner)).toHaveLength(1);
+
+    // A notice that names a run, from a computer with Ana's install id, is still not hers.
+    await owner.store.postNotice({
+      workspaceId: WORKSPACE, noticeId: "automation-failed:crafted", kind: "automation-failed", title: "Stamp failed", body: "",
+      target: { automation: AUTOMATION, path: "trip/tasks/automations.yaml", run: "atc_1" }, recipientUserId: "ana",
+    });
+    await ana.store.sync();
+    const crafted = (await ana.store.list()).notices.find((row) => row.noticeId.endsWith("automation-failed:crafted"))!;
+    expect(crafted.postedHere).toBe(false);
+    const retry = vi.fn();
+    await expect(retryFromFailureNotice(
+      { notices: ana.store, retry },
+      { notice: refOf(crafted), account: ana.signedIn!.key, startOver: false },
+    )).resolves.toEqual({ status: "refused", reason: RETRY_ELSEWHERE });
+    expect(retry).not.toHaveBeenCalled();
+    // Nor does it stop Ana's own Try again of a run her computer holds, or names another computer for it.
+    const own = vi.fn(async () => ({ status: "queued" as const, press: false }));
+    for (const holds of [true, false]) {
+      await expect(retryAutomationRun(
+        { notices: ana.store, installId: "install-c", holds: async () => holds, retry: own },
+        { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false },
+      )).resolves.toEqual({ status: "queued", press: false });
+    }
+    expect(own).toHaveBeenCalledTimes(2);
+  });
+
+  describe("History of an automation", () => {
+    const PATH = "trip/tasks/automations.yaml";
+    const file = (enabled: boolean | null) => enabled === null
+      ? "version: 1\nautomations: []\n"
+      : `version: 1\nautomations:\n  - id: stamp\n    name: Stamp the finish date\n${enabled ? "" : "    enabled: false\n"}    when: {field-changed: Status}\n    do: [{set: {Done: true}}]\n`;
+    const moment = (id: string, before: string | null, after: string, author?: MomentAuthor): VersionedTextMoment => ({
+      id, workspaceId: WORKSPACE, versionId: "main", objectId: "object-1", path: PATH, recordedAtMs: 1, operation: "write",
+      payload: { before: before === null ? null : { path: PATH, text: before }, after: { path: PATH, text: after } },
+      metadata: { origin: "local-file" },
+      ...(author ? { author } : {}),
+    });
+    const ana: MomentAuthor = { kind: "named", userId: "ana", grantId: "grant-0", grantGeneration: 1 };
+    const dohc: MomentAuthor = { kind: "automation", automationId: AUTOMATION, depth: 1 };
+    // Newest first, in pages, as History serves them.
+    const history = (moments: VersionedTextMoment[]): AutomationsFileHistory => ({
+      flush: async () => undefined,
+      fileObjectIdForPath: async (path) => (path === PATH ? "object-1" : null),
+      listMoments: async ({ limit, beforeMomentOrder }) => {
+        const start = beforeMomentOrder ?? 0;
+        return {
+          moments: moments.slice(start, start + limit).map((entry) => ({ id: entry.id, protected: false })),
+          nextBeforeMomentOrder: start + limit < moments.length ? start + limit : null,
+        };
+      },
+      readMoment: async (id) => {
+        const found = moments.find((entry) => entry.id === id);
+        return found ? { protected: false, moment: found } : null;
+      },
+    });
+    const at = { path: PATH, id: "stamp", ownerUserId: "owner" };
+    const switched = { collectionPath: "trip/tasks", id: "stamp", automationId: AUTOMATION, name: "Stamp the finish date" };
+
+    it("tells the person who changed it last who switched it off, through the relay", async () => {
+      const found = await whoSwitchedOff(history([
+        moment("m3", file(true), file(false)),
+        moment("m2", file(null), file(true), ana),
+        moment("m1", null, file(null)),
+      ]), at);
+      expect(found).toEqual({ switchedOffBy: "owner", lastChangedBy: "ana", contentHash: expect.any(String) });
+
+      const server = await relay();
+      await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+      const owner = await computer(account(server, "owner"));
+      const anaComputer = await computer(account(server, "ana"));
+      const notice = switchedOffNotice({ workspaceId: WORKSPACE, switched, path: PATH, ...found!, switcherName: "Ice" });
+      expect(notice).toMatchObject({ title: 'Ice switched off "Stamp the finish date"', recipientUserId: "ana" });
+      await owner.store.postNotice(notice!);
+      await anaComputer.store.sync();
+      expect((await anaComputer.store.list()).notices).toContainEqual(expect.objectContaining({
+        kind: "automation-switched-off", senderKind: "person", title: 'Ice switched off "Stamp the finish date"',
+        target: { automation: AUTOMATION, path: PATH },
+      }));
+      // The owner's other computer reads the same change and posts the same notice once.
+      await owner.store.postNotice(switchedOffNotice({ workspaceId: WORKSPACE, switched, path: PATH, ...found!, switcherName: "Ice" })!);
+      await anaComputer.store.sync();
+      expect((await anaComputer.store.list()).notices.filter((row) => row.kind === "automation-switched-off")).toHaveLength(1);
+    });
+
+    it("tells the owner when a person they shared with switches it off, however far back its last change is", async () => {
+      // Other automations in the file changed many times in between.
+      const others = Array.from({ length: 120 }, (_, index) =>
+        moment(`o${index}`, `${file(true)}# ${index}\n`, `${file(true)}# ${index + 1}\n`, ana));
+      const moments = [moment("m2", file(true), file(false), ana), ...others, moment("m1", file(null), file(true))];
+      const found = await whoSwitchedOff(history(moments), at);
+      expect(found).toMatchObject({ switchedOffBy: "ana", lastChangedBy: "owner" });
+      await expect(whoChangedLast(history(moments), at)).resolves.toBe("ana");
+    });
+
+    it("blames nobody for dohc's own switch off, and skips it when finding who changed it last", async () => {
+      const byDohc = [moment("m2", file(true), file(false), dohc), moment("m1", file(null), file(true), ana)];
+      await expect(whoSwitchedOff(history(byDohc), at)).resolves.toBeNull();
+      // Ana switches it on again after dohc switched it off; the owner switches it off.
+      const later = [
+        moment("m4", file(true), file(false)),
+        moment("m3", file(false), file(true), ana),
+        ...byDohc,
+      ];
+      await expect(whoSwitchedOff(history(later), at)).resolves.toMatchObject({ lastChangedBy: "ana" });
+      await expect(whoChangedLast(history(byDohc), at)).resolves.toBe("ana");
+    });
+
+    it("says nothing when you switch off your own, or History does not show who changed it", async () => {
+      const own = await whoSwitchedOff(history([
+        moment("m2", file(true), file(false), ana),
+        moment("m1", file(null), file(true), ana),
+      ]), at);
+      expect(switchedOffNotice({ workspaceId: WORKSPACE, switched, path: PATH, ...own!, switcherName: "Ana" })).toBeNull();
+      await expect(whoSwitchedOff(history([moment("m2", file(true), file(false))]), at)).resolves.toBeNull();
+    });
+
+    it("names a person by email only to the owner, who shared with it", () => {
+      const names = { ownerUserId: "owner", ownerName: "Ice", emailOf: (userId: string) => `${userId}@dohc.test` };
+      expect(switcherNameFor({ ...names, switchedOffBy: "ana", recipient: "owner" })).toBe("ana@dohc.test");
+      expect(switcherNameFor({ ...names, switchedOffBy: "ana", recipient: "ben" })).toBe("Someone");
+      expect(switcherNameFor({ ...names, switchedOffBy: "owner", recipient: "ben" })).toBe("Ice");
+    });
+  });
 });

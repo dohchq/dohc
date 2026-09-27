@@ -6,6 +6,8 @@ import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectW
 
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
+  | "chat-no-runner"
+  | "chat-budget-paused"
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"
@@ -38,6 +40,7 @@ export interface ShellError {
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs.
   action?: { label: string; run: () => void; ends?: boolean };
+  onDismiss?: () => void;
   kind?: ShellErrorKind;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
@@ -154,6 +157,7 @@ export function useShellError(workspaceId: string) {
       cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
       retry?: (() => void) | null;
+      onDismiss?: () => void;
       kind?: ShellErrorKind;
     }) => {
       const shown = readError(failure.message);
@@ -166,6 +170,7 @@ export function useShellError(workspaceId: string) {
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
         ...(details.length ? { details } : {}),
+        ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
       });
     },
@@ -333,6 +338,7 @@ export function useShellError(workspaceId: string) {
     );
   }, []);
   const dismissShellError = useCallback((id: string) => {
+    shellErrorsRef.current.find((error) => error.id === id)?.onDismiss?.();
     setShellErrors((current) => current.filter((error) => error.id !== id));
   }, []);
   const retryShellError = useCallback((id: string) => {
@@ -346,6 +352,7 @@ export function useShellError(workspaceId: string) {
 
   return {
     shellErrors,
+    clearKind,
     reportShellError,
     reportShellFailure,
     reportLaneFailure,

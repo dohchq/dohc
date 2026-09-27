@@ -3,6 +3,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { deferred } from "../testing/deferred";
+import { describeApprovedDataset, parseDatasetDescription } from "@dohc/security-contract/dataset";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { datasetDefinitionFromDrafts } from "./collections/datasetDefinitionFromDrafts";
+import { transactionalDescription } from "./transactionalCollectionModel";
 import { TransactionalCollectionPage, type TransactionalDatasetDescription, type TransactionalInvoke } from "./TransactionalCollectionPage";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -29,6 +33,48 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
   return { invoke, onError, onNotice, props, ...render(<TransactionalCollectionPage {...props} />) };
 }
 afterEach(cleanup);
+
+it.each(["Record ID", "Membership number"])("hides only the generated primary key column (%s)", async primaryName => {
+  const definition = datasetDefinitionFromDrafts({ name: "People", schemaPath: "schema.sql", operationsPath: "operations.js",
+    fields: [{ name: "Name", type: "text", required: true, unique: false }] });
+  const primary = definition.tables[0]!.fields[0]!;
+  primary.name = primaryName;
+  const userField = definition.tables[0]!.fields[1]!;
+  if (primaryName !== "Record ID") userField.name = "Record ID";
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "SELECT 1;", operationSource: "globalThis.operations={};" });
+  const description = transactionalDescription(parseDatasetDescription(describeApprovedDataset(revision, definition.operations.filter(operation => operation.kind !== "create"))));
+  const invoke = vi.fn(async () => ({ result: { rows: [{ id: "generated-uuid", version: 1, values: { [primary.fieldId]: "generated-uuid", [userField.fieldId]: "Alice" } }], nextCursor: null } }));
+  setup({ dataset: description, tableId: definition.tables[0]!.tableId, invoke });
+  await screen.findByText("Alice");
+  const table = screen.getByRole("table");
+  if (primaryName === "Record ID") {
+    expect(within(table).queryByRole("columnheader", { name: /Record ID/ })).toBeNull();
+  } else {
+    expect(within(table).queryByRole("columnheader", { name: /Membership number/ })).toBeNull();
+    expect(within(table).getByRole("columnheader", { name: /Record ID/ })).toBeTruthy();
+  }
+  expect(within(table).queryByText("generated-uuid")).toBeNull();
+  expect(description.operations.find(operation => operation.kind === "read")!.fieldIds).toContain(primary.fieldId);
+});
+
+it.each([false, true])("preserves user-supplied text keys in filtered descriptions (create visible: %s)", async createVisible => {
+  const definition = datasetDefinitionFromDrafts({ name: "People", schemaPath: "schema.sql", operationsPath: "operations.js",
+    fields: [{ name: "Name", type: "text", required: true, unique: false }] });
+  const primary = definition.tables[0]!.fields[0]!;
+  if (primary.type === "button") throw new Error("Expected a column");
+  delete primary.generated;
+  primary.name = "Membership number";
+  const createOperation = definition.operations.find(operation => operation.kind === "create")!;
+  createOperation.fieldIds = [...createOperation.fieldIds, primary.fieldId];
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "SELECT 1;", operationSource: "globalThis.operations={};" });
+  const operations = definition.operations.filter(operation => createVisible || operation.kind !== "create");
+  const description = transactionalDescription(parseDatasetDescription(describeApprovedDataset(revision, operations)));
+  const invoke = vi.fn(async () => ({ result: { rows: [{ id: "MEM-42", version: 1, values: { [primary.fieldId]: "MEM-42" } }], nextCursor: null } }));
+  setup({ dataset: description, tableId: definition.tables[0]!.tableId, invoke });
+  const table = await screen.findByRole("table");
+  expect(within(table).getByRole("columnheader", { name: /Membership number/ })).toBeTruthy();
+  expect(await within(table).findByText("MEM-42")).toBeTruthy();
+});
 
 it("keeps an empty multi-select visible and editable", async () => {
   const description = dataset();
@@ -408,4 +454,24 @@ it("keeps an open record's details, and the focus in them, when the records are 
   invoke.mockResolvedValue({ result: { rows: [], nextCursor: null } });
   rerender(<TransactionalCollectionPage {...props} recordsVersion={2} />);
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull());
+});
+
+it("shows the ⚡ button beside New record, and a ⚡ that names the automations on each field they set", async () => {
+  setup({
+    automationsButton: <button type="button">Automations</button>,
+    fieldMarks: new Map([["Amount", ["Round the amount"]], ["Status", ["Review new people", "Stamp"]]]),
+  });
+  await screen.findByText("Alice");
+  const header = screen.getByRole("heading", { name: "People" }).closest("header")!;
+  expect(within(header).getAllByRole("button").map(button => button.textContent)).toEqual(["Automations", "New record"]);
+  const marks = screen.getAllByRole("img", { name: "Automation" });
+  expect(marks.map(mark => mark.closest("th")?.querySelector("button")?.textContent)).toEqual(["Amount", "Status"]);
+  // Hovering or focusing a mark names the automations.
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  fireEvent.focus(marks[1]!);
+  expect(screen.getByRole("tooltip").textContent).toBe('"Review new people" and "Stamp" set this field');
+  fireEvent.blur(marks[1]!);
+  fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+  const details = screen.getByRole("dialog", { name: "Record details" });
+  expect(within(details).getAllByRole("img", { name: "Automation" })).toHaveLength(2);
 });

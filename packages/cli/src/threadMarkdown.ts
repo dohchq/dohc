@@ -1,7 +1,8 @@
 import type { CliResultByVerb } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
 
-type ThreadMarkdownInput = CliResultByVerb["show"];
+type ThreadMarkdownInput = Omit<CliResultByVerb["show"], "dispatch"> &
+  Partial<Pick<CliResultByVerb["show"], "dispatch">>;
 
 function swapEnginePrefix(
   id: string,
@@ -36,6 +37,7 @@ export function renderThreadMarkdown(result: ThreadMarkdownInput): string {
   const lines = [
     `# ${thread.title}`,
     `thread: ${formatThreadHandle(thread.id)} · #${thread.group.slug} · ${thread.commentCount} comments · open decisions: ${decisionCount(thread.openDecisionCount)}`,
+    ...(result.dispatch ? [`dispatch: ${JSON.stringify(result.dispatch)}`] : []),
   ];
   for (const message of messages) {
     const metadata = [

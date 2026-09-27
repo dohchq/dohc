@@ -1,8 +1,9 @@
+import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { lstat, mkdir, open, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { isAppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
+import { AppBackendRuntimeError, isAppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS, type AppOperationRefusal } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, JournalCommit, TransitionCheckpointInput, CheckpointStage, CheckpointStageAllocation } from "./journal.js";
 import { openPersistentAppBackend, PersistentRuntimeError, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
@@ -17,6 +18,8 @@ interface DatasetAccess {
   authorize(): void;
 }
 export interface DatasetInvocation extends DatasetAccess {
+  /** Recover the full host-approved schema, but grant the operation only tables. */
+  restrictTables?: true;
   operation: string;
   caller: JsonValue;
   callerKey: string;
@@ -30,6 +33,12 @@ export interface DatasetInvocation extends DatasetAccess {
   accountAndAttach?: CommitOperationInput["accountAndAttach"];
   /** Runs inside the commit transaction. A receipt replay never reaches it. */
   recordCommit?: (commit: Readonly<DatasetCommit>) => unknown;
+  /**
+   * Why a write's result must not commit, or null. Called after the operation
+   * runs and before its commit; a refusal rolls the write back like one the
+   * operation made, and keeps no receipt.
+   */
+  refuseResult?: (result: JsonValue) => AppOperationRefusal | null;
 }
 /** A committed change, with each approved table's columns in the order a changeset records them. */
 export interface DatasetCommit extends JournalCommit { columns: Readonly<Record<string, readonly string[]>> }
@@ -504,7 +513,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if (!current.active || !sameAuthority(captured.cursor, current.cursor)) throw new Error("The Collection's rules changed. Reload the Collection. Then try again.");
     };
     try {
-      worker = await recover(lane, input);
+      worker = await recover(lane, input.restrictTables ? { ...input, tables: parseDatasetRevision(JSON.parse(captured.definitionJson)).definition.tables.map(table => table.sqlName) } : input);
       currentAuthority();
       input.signal?.addEventListener("abort", abort, { once: true });
       if (!input.readOnly) {
@@ -513,12 +522,18 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       }
       const prepared = await worker.runtime.prepare({ expected: worker.cursor, source: captured.source, operation: input.operation,
         caller: input.caller, input: input.input, nowMs: now(), requestId: randomUUID(), secret: randomBytes(32).toString("base64url"),
-        files: input.files, readOnly: input.readOnly });
+        files: input.files, readOnly: input.readOnly, tables: input.tables });
       currentAuthority();
       if (input.readOnly) {
         const after = head(input);
         if (!sameCursor(after.cursor, worker.cursor)) throw new Error("The Collection changed while dohc read it. Try again.");
         return { result: prepared.result, revision: worker.cursor.revision, replayed: false };
+      }
+      const refusal = input.refuseResult?.(prepared.result) ?? null;
+      if (refusal !== null) {
+        await worker.runtime.discard(prepared.proposalId);
+        await recover(lane, input);
+        throw new AppBackendRuntimeError(refusal);
       }
       const resultJson = boundedText(JSON.stringify(prepared.result), DEFAULT_LIMITS.resultBytes, "Operation result");
       const committed = options.journal.commitOperation({ expected: worker.cursor, proposalId: prepared.proposalId, operation: input.operation,

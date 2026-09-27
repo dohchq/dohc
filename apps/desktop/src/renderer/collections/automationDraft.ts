@@ -153,12 +153,39 @@ export function idFor(name: string, taken: ReadonlySet<string>): string {
 }
 
 /**
+ * The dataset table a ⚡ panel shows, which is a Collection: its name, the
+ * names of the approved operations on it, and the names of every table in
+ * its dataset.
+ */
+export interface AutomationTable {
+  name: string;
+  operations: ReadonlySet<string>;
+  tables: ReadonlySet<string>;
+  /**
+   * The dataset's actions, by name, label, and table; `reversible` when the
+   * rules name a reverse. A new step offers this table's; a step the file
+   * wrote may run another table's.
+   */
+  actions: ReadonlyArray<{ name: string; label: string; table: string; reversible: boolean }>;
+}
+
+/**
+ * A new automation that a Button field starts: named for the button, with
+ * its trigger filled in and `steps` to start from. `table` is the dataset
+ * table the button is on, or null for a document Collection.
+ */
+export function buttonAutomation(field: string, table: string | null, steps: Automation["do"]): Automation {
+  return { id: "", name: field, enabled: true, when: { kind: "button", field, table }, if: null, do: steps };
+}
+
+/**
  * The automation a person starts from: when a field changes, set another.
  * It picks a select field to watch and a date field to set when the
  * Collection has them, so "when Status becomes Done, set Finished on to
- * today" is a few choices away.
+ * today" is a few choices away. `table` is the dataset table it watches,
+ * or null for a document Collection.
  */
-export function newAutomation(fields: readonly FieldDefinition[]): Automation {
+export function newAutomation(fields: readonly FieldDefinition[], table: string | null): Automation {
   const watched = fields.find((field) => field.type === "select") ?? fields[0];
   const set = fields.find((field) => field.type === "date" && field !== watched) ??
     fields.find((field) => field !== watched) ?? watched;
@@ -166,7 +193,7 @@ export function newAutomation(fields: readonly FieldDefinition[]): Automation {
     id: "",
     name: "",
     enabled: true,
-    when: { kind: "field-changed", field: watched?.name ?? "", to: null, table: null },
+    when: { kind: "field-changed", field: watched?.name ?? "", to: null, table },
     if: null,
     do: [{ kind: "set", values: [{ field: set?.name ?? "", value: defaultValueFor(set) }], records: null, operation: null }],
   };

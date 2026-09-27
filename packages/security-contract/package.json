@@ -8,6 +8,8 @@
     "./dataset-attempts": "./src/datasetAttempts.ts",
     "./dataset-artifacts": "./src/datasetArtifacts.ts",
     "./app-backend": "./src/appBackend.ts",
+    "./dataset-authorization": "./src/datasetAuthorization.ts",
+    "./dataset-operations": "./src/datasetOperations.ts",
     "./dataset": "./src/dataset.ts",
     "./app-publication": "./src/appPublication.ts",
     ".": "./src/index.ts",

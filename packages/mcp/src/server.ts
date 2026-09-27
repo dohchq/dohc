@@ -22,8 +22,11 @@ import {
   createRecord,
   dataset,
   createWorkspaceDirectory,
+  listAutomationRuns,
   listGroups,
   queryCollection,
+  readAutomationRun,
+  retryAutomationRun,
   readRecord,
   setRecordFields,
   listFileChats,
@@ -116,6 +119,9 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   // Every write tool, document and chat alike.
   const registerWrite: McpServer["registerTool"] =
     ctx.shareAccess === undefined ? register : skip;
+  // A shared view keeps no automation runs, because the owner's computer
+  // runs its automations, so it is offered no automation tool.
+  const registerAutomation = registerWrite;
 
   registerWrite("dohc_dataset", {
     description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
@@ -393,7 +399,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_chat",
     {
       description:
-        "Read one dohc Chat thread: its messages (with author kind and display name) and a read-only text projection.",
+        "Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
       },
@@ -537,6 +543,41 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await createRecord(ctx, args)),
+  );
+
+  const automationInput = {
+    collectionPath: z.string().min(1).max(4096),
+    automation: z.string().min(1).max(200),
+  };
+
+  registerAutomation(
+    "dohc_list_automation_runs",
+    {
+      description:
+        "List an automation's 20 newest runs on this computer, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. Each computer keeps the runs of the automations it ran.",
+      inputSchema: automationInput,
+    },
+    async (args) => text(await listAutomationRuns(ctx, args)),
+  );
+
+  registerAutomation(
+    "dohc_read_automation_run",
+    {
+      description:
+        "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
+      inputSchema: { ...automationInput, run: z.string().min(1).max(256) },
+    },
+    async (args) => text(await readAutomationRun(ctx, args)),
+  );
+
+  registerAutomation(
+    "dohc_retry_automation_run",
+    {
+      description:
+        "Try a failed automation run again, as Try again does in dohc. It resumes after the last step that finished. If the automation changed since the run failed, it refuses unless startOver is true, which runs it from the first step and can repeat changes the run already made. Only the computer that ran it can try a run again; anywhere else the refusal names that computer.",
+      inputSchema: { ...automationInput, run: z.string().min(1).max(256), startOver: z.boolean().optional() },
+    },
+    async (args) => text(await retryAutomationRun(ctx, args)),
   );
 
   return server;

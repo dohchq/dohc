@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
+import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
   cliTransportResponseSchema,
@@ -895,6 +896,7 @@ describe("CLI socket server", () => {
       ...context,
       ...scopedWorkspace,
       store: scopedStore,
+      dispatchStore: createLiveAgentDispatchStore(scopedWorkspace, sessions!).store,
       async fileObjectIdForPath(path) {
         return path === "scoped.md" ? "object_scoped" : null;
       },
@@ -1281,6 +1283,78 @@ describe("CLI socket server", () => {
     ]);
   });
 
+  it("answers the automation verbs from the Automations panel's calls", async () => {
+    const AUTOMATION = "collection:tasks#stamp";
+    const trigger = { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, depth: 1 };
+    const field = { kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" };
+    const run = {
+      claimId: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
+      trigger, definitionChanged: true, chainStopped: false, undone: false,
+    };
+    const retries: unknown[] = [];
+    const answers: Array<Awaited<ReturnType<NonNullable<CliWorkspaceContext["automations"]>["retry"]>>> = [
+      { status: "definition-changed", repeatsMessages: true },
+      { status: "queued", press: false },
+      {
+        status: "refused",
+        reason: "Only the computer this run failed on can try it again. The notice names that computer.",
+        notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+      },
+    ];
+    context.automations = {
+      runs: vi.fn(async () => [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }]),
+      run: vi.fn(async (_automationId: string, claimId: string) =>
+        claimId === "atc_1" ? { ...run, steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
+      retry: vi.fn(async (input) => {
+        retries.push(input);
+        return answers.shift()!;
+      }),
+    };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", automation: "stamp" };
+
+    await expect(invoke("automationRuns", args)).resolves.toEqual({
+      ok: true,
+      runs: [{
+        run: "atc_1", state: "failed", error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
+        trigger, definitionChanged: true, chainStopped: false, undone: false, changes: 2,
+      }],
+    });
+    expect(context.automations.runs).toHaveBeenCalledWith(AUTOMATION);
+    await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
+      ok: true,
+      run: { run: "atc_1", trigger, steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },
+    });
+    await expect(invoke("automationRun", { ...args, run: "atc_9" })).resolves.toEqual({
+      ok: false,
+      reason: "This computer has no run atc_9 of this automation. Each computer keeps the runs of the automations it ran.",
+    });
+
+    // A changed automation is refused until the caller confirms starting over.
+    const refused = await invoke("automationRetry", { ...args, run: "atc_1", startOver: false });
+    expect(refused).toMatchObject({ ok: false, status: "definition-changed", repeatsMessages: true });
+    expect("reason" in refused && refused.reason).toContain("This automation changed since the run failed.");
+    expect("reason" in refused && refused.reason).toContain("Posts, direct messages, and notices it already sent may be sent again.");
+    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: true })).resolves.toEqual({ ok: true, status: "queued" });
+    expect(retries).toEqual([
+      { automationId: AUTOMATION, claimId: "atc_1", startOver: false },
+      { automationId: AUTOMATION, claimId: "atc_1", startOver: true },
+    ]);
+    // Another computer's run is refused with the notice that names that computer.
+    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: false })).resolves.toEqual({
+      ok: false,
+      reason: "Only the computer this run failed on can try it again. The notice names that computer.",
+      notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+    });
+
+    await expect(invoke("automationRuns", { ...args, collectionPath: "../tasks" })).resolves.toMatchObject({ ok: false });
+    context.readOnly = true;
+    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: true })).resolves.toEqual({
+      ok: false,
+      reason: "A shared view has no automation runs. The owner's computer runs this workspace's automations.",
+    });
+    expect(retries).toHaveLength(3);
+  });
+
   it("routes collection writes through the write seam with a server-derived author", async () => {
     const seamCalls: Array<
       | { kind: "setFields"; input: Parameters<CliCollectionWriteSeam["setFields"]>[0] }
@@ -1414,6 +1488,27 @@ describe("CLI socket server", () => {
         origin: { attribution: agent },
       },
     ]);
+  });
+
+  it("resolves document CLI paths from the caller's folder and refuses workspace escapes", async () => {
+    const cwd = join(workspaceRoot, "notes");
+    await mkdir(cwd);
+    const paths: string[] = [];
+    context.documents = {
+      async read(path) { paths.push(path); return { path, markdown: "Live text" }; },
+      async edit({ path }) { paths.push(path); return { path, changed: true }; },
+      async create({ path }) { paths.push(path); return { path }; },
+    };
+    for (const verb of ["read", "edit", "create"]) {
+      for (const path of ["plan.md", "../root.md", join(cwd, "absolute.md"), "../../outside.md", "../.dohc/private.md"]) {
+        const result = await executeCli({
+          argv: ["document", verb, path, ...(verb === "read" ? [] : ["--text", "Body"])], cwd,
+          request: (request) => invoke(request.verb, request.args),
+        });
+        expect(result.exitCode, result.stderr).toBe(path.includes("outside") || path.includes("private") ? 1 : 0);
+      }
+    }
+    expect(paths).toEqual(Array.from({ length: 3 }, () => ["notes/plan.md", "root.md", "notes/absolute.md"]).flat());
   });
 
   it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {
@@ -2433,6 +2528,40 @@ describe("CLI socket server", () => {
     });
     expect(agentPost.group.kind).toBe("agent");
     expect(agentPost.title).toBe("Agent task");
+  });
+
+  it("exposes budget pauses in show and MCP chat reads without adding messages", async () => {
+    await seedDispatchThread("thread-dispatch");
+    const show = () => invoke("show", { cwd: workspaceRoot, actor: "agent", target: "th_dispatch", peek: true });
+    const chat = () => invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: "thread-dispatch" });
+    const before = await show();
+    expect(before.dispatch).toEqual({ paused: null, lastRun: null });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: null, lastRun: null } });
+    await dispatchStore.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", paused: true, reason: "re-dispatch budget exceeded" });
+    expect(await show()).toMatchObject({ dispatch: { paused: "budget", lastRun: null }, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: "budget", lastRun: null } });
+    await dispatchStore.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", paused: false });
+    expect(await show()).toMatchObject({ dispatch: { paused: null, lastRun: null }, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: null, lastRun: null } });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger" });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected run");
+    expect((await show()).dispatch.lastRun).toEqual({ state: "running", failureReason: null, exitCode: null });
+    await dispatchStore.failRun({ runId: claim.run.runId, reason: "runner failed to start", exitCode: 7 });
+    const dispatch = { paused: null, lastRun: { state: "failed", failureReason: "runner failed to start", exitCode: 7 } };
+    expect(await show()).toMatchObject({ dispatch, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch });
+    expect(await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger-2" });
+    const next = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!next) throw new Error("Expected next run");
+    await dispatchStore.completeRun({ runId: next.run.runId, exitCode: 0 });
+    expect((await show()).dispatch.lastRun).toEqual({ state: "completed", failureReason: null, exitCode: 0 });
+    await dispatchStore.markFailureNotePosted(next.run.runId);
+    const noReply = { paused: null, lastRun: { state: "failed", failureReason: "no-reply", exitCode: 0 } };
+    expect(await show()).toMatchObject({ dispatch: noReply, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: noReply });
+    expect(await dispatchStore.listRunMessages(WORKSPACE_ID, next.run.runId)).toEqual([]);
   });
 
   it("links only agent-authored messages carrying a valid local run id", async () => {
@@ -3863,18 +3992,23 @@ describe("CLI socket server", () => {
     });
     expect(threadOnly).toEqual({ threadIds: [opened.threadId] });
 
+    const pauseRead = vi.spyOn(dispatchStore, "getThreadDispatchPauseState");
+    const runRead = vi.spyOn(dispatchStore, "latestRunForThread");
     const exported = await invoke("export", {
       cwd: workspaceRoot,
       actor: "human",
       scope: { kind: "thread", thread: opened.threadId },
       outDir: "exports",
     });
+    expect(pauseRead).not.toHaveBeenCalled();
+    expect(runRead).not.toHaveBeenCalled();
     expect(exported.files).toHaveLength(1);
     expect(exported.files[0]?.threadId).toBe(opened.threadId);
     const markdown = await readFile(exported.files[0]!.path, "utf8");
     expect(markdown).toContain(
       `<!-- exported from dohc chat thread ${opened.threadId} at 2026-07-10T04:05:06.000Z -->`,
     );
+    expect(markdown).not.toContain("dispatch:");
     expect(markdown).toContain("# Search and export");
     expect(markdown).toContain(`thread: ${opened.threadId} · #general`);
     expect(markdown).toContain("The stable blockId is our unique Needle");

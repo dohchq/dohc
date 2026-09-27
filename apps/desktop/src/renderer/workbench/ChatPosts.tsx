@@ -1,4 +1,4 @@
-import { AgentBadge } from "./AgentBadge";
+import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
@@ -118,7 +118,7 @@ export function PollOptions(props: {
               className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors dohc-focus-visible ${
                 taken
                   ? "border-success/50 bg-success/10 text-ink"
-                  : "border-line text-ink enabled:hover:bg-panel-2 disabled:opacity-70"
+                  : "border-line text-ink enabled:hover:bg-hover disabled:opacity-70"
               }`}
             >
               <span
@@ -389,7 +389,7 @@ export function BookmarkAction(props: {
             event.stopPropagation();
             props.onOpen?.();
           }}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink dohc-focus-visible"
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink dohc-focus-visible"
         >
           <FileText size={12} aria-hidden />
         </button>
@@ -413,8 +413,8 @@ export function BookmarkAction(props: {
             }}
             className={`grid size-6 place-items-center rounded dohc-focus-visible disabled:opacity-50 ${
               props.active
-                ? "text-accent hover:bg-line/50"
-                : "text-subtle hover:bg-line/50 hover:text-ink"
+                ? "text-accent hover:bg-hover"
+                : "text-subtle hover:bg-hover hover:text-ink"
             }`}
           >
             <Bookmark size={12} fill={props.active ? "currentColor" : "none"} aria-hidden />
@@ -462,6 +462,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onNavCommand?: (nav: ChatsNav) => void;
   setMessageNode: (messageId: string, element: HTMLElement | null) => void;
 }) {
+  const isOwn = useIsOwnAuthor();
   const {
     nav,
     messages,
@@ -551,6 +552,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             <ChatAvatar
               name={comment.authorDisplayName}
               kind={comment.authorKind}
+              own={isOwn(comment.authorKind, comment, reactionControls.viewerAuthorId)}
               size="comment"
             />
           )}
@@ -752,6 +754,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <ChatAvatar
             name={openingMessage.authorDisplayName}
             kind={openingMessage.authorKind}
+            own={isOwn(openingMessage.authorKind, openingMessage, reactionControls.viewerAuthorId)}
           />
           <div className="flex min-w-0 flex-1 flex-col leading-tight">
             <span className="flex items-center gap-1.5">

@@ -28,6 +28,17 @@ pub use direct_write::{
 };
 use direct_write::{read_direct_write_marks, read_direct_write_open_objects};
 
+const CLAIM_REFUSALS: [(&str, RelayError); 5] = [
+    ("workspace-unavailable", RelayError::WorkspaceUnavailable),
+    ("epoch-superseded", RelayError::EpochSuperseded),
+    ("identity-not-recognized", RelayError::IdentityNotRecognized),
+    ("identity-required", RelayError::IdentityRequired),
+    (
+        "stream-identity-mismatch",
+        RelayError::StreamIdentityMismatch,
+    ),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushRequest {
     pub workspace_id: String,
@@ -1017,7 +1028,27 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
-            .ok_or(RelayError::InvalidResponse)?;
+            .ok_or(RelayError::IdentityRequired)?;
+        let claim_state: Option<String> = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT claim_state FROM sync_identity WHERE workspace_id=?1",
+                    [workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)
+            })
+            .map_err(local)?;
+        if let Some(state) = claim_state {
+            if state == "pending" {
+                return Err(RelayError::IdentityRequired);
+            }
+            let (_, refusal) = CLAIM_REFUSALS
+                .iter()
+                .find(|(code, _)| *code == state)
+                .ok_or(RelayError::InvalidResponse)?;
+            return Err(RelayError::ClaimRefused(Box::new(refusal.clone())));
+        }
         let mut sharing_declined = crate::live_audit::enrollment::prepare_exports(
             store,
             workspace_id,
@@ -1546,13 +1577,52 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         self.transport.probe(req)
     }
 
-    pub fn claim_workspace(&self, req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
+    pub fn claim_workspace(
+        &self,
+        store: &mut EngineStore,
+        req: ClaimRequest,
+        account_id: Option<&str>,
+        faults: &dyn FaultInjector,
+    ) -> Result<ClaimResponse, RelayError> {
         validate_identity_request(
             &req.workspace_id,
             &req.replication_epoch,
             &req.stream_identity,
         )?;
-        self.transport.claim_workspace(req)
+        let save = |store: &mut EngineStore, state: Option<&str>, keep_refusal: bool| match store
+            .write_with(faults, |tx| {
+                let changed = tx
+                    .execute(
+                        "UPDATE sync_identity SET \
+                     claim_account_id=CASE WHEN ?3 THEN claim_account_id ELSE ?4 END, \
+                     claim_state=CASE WHEN ?3 THEN COALESCE(claim_state,?2) ELSE ?2 END \
+                     WHERE workspace_id=?1",
+                        params![req.workspace_id, state, keep_refusal, state.and(account_id)],
+                    )
+                    .map_err(SyncError::persist)?;
+                if changed != 1 {
+                    return Err(SyncError::CoordinateDiverged);
+                }
+                Ok(())
+            })
+            .map_err(local)?
+        {
+            TxnOutcome::Committed(()) => Ok(()),
+            TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
+        };
+        // A crash or lost response must leave this identity waiting for claim.
+        save(store, Some("pending"), true)?;
+        let result = self.transport.claim_workspace(req.clone());
+        match &result {
+            Ok(_) => save(store, None, false)?,
+            Err(error) => {
+                if let Some((code, _)) = CLAIM_REFUSALS.iter().find(|(_, refusal)| refusal == error)
+                {
+                    save(store, Some(code), false)?;
+                }
+            }
+        }
+        result
     }
 
     pub fn rotate_epoch(&self, req: EpochRequest) -> Result<EpochResponse, RelayError> {

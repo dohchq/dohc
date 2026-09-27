@@ -40,8 +40,8 @@ function LayoutToggle(props: {
         onClick={props.onClick}
         className={`titlebar-no-drag relative grid size-7 place-items-center rounded-md transition-colors active:translate-y-px ${
           props.pressed
-            ? "bg-line/70 text-ink"
-            : "text-subtle hover:bg-line/50 hover:text-ink"
+            ? "bg-selected text-ink"
+            : "text-subtle hover:bg-hover hover:text-ink"
         }`}
       >
         <props.Icon size={15} strokeWidth={1.8} aria-hidden />
@@ -129,7 +129,7 @@ export function Titlebar(props: {
               aria-expanded={switcherOpen}
               title={workspaceName(props.workspace)}
               onClick={() => setSwitcherOpen((open) => !open)}
-              className="titlebar-no-drag flex h-7 min-w-0 items-center gap-1.5 rounded px-2 text-[13px] text-muted hover:bg-line/50 hover:text-ink"
+              className="titlebar-no-drag flex h-7 min-w-0 items-center gap-1.5 rounded px-2 text-[13px] text-muted hover:bg-hover hover:text-ink"
             >
               {/* Truncate the name before the local save status. */}
               <span data-testid="status-workspace" className="min-w-0 max-w-48 truncate">
@@ -160,7 +160,7 @@ export function Titlebar(props: {
                         setSwitcherOpen(false);
                         props.onSwitchWorkspace?.(candidate);
                       }}
-                      className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-ink"
+                      className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
                       {candidate.workspaceId === props.workspace?.workspaceId ? (
                         <Check size={12} aria-hidden />
@@ -183,7 +183,7 @@ export function Titlebar(props: {
                         setSwitcherOpen(false);
                         props.onManageWorkspaces?.();
                       }}
-                      className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-ink"
+                      className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
                       <span className="w-3" aria-hidden />
                       <span className="truncate">Manage workspaces…</span>
@@ -199,7 +199,7 @@ export function Titlebar(props: {
                         setSwitcherOpen(false);
                         props.onOpenShare?.();
                       }}
-                      className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-ink"
+                      className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
                       <span className="w-3" aria-hidden />
                       <span className="truncate">Open a share…</span>

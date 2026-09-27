@@ -3,6 +3,7 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RetryCollectionAutomationResult } from "../../ipc/bridgeContract";
+import { bridge } from "../bridge";
 import { PROGRESS_GONE_SENTENCE, REPEATS_MESSAGES_SENTENCE, useAutomationRetry } from "./useAutomationRetry";
 
 afterEach(() => {
@@ -10,8 +11,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const request = (target: { automationId: string; claimId: string }, startOver: boolean) =>
+  bridge().retryCollectionAutomation({ workspaceId: "ws-a", ...target, startOver });
+
 function Retry(props: { workspaceId: string; onError: () => void; onQueued: () => void }) {
-  const { retry, dialog } = useAutomationRetry(props);
+  const { retry, dialog } = useAutomationRetry({ ...props, request });
   return (
     <>
       <button type="button" onClick={() => retry({ automationId: "collection:Tasks#stamp", claimId: "atc_1" })}>

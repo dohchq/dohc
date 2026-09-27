@@ -1,3 +1,4 @@
+import { buildShareHandoffUrl } from "@dohc/workspace-contracts/deep-links";
 import { OpenSharedApp } from "./OpenSharedApp";
 import { PublishedApps } from "./PublishedApps";
 import {
@@ -16,6 +17,7 @@ import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import { CommentsPanel } from "./CommentsPanel";
 import { LinkDocumentEditor } from "./LinkDocumentEditor";
+import { LinkEntry } from "./LinkEntry";
 import {
   RETRY_BUDGET_MS,
   RETRY_INITIAL_MS,
@@ -150,13 +152,7 @@ function isCurrentHandoffResponse(
 }
 
 export const dohcNavigation = {
-  urlForCode(code: string, relayUrl: string): string {
-    if (!HANDOFF_CODE.test(code)) throw new Error("invalid handoff code");
-    if (relayUrl.length === 0 || relayUrl.length > 2048) {
-      throw new Error("invalid handoff relay coordinate");
-    }
-    return `dohc://open/${code}?relay=${encodeURIComponent(relayUrl)}`;
-  },
+  urlForCode: buildShareHandoffUrl,
   openCode(code: string, relayUrl: string): void {
     location.assign(dohcNavigation.urlForCode(code, relayUrl));
   },
@@ -1301,6 +1297,8 @@ export function App() {
   if (state.status === "loading") return <main className="state"><p>Opening shared files</p></main>;
   const selected = state.files.find((file) => file.path === selectedPath) ?? state.files[0];
   const tree = fileTree(state.files);
+  const canEditFile = state.meta.access === "edit" && state.meta.effectiveSelector.versionId === null &&
+    selected?.contentKind === "text" && /\.md$/i.test(selected.path);
   return (
     <div className="viewer">
       <header>
@@ -1310,11 +1308,12 @@ export function App() {
         </div>
         <div className="header-actions">
           <span className="badge">{accessLabel(state.meta.access)}</span>
-          {state.meta.access === "edit" && state.meta.effectiveSelector.versionId === null && selected?.contentKind === "text" && /\.md$/i.test(selected.path) &&
+          {canEditFile &&
             <button className="handoff-button primary" onClick={() => setEditing({discriminator: state.session, path: selected.path})}>Edit file</button>}
           <OpenInDohc key={state.session} session={state.session} />
         </div>
       </header>
+      <LinkEntry meta={state.meta} hasFiles={state.files.length > 0} canEditFile={canEditFile} />
       {new URLSearchParams(location.search).has("app") && <OpenSharedApp key={state.session} session={state.session} publicationId={new URLSearchParams(location.search).get("app") ?? ""} />}
       <PublishedApps session={state.session}/>
       <Freshness

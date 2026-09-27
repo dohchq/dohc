@@ -6,12 +6,13 @@ import type { DatasetCopyStatus } from "@dohc/cli/dataset";
 import type { CollectionTableView } from "./collectionTableViews";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { FieldTypeIcon } from "./collections/FieldTypeIcon";
+import { AutomationFieldMark, type FieldMarks } from "./collections/collectionFieldMarks";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelationInput } from "./CollectionResourceInputs";
 import { TransactionalRecordDetailsDialog } from "./TransactionalRecordDetailsDialog";
 import type { CollectionResources, CollectionResourceScope } from "./transactionalCollectionResources";
 import {
-  display, initialValue, inputProblem, object, parsePage, supportsInput, supportsSort,
+  display, initialValue, inputProblem, isGeneratedRecordIdField, object, parsePage, supportsInput, supportsSort,
   type TransactionalCursor, type TransactionalDatasetDescription, type TransactionalField, type TransactionalPage, type TransactionalRow,
 } from "./transactionalCollectionModel";
 
@@ -33,6 +34,10 @@ export interface TransactionalButtons {
 }
 export interface TransactionalCollectionPageProps extends CollectionResources {
   buttons?: TransactionalButtons;
+  /** The ⚡ Automations button, at the top beside New record. */
+  automationsButton?: ReactNode;
+  /** The fields switched-on automations set, by name, with those automations' names. */
+  fieldMarks?: FieldMarks;
   activeView?: CollectionTableView | null;
   viewControls?(disabled: boolean): ReactNode;
   copy?: DatasetCopyStatus;
@@ -118,7 +123,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const read = operations.find(operation => operation.kind === "read" && operation.readOnly);
   const create = operations.find(operation => operation.kind === "create" && !operation.readOnly);
   const remove = operations.find(operation => operation.kind === "delete" && !operation.readOnly);
-  const fields = table?.fields.filter(field => read?.fieldIds.includes(field.fieldId)) ?? [];
+  const fields = table?.fields.filter(field => read?.fieldIds.includes(field.fieldId) &&
+    !isGeneratedRecordIdField(field)) ?? [];
   const createFields = table?.fields.filter(field => create?.fieldIds.includes(field.fieldId)) ?? [];
   const canInput = (field: TransactionalField) => supportsInput(field) || (field.type === "attachment" && !!props.uploadFile) || (field.type === "relation" && !!field.relation && !!props.resolveRelation);
   const canCreate = create && createFields.every(canInput);
@@ -266,7 +272,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const hasManagement = props.onReviewSchema || props.onManageAccess || props.onExportRecovery || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
     <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 min-w-0 truncate text-sm font-semibold text-ink">{table.name}</h2>
-      {canCreate ? <PrimaryButton className="flex shrink-0 items-center gap-1.5" disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}><Plus size={16} strokeWidth={1.9} aria-hidden />New record</PrimaryButton> : null}
+      <div className="flex shrink-0 items-center gap-2">{props.automationsButton}
+      {canCreate ? <PrimaryButton className="flex shrink-0 items-center gap-1.5" disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}><Plus size={16} strokeWidth={1.9} aria-hidden />New record</PrimaryButton> : null}</div>
     </header>
     <div className="flex flex-wrap items-center gap-2">
       {props.viewControls?.(disabled || editor !== null)}
@@ -288,7 +295,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       </form>
       {canCreateForm ? <SecondaryButton className="flex items-center gap-1.5" disabled={disabled || editor !== null} onClick={props.onCreateForm}><FileInput size={14} strokeWidth={1.9} aria-hidden />Create form</SecondaryButton> : null}
       {hasManagement ? <details className="group relative" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }} onClick={event => { if (event.target instanceof Element && event.target.closest("button:not(:disabled)")) event.currentTarget.open = false; }} onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); event.stopPropagation(); } }}>
-        <summary aria-label="Manage Collection" title="Manage Collection" className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted hover:bg-panel-2 hover:text-ink [&::-webkit-details-marker]:hidden">
+        <summary aria-label="Manage Collection" title="Manage Collection" className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted hover:bg-hover hover:text-ink [&::-webkit-details-marker]:hidden">
           <MoreHorizontal size={16} strokeWidth={1.9} aria-hidden />
         </summary>
         <div className="dohc-popover absolute right-0 top-9 z-20 flex min-w-48 flex-col gap-1 rounded-lg border border-line bg-panel p-1">
@@ -315,9 +322,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {!visual && page && page.rows.length === 0 ? <p className="m-0 text-sm text-muted">{query.search ? "No records match. Try a shorter search." : canCreate ? "No records yet. Add a record to start." : "No records yet. Refresh to check for new submissions."}</p> : null}
     {!visual && page && page.rows.length > 0 ? <div className="min-h-0 overflow-auto rounded-md border border-line"><table className="w-full border-collapse text-[13px]">
       <thead className="sticky top-0 bg-panel"><tr>{fields.map(field => <th key={field.fieldId} scope="col" aria-sort={query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? "ascending" : "descending" : undefined} className="border-b border-line px-3 py-2 text-left font-medium text-muted">
-        {supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="flex items-center gap-1.5 text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}><FieldTypeIcon type={field.type} />{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : <span className="flex items-center gap-1.5"><FieldTypeIcon type={field.type} />{field.name}</span>}
+        <span className="flex items-center gap-1.5">{supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="flex items-center gap-1.5 text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}><FieldTypeIcon type={field.type} />{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : <><FieldTypeIcon type={field.type} />{field.name}</>}
+        {props.fieldMarks?.has(field.name) ? <AutomationFieldMark automations={props.fieldMarks.get(field.name)!} /> : null}</span>
       </th>)}{props.buttons?.fields.map(field => <th key={`button:${field}`} scope="col" className="border-b border-line px-3 py-2 text-left font-medium text-muted"><span className="block truncate">{field}</span></th>)}<th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
-      <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-panel-2/60">{fields.map(field => {
+      <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
         return <td key={field.fieldId} className="max-w-72 px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
@@ -326,7 +334,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className="max-w-72 px-3 py-2">{props.buttons!.render(field, row)}</td>)}<td className="px-3 py-2"><div className="flex justify-end gap-2"><IconButton title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><Expand size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>)}</tbody>
     </table></div> : null}
     {!visual && page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="font-mono">{page.rows.length} {page.rows.length === 1 ? "record" : "records"} on this page</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}
-    {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError} buttons={props.buttons}
+    {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError} buttons={props.buttons} fieldMarks={props.fieldMarks}
       onClose={() => { setDetails(null); trigger.current?.focus(); }}
       onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation, row: details, field }); }}
       onAction={onCustomAction ? operation => { setDetails(null); onCustomAction(operation.operationId); } : undefined} /> : null}

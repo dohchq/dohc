@@ -1,9 +1,7 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import {
-  parseAppBackendCaller,
   parseAppBackendJson,
-  type AppBackendCaller,
   type AppBackendJson,
 } from "./appBackend";
 
@@ -30,6 +28,8 @@ export interface DatasetColumnField {
   type: DatasetColumnFieldType;
   required: boolean;
   unique: boolean;
+  /** Set by the source generator for its internal record identity. */
+  generated?: "record-id";
   default?: AppBackendJson;
   options?: string[];
   relation?: DatasetRelation;
@@ -66,7 +66,16 @@ export interface DatasetOperation {
   fieldIds: string[];
   /** The edit accepts its receipt's priorValues under the same record-version guard. */
   reversible?: true;
+  /**
+   * An action's reverse: the name of another action, or this one, in the same
+   * dataset. The action returns `{ undo }`, and Undo runs the reverse action
+   * with that value as its input. The host refuses to commit a result
+   * without a valid `undo` of at most DATASET_UNDO_BYTES.
+   */
+  reversedBy?: string;
 }
+/** The largest `undo` value a reversible action may return. */
+export const DATASET_UNDO_BYTES = 16 * 1024;
 /** Source-visible draft metadata. Parsing or sharing it grants no authority. */
 export interface DatasetDefinition {
   formatVersion: 1;
@@ -96,10 +105,12 @@ export interface AppDatasetBinding {
   operationIds: string[];
   /** Generated forms may narrow the writable fields of a create operation. */
   createFields?: Array<{ operationId: string; fieldIds: string[] }>;
+  /** Owner-approved reads for this app's link audience, including their exact fields. */
+  linkReads?: Array<{ operationId: string; fieldIds: string[] }>;
 }
 /** Public dispatch metadata, derived from the approved revision rather than app source. */
 export interface AppDatasetCapability extends AppDatasetBinding {
-  operations: Array<Pick<DatasetOperation, "operationId" | "name" | "access" | "readOnly">>;
+  operations: Array<Pick<DatasetOperation, "operationId" | "name" | "access" | "readOnly"> & { fields?: Array<{ fieldId: string; name: string }> }>;
 }
 /** Grant-filtered metadata for Collection controls and agent discovery. */
 export interface DatasetDescription {
@@ -109,7 +120,7 @@ export interface DatasetDescription {
   name: string;
   revision: number;
   revisionSha256: string;
-  tables: Array<{ tableId: string; name: string; fields: DatasetDescribedField[] }>;
+  tables: Array<{ tableId: string; name: string; primaryKeyFieldId?: string; fields: DatasetDescribedField[] }>;
   operations: DatasetOperation[];
 }
 
@@ -208,10 +219,14 @@ function field(value: unknown): DatasetField {
   return isButtonRow(value) ? button(value) : columnField(value);
 }
 function columnField(value: unknown, allowWithheldRelation = false): DatasetColumnField {
-  const row = record(value, ["fieldId", "name", "sqlColumn", "type", "required", "unique"], ["default", "options", "relation"]);
+  const row = record(value, ["fieldId", "name", "sqlColumn", "type", "required", "unique"], ["default", "options", "relation", "generated"]);
   if (!fieldTypes.has(row.type as DatasetColumnFieldType)) fail();
   const result: DatasetColumnField = { fieldId: uuid(row.fieldId), name: text(row.name), sqlColumn: sqlName(row.sqlColumn), type: row.type as DatasetColumnFieldType,
     required: boolean(row.required), unique: boolean(row.unique) };
+  if (Object.hasOwn(row, "generated")) {
+    if (row.generated !== "record-id" || result.type !== "text" || !result.required || !result.unique || Object.hasOwn(row, "default")) fail();
+    result.generated = "record-id";
+  }
   if (result.type === "select" || result.type === "multi-select") {
     result.options = boundedArray(row.options, 100, 1).map(value => text(value, 200));
     unique(result.options);
@@ -236,10 +251,11 @@ function table(value: unknown): DatasetTable {
   unique(result.fields.map(field => field.name));
   const primary = columns.find(field => field.sqlColumn === result.primaryKey);
   if (!primary || !["text", "number"].includes(primary.type) || !primary.required || !primary.unique || Object.hasOwn(primary, "default")) fail();
+  if (columns.some(field => field.generated && field !== primary)) fail();
   return result;
 }
 function operation(value: unknown): DatasetOperation {
-  const row = record(value, ["operationId", "name", "label", "tableId", "kind", "access", "readOnly", "fieldIds"], ["reversible"]);
+  const row = record(value, ["operationId", "name", "label", "tableId", "kind", "access", "readOnly", "fieldIds"], ["reversible", "reversedBy"]);
   const name = text(row.name, 64);
   if (!operationNames.test(name) || name.split(".").some(part => forbidden.has(part)) || !operationKinds.has(row.kind as DatasetOperationKind) || !["link", "helper", "owner"].includes(row.access as string)) fail();
   const result: DatasetOperation = { operationId: uuid(row.operationId), name, label: text(row.label), tableId: uuid(row.tableId),
@@ -250,6 +266,11 @@ function operation(value: unknown): DatasetOperation {
   if (Object.hasOwn(row, "reversible")) {
     if (row.reversible !== true || result.kind !== "edit" || result.readOnly) fail();
     result.reversible = true;
+  }
+  if (Object.hasOwn(row, "reversedBy")) {
+    const reverse = text(row.reversedBy, 64);
+    if (result.kind !== "action" || result.readOnly || !operationNames.test(reverse) || reverse.split(".").some(part => forbidden.has(part))) fail();
+    result.reversedBy = reverse;
   }
   unique(result.fieldIds);
   return result;
@@ -271,9 +292,15 @@ function definition(value: unknown): DatasetDefinition {
     }
   }
   for (const operation of result.operations) {
+    // A reverse is an action that changes records, in this dataset.
+    if (operation.reversedBy !== undefined) {
+      const reverse = result.operations.find(candidate => candidate.name === operation.reversedBy);
+      if (!reverse || reverse.kind !== "action" || reverse.readOnly) fail();
+    }
     const table = tables.get(operation.tableId);
     // An operation reads and writes columns. A button has none.
     if (!table || operation.fieldIds.some(id => !datasetColumnFields(table).some(field => field.fieldId === id))) fail();
+    if (operation.kind === "create" && operation.fieldIds.some(id => datasetColumnFields(table).some(field => field.fieldId === id && field.generated))) fail();
     if (operation.kind === "edit" && operation.fieldIds.some(id => datasetColumnFields(table).some(field => field.fieldId === id && field.sqlColumn === table.primaryKey))) fail();
   }
   return result;
@@ -296,15 +323,20 @@ export function parseDatasetDescription(value: unknown): DatasetDescription {
     ...(row.archived === undefined ? {} : { archived: row.archived }),
     datasetId: uuid(row.datasetId), name: text(row.name), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
     tables: boundedArray(row.tables, DATASET_MAX_TABLES).map(value => {
-      const table = record(value, ["tableId", "name", "fields"]);
+      const table = record(value, ["tableId", "name", "fields"], ["primaryKeyFieldId"]);
       const fields = boundedArray(table.fields, DATASET_MAX_FIELDS).map((value): DatasetDescribedField => {
         if (isButtonRow(value)) return button(value);
-        const metadata = record(value, ["fieldId", "name", "type", "required", "unique"], ["default", "options", "relation"]);
+        const metadata = record(value, ["fieldId", "name", "type", "required", "unique"], ["default", "options", "relation", "generated"]);
         const { sqlColumn: _column, ...parsed } = columnField({ ...metadata, sqlColumn: "field" }, true);
         return parsed;
       });
       unique(fields.map(field => field.name));
-      return { tableId: uuid(table.tableId), name: text(table.name), fields };
+      const primaryKeyFieldId = table.primaryKeyFieldId === undefined ? undefined : uuid(table.primaryKeyFieldId);
+      if (primaryKeyFieldId !== undefined && !fields.some(field => field.fieldId === primaryKeyFieldId &&
+          field.type !== "button" && field.required && field.unique)) fail();
+      if (fields.some(field => field.type !== "button" && field.generated && field.fieldId !== primaryKeyFieldId)) fail();
+      return { tableId: uuid(table.tableId), name: text(table.name), fields,
+        ...(primaryKeyFieldId === undefined ? {} : { primaryKeyFieldId }) };
     }),
     operations: boundedArray(row.operations, DATASET_MAX_OPERATIONS).map(operation),
   };
@@ -338,13 +370,16 @@ export function describeApprovedDataset(approved: DatasetRevision, operations: D
   const fields = new Set(operations.flatMap(operation => operation.fieldIds));
   const tables = new Set(operations.map(operation => operation.tableId));
   return { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision, revisionSha256: approved.revisionSha256,
-    tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => ({ tableId: table.tableId, name: table.name,
-      fields: table.fields.filter(field => field.type === "button" || fields.has(field.fieldId)).map((field): DatasetDescribedField => {
-        if (field.type === "button") return { fieldId: field.fieldId, name: field.name, type: "button" };
-        const { sqlColumn: _sqlColumn, ...description } = field;
-        if (description.relation && !fields.has(description.relation.fieldId)) delete description.relation;
-        return description;
-      }) })), operations };
+    tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => {
+      const primary = datasetColumnFields(table).find(field => field.sqlColumn === table.primaryKey && fields.has(field.fieldId));
+      return { tableId: table.tableId, name: table.name, ...(primary ? { primaryKeyFieldId: primary.fieldId } : {}),
+        fields: table.fields.filter(field => field.type === "button" || fields.has(field.fieldId)).map((field): DatasetDescribedField => {
+          if (field.type === "button") return { fieldId: field.fieldId, name: field.name, type: "button" };
+          const { sqlColumn: _sqlColumn, ...description } = field;
+          if (description.relation && !fields.has(description.relation.fieldId)) delete description.relation;
+          return description;
+        }) };
+    }), operations };
 }
 export function parseDatasetRevision(value: unknown): DatasetRevision {
   const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["datasetId", "revision", "revisionSha256", "definitionSha256", "schemaSha256", "operationsSha256", "definition"]);
@@ -355,11 +390,21 @@ export function parseDatasetRevision(value: unknown): DatasetRevision {
 }
 /** Syntax validation only. A reference is not an owner approval or an invocation grant. */
 export function parseDatasetBindingReference(value: unknown): AppDatasetBinding {
-  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds"], ["createFields"]);
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds"], ["createFields", "linkReads"]);
   if (row.kind !== "dataset") fail();
   const result: AppDatasetBinding = { kind: "dataset", datasetId: uuid(row.datasetId), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
     operationIds: boundedArray(row.operationIds, DATASET_MAX_OPERATIONS, 1).map(uuid) };
   unique(result.operationIds);
+  if (Object.hasOwn(row, "linkReads")) {
+    result.linkReads = boundedArray(row.linkReads, DATASET_MAX_OPERATIONS).map(value => {
+      const entry = record(value, ["operationId", "fieldIds"]);
+      const read = { operationId: uuid(entry.operationId), fieldIds: boundedArray(entry.fieldIds, DATASET_MAX_FIELDS).map(uuid).sort() };
+      if (!result.operationIds.includes(read.operationId)) fail();
+      unique(read.fieldIds);
+      return read;
+    }).sort((a, b) => a.operationId.localeCompare(b.operationId));
+    unique(result.linkReads.map(read => read.operationId));
+  }
   if (Object.hasOwn(row, "createFields")) {
     result.createFields = boundedArray(row.createFields, DATASET_MAX_OPERATIONS, 1).map(value => {
       const entry = record(value, ["operationId", "fieldIds"]);
@@ -371,63 +416,25 @@ export function parseDatasetBindingReference(value: unknown): AppDatasetBinding 
   }
   return result;
 }
-export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRevision): AppDatasetBinding {
-  const approved = parseDatasetRevision(approvedRevision);
-  const result = parseDatasetBindingReference(value);
-  if (result.datasetId !== approved.datasetId || result.revision !== approved.revision || result.revisionSha256 !== approved.revisionSha256) fail();
-  const operations = new Set(approved.definition.operations.map(operation => operation.operationId));
-  if (result.operationIds.some(id => !operations.has(id))) fail();
-  for (const restriction of result.createFields ?? []) {
-    const operation = approved.definition.operations.find(operation => operation.operationId === restriction.operationId);
-    if (!operation || operation.kind !== "create" || restriction.fieldIds.some(id => !operation.fieldIds.includes(id))) fail();
-  }
-  return result;
-}
-
 /** Parse transport metadata. The host must verify it against its approved catalog. */
 export function parseAppDatasetCapability(value: unknown): AppDatasetCapability {
-  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations"], ["createFields"]);
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations"], ["createFields", "linkReads"]);
   const { operations: values, ...reference } = row;
   const binding = parseDatasetBindingReference(reference);
   const operations = boundedArray(values, DATASET_MAX_OPERATIONS, 1).map(value => {
-    const item = record(value, ["operationId", "name", "access", "readOnly"]);
+    const item = record(value, ["operationId", "name", "access", "readOnly"], ["fields"]);
     const name = text(item.name, 64);
     if (!operationNames.test(name) || name.split(".").some(part => forbidden.has(part)) || !["link", "helper", "owner"].includes(item.access as string)) fail();
-    return { operationId: uuid(item.operationId), name, access: item.access as DatasetOperation["access"], readOnly: boolean(item.readOnly) };
+    const fields = item.fields === undefined ? undefined : boundedArray(item.fields, DATASET_MAX_FIELDS).map(value => {
+      const field = record(value, ["fieldId", "name"]);
+      return { fieldId: uuid(field.fieldId), name: text(field.name) };
+    });
+    return { operationId: uuid(item.operationId), name, access: item.access as DatasetOperation["access"], readOnly: boolean(item.readOnly), ...(fields ? { fields } : {}) };
   }).sort((a, b) => a.operationId < b.operationId ? -1 : a.operationId > b.operationId ? 1 : 0);
   unique(operations.map(operation => operation.operationId));
   unique(operations.map(operation => operation.name));
   if (operations.length !== binding.operationIds.length || operations.some(operation => !binding.operationIds.includes(operation.operationId))) fail();
   return { ...binding, operationIds: [...binding.operationIds].sort(), operations };
-}
-
-/** The caller supplies a revision obtained from the owner's approved host catalog. */
-export function resolveAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision): AppDatasetCapability {
-  const approved = parseDatasetRevision(approvedRevision);
-  const binding = parseDatasetBinding(value, approved);
-  const selected = new Set(binding.operationIds);
-  return parseAppDatasetCapability({ ...binding, operations: approved.definition.operations.filter(operation => selected.has(operation.operationId))
-    .map(({ operationId, name, access, readOnly }) => ({ operationId, name, access, readOnly })) });
-}
-
-export function verifyAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision): AppDatasetCapability {
-  const parsed = parseAppDatasetCapability(value);
-  const { operations: _, ...binding } = parsed;
-  const expected = resolveAppDatasetCapability(binding, approvedRevision);
-  if (JSON.stringify(parsed) !== JSON.stringify(expected)) fail();
-  return expected;
-}
-
-/** Caller must be derived from current host credentials, never request JSON. */
-export function effectiveDatasetOperations(binding: unknown, approvedRevision: DatasetRevision, caller: AppBackendCaller): DatasetOperation[] {
-  const approved = parseDatasetRevision(approvedRevision);
-  const parsed = parseDatasetBinding(binding, approved);
-  const principal = parseAppBackendCaller(caller);
-  const allowed = new Set(parsed.operationIds);
-  return approved.definition.operations.filter(operation => allowed.has(operation.operationId) && (
-    principal.kind === "owner" || operation.access === "link" ||
-    (operation.access === "helper" && principal.kind === "named" && principal.helper)
-  ));
 }
 
 /** Stable inventory ordering and fixed member ordering for definition hashing. */

@@ -1,3 +1,4 @@
+import { readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
@@ -26,6 +27,23 @@ describe("resolveWorkspaceMetadataDir", () => {
     realpathOverride.current = null;
     const root = await createTestScratch("dohc-metadata-plain-");
     await expect(resolveWorkspaceMetadataDir(root)).resolves.toBeTruthy();
+  });
+
+  it("with create false, answers null and makes nothing when .dohc or the root is missing", async () => {
+    realpathOverride.current = null;
+    const root = await createTestScratch("dohc-metadata-read-");
+    await expect(resolveWorkspaceMetadataDir(root, { create: false })).resolves.toBeNull();
+    await expect(readdir(root)).resolves.toEqual([]);
+    await expect(resolveWorkspaceMetadataDir(join(root, "gone"), { create: false })).resolves.toBeNull();
+    const dir = await resolveWorkspaceMetadataDir(root);
+    await expect(resolveWorkspaceMetadataDir(root, { create: false })).resolves.toBe(dir);
+  });
+
+  it("with create false, still refuses a .dohc that is not a real folder", async () => {
+    realpathOverride.current = null;
+    const root = await createTestScratch("dohc-metadata-file-");
+    await writeFile(join(root, ".dohc"), "not a folder");
+    await expect(resolveWorkspaceMetadataDir(root, { create: false })).rejects.toThrow();
   });
 
   if (process.platform === "win32") {

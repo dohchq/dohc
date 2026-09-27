@@ -24,11 +24,18 @@ import {
 //
 // Refusal is a thrown error: callers that must stay tolerant (readers)
 // catch it; writers surface it instead of writing outside the workspace.
-export async function resolveWorkspaceMetadataDir(rootPath: string): Promise<string> {
+// With `create: false`, a missing .dohc (or workspace root) answers null and
+// nothing is made.
+export async function resolveWorkspaceMetadataDir(rootPath: string): Promise<string>;
+export async function resolveWorkspaceMetadataDir(rootPath: string, options: { create: false }): Promise<string | null>;
+export async function resolveWorkspaceMetadataDir(rootPath: string, options?: { create: false }): Promise<string | null> {
+  const create = options?.create !== false;
+  if (!create && (await lstat(join(rootPath, ".dohc")).catch(() => null)) === null) return null;
   const realRoot = await realpath(rootPath);
   const dir = join(realRoot, ".dohc");
   let stats = await lstat(dir).catch(() => null);
   if (stats === null) {
+    if (!create) return null;
     await mkdir(dir, { recursive: true });
     stats = await lstat(dir);
   }

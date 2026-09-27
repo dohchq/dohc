@@ -214,17 +214,14 @@ export const CHANNELS = {
   openSharedView: "desktop:open-shared-view",
   refreshSharedView: "desktop:refresh-shared-view",
   dismissShareSkips: "desktop:dismiss-share-skips",
-  // Automation failures (ADR 0008): the engine's failed claim rows minus
-  // what the owner acknowledged; the push poke tells the renderer to
-  // re-list.
-  listAutomationFailures: "desktop:list-automation-failures",
-  dismissAutomationFailure: "desktop:dismiss-automation-failure",
-  automationFailuresChanged: "desktop:automation-failures-changed",
+  // An automation claim failed or a retry queued one: run history reads again.
+  automationRunsChanged: "desktop:automation-runs-changed",
   // The crash report changed; the renderer reads it again.
   crashReportChanged: "desktop:crash-report-changed",
   noticesChanged: "desktop:notices-changed",
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
+  chatDispatchNotices: "desktop:chat-dispatch-notices",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
@@ -243,6 +240,7 @@ export const CHANNELS = {
   automationShareImpact: "desktop:automation-share-impact",
   automationHoldsChanged: "desktop:automation-holds-changed",
   listCollectionFieldMarks: "desktop:list-collection-field-marks",
+  findDatasetCollection: "desktop:find-dataset-collection",
   collectionAutomationsChanged: "desktop:collection-automations-changed",
   // Button fields: main decides who may press and what runs, and tells the
   // pressing window how its run went.

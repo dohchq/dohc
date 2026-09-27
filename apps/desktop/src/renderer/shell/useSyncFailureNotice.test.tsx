@@ -75,6 +75,15 @@ function renderNotice(
 }
 
 describe("useSyncFailureNotice", () => {
+  it("shows the claim refusal and keeps the existing Try again action", async () => {
+    const message = "Another account already claimed this workspace.";
+    const view = renderNotice({ failure: { cause: "claim-refused", detail: message, sinceMs: 1, attempts: 1 } });
+    expect(view.toasts()[0]!.message).toBe(message);
+    act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
+    await waitFor(() => expect(view.rows()).toEqual([]));
+    expect(view.retryCloudSync).toHaveBeenCalledWith("ws-a", "person");
+  });
+
   // A blip costs one toast, and recovery takes it away with the row.
   it("toasts each failure once and clears its toast and row on recovery", () => {
     const view = renderNotice({ failure: null });

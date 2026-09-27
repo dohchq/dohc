@@ -20,8 +20,11 @@ import {
 import {
   DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
+  EDITOR_FONTS,
   type DesktopUserSettingsResult,
+  MAX_EDITOR_FONT_SIZE,
   MAX_ZOOM_LEVEL,
+  MIN_EDITOR_FONT_SIZE,
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
   zoomPercent,
@@ -37,12 +40,21 @@ import {
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
-import { applyAppearanceSettings } from "../theme";
+import { applyLookSettings } from "../theme";
+import { palette } from "../tokens";
+import { ChatAvatar } from "../workbench/ChatAvatar";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { ScheduleHostRow } from "./ScheduleHostRow";
-import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
+import {
+  ColorControl,
+  HueControl,
+  SegmentedControl,
+  SettingRow,
+  SwitchControl,
+  TextControl,
+} from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
 import { SharedWithMeList } from "./SharedWithMeList";
 import { SidebarViewsControl } from "./SidebarViewsControl";
@@ -243,8 +255,10 @@ export function SettingsDialog(props: {
     ])
       .then(([nextUser, nextWorkspace]) => {
         if (cancelled) return;
+        // The window already shows these settings: DesktopRoot applies each
+        // read and each change. Applying this read again could undo a change
+        // that arrived while it was in flight.
         if (!settingsEventFiredRef.current) setUserResult(nextUser);
-        applyAppearanceSettings(nextUser.settings.appearance);
         if (!workspaceTokenRef.isCurrent(token)) return;
         setWorkspaceResult(nextWorkspace);
         onWorkspaceSettingsRead?.(nextWorkspace);
@@ -286,7 +300,7 @@ export function SettingsDialog(props: {
       source: current?.source ?? "default",
       ...(current?.warning ? { warning: current.warning } : {}),
     }));
-    applyAppearanceSettings(settings.appearance);
+    applyLookSettings(settings);
     markSaving();
     setError(null);
     try {
@@ -297,7 +311,7 @@ export function SettingsDialog(props: {
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(previous);
-      applyAppearanceSettings(previous.settings.appearance);
+      applyLookSettings(previous.settings);
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
@@ -392,7 +406,7 @@ export function SettingsDialog(props: {
       const next = await bridge().resetUserSettings();
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(next);
-      applyAppearanceSettings(next.settings.appearance);
+      applyLookSettings(next.settings);
       markSaved();
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
@@ -493,6 +507,11 @@ export function SettingsDialog(props: {
     error ? `Settings error: ${error}` : null,
   ].filter((message): message is string => Boolean(message));
 
+  const saveAppearance = (patch: Partial<DesktopUserSettings["appearance"]>) =>
+    saveUserSettings({ ...userSettings, appearance: { ...userSettings.appearance, ...patch } });
+  const saveEditor = (patch: Partial<DesktopUserSettings["editor"]>) =>
+    saveUserSettings({ ...userSettings, editor: { ...userSettings.editor, ...patch } });
+
   const renderSection = () => {
     if (query.trim() && filteredSections.length === 0) {
       return (
@@ -559,7 +578,7 @@ export function SettingsDialog(props: {
                   aria-label="Zoom out"
                   disabled={userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL}
                   onClick={() => void stepZoomSetting("out")}
-                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
                 >
                   <Minus size={14} strokeWidth={1.9} />
                 </button>
@@ -571,6 +590,101 @@ export function SettingsDialog(props: {
                   aria-label="Zoom in"
                   disabled={userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL}
                   onClick={() => void stepZoomSetting("in")}
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                >
+                  <Plus size={14} strokeWidth={1.9} />
+                </button>
+              </div>
+            </SettingRow>
+            <SettingRow
+              title="Accent color"
+              description="dohc adjusts it in each theme so labels on it stay readable."
+              modified={userSettings.appearance.accentColor !== null}
+              onReset={() => void saveAppearance({ accentColor: null })}
+              testId="settings-row-accent"
+            >
+              <ColorControl
+                label="Accent color"
+                value={userSettings.appearance.accentColor ??
+                  palette[document.documentElement.dataset.theme === "dark" ? "dark" : "light"].accent}
+                onChange={(accentColor) => void saveAppearance({ accentColor })}
+              />
+            </SettingRow>
+            <SettingRow
+              title="Your color"
+              description="How this computer shows you in chat. Collaborators see the color their computer picks."
+              modified={userSettings.appearance.yourColor !== null}
+              onReset={() => void saveAppearance({ yourColor: null })}
+              testId="settings-row-your-color"
+            >
+              <ChatAvatar name={userSettings.profile.preferredName ?? "You"} kind="human" own size="comment" />
+              <HueControl
+                label="Your color"
+                shape="person"
+                value={userSettings.appearance.yourColor}
+                onChange={(yourColor) => void saveAppearance({ yourColor })}
+              />
+            </SettingRow>
+            <SettingRow
+              title="Your agent's color"
+              description="How this computer shows your agent in chat."
+              modified={userSettings.appearance.yourAgentColor !== null}
+              onReset={() => void saveAppearance({ yourAgentColor: null })}
+              testId="settings-row-your-agent-color"
+            >
+              <ChatAvatar name={userSettings.profile.agentName ?? "Agent"} kind="agent" own size="comment" />
+              <HueControl
+                label="Your agent's color"
+                shape="agent"
+                value={userSettings.appearance.yourAgentColor}
+                onChange={(yourAgentColor) => void saveAppearance({ yourAgentColor })}
+              />
+            </SettingRow>
+            <SettingRow
+              title="Editor font"
+              modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}
+              onReset={() => void saveEditor({ fontFamily: DEFAULT_USER_SETTINGS.editor.fontFamily })}
+              testId="settings-row-editor-font"
+            >
+              <SegmentedControl
+                label="Editor font"
+                value={userSettings.editor.fontFamily}
+                options={[
+                  { value: "sans", label: "Sans" },
+                  { value: "serif", label: "Serif" },
+                  { value: "mono", label: "Mono" },
+                  // A font installed on this computer that the file names.
+                  ...((EDITOR_FONTS as readonly string[]).includes(userSettings.editor.fontFamily)
+                    ? []
+                    : [{ value: userSettings.editor.fontFamily, label: userSettings.editor.fontFamily }]),
+                ]}
+                onChange={(fontFamily) => void saveEditor({ fontFamily })}
+              />
+            </SettingRow>
+            <SettingRow
+              title="Editor text size"
+              modified={isModified(userSettings.editor.fontSize, DEFAULT_USER_SETTINGS.editor.fontSize)}
+              onReset={() => void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize })}
+              testId="settings-row-editor-size"
+            >
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-label="Smaller editor text"
+                  disabled={userSettings.editor.fontSize <= MIN_EDITOR_FONT_SIZE}
+                  onClick={() => void saveEditor({ fontSize: userSettings.editor.fontSize - 1 })}
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                >
+                  <Minus size={14} strokeWidth={1.9} />
+                </button>
+                <span className="min-w-12 text-center font-mono text-[12px] text-ink">
+                  {userSettings.editor.fontSize}px
+                </span>
+                <button
+                  type="button"
+                  aria-label="Larger editor text"
+                  disabled={userSettings.editor.fontSize >= MAX_EDITOR_FONT_SIZE}
+                  onClick={() => void saveEditor({ fontSize: userSettings.editor.fontSize + 1 })}
                   className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
                 >
                   <Plus size={14} strokeWidth={1.9} />
@@ -894,7 +1008,7 @@ export function SettingsDialog(props: {
                 type="button"
                 aria-label="Open settings file"
                 onClick={() => void openSettingsFile()}
-                className="shrink-0 rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="shrink-0 rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 Open
               </button>
@@ -908,7 +1022,7 @@ export function SettingsDialog(props: {
               <button
                 type="button"
                 onClick={() => void resetUserSettings()}
-                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 Reset user
               </button>
@@ -922,7 +1036,7 @@ export function SettingsDialog(props: {
               <button
                 type="button"
                 onClick={() => void resetWorkspaceSettings()}
-                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 Reset workspace
               </button>
@@ -992,7 +1106,7 @@ export function SettingsDialog(props: {
                     data-testid="check-updates-button"
                     disabled={updateBusy !== null || updateState?.canCheck === false}
                     onClick={() => void checkForUpdates()}
-                    className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
                   >
                     <RefreshCw size={12} aria-hidden />
                     {updateBusy === "check" ? "Checking" : "Check"}
@@ -1061,8 +1175,8 @@ export function SettingsDialog(props: {
               onClick={() => setActiveSection(section.id)}
               className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
                 activeSection === section.id
-                  ? "bg-line text-ink"
-                  : "text-muted hover:bg-panel-2 hover:text-ink"
+                  ? "bg-selected text-ink"
+                  : "text-muted hover:bg-hover hover:text-ink"
               }`}
             >
               <section.Icon size={15} aria-hidden />
@@ -1096,7 +1210,7 @@ export function SettingsDialog(props: {
             type="button"
             aria-label="Close settings"
             onClick={props.onClose}
-            className="grid size-8 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+            className="grid size-8 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
           >
             <X size={16} aria-hidden />
           </button>
@@ -1144,6 +1258,15 @@ export function SettingsDialog(props: {
             <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-subtle">
               {activeMeta.scope}
             </span>
+            {activeSection === "appearance" ? (
+              <button
+                type="button"
+                onClick={() => void openSettingsFile()}
+                className="ml-auto rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+              >
+                Open settings file
+              </button>
+            ) : null}
           </div>
           {renderSection()}
         </section>

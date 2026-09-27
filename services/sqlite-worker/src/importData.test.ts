@@ -86,6 +86,7 @@ describe('sqlite worker data imports', () => {
       .resolves.toMatchObject({ ok: false, code: 'invalid-import-schema' })
   })
 
+  // Two real on-disk materializations; under a loaded gate they take over vitest's 5 s default.
   it('keeps raw materialization usable when the encoded response fails', async () => {
     const engine = await createSqliteEngine()
     const input = {
@@ -111,7 +112,7 @@ describe('sqlite worker data imports', () => {
     } finally {
       spy.mockRestore()
     }
-  })
+  }, 15_000)
 
   it.each([
     { name: 'quoted.csv', mediaType: 'text/csv', body: 'id,note,amount\na,"one,two",4.5\nb,"line one\nline two",8' },

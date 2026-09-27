@@ -31,6 +31,7 @@ export function undoSentence(undone: Undone): string {
   const parts: string[] = [];
   if (undone.reverted > 0) parts.push(`Undid ${count(undone.reverted, "change", "changes")}.`);
   if (undone.removed > 0) parts.push(`Moved ${count(undone.removed, "added record", "added records")} to the trash.`);
+  if (undone.actionsReversed > 0) parts.push(`Undid ${count(undone.actionsReversed, "action", "actions")}.`);
   if (parts.length === 0) parts.push("Nothing was left to undo.");
   if (undone.kept > 0) parts.push(`${count(undone.kept, "added record stays", "added records stay")}.`);
   if (undone.changedSince > 0) parts.push(`${count(undone.changedSince, "field", "fields")} changed since then.`);
@@ -40,6 +41,7 @@ export function undoSentence(undone: Undone): string {
   if (undone.irreversible > 0) {
     parts.push(`The Collection's rules do not let dohc undo ${count(undone.irreversible, "change", "changes")}.`);
   }
+  if (undone.actions > 0) parts.push(`${count(undone.actions, "action", "actions")} can't be undone.`);
   return parts.join(" ");
 }
 
@@ -56,6 +58,7 @@ function valueText(value: unknown): string {
 function writeText(write: RunWrite): string {
   if (write.kind === "notice") return `Notified ${write.name}`;
   if (write.kind === "message") return `Sent a message to ${write.name}`;
+  if (write.kind === "dataset-action") return `Ran ${write.name}`;
   const record = "path" in write ? recordName(write.path) : String(write.recordId);
   switch (write.kind) {
     case "field":
@@ -81,7 +84,9 @@ function runSummary(run: Run): string {
   const added = run.writes.filter((write) => write.kind === "created" || write.kind === "dataset-created").length;
   const messages = run.writes.filter((write) => write.kind === "message").length;
   const notices = run.writes.filter((write) => write.kind === "notice").length;
+  const actions = run.writes.filter((write) => write.kind === "dataset-action").length;
   const parts = [
+    ...(actions > 0 ? [`ran ${count(actions, "action", "actions")}`] : []),
     ...(notices > 0 ? [`sent ${count(notices, "notice", "notices")}`] : []),
     ...(messages > 0 ? [`sent ${count(messages, "message", "messages")}`] : []),
     ...(fields > 0 ? [`changed ${count(fields, "field", "fields")}`] : []),
@@ -108,7 +113,8 @@ function RunRow(props: {
   const [open, setOpen] = useState(false);
   const canRetry = run.state === "failed" && !run.chainStopped && !run.undone;
   const canUndo = (run.state === "done" || run.state === "failed") && !run.undone &&
-    run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit");
+    run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit" ||
+      (write.kind === "dataset-action" && write.undo !== undefined));
   return (
     <li data-testid={`automation-run-${run.claimId}`} className="border-b border-line px-3 py-2 last:border-b-0">
       <div className="flex items-start gap-2">
@@ -131,7 +137,7 @@ function RunRow(props: {
               type="button"
               aria-expanded={open}
               onClick={() => setOpen((value) => !value)}
-              className="ml-auto rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink"
+              className="ml-auto rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
             >
               {open ? "Hide changes" : `Show ${count(run.writes.length, "change", "changes")}`}
             </button>
@@ -159,6 +165,8 @@ export function AutomationRuns(props: {
   onRetry: (target: { automationId: string; claimId: string }) => void;
   onError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onNotice: (message: string) => void;
+  /** An Undo changed records. */
+  onUndone?: () => void;
 }) {
   const { workspaceId, automationId, onError, onNotice } = props;
   // "unavailable" in a shared view: its automations run on the owner's computer.
@@ -194,8 +202,12 @@ export function AutomationRuns(props: {
       .undoCollectionAutomationRun({ workspaceId, automationId, claimId })
       .then((result) => {
         if (!scope.isCurrent(epoch)) return;
-        if (result.status === "refused") onError(result.reason, new Error(result.reason));
-        else onNotice(undoSentence(result));
+        if (result.status === "refused") {
+          onError(result.reason, new Error(result.reason));
+        } else {
+          onNotice(undoSentence(result));
+          props.onUndone?.();
+        }
       })
       .catch((error: unknown) => {
         if (scope.isCurrent(epoch)) onError("dohc could not undo this run.", error, () => undo(claimId));

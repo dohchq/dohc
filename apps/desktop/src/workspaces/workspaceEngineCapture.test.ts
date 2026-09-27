@@ -17,6 +17,7 @@ import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./wo
 import {
   DAEMON_CAPTURE_HEALTH_POLL_MS,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
+  AuthoredTextChangedError,
   MAX_SETTLED_FILE_BYTES,
   UnsupportedWorkspacePathError,
   assertGeneratedMarkdownPath,
@@ -2738,6 +2739,25 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     expect(await readFile(join(root, "output.txt"), "utf8")).toBe("Written by an agent\n");
     expect(await liveMomentAuthors(engine)).toEqual([author]);
+    await engine.stop();
+  });
+
+  it("writes an authored change only while the file is as it was read", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+    const target = join(root, "automations.yaml");
+    await writeFile(target, "version: 1\n");
+    const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+    // The loopback engine models agent authors; the daemon takes an automation's the same way.
+    const author = { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" } as const;
+
+    await expect(engine.writeAuthoredTextFile(target, "changed\n", author, { expectedContentHash: hash("something else\n") }))
+      .rejects.toBeInstanceOf(AuthoredTextChangedError);
+    expect(await readFile(target, "utf8")).toBe("version: 1\n");
+
+    await engine.writeAuthoredTextFile(target, "version: 1\nautomations: []\n", author, { expectedContentHash: hash("version: 1\n") });
+    expect(await readFile(target, "utf8")).toBe("version: 1\nautomations: []\n");
+    expect(await liveMomentAuthors(engine)).toContainEqual(author);
     await engine.stop();
   });
 

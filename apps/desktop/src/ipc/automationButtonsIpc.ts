@@ -4,15 +4,15 @@ import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import {
-  documentButtonAccess,
   noAccessReason,
   relayedButtonState,
   relayedButtonTarget,
   RUNNING_FOR_RECORD,
   sharedDatasetButtonState,
-} from "../automations/automationButtons";
+} from "@dohc/automation-executor/automation-buttons";
+import { documentButtonAccess } from "../automations/documentButtonAccess";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { AUTOMATIONS_FILE_NAME, type CollectionAutomationButton, type CollectionAutomations, type PressSettled, type PressWaitReason } from "../automations/collectionAutomations";
+import { AUTOMATIONS_FILE_NAME, type CollectionAutomationButton, type CollectionAutomations, type PressSettled, type PressWaitReason } from "@dohc/automation-executor/collection-automations";
 import {
   ListAutomationButtonsPayload,
   ListRecordButtonsPayload,
@@ -200,7 +200,7 @@ export function registerAutomationButtonsIpc<
           throw new Error(sharedDatasetButtonState(description, input.table).reason);
         }
         return await operation.state.collectionAutomations.pressDataset(
-          { datasetId: input.datasetId, table: input.table, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy },
+          { datasetId: input.datasetId, table: input.table, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy, confirmed: input.confirmed ?? [] },
           description, watch);
       });
       return pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed;

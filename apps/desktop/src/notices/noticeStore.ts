@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   isNoticeBody,
   isNoticeLine,
@@ -19,6 +20,7 @@ import {
   type NoticeKind,
   type NoticeMark,
   type NoticeReach,
+  type NoticeRecipient,
   type NoticeTarget,
   type PostNoticeRequest,
   type SyncRelayConnection,
@@ -61,16 +63,11 @@ export interface PostNoticeInput {
   // Another person's relay user id. Absent, or your own id, sends the
   // notice to yourself.
   recipientUserId?: string;
+  // Sends it to the owner of the workspace instead. From the owner's own
+  // computer that is yourself; through a share, the relay finds the owner.
+  toWorkspaceOwner?: true;
   // Ends the post before it sends or queues, as when an automation run stops.
   signal?: AbortSignal;
-}
-
-// A notice for another person that did not reach them. The message says why.
-export class NoticeNotSentError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NoticeNotSentError";
-  }
 }
 
 export interface NoticeStore {
@@ -90,6 +87,16 @@ export interface NoticeStore {
   withdraw(noticeId: string): Promise<void>;
   // Sends waiting posts and marks, then pulls changes. Never rejects.
   sync(): Promise<void>;
+  // The failure notice the signed-in person sent themselves about one run,
+  // dismissed or not, with the computer that posted it, or null. Only read,
+  // never shown.
+  sentFailure(run: { workspaceId: string; automationId: string; claimId: string }): Promise<SentFailure | null>;
+}
+
+export interface SentFailure {
+  title: string;
+  body: string;
+  originInstallId: string;
 }
 
 const kindValues = Object.keys(NOTICE_KINDS) as [NoticeKind, ...NoticeKind[]];
@@ -113,6 +120,7 @@ const Reach = z.union([
   z.object({ workspaceId: z.string().min(1), shareId: z.undefined().optional() }),
   z.object({ shareId: z.string().min(1), workspaceId: z.undefined().optional() }),
 ]);
+// Only your own posts wait in the outbox, so each names you.
 const PostRequest = z.object({
   noticeId: z.string(),
   recipientUserId: z.string().min(1),
@@ -612,7 +620,10 @@ export function createNoticeStore(deps: {
     // A session that changes while the notice is placed is read again.
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await postOnce(input.recipientUserId, content, input.signal);
+        const to: NoticeRecipient | null = input.toWorkspaceOwner
+          ? { toWorkspaceOwner: true }
+          : input.recipientUserId === undefined ? null : { recipientUserId: input.recipientUserId };
+        return await postOnce(to, content, input.signal);
       } catch (error) {
         if (!(error instanceof SessionChanged)) throw error;
         if (attempt === 3) throw new NoticeNotSentError("Your server session changed. Try again.");
@@ -620,26 +631,27 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function postOnce(recipientUserId: string | undefined, content: NoticeContent, signal?: AbortSignal): Promise<void> {
+  // `to` is null for yourself.
+  async function postOnce(to: NoticeRecipient | null, content: NoticeContent, signal?: AbortSignal): Promise<void> {
     const session = await deps.session();
     const reach = session?.reachFor(content.workspaceId) ?? null;
-    const request = (recipient: string, to: NoticeReach): PostNoticeRequest => ({
-      ...to,
+    const fields = {
       noticeId: content.noticeId,
-      recipientUserId: recipient,
       kind: content.kind,
       title: content.title,
       body: content.body,
       target: content.target,
       originInstallId: deps.installId(),
-    });
-    if (recipientUserId !== undefined && recipientUserId !== session?.account.userId) {
+    };
+    // The owner's own computer names the workspace, so its owner is you.
+    const toSomeoneElse = to?.toWorkspaceOwner ? reach?.shareId !== undefined : to !== null && to.recipientUserId !== session?.account.userId;
+    if (to !== null && toSomeoneElse) {
       if (!session || !reach) {
         throw new NoticeNotSentError(
           "Notices reach other people through a server. Sync this workspace with an up-to-date server first.",
         );
       }
-      return await postToAnotherPerson(session, request(recipientUserId, reach), signal);
+      return await postToAnotherPerson(session, { ...reach, ...to, ...fields }, signal);
     }
     const createdAtMs = nowMs();
     const queued = await locked(async () => {
@@ -659,7 +671,7 @@ export function createNoticeStore(deps: {
         const next: AccountFile = { ...file, posts: [...file.posts], marks: [...file.marks] };
         dropOldestUnsent(next);
         next.posts.push({
-          request: request(session.account.userId, reach), workspaceId: content.workspaceId, createdAtMs, sent: false,
+          request: { ...reach, ...fields, recipientUserId: session.account.userId }, workspaceId: content.workspaceId, createdAtMs, sent: false,
         });
         await saveAccount(session.account, next);
         return true;
@@ -733,6 +745,7 @@ export function createNoticeStore(deps: {
         target: row.target,
         createdAtMs: row.createdAtMs,
         readAtMs: row.readAtMs,
+        postedHere: true,
       }));
       if (account) {
         const file = await loadAccount(account);
@@ -749,6 +762,7 @@ export function createNoticeStore(deps: {
             recipientShareId: row.recipientShareId, senderKind: row.senderKind, senderLabel: row.senderLabel,
             title: row.title, body: row.body, target: row.target, createdAtMs: row.createdAtMs,
             readAtMs: readAt(row.noticeId, row.readAtMs),
+            postedHere: row.senderUserId === account.userId && row.originInstallId === deps.installId(),
           });
         }
         for (const { request, createdAtMs } of file.posts) {
@@ -759,6 +773,7 @@ export function createNoticeStore(deps: {
             senderKind: NOTICE_KINDS[request.kind].senderKind, senderLabel: null,
             title: request.title, body: request.body, target: request.target, createdAtMs,
             readAtMs: readAt(request.noticeId, null),
+            postedHere: request.originInstallId === deps.installId(),
           });
         }
       }
@@ -901,7 +916,26 @@ export function createNoticeStore(deps: {
     void sync();
   }
 
-  return { postNotice, list, mark, sync, dismissFirst, withdraw };
+  async function sentFailure(run: { workspaceId: string; automationId: string; claimId: string }): Promise<SentFailure | null> {
+    const session = await deps.session();
+    if (!session) return null;
+    const names = (kind: string, workspaceId: string | null | undefined, target: NoticeTarget | null) =>
+      kind === "automation-failed" && workspaceId === run.workspaceId &&
+      target?.automation === run.automationId && target.run === run.claimId;
+    return await locked(async () => {
+      const file = await loadAccount(session.account);
+      // An account that signed out meanwhile names no computer for this one.
+      if (!session.isCurrent()) return null;
+      const row = file.rows.find((candidate) =>
+        candidate.senderUserId === session.account.userId && names(candidate.kind, candidate.workspaceId, candidate.target));
+      if (row) return { title: row.title, body: row.body, originInstallId: row.originInstallId };
+      // Your own post, not pulled back yet.
+      const post = file.posts.find(({ request }) => names(request.kind, request.workspaceId, request.target));
+      return post ? { title: post.request.title, body: post.request.body, originInstallId: post.request.originInstallId } : null;
+    });
+  }
+
+  return { postNotice, list, mark, sync, dismissFirst, withdraw, sentFailure };
 }
 
 // Folds one page into the stored rows. A page that starts the list over

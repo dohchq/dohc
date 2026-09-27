@@ -158,6 +158,39 @@ describe("installRendererCrashRecovery", () => {
     expect(fake.reloads).toHaveLength(CRASH_LOOP_MAX_RELOADS);
   });
 
+  it("runs the crash-loop hook after cleanup, only once reloading stops", async () => {
+    let now = 0;
+    const fake = fakeWebContents();
+    const order: string[] = [];
+    const afterCrashLoop = vi.fn(() => { order.push("crash-loop"); });
+    installRendererCrashRecovery(
+      fake.contents,
+      () => (now += 1_000),
+      async () => { order.push("cleanup"); },
+      afterCrashLoop,
+    );
+
+    for (let i = 0; i < CRASH_LOOP_MAX_RELOADS; i += 1) fake.crash("crashed");
+    await vi.waitFor(() => expect(fake.reloads).toHaveLength(CRASH_LOOP_MAX_RELOADS));
+    expect(afterCrashLoop).not.toHaveBeenCalled();
+
+    fake.crash("crashed");
+    await vi.waitFor(() => expect(afterCrashLoop).toHaveBeenCalledOnce());
+    expect(order.slice(-2)).toEqual(["cleanup", "crash-loop"]);
+    expect(fake.reloads).toHaveLength(CRASH_LOOP_MAX_RELOADS);
+  });
+
+  it("skips the crash-loop hook for a window that closed", () => {
+    let now = 0;
+    const fake = fakeWebContents();
+    const afterCrashLoop = vi.fn();
+    installRendererCrashRecovery(fake.contents, () => (now += 1_000), undefined, afterCrashLoop);
+    for (let i = 0; i < CRASH_LOOP_MAX_RELOADS; i += 1) fake.crash("crashed");
+    fake.destroy();
+    fake.crash("crashed");
+    expect(afterCrashLoop).not.toHaveBeenCalled();
+  });
+
   it("never reloads a destroyed webContents", () => {
     const fake = fakeWebContents();
     installRendererCrashRecovery(fake.contents, () => 1_000);

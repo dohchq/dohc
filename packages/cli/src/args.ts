@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { CliActor } from "./protocol";
+import { documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -16,6 +16,8 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | { verb: "documentRead"; path: string }
+  | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
   | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
@@ -59,7 +61,10 @@ type CliCommandBody =
     }
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
-  | { verb: "moment"; id: string; side: "before" | "after" };
+  | { verb: "moment"; id: string; side: "before" | "after" }
+  | { verb: "automationRuns"; collectionPath: string; automation: string }
+  | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
+  | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean };
 
 export type ParsedCliCommand = ParsedCliBase & CliCommandBody;
 
@@ -183,6 +188,63 @@ const decisionFlags: readonly CliFlag[] = [
 ];
 export const DASH_RULE = "options first, then --, then text that starts with a dash";
 const stdinNote = "Use - as the body to read it from stdin.";
+
+const documentTextFlags: readonly CliFlag[] = [
+  { name: "--text", value: "markdown", text: "Use this Markdown as the body. An empty string is allowed." },
+  { name: "--agent", value: "name", text: "Record this agent name with the change." },
+];
+
+function documentWrite(input: VerbInput, verb: "documentEdit" | "documentCreate"): CliCommandBody {
+  const [path, body, ...extra] = input.operands;
+  if (!path) fail("document requires a path");
+  noExtraArgs(extra, "document");
+  const text = lastValue(input, "--text");
+  if (body !== undefined && (body !== "-" || text !== undefined)) fail("use either - for stdin or --text <markdown>");
+  if (verb === "documentEdit" && body === undefined && text === undefined) fail("document edit requires - for stdin or --text <markdown>");
+  const find = lastValue(input, "--find");
+  const agent = lastValue(input, "--agent");
+  const requestId = lastValue(input, "--request-id");
+  if (find !== undefined && !documentEditTextSchema.min(1).safeParse(find).success) fail("--find requires non-empty Markdown of at most 256 KiB");
+  if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name; use 1 to 64 letters, numbers, spaces, dots, underscores, or hyphens, starting with a letter or number");
+  if (requestId !== undefined && !requestIdSchema.safeParse(requestId).success) fail("--request-id requires 1 to 64 printable ASCII characters");
+  return { verb, path, text: text ?? "", stdin: body === "-",
+    ...(find === undefined ? {} : { find }), ...(agent === undefined ? {} : { agent }),
+    ...(requestId === undefined ? {} : { requestId }) };
+}
+
+const DOCUMENT_VERBS = {
+  read: {
+    summary: "Read the current Markdown, including edits in an open editor.",
+    operands: "<path>",
+    notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
+    parse: ({ operands }) => {
+      const [path, ...extra] = operands;
+      if (!path) fail("document read requires a path");
+      noExtraArgs(extra, "document read");
+      return { verb: "documentRead", path };
+    },
+  },
+  edit: {
+    summary: "Replace matching text or append Markdown through the live document.",
+    operands: "<path> [-]",
+    flags: [...documentTextFlags,
+      { name: "--find", value: "markdown", text: "Replace this exact, unique match. Omit to append." },
+      { name: "--request-id", value: "key", text: "Reuse this key when retrying the same edit, as with dohc_edit_document." },
+    ],
+    notes: [stdinNote, "Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8.",
+      "Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind.",
+      "Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document."],
+    parse: (input) => documentWrite(input, "documentEdit"),
+  },
+  create: {
+    summary: "Create a Markdown document without overwriting an existing file.",
+    operands: "<path> [-]",
+    flags: documentTextFlags,
+    notes: [stdinNote, "Use --text instead to supply Markdown. With neither, create an empty document.",
+      "The path must end in .md or .markdown. Frontmatter is refused."],
+    parse: (input) => documentWrite(input, "documentCreate"),
+  },
+} satisfies Record<string, CliVerbSpec>;
 
 function decisionFields(input: VerbInput): { needsDecision: boolean; options?: string[] } {
   const options = allValues(input, "--option");
@@ -389,6 +451,53 @@ const HISTORY_VERBS = {
       if (!id) fail("history show requires a change id");
       noExtraArgs(extra, "history show");
       return { verb: "moment", id, side: input.flags.has("--before") ? "before" : "after" };
+    },
+  },
+} satisfies Record<string, CliVerbSpec>;
+
+/** The Collection and automation every automation verb starts with, and one run when the verb takes one. */
+function automationOperands(input: VerbInput, verb: string, takesRun: boolean): { collectionPath: string; automation: string; run: string } {
+  const [collectionPath, automation, run = "", ...extra] = input.operands;
+  if (!collectionPath || !automation) fail(`automation ${verb} requires a Collection and an automation id`);
+  if (takesRun && !run) fail(`automation ${verb} requires a run id`);
+  noExtraArgs(takesRun ? extra : input.operands.slice(2), `automation ${verb}`);
+  return { collectionPath, automation, run };
+}
+
+const AUTOMATION_VERBS = {
+  runs: {
+    summary: "List an automation's runs on this computer, newest first.",
+    operands: "<collection> <automation>",
+    notes: ["Lists the 20 newest runs, as the Automations panel does. Each line starts with the run's ID."],
+    parse: (input) => {
+      const { collectionPath, automation } = automationOperands(input, "runs", false);
+      return { verb: "automationRuns", collectionPath, automation };
+    },
+  },
+  run: {
+    summary: "Show one run: what started it, what each step changed, and why it failed.",
+    operands: "<collection> <automation> <run>",
+    notes: [
+      "Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
+    ],
+    parse: (input) => {
+      const { collectionPath, automation, run } = automationOperands(input, "run", true);
+      return { verb: "automationRun", collectionPath, automation, run };
+    },
+  },
+  retry: {
+    summary: "Try a failed run again. It resumes after the last step that finished.",
+    operands: "<collection> <automation> <run>",
+    flags: [
+      {
+        name: "--start-over",
+        text: "Run it from the first step when the automation changed since the run failed. This can repeat changes the run already made.",
+      },
+    ],
+    notes: ["Only the computer that ran it can try a run again. Anywhere else, the command names that computer."],
+    parse: (input) => {
+      const { collectionPath, automation, run } = automationOperands(input, "retry", true);
+      return { verb: "automationRetry", collectionPath, automation, run, startOver: input.flags.has("--start-over") };
     },
   },
 } satisfies Record<string, CliVerbSpec>;
@@ -659,6 +768,12 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
+  document: {
+    summary: "Read, edit, and create live Markdown documents.",
+    notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
+      "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
+    verbs: DOCUMENT_VERBS,
+  },
   chat: {
     summary: "Read and post in Groups and threads.",
     notes: [
@@ -682,6 +797,14 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
   },
+  automation: {
+    summary: "Read an automation's runs and try a failed run again.",
+    notes: [
+      "Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml.",
+      "Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.",
+    ],
+    verbs: AUTOMATION_VERBS,
+  },
 };
 
 export const GLOBAL_FLAGS: readonly CliFlag[] = [
@@ -691,7 +814,7 @@ export const GLOBAL_FLAGS: readonly CliFlag[] = [
 ];
 
 const VALUE_FLAGS = new Set(
-  [...Object.values(CHAT_VERBS), ...Object.values(HISTORY_VERBS)].flatMap((verb: CliVerbSpec) =>
+  Object.values(CLI_COMMANDS).flatMap((command) => Object.values(command.verbs)).flatMap((verb) =>
     (verb.flags ?? []).filter((flag) => flag.value).map((flag) => flag.name),
   ),
 );
@@ -749,7 +872,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = commandName === "document" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

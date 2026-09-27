@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
-import type { CollectionAutomations } from "../automations/collectionAutomations";
+import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import { createPressWindows, registerAutomationButtonsIpc } from "./automationButtonsIpc";
 import { CHANNELS } from "./channels";
 
@@ -248,7 +248,7 @@ describe("pressing a button", () => {
     await expect(f.pressDataset({ recordId: "12" })).resolves.toEqual({ busy: false, claimId, settled: null });
     expect(f.describeDataset).toHaveBeenCalledWith(f.window, WORKSPACE_ID, id(1));
     expect(f.executor.pressDataset).toHaveBeenCalledWith(
-      { datasetId: id(1), table: "Invoices", field: "Mark paid", recordId: "12", pressId: PRESS_ID, pressedBy: "user-main" },
+      { datasetId: id(1), table: "Invoices", field: "Mark paid", recordId: "12", pressId: PRESS_ID, pressedBy: "user-main", confirmed: [] },
       expect.objectContaining({ operations: [expect.objectContaining({ name: "list" }), expect.objectContaining({ name: "add" })] }),
       expect.any(Function),
     );

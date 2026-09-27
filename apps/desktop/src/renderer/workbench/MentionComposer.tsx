@@ -314,7 +314,7 @@ export function MentionComposer(props: {
     >
       {isPost && props.authorName ? (
         <div className={`flex items-center gap-2.5 ${expanded ? "mb-2" : ""}`}>
-          <ChatAvatar name={props.authorName} kind={props.authorKind ?? "human"} />
+          <ChatAvatar name={props.authorName} kind={props.authorKind ?? "human"} own />
           {expanded ? (
             <span className="text-[14px] font-semibold text-ink">{props.authorName}</span>
           ) : (
@@ -358,7 +358,7 @@ export function MentionComposer(props: {
                   }}
                   onMouseEnter={() => setHighlight(0)}
                   className={`flex w-full flex-col px-2 py-1 text-left ${
-                    boundedHighlight === 0 ? "bg-line/50 text-ink" : "text-muted hover:bg-line/30"
+                    boundedHighlight === 0 ? "bg-selected text-ink" : "text-muted hover:bg-hover"
                   }`}
                 >
                   <span className="font-medium text-ink">Whole file</span>
@@ -384,7 +384,7 @@ export function MentionComposer(props: {
                       }}
                       onMouseEnter={() => setHighlight(index)}
                       className={`flex w-full items-baseline gap-2 px-2 py-1 text-left ${
-                        boundedHighlight === index ? "bg-line/50 text-ink" : "text-muted hover:bg-line/30"
+                        boundedHighlight === index ? "bg-selected text-ink" : "text-muted hover:bg-hover"
                       }`}
                       style={{ paddingLeft: `${8 + (heading.level - 1) * 7}px` }}
                     >
@@ -414,7 +414,7 @@ export function MentionComposer(props: {
                 }}
                 onMouseEnter={() => setHighlight(index)}
                 className={`flex w-full items-baseline gap-2 px-2 py-1 text-left ${
-                  index === boundedHighlight ? "bg-line/50 text-ink" : "text-muted hover:bg-line/30"
+                  index === boundedHighlight ? "bg-selected text-ink" : "text-muted hover:bg-hover"
                 }`}
               >
                 <span className="font-medium text-ink">@{candidate.handle}</span>
@@ -441,7 +441,7 @@ export function MentionComposer(props: {
                   }}
                   onMouseEnter={() => setHighlight(index)}
                   className={`flex w-full flex-col px-2 py-1 text-left ${
-                    index === boundedHighlight ? "bg-line/50 text-ink" : "text-muted hover:bg-line/30"
+                    index === boundedHighlight ? "bg-selected text-ink" : "text-muted hover:bg-hover"
                   }`}
                 >
                   <span className="font-medium text-ink">{candidate.label}</span>
@@ -517,7 +517,7 @@ export function MentionComposer(props: {
                 event.preventDefault();
                 insertAtCaret("@");
               }}
-              className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-40"
+              className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
             >
               <AtSign size={14} strokeWidth={1.9} aria-hidden />
               Mention
@@ -534,7 +534,7 @@ export function MentionComposer(props: {
                   highlightFileOnOpen.current = true;
                   insertAtCaret("@");
                 }}
-                className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-40"
+                className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
               >
                 <FileText size={14} strokeWidth={1.9} aria-hidden />
                 File
@@ -580,7 +580,7 @@ export function MentionComposer(props: {
               event.preventDefault();
               insertAtCaret("@");
             }}
-            className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-line/40 hover:text-ink disabled:opacity-40"
+            className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40"
           >
             <span aria-hidden className="text-[13px] font-semibold">
               @
@@ -598,7 +598,7 @@ export function MentionComposer(props: {
                 highlightFileOnOpen.current = true;
                 insertAtCaret("@");
               }}
-              className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-line/40 hover:text-ink disabled:opacity-40"
+              className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40"
             >
               <FileText size={14} strokeWidth={1.9} aria-hidden />
             </button>

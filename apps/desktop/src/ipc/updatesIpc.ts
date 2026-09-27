@@ -3,39 +3,23 @@ import { CHANNELS } from "./channels";
 import type { AutoUpdateController } from "../updates/electronUpdater";
 import type { createExitRounds, createQuitGuard } from "../quitGuard";
 
-export function registerUpdatesIpcHandlers<Event, Participant = unknown>(dependencies: {
-  registerHandler(channel: string, handler: (event: Event) => unknown): void;
-  assertTrustedSender(event: Event): void;
+/**
+ * Restarts into a downloaded update once every workspace window agrees. The
+ * renderer's Restart and main's offer after a failure both go through it.
+ */
+export function createUpdateInstall<Participant = unknown>(dependencies: {
   currentUpdateState(): UpdateStateEvent;
-  readonly autoUpdateController: Pick<AutoUpdateController, "checkForUpdates" | "installUpdate"> | null;
+  readonly autoUpdateController: Pick<AutoUpdateController, "installUpdate"> | null;
   exitRounds: Pick<ReturnType<typeof createExitRounds<Participant>>, "begin" | "retract">;
   quitGuard: Pick<ReturnType<typeof createQuitGuard>, "approve" | "revoke">;
-}): void {
-  const { registerHandler, assertTrustedSender, currentUpdateState, exitRounds, quitGuard } = dependencies;
-
-  registerHandler(CHANNELS.getUpdateState, (event) => {
-    assertTrustedSender(event);
-    return currentUpdateState();
-  });
-
-  registerHandler(CHANNELS.checkForUpdates, async (event) => {
-    assertTrustedSender(event);
-    if (!dependencies.autoUpdateController) {
-      return UpdateCheckResult.parse({
-        checked: false,
-        state: currentUpdateState(),
-      });
-    }
-    return UpdateCheckResult.parse(await dependencies.autoUpdateController.checkForUpdates());
-  });
-
+}): () => Promise<UpdateActionResult> {
+  const { currentUpdateState, exitRounds, quitGuard } = dependencies;
   // One install at a time. A second request while the round is open joins
   // it and shares its answer, so two windows asking to restart never race
   // two stagings.
   let staging: Promise<UpdateActionResult> | null = null;
 
-  registerHandler(CHANNELS.installUpdate, async (event) => {
-    assertTrustedSender(event);
+  return async () => {
     const controller = dependencies.autoUpdateController;
     if (!controller) {
       return UpdateActionResult.parse({
@@ -82,5 +66,36 @@ export function registerUpdatesIpcHandlers<Event, Participant = unknown>(depende
     };
     void install.then(release, release);
     return install;
+  };
+}
+
+export function registerUpdatesIpcHandlers<Event>(dependencies: {
+  registerHandler(channel: string, handler: (event: Event) => unknown): void;
+  assertTrustedSender(event: Event): void;
+  currentUpdateState(): UpdateStateEvent;
+  readonly autoUpdateController: Pick<AutoUpdateController, "checkForUpdates"> | null;
+  installUpdate(): Promise<UpdateActionResult>;
+}): void {
+  const { registerHandler, assertTrustedSender, currentUpdateState, installUpdate } = dependencies;
+
+  registerHandler(CHANNELS.getUpdateState, (event) => {
+    assertTrustedSender(event);
+    return currentUpdateState();
+  });
+
+  registerHandler(CHANNELS.checkForUpdates, async (event) => {
+    assertTrustedSender(event);
+    if (!dependencies.autoUpdateController) {
+      return UpdateCheckResult.parse({
+        checked: false,
+        state: currentUpdateState(),
+      });
+    }
+    return UpdateCheckResult.parse(await dependencies.autoUpdateController.checkForUpdates());
+  });
+
+  registerHandler(CHANNELS.installUpdate, async (event) => {
+    assertTrustedSender(event);
+    return await installUpdate();
   });
 }

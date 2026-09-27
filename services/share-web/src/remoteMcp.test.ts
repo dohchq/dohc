@@ -1,6 +1,7 @@
 import {afterEach, expect, it} from "vitest";
 import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/client";
 import {createShareWebApplication} from "./server";
+import {asRecord} from "@dohc/workspace-core/records";
 
 const origin = "https://share.example.test";
 const secret = "A".repeat(43);
@@ -20,7 +21,7 @@ const logPage = {ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, ops
 ]};
 servedLog = logPage;
 
-function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text") {
+function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text", paths: string[] = []) {
   const calls: Request[] = [];
   let revoked = false;
   const app = createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
@@ -36,7 +37,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       const path = new URL(request.url).pathname;
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
       if (revoked) return new Response(null, {status: 401});
-      if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId}});
+      if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
       if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
       if (path === "/sync/link/log") return Response.json(servedLog);
       if (path === `/sync/link/blobs/${withdrawn}`) return new Response(null, {status: 404});
@@ -213,4 +214,38 @@ it("refuses the log after the link is revoked", async () => {
   f.revoke();
   await expect(client.callTool({name: "dohc_list_changes", arguments: {}})).rejects.toThrow();
   expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/log")).toBe(false);
+});
+
+it.each([
+  ["view", false, null],
+  ["comment", false, null],
+  ["edit", true, null],
+  ["edit", true, "pinned"],
+] as const)("summarizes link status for %s, live=%s, version=%s without losing metadata", async (access, live, versionId) => {
+  const f = fixture(access, live, versionId, "text", ["docs", "plan.md"]);
+  const client = await f.connect(await f.exchange());
+  const result = await client.callTool({name: "dohc_share_status", arguments: {}});
+  expect(result.structuredContent).toMatchObject({ok: true, access,
+    effectiveSelector: {versionId, paths: ["docs", "plan.md"], access}, lastSettledKnown: true, lastSettledAtMs: 123});
+  const summary = asRecord(result.structuredContent)?.summary;
+  expect(summary).toEqual(expect.any(String));
+  expect(summary).toContain(access === "view" ? "You can read files and comments." :
+    access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
+  expect(summary).toContain("Included paths: docs, plan.md.");
+  expect(summary).toContain("this share's comments");
+  expect(summary).toContain("retained history of files that remain in this share");
+  expect(summary).toContain("Deleted files and files moved out lose their readable history.");
+  if (access !== "edit") expect(summary).toContain(access === "view" ? "does not let you comment or edit" : "does not let you edit files");
+  if (versionId !== null) {
+    expect(summary).toContain("pinned version");
+    expect(summary).toContain("Editing is unavailable on this link.");
+  } else if (access === "edit") expect(summary).toContain("Editing pauses while the workspace is offline");
+  expect(result.content).toContainEqual({type: "text", text: JSON.stringify(result.structuredContent)});
+  expect(f.calls.every(call => ["/sync/link-exchange", "/sync/link/share"].includes(new URL(call.url).pathname))).toBe(true);
+});
+
+it("describes an unfiltered link without claiming access to private workspace data", async () => {
+  const f = fixture("view"); const client = await f.connect(await f.exchange());
+  const result = await client.callTool({name: "dohc_share_status", arguments: {}});
+  expect(asRecord(result.structuredContent)?.summary).toContain("Included: shareable workspace files and this share's comments.");
 });

@@ -7,14 +7,15 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { bridgeAutomationClaimsToExecutors } from "../workspaces/automationClaimsBridge";
 import { onWorkspaceCaptureSettled } from "../workspaces/captureActivityBridge";
-import { setCollectionRecordFields, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
+import { collectionRecordWrites, setCollectionRecordFields, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import { createTestScratch } from "../workspaces/testTemp";
+import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { waitForPathMoments } from "../workspaces/waitForPathMoments";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
-import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import { localIsoTime } from "./automationPlan";
-import { createAutomationRunStore } from "./automationRunStore";
-import { CollectionAutomations, type CollectionAutomationEngine } from "./collectionAutomations";
+import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import { localIsoTime } from "@dohc/automation-executor/automation-plan";
+import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { CollectionAutomations, type CollectionAutomationEngine } from "@dohc/automation-executor/collection-automations";
 
 // A person's change claims an automation in the real engine, and the
 // executor runs it: the claim, its field facts, the drain, the formula, and
@@ -73,7 +74,7 @@ async function harness(automations: string, run: (context: {
     requestHost: async () => undefined,
     readMessageBody: async () => null,
     postNotice: async () => { throw new Error("No notices in this test."); },
-    withRecordWrites: async (signal, work) => await work(editContext(signal)),
+    withRecordWrites: async (signal, work) => await work(collectionRecordWrites(editContext(signal))),
     readText: async (path) => {
       try {
         const text = await readFile(join(root, path), "utf8");
@@ -87,8 +88,11 @@ async function harness(automations: string, run: (context: {
     roster: async () => ({ kind: "owner", ownerUserId: null, grants: [] }),
     cachedRoster: async () => ({ kind: "owner", ownerUserId: null, grants: [] }),
     evaluator,
-    store: createAutomationRunStore(root),
-    onFailuresChanged: () => undefined,
+    store: createAutomationRunStore(root, resolveWorkspaceMetadataDir),
+    onRunsChanged: () => undefined,
+    reportFailure: async () => undefined,
+    withdrawFailure: async () => undefined,
+    onSwitchedOff: () => undefined,
     onHoldsChanged: () => undefined,
     onAutomationsChanged: () => undefined,
     personName: (userId) => userId,

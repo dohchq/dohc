@@ -22,6 +22,9 @@ For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of openi
 
 Read [AGENTS.md](AGENTS.md) for product boundaries and development rules. Follow the [setup and verification guide](docs/how-to/verify-agent-work.md).
 
+Cloud CI is disabled by default. A maintainer verifies fork PRs locally before merging.
+Enabling Blacksmith adds automatic checks for ready branches in this repository; it does not enable checks for forks.
+
 - Keep each pull request focused on one change. Explain the problem and the fix.
 - Add a test for any behavior change. Tests must wait for the expected condition, not a fixed delay.
 - Run the relevant checks and include their commands and results.

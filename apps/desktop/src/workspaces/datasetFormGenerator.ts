@@ -1,4 +1,5 @@
-import { DATASET_MAX_FIELDS, datasetColumnFields, parseDatasetRevision, resolveAppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { DATASET_MAX_FIELDS, datasetColumnFields, parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { generateDatasetFormFrontend, type DatasetFormField } from "./datasetFormFrontend";

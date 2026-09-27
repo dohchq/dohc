@@ -25,6 +25,8 @@ export interface PersistentOpenInput {
   signal?: AbortSignal;
 }
 export interface PersistentPrepareInput {
+  /** Per-operation table access, bounded by the opened Collection. */
+  tables?: string[];
   expected: DatasetCursor;
   source: string;
   operation: string;

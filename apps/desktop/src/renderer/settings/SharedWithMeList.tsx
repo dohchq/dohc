@@ -435,7 +435,7 @@ export function SharedWithMeList(props: {
                 // mounted: the pin would have nothing to enforce.
                 disabled={busyShareId === share.shareId || !share.selector}
                 onClick={() => void mount(share)}
-                className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 {busyShareId === share.shareId ? "Adding…" : "Add to workspace"}
               </button>

@@ -59,6 +59,9 @@ describe("initial dataset source", { timeout: 60_000 }, () => {
     expect(JSON.parse(after.files["data/registrations/dataset.json"]!).tables[0].fields.at(-1)).toEqual(button);
     expect(hasGeneratedDatasetOperations(before.files[plain.operationsPath]!, after.definition)).toBe(true);
     expect(hasGeneratedDatasetOperations(before.files[plain.operationsPath]! + "\n// edited", after.definition)).toBe(false);
+    // Rules that name an action are someone's own, whatever the source's text.
+    const withAction = { ...after.definition, operations: [...after.definition.operations, { ...after.definition.operations[0]!, operationId: id(31), name: "settle", kind: "action" as const, readOnly: false }] };
+    expect(hasGeneratedDatasetOperations(before.files[plain.operationsPath]!, withAction)).toBe(false);
   });
 
   it("refuses a create operation that cannot fill a private required field", () => {
@@ -84,10 +87,22 @@ describe("initial dataset source", { timeout: 60_000 }, () => {
     expect((await app.call("read", {})).result).toMatchObject({ rows: [] });
   });
 
+  it("lets an automation use generated operations under its own caller", async () => {
+    const definition = fixture();
+    definition.operations.find(operation => operation.name === "read")!.access = "owner";
+    const app = await runtime(definition);
+    const automation = { kind: "automation", automationId: "collection:registrations#approve" };
+    const created = (await app.call("submit", { values: { [id(4)]: "Alice" } }, automation)).result as { id: string };
+    await app.call("edit", { id: created.id, expectedVersion: 1, values: { [id(5)]: "Approved" } }, automation);
+    expect((await app.call("read", {}, automation)).result).toMatchObject({ rows: [{ version: 2, values: { [id(5)]: "Approved" } }] });
+    await expect(app.call("read", {}, { ...link, approvedRead: id(21) })).rejects.toThrow("do not have access");
+  });
+
   it("derives access from the host caller and never filters or sorts hidden fields", async () => {
     const app = await runtime();
     await app.call("submit", { values: { [id(4)]: "Alice" } }, link);
     await expect(app.call("read", {}, link)).rejects.toThrow("do not have access");
+    expect((await app.call("read", {}, { ...link, approvedRead: id(21) })).result).toMatchObject({ rows: [expect.objectContaining({ values: expect.objectContaining({ [id(4)]: "Alice" }) })] });
     await expect(app.call("read", {}, { kind: "named", userId: "reader", grantId: "g", access: "edit", helper: false })).rejects.toThrow("do not have access");
     expect((await app.call("read", {}, { kind: "named", userId: "helper", grantId: "g", access: "view", helper: true })).result).toMatchObject({ rows: [{ values: { [id(4)]: "Alice" } }] });
     await expect(app.call("public", { filters: [{ fieldId: id(5), value: "Pending" }] }, link)).rejects.toThrow("Check the fields");
@@ -176,4 +191,19 @@ describe("initial dataset source", { timeout: 60_000 }, () => {
     await app.call("edit", { id: row.id, expectedVersion: 1, values });
     expect((await app.call("read", { search: "match", filters: [{ fieldId: fields[1].fieldId, value: "match" }] })).result).toMatchObject({ rows: [{ id: row.id, version: 2 }] });
   });
+});
+
+it("marks only keys supplied by every generated create operation", () => {
+  const value = fixture();
+  const generated = generateDatasetSources(value);
+  expect(datasetColumnFields(generated.definition.tables[0]!)[0]!.generated).toBe("record-id");
+  expect(datasetColumnFields(value.tables[0]!)[0]!.generated).toBeUndefined();
+  const supplied = structuredClone(value);
+  supplied.operations[0]!.fieldIds.push(id(3));
+  expect(datasetColumnFields(generateDatasetSources(supplied).definition.tables[0]!)[0]!.generated).toBeUndefined();
+  const mixed = structuredClone(value);
+  mixed.operations.push({ ...supplied.operations[0]!, operationId: id(40), name: "import" });
+  expect(datasetColumnFields(generateDatasetSources(mixed).definition.tables[0]!)[0]!.generated).toBeUndefined();
+  const readOnly = { ...value, operations: value.operations.filter(operation => operation.kind === "read") };
+  expect(datasetColumnFields(generateDatasetSources(readOnly).definition.tables[0]!)[0]!.generated).toBeUndefined();
 });

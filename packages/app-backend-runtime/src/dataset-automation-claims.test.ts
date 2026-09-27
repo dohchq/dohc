@@ -9,7 +9,8 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { createDatasetJournal, type DatasetScope, type JournalDb } from "./journal.ts";
 import { decodeChangeset } from "./dataset-change-facts.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
-import { createDatasetHost } from "./dataset-host.ts";
+import { createDatasetHost, type DatasetAuthority } from "./dataset-host.ts";
+import type { JsonValue } from "./protocol.ts";
 import {
   createDatasetAutomationClaims,
   DATASET_AUTOMATION_ATTRIBUTED_REVISIONS,
@@ -591,11 +592,13 @@ const hostDefinition: DatasetDefinition = {
     { operationId: READ, name: "read", label: "Read", tableId: ITEMS, kind: "read", access: "owner", readOnly: true, fieldIds: [id(13), id(14)] },
   ],
 };
-type Context = "owner" | "visitor" | { automationId: string; depth: number; visitor?: true };
+// A context names the authority resolveAuthority returns: the owner, a link
+// visitor, an automation at a depth, or an exact authority to probe the host with.
+type Context = "owner" | "visitor" | { automationId: string; depth: number; visitor?: true } | { authority: DatasetAuthority };
 
 const hostSchema = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);";
-async function host(operationSource = hostSource) {
-  const revision = describeDatasetRevision({ definition: hostDefinition, revision: 1, schemaSql: hostSchema, operationSource });
+async function host(operationSource = hostSource, definition = hostDefinition) {
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: hostSchema, operationSource });
   const directory = mkdtempSync(join(tmpdir(), "dohc-automation-host-"));
   const db = new DatabaseSync(join(directory, "host.sqlite")); db.exec("PRAGMA journal_mode=WAL;");
   const transaction = transactions(db);
@@ -612,8 +615,9 @@ async function host(operationSource = hostSource) {
     resolveAuthority(context, request) {
       if (context === "owner") return { caller: { kind: "owner", userId: "owner" }, principalKey: "owner" };
       if (context === "visitor") return { caller: visitor, principalKey: "visitor", ...(request.access.kind === "app" ? { appId: request.access.appId } : {}) };
-      return { caller: context.visitor ? visitor : { kind: "owner", userId: "owner" }, principalKey: `automation:${context.automationId}`,
-        automation: { automationId: context.automationId, depth: context.depth } };
+      if ("authority" in context) return context.authority;
+      return { caller: context.visitor ? visitor : { kind: "automation", automationId: context.automationId }, principalKey: `automation:${context.automationId}`,
+        chainDepth: context.depth, ...(request.access.kind === "app" ? { appId: request.access.appId } : {}) };
     } });
   let current = create();
   await current.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql: hostSchema, operationSource });
@@ -694,4 +698,76 @@ it("takes an automation's identity from its context, and grants it no owner admi
   await expect(f.invoke({ automationId: "collection:signups#a", depth: 5 }, CREATE, "step-3")).rejects.toThrow("You do not have access to this Collection.");
   expect(() => f.host.lifecycle({ automationId: "collection:signups#a", depth: 1 }, scope)).toThrow("You do not have access to this Collection.");
   expect(f.storage.bytes).toBe(retained(f.db));
+});
+
+it("shows operation code an automation, not the owner, and lets owner-only code refuse it", async () => {
+  const f = await host(`globalThis.operations={
+    create(ctx,input){if(ctx.caller.kind!=='owner')ctx.refuse('forbidden','Owner only.');ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.value]);return {id:ctx.requestId};},
+    read(ctx){return ctx.caller;}
+  };`);
+  const automation = { automationId: "collection:signups#a", depth: 1 };
+  // The owner's read operation runs for the automation with no data grant, and its code sees who asked.
+  expect(await f.invoke(automation, READ, "who")).toMatchObject({ result: { kind: "automation", automationId: "collection:signups#a" } });
+  await expect(f.invoke(automation, CREATE, "refused")).rejects.toMatchObject({ refusal: { code: "forbidden" } });
+  expect(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_events").get()).toEqual({ count: 0 });
+  await f.invoke("owner", CREATE, "by-hand");
+  expect(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_events").get()).toEqual({ count: 1 });
+});
+
+it("refuses an automation through an app, and a chain depth that is missing, out of range, or on another caller", async () => {
+  const f = await host();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: { kind: "dataset", datasetId: scope.datasetId, revision: 1, revisionSha256: f.revision.revisionSha256, operationIds: [CREATE] } });
+  // The binding admits a link visitor, so only the automation guard refuses the automation.
+  expect(await f.invoke("visitor", CREATE, "visitor", "form")).toMatchObject({ replayed: false });
+  await expect(f.invoke({ automationId: "collection:signups#a", depth: 1 }, CREATE, "as-app", "form")).rejects.toThrow("You do not have access to this Collection.");
+  const automation = { kind: "automation" as const, automationId: "collection:signups#a" };
+  const refused: DatasetAuthority[] = [
+    { caller: automation, principalKey: "automation" },
+    { caller: automation, principalKey: "automation", chainDepth: 0 },
+    { caller: automation, principalKey: "automation", chainDepth: 1.5 },
+    { caller: { kind: "owner", userId: "owner" }, principalKey: "owner", chainDepth: 1 },
+    { caller: { kind: "named", userId: "ana", grantId: "grant", access: "edit", helper: true }, principalKey: "ana", chainDepth: 1 },
+  ];
+  for (const [index, authority] of refused.entries()) {
+    await expect(f.invoke({ authority }, CREATE, `depth-${index}`)).rejects.toThrow("You do not have access to this Collection.");
+  }
+  // Owner administration refuses it at every depth it may write at.
+  const context = { automationId: "collection:signups#a", depth: 1 };
+  expect(() => f.host.permissions(context, scope)).toThrow("You do not have access to this Collection.");
+  expect(() => f.host.approvedArtifacts(context, scope)).toThrow("You do not have access to this Collection.");
+  expect(() => f.host.setBinding(context, { ...scope, appId: "other", binding: null })).toThrow("You do not have access to this Collection.");
+});
+
+it("replays a receipt an automation wrote when the host still called it the owner", async () => {
+  const f = await host();
+  // Before the automation caller, an automation's authority was the owner caller under its own principal key.
+  const before: Context = { authority: { caller: { kind: "owner", userId: "owner" }, principalKey: "automation:collection:signups#a" } };
+  expect(await f.invoke(before, CREATE, "step-1")).toMatchObject({ replayed: false });
+  expect(await f.invoke({ automationId: "collection:signups#a", depth: 1 }, CREATE, "step-1")).toMatchObject({ replayed: true });
+  expect(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_events").get()).toEqual({ count: 1 });
+});
+
+it("commits a reversible action only when it returns a bounded undo, and keeps no receipt for one it refuses", async () => {
+  const SETTLE = id(20);
+  const settle = { operationId: SETTLE, name: "settle", label: "Settle", tableId: ITEMS, kind: "action" as const, access: "owner" as const, readOnly: false, fieldIds: [id(14)], reversedBy: "settle" };
+  const f = await host(`globalThis.operations={
+    create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.value]);return {id:ctx.requestId};},
+    read(ctx){return ctx.db.query('SELECT id,value FROM items ORDER BY id');},
+    settle(ctx,input){
+      ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,'settled']);
+      if(input.shape==='none')return {id:ctx.requestId};
+      if(input.shape==='large')return {undo:'x'.repeat(20000)};
+      return {undo:{id:ctx.requestId}};
+    }
+  };`, { ...hostDefinition, operations: [...hostDefinition.operations, settle] });
+  const call = (input: JsonValue, idempotencyKey: string) => f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: f.revision.revisionSha256, operationId: SETTLE, input, idempotencyKey });
+  const events = () => f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_events").get();
+  for (const [shape, key] of [["none", "k-none"], ["large", "k-large"]] as const) {
+    await expect(call({ shape }, key)).rejects.toMatchObject({ refusal: { code: "undo_missing", message: "Settle is reversed by settle, so it must return undo: the input settle takes to reverse it, at most 16 KB." } });
+  }
+  expect(events()).toEqual({ count: 0 });
+  expect(await f.invoke("owner", READ, "read-1")).toMatchObject({ result: [] });
+  // The same key runs again once the action returns what it must: nothing was kept for it.
+  expect(await call({ shape: "ok" }, "k-none")).toMatchObject({ replayed: false, result: { undo: { id: expect.any(String) } } });
+  expect(events()).toEqual({ count: 1 });
 });

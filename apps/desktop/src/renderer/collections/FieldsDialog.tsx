@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { CollectionSchema } from "@dohc/workspace-contracts";
-import type { AutomationButtonState } from "../../automations/automationButtons";
+import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { Overlay } from "../Overlay";
 import { PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import {
@@ -161,7 +161,7 @@ export function FieldsDialog(props: {
                 {field.type === "button" && props.onChooseButtonAutomation &&
                   props.buttonStates?.get(field.name)?.kind === "no-automation" ? (
                   <SecondaryButton
-                    aria-label={`Choose what ${field.name} does`}
+                    aria-label={`Choose what it does: ${field.name}`}
                     disabled={pending}
                     onClick={() => props.onChooseButtonAutomation?.(field.name)}
                   >

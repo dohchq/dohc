@@ -10,8 +10,9 @@ use dohc_engine_storage::{NoFaults, put_binary_blob};
 use dohc_engine_testkit::{ScratchDir, open_store};
 use serde_json::json;
 
+// Fields drop in order, so the scratch directory comes last: its guard
+// removes the directory only after the store has closed the database.
 struct Fixture {
-    _scratch: ScratchDir,
     path: std::path::PathBuf,
     store: EngineStore,
     _owner: ApplicationOwner,
@@ -19,6 +20,7 @@ struct Fixture {
     binding: LiveObjectBinding,
     input: LiveApplicationBootstrap,
     bytes: Vec<u8>,
+    _scratch: ScratchDir,
 }
 
 fn fixture(replicates: bool) -> Fixture {
@@ -363,6 +365,18 @@ fn first_push_exports_native_history_after_actual_contact() {
     bootstrap(&mut f, false).unwrap();
     accept_enrollment_event(&mut f, 1);
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    client
+        .claim_workspace(
+            &mut f.store,
+            crate::ClaimRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+            },
+            None,
+            &NoFaults,
+        )
+        .unwrap();
     let outcome = client
         .push_workspace(
             &mut f.store,
@@ -501,6 +515,18 @@ fn origin_recovery_keeps_pending_live_exports_publishable() {
     assert_eq!(cursor.cursor, 0);
     assert!(cursor.bootstrap_complete);
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    client
+        .claim_workspace(
+            &mut f.store,
+            crate::ClaimRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+            },
+            None,
+            &NoFaults,
+        )
+        .unwrap();
     client
         .push_workspace(
             &mut f.store,

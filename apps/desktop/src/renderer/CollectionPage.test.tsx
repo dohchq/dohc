@@ -19,7 +19,7 @@ import type {
   QueryCollectionRecordsResult,
   WorkspaceActivityEvent,
 } from "../ipc/bridgeContract";
-import type { AutomationButtonState } from "../automations/automationButtons";
+import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { CollectionPage, DRAIN_RECORD_LIMIT, type CollectionPageProps } from "./CollectionPage";
 import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import {
@@ -280,7 +280,6 @@ function pageWithHost(
     onActiveViewChange?: (viewName: string | null) => void;
     onError?: CollectionPageProps["onError"];
     onNotice?: CollectionPageProps["onNotice"];
-    onChooseButtonAutomation?: CollectionPageProps["onChooseButtonAutomation"];
   },
 ) {
   return (
@@ -295,7 +294,6 @@ function pageWithHost(
         {...SHELL_PROPS}
         onError={view?.onError ?? SHELL_PROPS.onError}
         onNotice={view?.onNotice ?? SHELL_PROPS.onNotice}
-        onChooseButtonAutomation={view?.onChooseButtonAutomation}
       />
       <CollectionFieldWriteHost />
     </>
@@ -361,7 +359,7 @@ describe("CollectionPage", () => {
     ] };
     bridge.listCollectionAutomations.mockResolvedValue(automations as never);
     Object.assign(bridge, {
-      onAutomationFailuresChanged: () => () => undefined,
+      onAutomationRunsChanged: () => () => undefined,
       onAutomationHoldsChanged: () => () => undefined,
     });
     renderPage(bridge);
@@ -402,7 +400,7 @@ describe("CollectionPage", () => {
         cannotRun: null, reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
       }] })),
       listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [] })),
-      onAutomationFailuresChanged: () => () => undefined,
+      onAutomationRunsChanged: () => () => undefined,
       onAutomationHoldsChanged: () => () => undefined,
     });
     vi.stubGlobal("dohcDesktop", bridge);
@@ -2111,26 +2109,26 @@ describe("Button fields", () => {
     await pressing;
   });
 
-  it("offers Button in Fields, and Choose what it does for a button nothing uses", async () => {
-    const bridge = buttonsWith();
-    vi.stubGlobal("dohcDesktop", bridge);
-    const choose = vi.fn();
-    render(pageWithHost(undefined, undefined, { onChooseButtonAutomation: choose }));
-    fireEvent.click(await screen.findByTestId("collection-fields-button"));
-    const dialog = await screen.findByTestId("collection-fields-dialog");
-    expect(within(dialog).getByRole("option", { name: "Button" })).toBeTruthy();
-    expect(within(dialog).queryByRole("button", { name: "Choose what Mark paid does" })).toBeNull();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Choose what Archive does" }));
-    expect(choose).toHaveBeenCalledWith("Archive");
-  });
-
-  it("offers no builder when the shell has none", async () => {
-    const bridge = buttonsWith();
+  it("offers Button in Fields, and Choose what it does opens the builder on a button nothing uses", async () => {
+    const bridge = Object.assign(buttonsWith(), {
+      onAutomationRunsChanged: () => () => undefined,
+      onAutomationHoldsChanged: () => () => undefined,
+      listAutomationTargets: async () => ({ collections: [] }),
+      checkCollectionAutomation: async () => ({ diagnostics: [], formulaProblems: [] }),
+      readScheduleHost: async () => ({ kind: "this-computer" }),
+      onScheduleHostChanged: () => () => undefined,
+    });
     vi.stubGlobal("dohcDesktop", bridge);
     render(pageWithHost());
     fireEvent.click(await screen.findByTestId("collection-fields-button"));
     const dialog = await screen.findByTestId("collection-fields-dialog");
-    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalled());
-    expect(within(dialog).queryByText("Choose what it does")).toBeNull();
+    expect(within(dialog).getByRole("option", { name: "Button" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Choose what it does: Mark paid" })).toBeNull();
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Choose what it does: Archive" }));
+    // The Fields dialog closes, and the ⚡ panel opens its builder with the button as the trigger.
+    await waitFor(() => expect(screen.queryByTestId("collection-fields-dialog")).toBeNull());
+    const panel = await screen.findByTestId("collection-automations-panel");
+    expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Archive");
+    expect(within(panel).getByRole("combobox", { name: "Trigger" }).textContent).toContain("When someone clicks Archive");
   });
 });

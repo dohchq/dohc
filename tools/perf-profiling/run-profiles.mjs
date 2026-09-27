@@ -378,7 +378,7 @@ async function main() {
     source: {
       gitCommit: await capture("git", ["rev-parse", "HEAD"]),
       gitDirty: gitStatus.length > 0,
-      mainBundleSha256: await sha256File(join(desktopRoot, "dist", "main", "main.js")),
+      mainBundleSha256: await sha256File(join(desktopRoot, "dist", "main", "app.js")),
       rendererTreeSha256: await sha256Tree(join(desktopRoot, "dist", "renderer")),
       engineSha256: await sha256File(stagedEngine),
       fixtureManifestSha256: await sha256File(join(fixtures, "seed-manifest.json")),

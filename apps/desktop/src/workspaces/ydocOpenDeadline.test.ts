@@ -115,11 +115,9 @@ describe("the document open's capture-chain hold", () => {
     await write(root, "note.md", "hello\n");
     const loopback = new VersionedLoopbackEngine();
     const handlers = new Set<(event: Event) => void>();
-    const waits = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-    const fallback = Promise.withResolvers<void>();
     let importing = false;
     let activeReads = 0;
-    let sleeps = 0;
+    const sleep = vi.fn(async () => undefined);
     const providerOpen = vi.fn();
     const client = {
       close: () => undefined,
@@ -145,12 +143,7 @@ describe("the document open's capture-chain hold", () => {
         return daemonCaptureLifecycleAnswer(request) ?? await loopback.sendRequest(request);
       },
     };
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-      sleep: () => {
-        waits[sleeps++]?.resolve();
-        return fallback.promise;
-      },
-    });
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
     const engine = captureWith(root, sessions, providerOpen);
     const notify = () => {
       for (const handler of [...handlers]) handler({
@@ -160,29 +153,32 @@ describe("the document open's capture-chain hold", () => {
     };
     engine.start();
     await engine.flush();
+    vi.useFakeTimers();
     importing = true;
     const opening = engine.openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined });
     try {
-      await waits[0]!.promise;
+      await vi.advanceTimersByTimeAsync(42_000);
+      expect(activeReads).toBe(1);
       notify();
-      await waits[1]!.promise;
+      await vi.advanceTimersByTimeAsync(0);
       expect(providerOpen).not.toHaveBeenCalled();
       expect(activeReads).toBe(2);
       importing = false;
       notify();
       await opening;
       expect(providerOpen).toHaveBeenCalledOnce();
-      expect(sleeps).toBe(2);
+      expect(sleep).not.toHaveBeenCalled();
       expect(handlers.size).toBe(0);
     } finally {
       importing = false;
-      fallback.resolve();
+      sessions.beginShutdown();
       await opening.catch(() => undefined);
+      vi.useRealTimers();
       await engine.stop();
     }
   });
 
-  it.each(["ready", "deadline", "shutdown"] as const)(
+  it.each(["ready", "deadline", "shutdown", "stop"] as const)(
     "waits for the initial capture before opening the provider: %s",
     async (outcome) => {
       const root = await createTestScratch("dohc-ydoc-initial-capture-");
@@ -192,11 +188,14 @@ describe("the document open's capture-chain hold", () => {
       let activeReads = 0;
       let workspaceOpens = 0;
       let providerOpens = 0;
-      let nowMs = 0;
-      const sleeps: number[] = [];
+      const handlers = new Set<(event: Event) => void>();
+      const sleep = vi.fn(async () => undefined);
       const client = {
         close: () => undefined,
-        onEvent: () => () => undefined,
+        onEvent(handler: (event: Event) => void) {
+          handlers.add(handler);
+          return () => { handlers.delete(handler); };
+        },
         async sendRequest(request: Request): Promise<Response> {
           if (request.method === "workspace.open") {
             workspaceOpens += 1;
@@ -216,47 +215,52 @@ describe("the document open's capture-chain hold", () => {
           return daemonCaptureLifecycleAnswer(request) ?? await loopback.sendRequest(request);
         },
       };
-      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-        now: () => nowMs,
-        sleep: async (delayMs) => {
-          sleeps.push(delayMs);
-          nowMs += delayMs;
-          // Initial capture can take more attempts than transport recovery.
-          if (outcome === "ready" && sleeps.length === 8) importing = false;
-          if (outcome === "shutdown") sessions.beginShutdown();
-        },
-      });
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
       const engine = captureWith(root, sessions, () => { providerOpens += 1; });
       engine.start();
       await engine.flush();
       const opensBefore = workspaceOpens;
       importing = true;
+      vi.useFakeTimers();
       try {
-        const opened = await engine.openYDocSession({
+        const opening = engine.openYDocSession({
           path: "note.md", onRemoteUpdate: () => undefined,
         }).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(42_000);
+        expect(providerOpens).toBe(0);
+        expect(activeReads).toBe(1);
+        if (outcome === "ready") {
+          importing = false;
+          for (const handler of [...handlers]) handler({
+            name: "capture.initialSettled", payload: { workspaceId: WORKSPACE_ID },
+            seq: 1, sessionGeneration: 1,
+          });
+        } else if (outcome === "deadline") {
+          await vi.advanceTimersByTimeAsync(78_000);
+        } else if (outcome === "stop") {
+          importing = false;
+          await engine.stop();
+        } else {
+          sessions.beginShutdown();
+        }
+        const opened = await opening;
         if (outcome === "ready") {
           expect(opened).not.toBeInstanceOf(Error);
           expect(providerOpens).toBe(1);
-          expect(activeReads).toBe(8);
         } else {
-          expect(opened).toBeInstanceOf(
-            outcome === "deadline" ? EngineWorkspaceRetryDeadlineError : DaemonRefusalError,
-          );
+          expect(opened).toBeInstanceOf(DaemonRefusalError);
           expect(isEngineWorkspaceOpenRefusedError(opened)).toBe(true);
           expect(providerOpens).toBe(0);
-          if (outcome === "deadline") {
-            expect(nowMs).toBeGreaterThanOrEqual(YDOC_OPEN_RETRY_DEADLINE_MS);
-          } else {
-            expect(activeReads).toBe(1);
-          }
         }
-        expect(sleeps.length).toBeGreaterThan(0);
+        expect(sleep).not.toHaveBeenCalled();
+        expect(handlers.size).toBe(0);
         expect(workspaceOpens).toBe(opensBefore);
         importing = false;
         // A finished or refused open must release the capture chain.
         await engine.listMoments({ limit: 1 });
       } finally {
+        sessions.beginShutdown();
+        vi.useRealTimers();
         importing = false;
         await engine.stop();
       }

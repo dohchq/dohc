@@ -1,5 +1,7 @@
+import { useSyncExternalStore } from "react";
 import { Sparkles, Zap } from "lucide-react";
 import { IDENTITY_HUES, type IdentityHue } from "../tokens";
+import { chosenHue, subscribeChosenColors } from "./chosenColors";
 
 // One avatar for every chat surface: a person's initials on a tint of their
 // own hue, the agent's sparkle in the olive voice, or an automation's bare
@@ -24,6 +26,18 @@ const HUE_CLASSES: Record<IdentityHue, string> = {
   indigo: "bg-hue-indigo/15 text-hue-indigo",
   plum: "bg-hue-plum/15 text-hue-plum",
   rose: "bg-hue-rose/15 text-hue-rose",
+};
+
+// Your agent in the color you chose for it, drawn like the agent token.
+const AGENT_HUE_CLASSES: Record<IdentityHue, string> = {
+  rust: "border-hue-rust/50 bg-bg text-hue-rust",
+  amber: "border-hue-amber/50 bg-bg text-hue-amber",
+  olive: "border-hue-olive/50 bg-bg text-hue-olive",
+  teal: "border-hue-teal/50 bg-bg text-hue-teal",
+  blue: "border-hue-blue/50 bg-bg text-hue-blue",
+  indigo: "border-hue-indigo/50 bg-bg text-hue-indigo",
+  plum: "border-hue-plum/50 bg-bg text-hue-plum",
+  rose: "border-hue-rose/50 bg-bg text-hue-rose",
 };
 
 // FNV-1a over the display name, the one key every surface has, so a person
@@ -56,11 +70,16 @@ function initials(name: string): string {
 export function ChatAvatar(props: {
   name: string;
   kind: "human" | "agent" | "automation";
+  // You or your agent, drawn in the color the settings file chose.
+  own?: boolean;
   size?: keyof typeof SIZES;
   className?: string;
 }) {
   const size = props.size ?? "post";
-  if (props.kind === "automation") {
+  const kind = props.kind;
+  const chosen = useSyncExternalStore(subscribeChosenColors, () =>
+    props.own && kind !== "automation" ? chosenHue(kind) : null);
+  if (kind === "automation") {
     // No border, fill, or identity color: an automation is not a person or an agent.
     return (
       <span
@@ -72,7 +91,7 @@ export function ChatAvatar(props: {
       </span>
     );
   }
-  const agent = props.kind === "agent";
+  const agent = kind === "agent";
   return (
     <span
       aria-hidden
@@ -81,8 +100,8 @@ export function ChatAvatar(props: {
         SIZES[size]
       } ${
         agent
-          ? "border-agent/50 bg-bg text-agent"
-          : `border-line ${HUE_CLASSES[identityHue(props.name)]}`
+          ? chosen ? AGENT_HUE_CLASSES[chosen] : "border-agent/50 bg-bg text-agent"
+          : `border-line ${HUE_CLASSES[chosen ?? identityHue(props.name)]}`
       } ${props.className ?? ""}`}
     >
       {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name)}

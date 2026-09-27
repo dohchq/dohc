@@ -1,8 +1,8 @@
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, MoreHorizontal, Plus, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, MoreHorizontal, Plus, X, Zap } from "lucide-react";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ListCollectionAutomationsResult,
   ScheduleHostResult,
@@ -16,7 +16,7 @@ import { IconButton, SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { AutomationBuilder } from "./AutomationBuilder";
 import { AutomationRuns } from "./AutomationRuns";
-import { newAutomation } from "./automationDraft";
+import { newAutomation, type AutomationTable } from "./automationDraft";
 import { Sentence, StatusLine } from "./AutomationParts";
 import {
   automationSentence,
@@ -24,6 +24,7 @@ import {
   sentenceText,
   type Automation,
   type AutomationsFile,
+  type AutomationSummary,
   type ValidAutomationSummary,
 } from "./automationSentence";
 import { useAutomationRetry } from "./useAutomationRetry";
@@ -76,6 +77,69 @@ function editableOf(file: AutomationsFile | null): { contentHash: string | null;
     contentHash: file.contentHash,
     automations: file.automations.flatMap((entry) => (entry.valid ? [entry.automation] : [])),
   };
+}
+
+/**
+ * Whether an automation belongs in the panel of one dataset table: its
+ * trigger names that table, or names none. A dataset keeps one
+ * automations.yaml for all its tables, and each table is a Collection. An
+ * entry dohc cannot read, or one whose trigger names a table the dataset
+ * lacks, as after a rename, shows in every table with why it does not run.
+ * A document Collection's panel, with no table, shows every automation.
+ */
+export function shownInTable(entry: AutomationSummary, table: AutomationTable | undefined): boolean {
+  if (table === undefined || !entry.valid) return true;
+  const trigger = entry.automation.when;
+  return !("table" in trigger) || trigger.table === null || trigger.table === table.name || !table.tables.has(trigger.table);
+}
+
+/** How many automations a Collection's ⚡ button counts: those its panel lists. */
+export function automationCount(file: ListCollectionAutomationsResult | null, table?: AutomationTable): number {
+  return file?.status === "read" ? file.automations.filter((entry) => shownInTable(entry, table)).length : 0;
+}
+
+/** The ⚡ Automations button at the top of a Collection, with how many it has. */
+export function AutomationsButton(props: { open: boolean; count: number; onClick: () => void }) {
+  return (
+    <SecondaryButton
+      data-testid="collection-automations-button"
+      aria-pressed={props.open}
+      onClick={props.onClick}
+      className={`flex items-center gap-1.5${props.open ? " bg-panel-2 text-ink" : ""}`}
+    >
+      <Zap size={12} aria-hidden />
+      Automations
+      {props.count > 0 ? (
+        <span className="rounded-full border border-line bg-panel-2 px-1.5 text-[11px] leading-4 text-muted">
+          {props.count}
+        </span>
+      ) : null}
+    </SecondaryButton>
+  );
+}
+
+/**
+ * The panel in place of the list when dohc has no automations file to show
+ * for this Collection, with what says why and any way forward. Without
+ * them it is still finding the file.
+ */
+export function AutomationsNote(props: { children?: ReactNode; onClose: () => void }) {
+  return (
+    <aside
+      data-testid="collection-automations-panel"
+      aria-label="Automations"
+      aria-busy={props.children === undefined}
+      className="flex w-80 shrink-0 flex-col border-l border-line bg-panel"
+    >
+      <div className="flex h-9 shrink-0 items-center gap-1 border-b border-line px-2">
+        <span className="flex-1" />
+        <IconButton aria-label="Close automations" title="Close automations" onClick={props.onClose}>
+          <X size={14} aria-hidden />
+        </IconButton>
+      </div>
+      {props.children === undefined ? null : <div className="px-3 py-4 text-[12px] text-muted">{props.children}</div>}
+    </aside>
+  );
 }
 
 /** A new slug for a copy: "stamp-copy", then "stamp-copy-2". */
@@ -447,7 +511,7 @@ function RowMenu(props: { label: string; items: readonly MenuItem[] }) {
               aria-disabled={item.disabled ? true : undefined}
               onMouseEnter={(event) => event.currentTarget.focus()}
               onClick={() => pick(item)}
-              className="flex h-7 w-full items-center rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-panel-2 hover:text-ink focus:bg-line focus:text-ink aria-disabled:opacity-50"
+              className="flex h-7 w-full items-center rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink focus:bg-selected focus:text-ink aria-disabled:opacity-50"
             >
               {item.label}
             </button>
@@ -464,13 +528,15 @@ function RowMenu(props: { label: string; items: readonly MenuItem[] }) {
  * as runs) know to read again. Latest wins: a slow answer never replaces a
  * newer one.
  */
-export function useCollectionAutomations(workspaceId: string, collectionPath: string, onError: ErrorReport) {
+export function useCollectionAutomations(workspaceId: string, collectionPath: string | null, onError: ErrorReport) {
   const [state, setState] = useState<{ file: ListCollectionAutomationsResult | null; holdsUnreadable: boolean; version: number }>({
     file: null, holdsUnreadable: false, version: 0,
   });
   const request = useRequestSequence([workspaceId, collectionPath]);
   const reload = useCallback(async () => {
     const token = request.next();
+    // Null while the page is still finding its Collection's folder.
+    if (collectionPath === null) return;
     try {
       // When dohc cannot read which steps were allowed, every automation
       // waits, and the panel offers the way back the notice does.
@@ -494,6 +560,10 @@ export function useCollectionAutomations(workspaceId: string, collectionPath: st
 export function AutomationsPanel(props: {
   workspaceId: string;
   collectionPath: string;
+  /** The dataset table this panel shows; absent for a document Collection. */
+  table?: AutomationTable;
+  /** A run's Undo changed records the page cannot see change, as a dataset's are. */
+  onRunUndone?: () => void;
   automations: ReturnType<typeof useCollectionAutomations>;
   /** This Collection's fields, for the builder. */
   fields: readonly FieldDefinition[];
@@ -501,6 +571,13 @@ export function AutomationsPanel(props: {
   closeAsk?: number;
   /** A notice asked to open one automation's runs; `seq` rises with each ask. */
   focus: { automationId: string; seq: number } | null;
+  /**
+   * The page asked to build a new automation from this draft, as for a button
+   * nothing uses yet; `seq` rises with each ask.
+   */
+  start?: { automation: Automation; seq: number } | null;
+  /** The panel took the start request; the page forgets it, so a new panel does not take it again. */
+  onStarted?: () => void;
   onClose: () => void;
   onOpenFile: (path: string) => void;
   /** Opens the setting where the owner chooses which computer runs schedules. */
@@ -508,7 +585,7 @@ export function AutomationsPanel(props: {
   onError: ErrorReport;
   onNotice: (message: string, undo?: () => void) => void;
 }) {
-  const { workspaceId, collectionPath, onError, onNotice } = props;
+  const { workspaceId, collectionPath, table, onError, onNotice } = props;
   const { file, holdsUnreadable, version, reload: load } = props.automations;
   const nextRuns = useNextRuns(file);
   const scheduleHost = useScheduleHost(workspaceId, nextRuns.size > 0, onError);
@@ -529,7 +606,7 @@ export function AutomationsPanel(props: {
   };
   // What the builder edits. A draft kept when the panel went away without
   // asking, such as on a workspace switch, opens again here.
-  const draftKey = `${workspaceId}\n${collectionPath}`;
+  const draftKey = JSON.stringify([workspaceId, collectionPath, table?.name ?? null]);
   const [editing, setEditing] = useState<Editing | null>(() => keptDrafts.get(draftKey) ?? null);
   const editingRef = useRef(editing);
   editingRef.current = editing;
@@ -560,13 +637,26 @@ export function AutomationsPanel(props: {
     const reload = (event: { workspaceId: string }) => {
       if (event.workspaceId === workspaceId) void load();
     };
-    const offFailures = bridge().onAutomationFailuresChanged(reload);
+    const offFailures = bridge().onAutomationRunsChanged(reload);
     const offHolds = bridge().onAutomationHoldsChanged(reload);
     return () => {
       offFailures();
       offHolds();
     };
   }, [workspaceId, load]);
+
+  useEffect(() => {
+    const ask = props.start;
+    // The builder opens once the list is read, so it can be edited and take focus.
+    if (!ask || file === null) return;
+    props.onStarted?.();
+    leave(() => {
+      setRunsOf(null);
+      // Steps the page filled in are a change, so leaving asks before it drops them.
+      setEditing({ session: nextSession(), start: ask.automation, baseline: { ...ask.automation, do: [] }, original: null, cannotRun: null, reach: null });
+    });
+    // Only a new ask opens the builder; a reload does not.
+  }, [props.start?.seq, file === null]);
 
   useEffect(() => {
     if (!props.focus) return;
@@ -592,7 +682,12 @@ export function AutomationsPanel(props: {
     leave(props.onClose);
   }, [props.closeAsk]);
 
-  const { retry, dialog: retryDialog } = useAutomationRetry({ workspaceId, onError, onQueued: () => void load() });
+  const requestRetry = useCallback(
+    (target: { automationId: string; claimId: string }, startOver: boolean) =>
+      bridge().retryCollectionAutomation({ workspaceId, ...target, startOver }),
+    [workspaceId],
+  );
+  const { retry, dialog: retryDialog } = useAutomationRetry({ workspaceId, request: requestRetry, onError, onQueued: () => void load() });
 
   /**
    * Saves `change` of the automations over the file the panel read. A file
@@ -715,7 +810,9 @@ export function AutomationsPanel(props: {
   };
 
   const editable = file === null || file.status === "unavailable" ? null : editableOf(file);
+  // The file's cap counts every automation in it, a dataset's other tables' too.
   const count = editable?.automations.length ?? 0;
+  const shown = file?.status === "read" ? file.automations.filter((entry) => shownInTable(entry, table)) : [];
   const filePath = `${collectionPath}/${AUTOMATIONS_FILE}`;
 
   const duplicate = (automation: Automation) =>
@@ -732,9 +829,11 @@ export function AutomationsPanel(props: {
     });
 
   const remove = (automation: Automation) => {
-    const list = editable?.automations ?? [];
-    const index = list.findIndex((entry) => entry.id === automation.id);
-    const neighbor = list[index + 1] ?? list[index - 1] ?? null;
+    // Undo puts it back at its place in the file; focus moves to a row on screen.
+    const index = (editable?.automations ?? []).findIndex((entry) => entry.id === automation.id);
+    const rows = shown.flatMap((entry) => (entry.valid ? [entry.automation] : []));
+    const at = rows.findIndex((entry) => entry.id === automation.id);
+    const neighbor = rows[at + 1] ?? rows[at - 1] ?? null;
     save(
       (automations) => automations.filter((entry) => entry.id !== automation.id),
       () => {
@@ -821,7 +920,7 @@ export function AutomationsPanel(props: {
   const leavingRef = useRef(leaving);
   leavingRef.current = leaving;
   const startNew = () => {
-    const start = newAutomation(props.fields);
+    const start = newAutomation(props.fields, table?.name ?? null);
     setEditing({ session: nextSession(), start, baseline: start, original: null, cannotRun: null, reach: null });
   };
   const edit = (entry: ValidAutomationSummary) => setEditing({
@@ -853,7 +952,7 @@ export function AutomationsPanel(props: {
     <>
       <span className="flex-1" />
       {/* An empty list offers New automation in its own place. */}
-      {editable !== null && count > 0 && count < MAX_AUTOMATIONS ? (
+      {editable !== null && shown.length > 0 && count < MAX_AUTOMATIONS ? (
         <IconButton aria-label="New automation" title="New automation" onClick={startNew}>
           <Plus size={14} aria-hidden />
         </IconButton>
@@ -884,6 +983,7 @@ export function AutomationsPanel(props: {
             key={editing.session}
             workspaceId={workspaceId}
             collectionPath={collectionPath}
+            table={table ?? null}
             fields={props.fields}
             automation={editing.start}
             baseline={editing.baseline}
@@ -916,6 +1016,7 @@ export function AutomationsPanel(props: {
             onRetry={retry}
             onError={onError}
             onNotice={(message) => onNotice(message)}
+            onUndone={props.onRunUndone}
           />
         ) : file === null ? null : file.status === "unavailable" ? (
           <p className="m-0 px-3 py-4 text-[12px] text-muted">This Collection's automations run on its owner's computer.</p>
@@ -927,13 +1028,15 @@ export function AutomationsPanel(props: {
             </p>
             <SecondaryButton size="compact" className="mt-2" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
           </div>
-        ) : file.status === "missing" || file.automations.length === 0 ? (
+        ) : file.status === "missing" || shown.length === 0 ? (
           <div className="flex flex-col items-start gap-2 px-3 py-4">
             <p className="m-0 text-[12px] text-muted">No automations in this Collection yet.</p>
-            <SecondaryButton size="compact" className="flex items-center gap-1" onClick={startNew}>
-              <Plus size={12} aria-hidden />
-              New automation
-            </SecondaryButton>
+            {count < MAX_AUTOMATIONS ? (
+              <SecondaryButton size="compact" className="flex items-center gap-1" onClick={startNew}>
+                <Plus size={12} aria-hidden />
+                New automation
+              </SecondaryButton>
+            ) : null}
           </div>
         ) : (
           <>
@@ -958,7 +1061,7 @@ export function AutomationsPanel(props: {
               onChooseComputer={props.onOpenScheduleSettings}
             />
             <ul className="m-0 list-none p-0">
-              {file.automations.map((entry, index) =>
+              {shown.map((entry, index) =>
                 entry.valid ? (
                   <li
                     key={entry.automationId}

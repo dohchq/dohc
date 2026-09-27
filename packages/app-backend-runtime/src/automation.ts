@@ -47,6 +47,9 @@ function isInstant(value: unknown): boolean {
 const BINDING_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 function scopeProblem(scope: AutomationScope): string | undefined {
   if (!isInstant(scope.now)) return "The automation scope needs `now` with a UTC offset.";
+  if (scope.recordKeys !== undefined && (!Array.isArray(scope.recordKeys) || !scope.recordKeys.every(key => typeof key === "string"))) {
+    return "The automation scope's record keys must be a list of names.";
+  }
   const taken = Object.keys(scope.bindings ?? {}).find(name => !BINDING_NAME.test(name) || AUTOMATION_SCOPE_NAMES.includes(name));
   return taken === undefined ? undefined : `The automation scope cannot bind the name ${JSON.stringify(taken)}.`;
 }

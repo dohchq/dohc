@@ -2678,7 +2678,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        ordinal: 18,
+        ordinal: 19,
+        id: "v2-sync-identity-claim-state",
+        sql: "ALTER TABLE sync_identity ADD COLUMN claim_state TEXT CHECK (claim_state IN ('pending','workspace-unavailable','epoch-superseded','identity-not-recognized','identity-required','stream-identity-mismatch')); ALTER TABLE sync_identity ADD COLUMN claim_account_id TEXT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 20,
         id: "v2-materialization-displacements",
         sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
         sets_user_version: None,
@@ -3013,8 +3019,12 @@ mod tests {
                 "5b2247e5582d3fdb328eae4d4af88ae7c2e9be8acf0e2dd8aa6ccfa81d23afe8",
             ),
             (
+                "v2-sync-identity-claim-state",
+                "3cf872e265017c043dd394e9a67c6a3108cec735d06c7cab6f89d00b164feaee",
+            ),
+            (
                 "v2-materialization-displacements",
-                "56ed2f2f3c8ae1c797e2dbc028039d78c09cc71f6194aa003bab394e33dbe3f9",
+                "2887eaf2ca3af9e0361b7dce143eddaf80e94c60dfaf46bcb2b29443c735a36b",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3048,6 +3058,39 @@ mod tests {
         assert!(
             std::error::Error::source(&refused).is_some(),
             "the cause names the migration"
+        );
+    }
+
+    #[test]
+    fn relay_identity_claim_migration_preserves_existing_identity() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-sync-identity-claim-state")
+            .expect("the identity claim migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('ws','origin','epoch','stream',1)", []).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let identity: (String, String, String, Option<String>, Option<String>) = conn.query_row(
+            "SELECT origin_id,replication_epoch,stream_identity,claim_state,claim_account_id FROM sync_identity WHERE workspace_id='ws'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).unwrap();
+        assert_eq!(
+            identity,
+            (
+                "origin".to_owned(),
+                "epoch".to_owned(),
+                "stream".to_owned(),
+                None,
+                None
+            )
+        );
+        assert!(
+            conn.execute("UPDATE sync_identity SET claim_state='unexpected'", [])
+                .is_err()
         );
     }
 

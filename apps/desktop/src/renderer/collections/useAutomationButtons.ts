@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import type { AutomationButtonState } from "../../automations/automationButtons";
+import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import type { AutomationRunSettledEvent, AutomationRunWaitingEvent } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
@@ -232,7 +232,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
      * Presses a button on one record. The press id stays with this press, so
      * Try again after a lost answer sends the same press, not a second one.
      */
-    async press(field: string, record: PressedRecord, pressId: string = crypto.randomUUID()): Promise<void> {
+    async press(field: string, record: PressedRecord, pressId: string = crypto.randomUUID(), confirmed: readonly string[] = []): Promise<void> {
       const key = runKey(field, record.id);
       if (closed || runs.has(key)) return;
       const state = states?.get(field);
@@ -241,7 +241,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       notes.delete(key);
       changed(key);
       try {
-        const result = await bridge().pressAutomationButton({ workspaceId, ...of, field, recordId: record.id, pressId });
+        const result = await bridge().pressAutomationButton({ workspaceId, ...of, field, recordId: record.id, pressId, ...("datasetId" in of ? { confirmed: [...confirmed] } : {}) });
         if (closed) return;
         if (result.busy) {
           notes.set(key, result.reason);
@@ -265,7 +265,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       } catch (error) {
         if (closed) return;
         finish(key);
-        report().onError(`${field} did not start.`, error, () => void live()?.press(field, record, pressId));
+        report().onError(`${field} did not start.`, error, () => void live()?.press(field, record, pressId, confirmed));
       }
     },
 

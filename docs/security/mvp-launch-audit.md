@@ -92,7 +92,7 @@ Follow-up: the shared static server rejects Host values other than its bound `12
 - Process execution: agent prompts ride stdin, never argv (`chatRunnerProcess.ts:14-18`). ripgrep gets an argv array with `--` before the query and hardcoded exclusions last (`workspaceSearch.ts:114-140`). The Windows compiler supervisor builds its PowerShell command from absolute app paths through a strict single-quote escaper, carries no inherited credential env, and frames input on stdin (`compilerProcessSupervisor.ts:45-58`).
 - The CLI server: UDS or a random-named Windows pipe, a 32-byte token written `0600`, and a timing-safe token compare (`cliServer.ts:304-311, 2676-2700`).
 - The engine daemon: spawned as a child process and spoken to over stdio, with a fresh 32-byte handshake token per launch (`engineDaemonLifecycle.ts:303-309, 599-624`). No port, no pipe, no socket a website or another process can connect to.
-- Deep links: the `dohc://` scheme accepts exactly one URL shape, a 43-character code and a canonically encoded relay URL, and nothing else reaches the app from argv (`shareHandoffIngress.ts:5-6, 58-86`).
+- Deep links: `open` is the only public host: `dohc://open/<43-character base64url code>?relay=<encoded canonical relay URL>`. Parse and build functions live in [`deepLinks.ts`](../../packages/workspace-contracts/src/deepLinks.ts). This is the same URL share-web already gives users; no legacy URL alias is needed. Internal tab IDs use `tab://` and are never OS deep links. UI-state v2 tab references migrate to v3 during restore; v3 writes use the internal IDs. Unknown UI-state versions still restore defaults.
 - Fuses: runAsNode off, asar integrity on, only-load-app-from-asar on, inspect arguments off, with a smoke gate (`smoke:fuses`).
 - Dev surfaces fail closed: `DOHC_DEV_TOOLS`, `DOHC_TEST_AUTH`, and `SYNC_RELAY_TEST_AUTH` are double-gated on unpackaged builds or dev/test `NODE_ENV`, and the impersonation seam crashes the server on a production `NODE_ENV` (`workspace-api/src/main.ts:19-36`, `sync-relay/src/main.ts:152-167`).
 
@@ -129,7 +129,7 @@ Follow-up: the shared static server rejects Host values other than its bound `12
 - No install-time lifecycle scripts anywhere in 27 workspace packages; pnpm's build allowlist covers only electron, electron-winstaller, and esbuild. No lockfile deps from git or URLs.
 - The three pnpm patches cover list rendering, file watching, and editor behavior. The vendored crates (`file-guard`, `yrs`) are verified by SHA-256 with documented upstream commits and change notes.
 - No backdoor patterns: no remote-code eval, no `curl`-to-shell, no magic auth tokens, no time or date triggers, no origin-based bypasses.
-- Workflows: action SHAs pinned, `persist-credentials: false`, no `pull_request_target`, PR checks dispatch-only on self-hosted runners.
+- Workflows: action SHAs pinned, `persist-credentials: false`, no `pull_request_target`. Blacksmith PR checks stay off behind `BLACKSMITH_ENABLED`; manual checks use self-hosted runners while off.
 - No secrets in the tree or in the scanned history beyond the test PEM in finding 4. `.gitignore` covers `.env*`; the example env file holds placeholders and honest disclosures.
 - `deny.toml` restricts sources to crates.io and has an empty advisory ignore list. Separately, `.cargo/audit.toml` ignores `RUSTSEC-2026-0009` and documents the claimed unreachable dependency path.
 - Electron fuses hardened with a smoke gate; no source maps ship in production; the mock update server is unreachable from app code.

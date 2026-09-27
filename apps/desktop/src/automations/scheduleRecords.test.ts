@@ -2,7 +2,7 @@ import { readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
-import type { ScheduleRecord } from "./automationScheduler";
+import type { ScheduleRecord } from "@dohc/automation-executor/automation-scheduler";
 import { createScheduleRecords, parseScheduleRecord } from "./scheduleRecords";
 
 const record: ScheduleRecord = {
