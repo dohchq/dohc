@@ -3189,9 +3189,10 @@ fn recover_displacement(
         return Ok(false);
     }
     // Save may have linked the visible copy but stopped before unlinking
-    // staging. Leave both names and the row for the next Save to finish.
+    // staging. Leave both names and the row for the next Save to finish. A
+    // kept file that cannot be opened is also left staged.
     if displacement.state == DisplacementState::Kept
-        && has_multiple_links(&moved.path).map_err(|err| MaterializeError::io(&moved.path, &err))?
+        && has_multiple_links(&moved.path).unwrap_or(true)
     {
         return Ok(true);
     }
