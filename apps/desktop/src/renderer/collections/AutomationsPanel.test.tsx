@@ -159,6 +159,8 @@ function Panel(props: {
   onOpenScheduleSettings?: () => void;
   closeAsk?: number;
   onClose?: () => void;
+  start?: { automation: Automation; seq: number } | null;
+  onStarted?: () => void;
 }) {
   const onError = props.onError ?? (() => undefined);
   const workspaceId = props.workspaceId ?? "ws-1";
@@ -172,6 +174,8 @@ function Panel(props: {
       automations={automations}
       fields={props.fields ?? FIELDS}
       focus={props.focus ?? null}
+      start={props.start ?? null}
+      onStarted={props.onStarted}
       closeAsk={props.closeAsk ?? 0}
       onClose={props.onClose ?? (() => undefined)}
       onOpenFile={props.onOpenFile ?? (() => undefined)}
@@ -480,6 +484,41 @@ describe("a dataset table's ⚡ panel", () => {
     expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toEqual(["Settle", "Issue refund (Refunds)"]);
     expect(screen.getByText("Issue refund can't be undone.")).toBeTruthy();
   }, 30_000);
+
+  it("opens the builder on a draft the page asks for, says it took it, and gives Name focus", async () => {
+    makeBridge(read([]));
+    const onStarted = vi.fn();
+    const draft: Automation = { id: "", name: "Settle", enabled: true, when: { kind: "button", field: "Settle", table: "Invoices" }, if: null,
+      do: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
+    render(<Panel table={{ ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] }}
+      start={{ automation: draft, seq: 1 }} onStarted={onStarted} />);
+    await waitFor(() => expect(onStarted).toHaveBeenCalledTimes(1));
+    const name = await screen.findByRole("textbox", { name: "Name" }) as HTMLInputElement;
+    expect(name.value).toBe("Settle");
+    await waitFor(() => expect(document.activeElement).toBe(name));
+    expect((screen.getByRole("combobox", { name: "Step 1, action" }) as HTMLSelectElement).value).toBe("invoices.settle");
+  });
+
+  it("asks before Back drops the steps a page filled in, and a new panel does not take a request it already took", async () => {
+    makeBridge(read([]));
+    const user = userEvent.setup();
+    const draft: Automation = { id: "", name: "Settle", enabled: true, when: { kind: "button", field: "Settle", table: "Invoices" }, if: null,
+      do: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
+    const table = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] };
+    let start: { automation: Automation; seq: number } | null = { automation: draft, seq: 1 };
+    const { rerender, unmount } = render(<Panel table={table} start={start} onStarted={() => { start = null; }} />);
+    await screen.findByRole("combobox", { name: "Step 1, action" });
+    await user.click(screen.getByRole("button", { name: "Back to automations" }));
+    expect(await screen.findByTestId("automation-unsaved")).toBeTruthy();
+    await user.click(within(screen.getByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull());
+    // The page forgot the request it saw taken, so a panel that mounts again shows the list.
+    rerender(<Panel table={table} start={start} onStarted={() => { start = null; }} />);
+    unmount();
+    render(<Panel table={table} start={start} />);
+    expect(await screen.findByRole("button", { name: "New automation" })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+  });
 
   it("offers no action step on a table without actions", async () => {
     makeBridge(read([]));
