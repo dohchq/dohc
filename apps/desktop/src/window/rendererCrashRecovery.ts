@@ -49,6 +49,9 @@ export function installRendererCrashRecovery(
   webContents: RecoverableWebContents,
   now: () => number = Date.now,
   beforeReload?: () => void | Promise<void>,
+  // Runs when the guard stops reloading, so main can offer an update that
+  // may fix a renderer that crashes on every load.
+  afterCrashLoop?: () => void,
 ): void {
   let recentCrashesMs: number[] = [];
   webContents.on("render-process-gone", (_event, details) => {
@@ -64,7 +67,9 @@ export function installRendererCrashRecovery(
     );
     if (webContents.isDestroyed()) return;
     const reloadIfAllowed = () => {
-      if (decision.reload && !webContents.isDestroyed()) webContents.reload();
+      if (webContents.isDestroyed()) return;
+      if (decision.reload) webContents.reload();
+      else afterCrashLoop?.();
     };
     if (!beforeReload) {
       reloadIfAllowed();

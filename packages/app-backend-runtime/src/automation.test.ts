@@ -283,6 +283,23 @@ describe("formulas", () => {
     ]);
   });
 
+  it("stops a formula that reads a record key it may not, however it reaches the record", async () => {
+    const idOnly: AutomationScope = { record: { id: "inv-1" }, trigger: { kind: "button", record: { id: "inv-1" } }, person: null, now: scope.now, recordKeys: ["id"] };
+    const refused = { code: "runtime", message: "TypeError: Formulas can read only this record's id, not Status." };
+    expect(await evaluator.evaluate(idOnly, [
+      "record.id", 'record["id"]', "trigger.record.id", "String(record)", "Object.keys(record)",
+      '"id" in record', 'Object.hasOwn(record, "id")',
+      "record.Status", "(record).Status", "((r) => r.Status)(record)", "(({ Status }) => Status)(record)", 'trigger["record"].Status', 'record?.["Status"]',
+      '"Status" in record', 'Object.getOwnPropertyDescriptor(record, "Status")', 'Object.hasOwn(record, "Status")', 'Reflect.has(trigger.record, "Status")',
+    ].map(expression))).toEqual([
+      { ok: true, value: "inv-1" }, { ok: true, value: "inv-1" }, { ok: true, value: "inv-1" }, { ok: true, value: "[object Object]" }, { ok: true, value: ["id"] },
+      { ok: true, value: true }, { ok: true, value: true },
+      ...Array.from({ length: 10 }, () => ({ ok: false, error: refused })),
+    ]);
+    // Without the list, a missing field reads as nothing, as before.
+    expect(await evaluator.evaluate({ ...idOnly, recordKeys: undefined }, [expression("record.Status")])).toEqual([{ ok: true, value: null }]);
+  });
+
   it("cannot change the scope", async () => {
     expect(await values(['record.Status = "Open"', 'record.Tags.push("x")', "record = {}", 'trigger.kind = "x"', "total = 0", 'tasks[0].Name = "x"']))
       .toEqual(Array.from({ length: 6 }, () => expect.objectContaining({ code: "runtime", message: expect.stringMatching(/^TypeError: /) })));

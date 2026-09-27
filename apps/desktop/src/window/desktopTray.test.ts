@@ -34,7 +34,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     readRunnerSettings: async () => (await readCachedUserSettingsFile(stateRoot)).settings.runner,
     identityFor: async () => ({ displayName: "Nova", ownerDisplayName: "Local" }), stateDir: () => stateRoot,
     appRoot: () => root, isPackaged: () => packaged, queueSync: () => undefined,
-    authorizeServiceNote: async () => false, onMessagePosted: () => undefined,
+    onMessagePosted: () => undefined,
     setRunAttribution: () => undefined,
   });
   cleanups.push(() => service.stop());

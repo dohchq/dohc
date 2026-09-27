@@ -732,7 +732,7 @@ export function SitePreviewPage(props: {
                 data-testid="site-preview-options"
                 aria-label="Preview options"
                 title="Preview options"
-                className="grid size-7 cursor-pointer list-none place-items-center rounded-md text-subtle transition-colors hover:bg-panel-2 hover:text-ink [&::-webkit-details-marker]:hidden"
+                className="grid size-7 cursor-pointer list-none place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink [&::-webkit-details-marker]:hidden"
               >
                 <Settings2 size={13} aria-hidden />
               </summary>
@@ -751,7 +751,7 @@ export function SitePreviewPage(props: {
                       optionsTriggerRef.current?.focus();
                       void start(mode, true);
                     }}
-                    className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-wait disabled:opacity-60"
+                    className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
                   >
                     {mode === "build" ? (
                       <Hammer size={12} aria-hidden />

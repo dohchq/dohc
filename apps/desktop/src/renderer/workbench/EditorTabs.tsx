@@ -12,6 +12,7 @@ import { prefersReducedMotion } from "../reducedMotion";
 import {
   isChatsTabPath,
   chatTabDefaultTitle,
+  editorTabTestId,
   isGraphTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
@@ -136,7 +137,7 @@ const Tab = memo(function Tab(props: {
       role="tab"
       tabIndex={0}
       aria-selected={props.active}
-      data-testid={`tab-${props.path}`}
+      data-testid={editorTabTestId(props.path)}
       data-active={props.active || undefined}
       title={tabTitle(props.path, props.label)}
       onKeyDown={(event) => {
@@ -175,7 +176,7 @@ const Tab = memo(function Tab(props: {
       className={`group relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
         props.active
           ? "z-10 rounded-t-lg border-line border-b-bg bg-bg text-ink"
-          : "cursor-default border-transparent border-b-line text-muted before:absolute before:inset-y-2 before:-left-px before:w-px before:bg-line first:before:hidden [[data-active]+&::before]:hidden hover:bg-line/50 hover:text-ink"
+          : "cursor-default border-transparent border-b-line text-muted before:absolute before:inset-y-2 before:-left-px before:w-px before:bg-line first:before:hidden [[data-active]+&::before]:hidden hover:bg-hover hover:text-ink"
       }`}
     >
       {props.active ? (
@@ -205,7 +206,7 @@ const Tab = memo(function Tab(props: {
           event.stopPropagation();
           props.onClose(props.groupId, props.path);
         }}
-        className={`grid size-4 place-items-center rounded text-subtle hover:bg-line hover:text-ink ${
+        className={`grid size-4 place-items-center rounded text-subtle hover:bg-hover hover:text-ink ${
           props.active ? "" : "opacity-0 focus:opacity-100 group-hover:opacity-100"
         }`}
       >
@@ -869,7 +870,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
           aria-label="Close editor group"
           title="Close editor group"
           onClick={() => props.onCloseGroup?.(props.groupId)}
-          className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-line/50 hover:text-ink"
+          className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-hover hover:text-ink"
         >
           <X size={14} aria-hidden />
         </button>
@@ -881,7 +882,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         title="New editor group right"
         disabled={empty || isSingletonEditorTabPath(props.activeTab)}
         onClick={() => props.onCreateGroupRight(props.groupId)}
-        className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle"
+        className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle"
       >
         <Columns2 size={14} aria-hidden />
       </button>
@@ -1009,7 +1010,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
                 className={`flex h-7 w-full items-center px-3 text-left text-[13px] ${
                   tab.path === props.activeTab
                     ? "text-ink"
-                    : "text-muted hover:bg-line/50 hover:text-ink"
+                    : "text-muted hover:bg-hover hover:text-ink"
                 }`}
               >
                 <span className="truncate">

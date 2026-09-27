@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { join } from "node:path";
+import type { RelayWorkspaceIdentity } from "@dohc/workspace-contracts/relay";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import type {
   EngineDaemonLifecycle,
@@ -19,7 +19,9 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
+import { createRelaySyncEngine } from "./relaySyncEngine";
 import { createTestScratch } from "./testTemp";
+import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 // This suite used to gate on a private env var of its own, so it kept skipping
 // even where the daemon was built and every other suite ran. It now shares the
@@ -64,10 +66,12 @@ function json(response: ServerResponse, value: unknown): void {
 
 async function startRelay(workspaceId: string): Promise<{
   baseUrl: string;
+  claims: RelayWorkspaceIdentity[];
   pushed: Array<Record<string, unknown>>;
   close(): Promise<void>;
 }> {
   const pushed: Array<Record<string, unknown>> = [];
+  const claims: RelayWorkspaceIdentity[] = [];
   const server = createServer((request, response) => {
     void (async () => {
       if (request.headers.authorization !== "Bearer relay-test-token") {
@@ -79,6 +83,22 @@ async function startRelay(workspaceId: string): Promise<{
         return;
       }
       const url = new URL(request.url ?? "/", "http://relay.test");
+      if (request.method === "POST" && url.pathname === "/sync/workspaces") {
+        const body = await bodyJson(request);
+        expect(body.workspaceId).toBe(workspaceId);
+        expect(body.replicationEpoch).toEqual(expect.any(String));
+        expect(body.streamIdentity).toEqual(expect.any(String));
+        claims.push({
+          replicationEpoch: body.replicationEpoch as string,
+          streamIdentity: body.streamIdentity as string,
+        });
+        json(response, { ok: true });
+        return;
+      }
+      const identity = claims[0];
+      expect(identity, "the workspace must be claimed before log or blob access").toBeDefined();
+      expect(url.searchParams.get("replicationEpoch")).toBe(identity!.replicationEpoch);
+      expect(url.searchParams.get("streamIdentity")).toBe(identity!.streamIdentity);
       if (
         request.method === "POST" &&
         url.pathname === `/sync/${workspaceId}/log`
@@ -146,6 +166,7 @@ async function startRelay(workspaceId: string): Promise<{
   }
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
+    claims,
     pushed,
     close: async () =>
       await new Promise<void>((resolveClose, reject) => {
@@ -191,15 +212,6 @@ describe("EngineRelayClient real daemon", () => {
           relay.baseUrl,
         );
 
-        // Each replica owns a local identity. The receiver's seed is never
-        // pushed; it only prepares an independent durable store for the pull.
-        await createChannel(
-          receiver.sessions,
-          workspaceId,
-          receiverRoot,
-          "receiver-seed",
-          "Receiver seed",
-        );
         await createChannel(
           sender.sessions,
           workspaceId,
@@ -208,9 +220,32 @@ describe("EngineRelayClient real daemon", () => {
           "Relay E2E",
         );
 
-        const pushed = await sender.client.push();
-        expect(pushed.pushed).toBeGreaterThan(0);
-        expect(relay.pushed.length).toBeGreaterThan(0);
+        // main.ts routes pushes through this coordinator, which claims on
+        // IDENTITY_REQUIRED and retries. Do not pre-claim the sender here.
+        const sync = createRelaySyncEngine({
+          rootDir: senderRoot,
+          relay: { baseUrl: relay.baseUrl, token: "relay-test-token" },
+          operations: sender.client,
+          // This fixture has only chats; the daemon materializes them.
+          capture: {
+            runRelaySync: (task) => task(async (paths) => {
+              expect(paths).toEqual([]);
+            }),
+          } as WorkspaceEngineCapture,
+          onChange: () => undefined,
+        });
+        try {
+          await sync.start();
+          expect(sync.snapshot().syncFailure).toBeNull();
+          expect(relay.claims).toHaveLength(1);
+          expect(relay.pushed.length).toBeGreaterThan(0);
+          await sync.retryNow({ countsAsAttempt: true });
+          expect(sync.snapshot().syncFailure).toBeNull();
+          expect(relay.claims).toHaveLength(1);
+        } finally {
+          await sync.stop();
+        }
+        await receiver.client.bootstrapJoinIdentity(relay.claims[0]!);
         const pulled = await receiver.client.pull(async () => undefined);
         expect(pulled.fetched).toBeGreaterThan(0);
         expect(

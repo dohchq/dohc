@@ -108,8 +108,8 @@ export function ChatsPanel(props: {
               onClick={() => props.onTabChange(tab)}
               className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
                 props.tab === tab
-                  ? "bg-line/60 text-ink"
-                  : "text-muted hover:bg-line/40 hover:text-ink"
+                  ? "bg-selected text-ink"
+                  : "text-muted hover:bg-hover hover:text-ink"
               }`}
             >
               {CHATS_PANEL_TAB_LABELS[tab]}
@@ -124,7 +124,7 @@ export function ChatsPanel(props: {
             aria-label="Hide chats"
             title="Hide chats"
             onClick={props.onCollapse}
-            className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+            className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
           >
             <PanelRight size={13} aria-hidden />
           </button>

@@ -264,7 +264,7 @@ function SectionActionButton(props: {
       title={props.label}
       disabled={props.disabled}
       onClick={props.onClick}
-      className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-30"
+      className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-30"
     >
       {props.children}
     </button>
@@ -317,8 +317,10 @@ const TreeRow = memo(function TreeRow(props: {
   selected: boolean;
   active: boolean;
   focused: boolean;
+  tabbable: boolean;
   dropPreview: RowDropPreview | null;
   registerRef: (path: string, el: HTMLButtonElement | null) => void;
+  onRowFocus: (path: string) => void;
   onRowClick: (path: string, event: MouseEvent) => void;
   onRowChevronClick: (path: string, event: MouseEvent) => void;
   onRowContextMenu: (path: string, event: MouseEvent) => void;
@@ -354,9 +356,10 @@ const TreeRow = memo(function TreeRow(props: {
         aria-setsize={row.setSize}
         aria-selected={props.selected}
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
-        tabIndex={props.focused ? 0 : -1}
+        tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
         draggable
+        onFocus={() => props.onRowFocus(row.fullPath)}
         onClick={(event) => props.onRowClick(row.fullPath, event)}
         onContextMenu={(event) => props.onRowContextMenu(row.fullPath, event)}
         onDragStart={(event) => props.onRowDragStart(row.fullPath, event)}
@@ -377,10 +380,10 @@ const TreeRow = memo(function TreeRow(props: {
           props.dropPreview
             ? dropClass
             : props.active
-              ? "bg-line text-ink"
+              ? "bg-selected text-ink"
               : props.selected
-                ? "bg-line/60 text-ink"
-                : "text-muted hover:bg-line/50 hover:text-ink"
+                ? "bg-selected/85 text-ink"
+                : "text-muted hover:bg-hover hover:text-ink"
         } ${props.focused ? "ring-1 ring-inset ring-ink/30" : ""}`}
       >
         {props.dropPreview ? (
@@ -670,6 +673,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     }
     return indexes;
   }, [renderItems]);
+
+  const tabbablePath = useMemo(() => {
+    if (focusedPath && renderIndexByPath.has(focusedPath)) return focusedPath;
+    for (const path of renderIndexByPath.keys()) {
+      if (selection.has(path)) return path;
+    }
+    return renderIndexByPath.keys().next().value ?? null;
+  }, [focusedPath, renderIndexByPath, selection]);
 
   const virtualized = renderItems.length > TREE_VIRTUALIZATION_THRESHOLD;
 
@@ -1488,7 +1499,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // Keep the DOM proportional to the viewport. The full flattened row list
   // remains authoritative for keyboard navigation and range selection; only
-  // its fixed-height presentation is windowed. A focused row stays mounted
+  // its fixed-height presentation is windowed. The tabbable row stays mounted
   // outside the viewport so wheel scrolling never destroys the roving tab
   // stop or drops browser focus.
   const mountedIndexes = new Set<number>();
@@ -1501,9 +1512,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   for (let index = range.start; index < range.end; index += 1) {
     mountedIndexes.add(index);
   }
-  if (virtualized && focusedPath) {
-    const focusedIndex = renderIndexByPath.get(focusedPath);
-    if (focusedIndex !== undefined) mountedIndexes.add(focusedIndex);
+  if (virtualized && tabbablePath) {
+    const tabbableIndex = renderIndexByPath.get(tabbablePath);
+    if (tabbableIndex !== undefined) mountedIndexes.add(tabbableIndex);
   }
   if (virtualized && dragOriginPath) {
     const dragOriginIndex = renderIndexByPath.get(dragOriginPath);
@@ -1541,8 +1552,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           focused={focusedPath === row.fullPath}
+          tabbable={tabbablePath === row.fullPath}
           dropPreview={dropPreviewForRow(row)}
           registerRef={registerRef}
+          onRowFocus={setFocusedPath}
           onRowClick={onRowClick}
           onRowChevronClick={onRowChevronClick}
           onRowContextMenu={onRowContextMenu}
@@ -1592,7 +1605,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
           <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
           {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`}
-            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-panel-2 hover:text-ink"
+            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
             onClick={() => props.onOpenDataCollection?.(collection.datasetId, collection.tableId)}>
             <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
           </button>)}
@@ -1607,7 +1620,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         >
           <header
             data-testid="open-editors-header"
-            className="group flex h-6 items-center gap-1 pr-1 hover:bg-line/40"
+            className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
           >
             <button
               type="button"
@@ -1703,8 +1716,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                             data-active={active}
                             className={`group mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
                               active
-                                ? "bg-line text-ink"
-                                : "text-muted hover:bg-line/50 hover:text-ink"
+                                ? "bg-selected text-ink"
+                                : "text-muted hover:bg-hover hover:text-ink"
                             }`}
                           >
                             <button
@@ -1735,7 +1748,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                                 event.stopPropagation();
                                 props.onCloseTab(group.id, tab.path);
                               }}
-                              className={`mr-1 grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line hover:text-ink focus:opacity-100 ${
+                              className={`mr-1 grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-hover hover:text-ink focus:opacity-100 ${
                                 active ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                               }`}
                             >
@@ -1802,7 +1815,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         <section data-testid="explorer-files-section" aria-label="Files">
           <header
             data-testid="explorer-files-header"
-            className="group flex h-6 items-center gap-1 pr-1 hover:bg-line/40"
+            className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
           >
             <button
               type="button"
@@ -1873,7 +1886,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               true,
                             );
                           }}
-                          className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink"
+                          className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                         >
                           {isFolderPath(path) ? (
                             <Folder size={13} aria-hidden className="shrink-0" />

@@ -57,7 +57,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   ownerDeliveryCredentials?(): {bearer: string; relayUrl: string; signal: AbortSignal} | null;
   existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
   findWorkspace(workspaceId: string): RegistryEntry | null;
-  app: Pick<App, "isPackaged" | "getAppPath" | "quit">;
+  app: Pick<App, "isPackaged" | "getAppPath">;
   dialog: Pick<Dialog, "showErrorBox">;
   process: { env: NodeJS.ProcessEnv; resourcesPath?: string };
   createRustEngineDaemon: typeof createRustEngineDaemonImplementation;
@@ -271,8 +271,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       },
     });
   };
-  // Settles with the daemon handshake (false = startup failed and the app is
-  // quitting). The whenReady continuation creates the window while the daemon
+  // Settles with the daemon handshake (false = startup failed and the app will
+  // quit). The whenReady continuation creates the window while the daemon
   // starts, so a fast renderer can ask for the engine before the handshake
   // settles; boot-time paths that need engine sessions await this first instead
   // of throwing the broken-invariant error at it.
@@ -282,8 +282,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // Narrowing for the engine-access gates. The invariant is real:
   // every boot-time path that can reach the engine awaits engineDaemonStartup
   // first (openWorkspaceActivityWith, cloudStatus, the share-view file and
-  // mount lanes), and startRustEngineDaemon
-  // quits the app when the handshake fails; this handle is nulled only on that
+  // mount lanes), and a failed handshake
+  // quits the app; this handle is nulled only on that
   // failure path. A later startup-smoke failure restarts the daemon without
   // nulling it. A throw here would mean that invariant broke, which must be
   // loud, not a silent drop to the legacy engine.
@@ -326,10 +326,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     });
   }
 
-  async function closeAllRelayTransportWorkspaces(): Promise<void> {
+  async function closeAllRelayTransportWorkspaces(options?: { accountChanged?: boolean }): Promise<void> {
     await withOwnerHostPaused(true, async () => {
       if (rustEngineRelayClient) {
-        await rustEngineRelayClient.closeAll();
+        await rustEngineRelayClient.closeAll(options);
         return;
       }
       await rustEngineWorkspaceSessions?.closeAll();
@@ -513,9 +513,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         "Rust engine failed to start",
         `${message}\n\nThe desktop cannot start without the Rust engine.`,
       );
-      // Contained: a stop() throw here would reject engineDaemonStartup itself,
-      // skip the quit below, and rethrow from every gated await instead of
-      // letting the quit land.
+      // Contained: a stop() throw here would reject engineDaemonStartup itself
+      // and rethrow from every gated await instead of letting the caller's
+      // quit land.
       await rustEngineDaemon?.stop().catch((stopError: unknown) => {
         console.error(
           "[desktop] Rust engine daemon stop after failed start:",
@@ -526,14 +526,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       rustEngineWorkspaceSessions = null;
       rustEngineRelayClient = null;
       rustEngineSessionSource = null;
-      // The window may already be up — it loads while the daemon handshakes —
-      // and by the time the user dismisses the dialog above, a restored tab can
-      // hold edits (local reads and the plain editor never wait for the
-      // daemon). So this quit goes through the ordinary path: before-quit
-      // intercepts while a workspace window is live, and the quit guard's ask
-      // lets the renderer flush or warn about that work — a destroy() here
-      // would discard it with no beforeunload and no ask.
-      app.quit();
+      // The app lifecycle quits, after it checks for a build that fixes this.
       return false;
     }
   }

@@ -102,7 +102,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     revealAutomationHolds: vi.fn(async () => undefined),
     retryCollectionAutomation: vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false })),
     undoCollectionAutomationRun: vi.fn(async (): Promise<UndoCollectionAutomationRunResult> =>
-      ({ status: "undone", reverted: 1, removed: 0, changedSince: 1, missing: 0, kept: 0, irreversible: 0 })),
+      ({ status: "undone", reverted: 1, removed: 0, changedSince: 1, missing: 0, kept: 0, irreversible: 0, actions: 0 })),
     confirmCollectionAutomationStep: vi.fn(async () => ({ status: "confirmed" as const })),
     listAutomationTargets: vi.fn(async (): Promise<ListAutomationTargetsResult> => ({ collections: [
       { path: "Tasks", name: "Tasks", stopped: null },
@@ -288,7 +288,7 @@ describe("the ⚡ panel", () => {
 
     rerender(<Panel workspaceId="ws-2" onError={onError} onNotice={onNotice} />);
     answerWrite({ status: "reformats" });
-    answerUndo({ status: "undone", reverted: 1, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0 });
+    answerUndo({ status: "undone", reverted: 1, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0, actions: 0 });
     await waitFor(() => expect(bridge.listCollectionAutomations).toHaveBeenCalledWith({ workspaceId: "ws-2", collectionPath: "Tasks" }));
     expect(screen.queryByTestId("automations-reformat")).toBeNull();
     expect(onNotice).not.toHaveBeenCalled();
@@ -689,7 +689,7 @@ describe("an automation's runs", () => {
       run({ claimId: "atc_added", writes: [{ kind: "dataset-created", rules, operationId: "create", tableId: "table-1", recordId: "invoice-2", version: 1 }] }),
     ]);
     bridge.undoCollectionAutomationRun.mockResolvedValueOnce({
-      status: "undone", reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 1,
+      status: "undone", reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 1, actions: 0,
     });
     const onNotice = vi.fn();
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} onNotice={onNotice} />);
@@ -699,6 +699,30 @@ describe("an automation's runs", () => {
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith(
       "Undid 1 change. 1 added record stays. The Collection's rules do not let dohc undo 1 change.",
     ));
+  });
+
+  it("names the action a run ran, and says its changes stay when the run's edits are undone", async () => {
+    const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
+    const { bridge } = makeBridge(read([summary(stamp)]), [
+      run({ writes: [
+        { kind: "dataset-action", rules, operationId: "settle", tableId: "table-1", name: "Settle", revision: 4 },
+        { kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", version: 2, fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] },
+      ] }),
+      run({ claimId: "atc_action", writes: [{ kind: "dataset-action", rules, operationId: "settle", tableId: "table-1", name: "Settle", revision: 5 }] }),
+    ]);
+    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({
+      status: "undone", reverted: 1, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 1,
+    });
+    const onNotice = vi.fn();
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} onNotice={onNotice} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    expect(row.textContent).toContain("Ran 1 action and changed 1 field");
+    await userEvent.click(within(row).getByRole("button", { name: "Show 2 changes" }));
+    expect(row.textContent).toContain("Ran Settle");
+    // A run that only ran an action has nothing Undo can put back.
+    expect(within(screen.getByTestId("automation-run-atc_action")).queryByRole("button", { name: "Undo" })).toBeNull();
+    await userEvent.click(within(row).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid 1 change. 1 action can't be undone."));
   });
 
   it("shows a sent message without offering record Undo", async () => {
@@ -806,6 +830,22 @@ describe("the builder", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1));
     expect(written[0]!.automations[0]!.if).toBe("record.Points == 3");
+  }, 30_000);
+
+  it("shows a syntax error in an action's input on its step, inside an If too, and does not save", async () => {
+    const settle: Automation = { ...stamp, id: "settle", name: "Settle", do: [{
+      kind: "if", if: "true",
+      do: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "note", value: { kind: "literal", value: "x" } }] }],
+      otherwise: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id +" } }] }],
+    }] };
+    const { written, bridge } = makeBridge(read([summary(settle)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user, "Settle");
+    await waitFor(() => expect(bridge.checkCollectionAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ formulas: ["record.id +"] })), SLOW);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/^The formula for id has a syntax error\./u, undefined, SLOW)).toBeTruthy();
+    expect(written).toEqual([]);
   }, 30_000);
 
   it("never saves what the file contract refuses: a removed record's fields, or what main's check turns down", async () => {

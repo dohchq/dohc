@@ -511,7 +511,7 @@ function RowMenu(props: { label: string; items: readonly MenuItem[] }) {
               aria-disabled={item.disabled ? true : undefined}
               onMouseEnter={(event) => event.currentTarget.focus()}
               onClick={() => pick(item)}
-              className="flex h-7 w-full items-center rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-panel-2 hover:text-ink focus:bg-line focus:text-ink aria-disabled:opacity-50"
+              className="flex h-7 w-full items-center rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink focus:bg-selected focus:text-ink aria-disabled:opacity-50"
             >
               {item.label}
             </button>

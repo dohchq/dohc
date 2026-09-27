@@ -1,3 +1,4 @@
+import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -8,7 +9,7 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError } from "./ipc/errorWords";
-import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
+import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
   devToolsEnabled,
@@ -118,6 +119,7 @@ import {
   crashReportOperations,
   noticeOperations,
   scheduleHostOperations,
+  chatDispatchNoticeOperations,
   type ScheduleHostResult,
   type NoticeRef,
   workspaceSearchOperations,
@@ -152,6 +154,9 @@ import {
   type PublicUpdateState,
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
+import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
+import { confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
+import { finishLaunch } from "./launch/launchMarker";
 import {
   createExitRounds,
   createQuitGuard,
@@ -572,6 +577,7 @@ function assertAgentRunnableWorkspace(workspaceId: string): void {
 }
 
 let autoUpdateController: AutoUpdateController | null = null;
+let autoUpdateStartup: Promise<AutoUpdateController | null> | null = null;
 
 // app.getAppPath() is unreliable here: when Electron is launched with a
 // direct script path (as the e2e harness does, and as a plain built binary
@@ -780,6 +786,7 @@ const desktopWindows = createDesktopWindows({
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
   preloadArguments: devToolsPreloadArguments(devToolsGranted),
+  afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
   > { return rendererWorkspaceSessions; },
@@ -1588,6 +1595,7 @@ function registerReservedPhysicalWorkspace(
 // manifest and its identity.
 async function forgetWorkspace(workspaceId: string): Promise<void> {
   await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
+  chatDispatchNotices.clearWorkspace(workspaceId);
   notifyRenderer();
 }
 
@@ -1769,6 +1777,7 @@ function testCaptureSeams(): {
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
+  accountId: string;
   attachmentId?: symbol;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient {
@@ -1800,6 +1809,7 @@ function engineForWorkspace(
   const daemonRelay = relayClientForWorkspace({
     workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
+    accountId: credentials.userId,
     attachmentId: workspace.attachmentId,
     relay,
   });
@@ -1807,6 +1817,7 @@ function engineForWorkspace(
     rootDir: workspace.rootPath,
     relay,
     operations: {
+      claim: () => daemonRelay.claim(),
       push: () => daemonRelay.push(),
       // Each page's files, once written, go to the Collection automation
       // executor: a pull need not leave a watcher batch.
@@ -2853,7 +2864,18 @@ function rememberPendingCliRunMessageLink(
   lease.release();
 }
 
+const chatDispatchNotices = createChatDispatchNotices((event) => {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.webContents.isDestroyed()) continue;
+    if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId !== event.workspaceId) continue;
+    window.webContents.send(CHANNELS.chatDispatchNotices, event);
+  }
+});
+
 const chatDispatchService = createChatDispatchService({
+  onDispatchNotice: (workspace, notice) => {
+    withWorkspaceAttachment(workspace, () => chatDispatchNotices.report(workspace.workspaceId, notice));
+  },
   runNotices: {
     post: (input) => noticeStore().postNotice(input),
     owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),
@@ -2911,31 +2933,6 @@ const chatDispatchService = createChatDispatchService({
     }
     return release;
   },
-  authorizeServiceNote: (workspace, threadId, verifiedUserId) =>
-    withWorkspaceAttachmentAsync(workspace, async (lease) => {
-      try {
-        const store = linkedChatStoreFor(lease);
-        const registered = canonicalWorkspaceFor(lease);
-        await assertSharedChannelWritable({
-          workspaceId: registered.workspaceId,
-          sharedChannels: registered.sharedChannels,
-          store,
-          target: { threadId },
-        });
-        const identity = await chatRelayIdentityFor(
-          workspace.workspaceId,
-          { threadId },
-          store,
-        );
-        return (
-          identity.authorUserId === verifiedUserId &&
-          (identity.joinedChannel === null || verifiedUserId !== undefined)
-        );
-      } catch (error) {
-        if (!(error instanceof SharedChannelReadOnlyError)) throw error;
-        return false;
-      }
-    }),
   onMessagePosted: (workspace, threadId) => {
     withWorkspaceAttachment(workspace, () => {
       notifyRenderer({ workspaceId: workspace.workspaceId });
@@ -3865,6 +3862,33 @@ function currentUpdateState(): UpdateStateEvent {
   );
 }
 
+// Auto-updates: packaged builds use electron-builder's baked app-update.yml
+// feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
+// Failures are absorbed — updates must never take the app down. Starting
+// twice returns the first start.
+function startUpdates(): Promise<AutoUpdateController | null> {
+  autoUpdateStartup ??= startAutoUpdates({
+    isPackaged: app.isPackaged,
+    currentVersion: app.getVersion(),
+    // A restart already staged has no install left to make — quitAndInstall
+    // started its own quit on the first call and has none left to start.
+    // Main makes it, so the fact lives here and not in a renderer module a
+    // reload would reset. The quit is already approved:
+    // the IPC handler approves before asking the controller.
+    quitForStagedRestart: () => app.quit(),
+    onState: (_state, state) => {
+      broadcastUpdateState(state);
+    },
+  })
+    .then((controller) => {
+      autoUpdateController = controller;
+      broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
+      return controller;
+    })
+    .catch(() => null);
+  return autoUpdateStartup;
+}
+
 function broadcastUpdateState(state: PublicUpdateState): void {
   const payload = parseUpdateStateForIpc(state);
   if (!payload) return;
@@ -4323,11 +4347,25 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     create: () => trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        afterRendererCrashLoop,
         preloadArguments: devToolsPreloadArguments(devToolsGranted),
       }),
     ),
-    whenLoaded: (window) => new Promise<void>((resolve) => {
-      window.webContents.once("did-finish-load", resolve);
+    whenLoaded: (window) => new Promise<boolean>((resolve) => {
+      const contents = window.webContents;
+      const settle = (loaded: boolean) => {
+        contents.off("did-finish-load", onLoad);
+        contents.off("did-fail-load", onFail);
+        resolve(loaded);
+      };
+      const onLoad = () => settle(true);
+      const onFail = (_event: unknown, errorCode: number, _description: string, _url: string, isMainFrame: boolean) => {
+        // ERR_ABORTED (-3) is a load that another navigation replaced; that
+        // one still finishes or fails on its own.
+        if (isMainFrame && errorCode !== -3) settle(false);
+      };
+      contents.on("did-finish-load", onLoad);
+      contents.on("did-fail-load", onFail);
     }),
     current: () => targetWindow(undefined),
     hasWorkspace: () => liveWorkspaceWindow() !== undefined,
@@ -4418,30 +4456,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     reportTrayFailure: (error) => console.error("[desktop] dispatch tray:", error),
     warmCredentials: warmCredentialCache,
     reconcileCloud: () => { activity.reconcileCloud(); },
-    startUpdates: () => {
-      // Auto-updates: packaged builds use electron-builder's baked app-update.yml
-      // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
-      // Failures are absorbed — updates must never take the app down.
-      void startAutoUpdates({
-        isPackaged: app.isPackaged,
-        currentVersion: app.getVersion(),
-        // A restart already staged has no install left to make — quitAndInstall
-        // started its own quit on the first call and has none left to start.
-        // Main makes it, so the fact lives here and not in a renderer module a
-        // reload would reset. The quit is already approved:
-        // the IPC handler approves before asking the controller.
-        quitForStagedRestart: () => app.quit(),
-        onState: (_state, state) => {
-          broadcastUpdateState(state);
-        },
-      })
-        .then((controller) => {
-          autoUpdateController = controller;
-          broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
-        })
-        .catch(() => undefined);
-    },
+    startUpdates: () => { void startUpdates(); },
+    updateAfterStartupFailure: () => updateAfterFailure("startup"),
+    updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
+  launch: { finished: finishLaunch },
   beforeQuit: (event) => { quitGuard.beforeQuit(event); },
   shutdown: {
     budgetMs: WILL_QUIT_BUDGET_MS,
@@ -4602,7 +4621,7 @@ const senderWorkspaceAuthority = {
 // window opens a MAIN-side dialog that names the loss — it never proceeds by
 // itself.
 const exitRounds = createExitRounds<BrowserWindow>({
-  participants: () => workspaceWindows.allLive(),
+  participants: () => workspaceWindows.answering(),
   participantId: (window) => window.webContents.id,
   send: (window, message) => {
     if (!window.isDestroyed()) window.webContents.send(CHANNELS.exitRound, message);
@@ -4647,6 +4666,24 @@ const quitGuard = createQuitGuard({
     app.quit();
   },
 });
+
+const installUpdate = createUpdateInstall<BrowserWindow>({
+  currentUpdateState, exitRounds, quitGuard,
+  get autoUpdateController() { return autoUpdateController; },
+});
+
+// A failing build checks the feed before it gives up, so a person on a bad
+// release can still reach the release that fixes it.
+const updateAfterFailure = createUpdateAfterFailure({
+  controller: startUpdates,
+  showDownloading: (failure, version, signal) => showDownloadingDialog(dialog, failure, version, signal),
+  confirmRestart: (failure, version) => confirmRestartDialog(dialog, failure, version),
+  install: installUpdate,
+});
+
+function afterRendererCrashLoop(): void {
+  void updateAfterFailure("window-crash");
+}
 
 // The owner of the user settings file: every save, zoom step, reset, and
 // edit made in the file goes through it and takes effect there.
@@ -5469,6 +5506,11 @@ function registerIpcHandlers(): void {
     }),
   });
 
+  registerOperations(operationBoundary, chatDispatchNoticeOperations, {
+    registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
+    dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
+  });
+
   registerOperations(operationBoundary, noticeOperations, {
     listNotices: () => noticeStore().list(),
     markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
@@ -5479,7 +5521,7 @@ function registerIpcHandlers(): void {
 
   registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
     registerHandler: handleIpc,
-    assertTrustedSender, currentUpdateState, exitRounds, quitGuard,
+    assertTrustedSender, currentUpdateState, installUpdate,
     get autoUpdateController() { return autoUpdateController; },
   });
 

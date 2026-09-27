@@ -18,6 +18,7 @@ import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOper
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { JoinedSharedChannel, RegistryEntry } from "../workspaces/registryStore";
 import { deferred } from "../testing/deferred";
+import { RelayClaimRefusedError, RelayIdentityMissingError } from "@dohc/workspace-contracts/relay";
 
 const credentials: CloudCredentials = {
   serverUrl: "https://account.test", relayUrl: "https://relay.test",
@@ -69,6 +70,7 @@ async function harness() {
   const acknowledge = vi.fn();
   const unmount = vi.fn<() => Promise<{ folderLeft?: true }>>(async () => ({}));
   const push = vi.fn(async () => undefined);
+  const claim = vi.fn(async () => undefined);
   const rotateAfterLookup = { value: false };
   const mount = vi.fn(async () => undefined);
   const sharesChanged = vi.fn<(workspaceId: string) => void>();
@@ -101,7 +103,7 @@ async function harness() {
       return await relayListing() as Result;
     },
     listWorkspaces: () => [workspace, other], setWorkspaceSharedChannels: write,
-    relayClientForWorkspace: () => ({ pullSharedChannel: async () => ({ fetched: 0, applied: 0, skipped: 0, nextCursor: 0 }), push }),
+    relayClientForWorkspace: () => ({ pullSharedChannel: async () => ({ fetched: 0, applied: 0, skipped: 0, nextCursor: 0 }), push, claim }),
     projectPendingChatBookmarksAfterPull: async () => undefined,
     normalizeServerUrl: (url) => url, peekedReceivedGrantKinds: cache,
     peekReceivedGrantKindForShare: peek, acknowledgeWorkspaceShareSkips: acknowledge,
@@ -112,7 +114,7 @@ async function harness() {
     handlers.get(channel)!({ sender: "window", trusted }, payload);
   return {
     handlers, invoke, workspace, other, authorities, helpers, relayListing, warm, peek, cache, write, notify, acknowledge,
-    mount, unmount, push, rotateAfterLookup, store, relayCalls, sharesChanged,
+    mount, unmount, push, claim, rotateAfterLookup, store, relayCalls, sharesChanged,
     rotateCredentials: () => { generation += 1; }, retireRenderer: () => { rendererCurrent = false; },
   };
 }
@@ -237,6 +239,49 @@ describe("registered shared-channel handlers", () => {
     expect(h.push).toHaveBeenCalledOnce();
     // Each new grant refreshes the workspace's share roster.
     expect(h.sharesChanged.mock.calls).toEqual([["workspace"], ["workspace"]]);
+  });
+
+  it("claims a missing identity and pushes again before sharing a group", async () => {
+    const h = await harness();
+    h.store.listChannels.mockResolvedValue([channel({ folderPath: "team" })]);
+    h.store.getChannelWireId.mockResolvedValue("wire-team");
+    h.push.mockRejectedValueOnce(new RelayIdentityMissingError());
+    h.claim.mockImplementationOnce(async () => {
+      expect(h.push).toHaveBeenCalledOnce();
+      expect(h.relayCalls).toHaveLength(0);
+    });
+    h.push.mockImplementationOnce(async () => {
+      expect(h.claim).toHaveBeenCalledOnce();
+      expect(h.relayCalls).toHaveLength(0);
+    });
+    h.relayListing.mockResolvedValue({ shareId: "share-team" });
+
+    await expect(h.invoke(CHANNELS.shareChatChannel, {
+      workspaceId: "workspace", channelId: "chan", recipientEmail: "ana@example.test",
+    })).resolves.toEqual({ shareId: "share-team" });
+    expect(h.push).toHaveBeenCalledTimes(2);
+    expect(h.claim).toHaveBeenCalledOnce();
+    expect(h.relayCalls).toHaveLength(1);
+    expect(h.sharesChanged).toHaveBeenCalledWith("workspace");
+  });
+
+  it("surfaces the sync claim refusal without sharing the group", async () => {
+    const h = await harness();
+    h.store.listChannels.mockResolvedValue([channel({ folderPath: "team" })]);
+    h.store.getChannelWireId.mockResolvedValue("wire-team");
+    h.push.mockRejectedValueOnce(new RelayIdentityMissingError());
+    const refusal = new RelayClaimRefusedError(
+      "Sync stopped. Another account already claimed this workspace. Sign in with that account and try again.",
+    );
+    h.claim.mockRejectedValueOnce(refusal);
+
+    await expect(h.invoke(CHANNELS.shareChatChannel, {
+      workspaceId: "workspace", channelId: "chan", recipientEmail: "ana@example.test",
+    })).rejects.toThrow(refusal);
+    expect(h.push).toHaveBeenCalledOnce();
+    expect(h.claim).toHaveBeenCalledOnce();
+    expect(h.relayCalls).toHaveLength(0);
+    expect(h.sharesChanged).not.toHaveBeenCalled();
   });
 
   it("a session change before the share runs stops a plain channel share too", async () => {

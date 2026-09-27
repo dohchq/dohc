@@ -66,6 +66,12 @@ export interface AutomationScope {
   message?: JsonObject;
   bindings?: JsonObject;
   now: string;
+  /**
+   * The only keys of the trigger record that formulas may read, as `record`
+   * and as `trigger.record`. Reading any other key stops the formula with an
+   * error instead of reading nothing. Absent means every key.
+   */
+  recordKeys?: string[];
 }
 
 /** One part of message text. This matches `AutomationTextPart` from the automations file contract. */

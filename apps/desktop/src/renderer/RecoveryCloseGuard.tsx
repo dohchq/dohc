@@ -618,7 +618,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     answerRound(round, "cancel");
                   }
                 }}
-                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink"
               >
                 Go back
               </button>

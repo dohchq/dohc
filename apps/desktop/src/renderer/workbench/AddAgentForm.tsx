@@ -216,7 +216,7 @@ export function AddAgentForm(props: {
             data-testid="chats-add-agent-cancel"
             disabled={busy}
             onClick={props.onCancel}
-            className="h-7 rounded-md px-2.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50 dohc-focus-visible"
+            className="h-7 rounded-md px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50 dohc-focus-visible"
           >
             Cancel
           </button>

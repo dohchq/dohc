@@ -181,12 +181,14 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       if(!/^[A-Za-z0-9_-]{43}$/.test(secret)) reject("invalid_input","Invalid operation secret.");
       const files=operation.files ?? [];
       const readOnly=operation.readOnly===true;
+      const tables=operation.tables === undefined ? config.tables : approvedTables(operation.tables);
+      if(tables.some(table=>!config.tables.includes(table))) reject("invalid_input","Operation tables exceed Collection access.");
       if(!Array.isArray(files) || files.length>APP_BACKEND_OPERATION_FILES || files.some(file=>!file || !/^[A-Za-z0-9._:-]{1,128}$/.test(file.fileId) || typeof file.name!=="string" || Buffer.byteLength(file.name)>512 || typeof file.contentType!=="string" || Buffer.byteLength(file.contentType)>128 || !/^[a-f0-9]{64}$/.test(file.sha256) || !Number.isSafeInteger(file.byteLength) || file.byteLength<0) || new Set(files.map(file=>file.fileId)).size!==files.length) reject("invalid_input","Invalid operation files.");
       // Serialize before admission: invalid JSON and oversized inputs never consume queue slots.
       const inputJson=boundedText(JSON.stringify(operation.input),config.limits.inputBytes,"Operation input");
       const callerJson=boundedText(JSON.stringify(operation.caller),config.limits.inputBytes,"Caller");
       const result=await send({kind:"prepare",expected:{...operation.expected},guest:{
-        tables:config.tables,limits:config.limits,source:boundedText(operation.source,config.limits.sourceBytes,"Operation source"),
+        tables,limits:config.limits,source:boundedText(operation.source,config.limits.sourceBytes,"Operation source"),
         operation:operation.operation,inputJson,callerJson,nowMs:operation.nowMs,requestId:operation.requestId,secret,
         readOnly,files:files.map(file=>({...file})),
       }}) as PreparedOperation;

@@ -86,6 +86,9 @@ globalThis.operations = {
 Declare those tables and operations in the dataset descriptor and schema.
 `ctx.db.query` returns rows; `ctx.db.execute` returns `{ changes }`.
 Parameters are strings, finite numbers, or null. The host verifies `ctx.caller`.
+`ctx.caller.kind` says who asked: `owner`, `named` for a person the owner granted access, `link` for someone with a share link, or `automation` for an automation on the Collection.
+An automation caller has `automationId`, such as `collection:Invoices#mark-paid`.
+It is not the owner: an operation that allows only the owner refuses it.
 The request identity and operation context stay stable during host retries.
 `ctx.files.attach(fileId)` associates an admitted upload with the transaction.
 `ctx.refuse(code, message)` rolls back a business-rule failure.

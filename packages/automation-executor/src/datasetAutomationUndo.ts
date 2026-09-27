@@ -102,6 +102,7 @@ export async function undoDatasetAutomationRuns(
   const undone: CollectionAutomationUndone = {
     reverted: 0, removed: 0, changedSince: 0, missing: 0, irreversible: 0,
     kept: writesOf(runs).filter((write) => write.kind === "dataset-created").length,
+    actions: writesOf(runs).filter((write) => write.kind === "dataset-action").length,
   };
   for (const record of changesOf(host, runs)) {
     const changed = record.fields.filter((field) => !isDeepStrictEqual(field.before, field.after));

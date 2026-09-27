@@ -1232,6 +1232,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Sync stopped because the server does not serve this dohc's relay API
   // version: "app" means update dohc, "server" means the server is older.
   updateRequired: z.enum(["app", "server"]).optional(),
+  claimingIdentity: z.boolean().optional(),
   // True when the recorder could not be built at workspace open. Required:
   // an omitted boolean reads as false, and a producer that cannot say which
   // cause it means must not compile.
@@ -1241,10 +1242,10 @@ const SYNC_STATUS_BASE_FIELDS = {
   // for the same reason as its neighbour.
   historyShareView: z.boolean(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
-  // is saved either way, and the engine keeps retrying with backoff.
+  // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
     .object({
-      cause: z.enum(["server-unreachable", "unknown"]),
+      cause: z.enum(["server-unreachable", "claim-refused", "unknown"]),
       detail: z.string(),
       // When this failure began, and how many passes have failed since.
       sinceMs: z.number(),
@@ -5105,7 +5106,7 @@ const APP_VIEW_ID = z
   .refine((value) => parseAppViewId(value) !== null);
 
 export const WorkspaceUiState = z.object({
-  version: z.literal(2),
+  version: z.literal(3),
   // dohc's own views or a pinned app. The catch keeps a stored id that names
   // neither from failing the file.
   activeView: z.union([z.enum(VIEW_IDS), APP_VIEW_ID]).catch("explorer"),
@@ -5114,7 +5115,7 @@ export const WorkspaceUiState = z.object({
   editorGroups: WorkspaceEditorGroups,
   activeEditorGroup: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS),
   // The right-hand Chats panel. Optional fields degrade independently when a
-  // version-2 file is hand-edited or lacks a newer cosmetic setting.
+  // version-3 file is hand-edited or lacks a newer cosmetic setting.
   chatsVisible: z.boolean().optional(),
   chatsWidth: z.number().int().min(CHATS_MIN_WIDTH).max(CHATS_MAX_WIDTH).optional(),
   // The catch keeps a foreign height from nulling an otherwise valid file.
@@ -5457,6 +5458,33 @@ export const ScheduleHostResult = z.discriminatedUnion("kind", [
 export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
 // The workspace whose schedule host changed.
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
+export const ChatDispatchNotice = z.object({
+  id: z.string().min(1),
+  reason: z.enum(["no-runner", "budget-paused"]),
+  threadId: z.string().min(1),
+  runId: z.string().min(1).optional(),
+  logPath: z.string().min(1).optional(),
+  message: z.string().min(1),
+});
+export type ChatDispatchNotice = z.infer<typeof ChatDispatchNotice>;
+export const ChatDispatchNoticesEvent = z.object({
+  workspaceId: z.string().min(1),
+  revision: z.number().int().nonnegative(),
+  notices: z.array(ChatDispatchNotice).max(3),
+});
+export type ChatDispatchNoticesEvent = z.infer<typeof ChatDispatchNoticesEvent>;
+export const chatDispatchNoticeOperations = {
+  registerChatDispatchNotices: {
+    channel: "desktop:register-chat-dispatch-notices",
+    payload: WorkspaceIdPayload, result: ChatDispatchNoticesEvent,
+    guard: "active-workspace", inactiveMessage: "Open this workspace to read its dispatch notices.",
+  },
+  dismissChatDispatchNotice: {
+    channel: "desktop:dismiss-chat-dispatch-notice",
+    payload: WorkspaceIdPayload.extend({ id: z.string().min(1) }),
+    guard: "active-workspace", inactiveMessage: "Open this workspace to dismiss its dispatch notice.",
+  },
+} as const satisfies OperationTable;
 
 export const scheduleHostOperations = {
   readScheduleHost: {
@@ -5738,7 +5766,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof noticeOperations>,
-    OperationBridge<typeof scheduleHostOperations> {
+    OperationBridge<typeof scheduleHostOperations>,
+    OperationBridge<typeof chatDispatchNoticeOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -6179,6 +6208,7 @@ export interface DohcDesktopBridge
   // Which computer runs a workspace's schedules changed, as when a handover
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;
+  onChatDispatchNotices(listener: (event: ChatDispatchNoticesEvent) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(

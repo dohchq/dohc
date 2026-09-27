@@ -9,8 +9,9 @@ import { ERROR_CODES, ERROR_NAMES, SIGNALS, SYSCALLS, WIRE_CODES } from "./crash
 // template, and stack frames inside dohc's own code. Everything else is
 // withheld, because free text can hold a person's file names and content.
 export type CrashEvent =
-  // An exception nothing caught in the main process.
-  | { kind: "main-exception"; error: unknown; origin: "uncaughtException" | "unhandledRejection" }
+  // An exception nothing caught in the main process, or one that stopped
+  // the main module from loading at all.
+  | { kind: "main-exception"; error: unknown; origin: "uncaughtException" | "unhandledRejection" | "module-load" }
   // A window's renderer, the GPU process, or a Chromium service process
   // that ended abnormally.
   | { kind: "process-gone"; source: "window" | "gpu" | "utility"; name: string | null; reason: string; exitCode: number }
@@ -48,6 +49,12 @@ const ENGINE_STAGE: Record<Extract<CrashEvent, { kind: "engine" }>["stage"], str
   restarting: "The workspace engine failed. dohc restarts it.",
   stopped: "The workspace engine failed again, and dohc stopped restarting it.",
   startup: "The workspace engine did not start.",
+};
+
+const MAIN_EXCEPTION: Record<Extract<CrashEvent, { kind: "main-exception" }>["origin"], string> = {
+  uncaughtException: "Uncaught exception",
+  unhandledRejection: "Unhandled promise rejection",
+  "module-load": "The main module failed to load",
 };
 
 export const VALUE_WITHHELD = "<withheld>";
@@ -101,7 +108,7 @@ export function formatCrashEvent(
   fact("Time", new Date(facts.atMs).toISOString());
   if (event.kind === "main-exception") {
     fact("Process", "main");
-    fact("What happened", event.origin === "unhandledRejection" ? "Unhandled promise rejection" : "Uncaught exception");
+    fact("What happened", MAIN_EXCEPTION[event.origin]);
   } else if (event.kind === "process-gone") {
     const name = event.name && /^[\w .-]{1,100}$/.test(event.name) ? event.name : null;
     fact("Process", event.source === "utility" && name ? `utility (${name})` : event.source);

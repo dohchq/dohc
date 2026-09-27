@@ -64,15 +64,50 @@ ${step}`;
 const sharedEvaluator = createAutomationFormulaEvaluator();
 afterAll(() => sharedEvaluator.close());
 const hosts: LocalDatasetHost[] = [];
-afterEach(async () => { for (const host of hosts.splice(0)) await host.close(); });
+const drains: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  for (const drain of drains.splice(0)) await drain();
+  for (const host of hosts.splice(0)) await host.close();
+});
 
 const TEAM: ChatDirectoryChannel = { id: "team", name: "Team", slug: "team", kind: "channel", type: "posts", wireId: "team", runningThreadId: null };
 
-async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean } = {}) {
+// Generated operations with more code after them, as someone who adds to
+// them writes: dohc no longer knows the operations. This code refuses every
+// call an automation makes, and every read of one record, as a trigger read
+// or a press's record check would make, so a run that calls any fails.
+const AUTHORED_OPERATIONS = `${files[definition.operationsPath]}
+for (const [name, operation] of Object.entries(globalThis.operations)) {
+  globalThis.operations[name] = (ctx, input) => {
+    if (ctx.caller.kind === "automation") ctx.refuse("not_for_automations", "This operation does not run for automations.");
+    if (input.limit === 1) ctx.refuse("one_record", "This read lists records; it does not find one.");
+    return operation(ctx, input);
+  };
+}
+`;
+
+// The same rules with an action someone wrote: only an automation may settle
+// an invoice, and the action says which automation did.
+const SETTLE = id(14);
+const ACTION_DESCRIPTOR = JSON.stringify({ ...definition, operations: [...definition.operations,
+  { operationId: SETTLE, name: "invoices.settle", label: "Settle", tableId: TABLE, kind: "action", access: "owner", readOnly: false, fieldIds: [STATUS] }] }, null, 2) + "\n";
+const ACTION_OPERATIONS = `${files[definition.operationsPath]}
+globalThis.operations["invoices.settle"] = (ctx, input) => {
+  if (ctx.caller.kind !== "automation") ctx.refuse("automations_only", "Only an automation settles an invoice.");
+  const changed = ctx.db.execute('UPDATE invoices SET status=?, "_record_version"="_record_version"+1 WHERE id=?', ["Settled by " + ctx.caller.automationId + ": " + input.note, input.id]);
+  if (changed.changes !== 1) ctx.refuse("not_found", "This invoice is gone.");
+  return { id: input.id };
+};
+`;
+
+async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean; operations?: string; descriptor?: string;
+  /** Runs once, after the first automation invocation commits and before its run hears back, as a crash there would. */
+  afterInvoke?: () => Promise<void> } = {}) {
   const root = await createTestScratch("dohc-dataset-automations-");
   for (const [path, text] of Object.entries(files)) {
     await mkdir(join(root, dirname(path)), { recursive: true });
-    await writeFile(join(root, path), text);
+    const given = path === definition.operationsPath ? options.operations : path === "Budget/dataset.json" ? options.descriptor : undefined;
+    await writeFile(join(root, path), given ?? text);
   }
   const writeAutomations = (body: string) => writeFile(join(root, "Budget", "automations.yaml"), `version: 1\nautomations:\n${body}`);
   await writeAutomations(closePaid());
@@ -80,15 +115,30 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   let executor: CollectionAutomations | undefined;
   const waiters = new Set<() => void>();
   const wake = () => { for (const waiter of [...waiters]) waiter(); };
-  const until = (condition: () => boolean | Promise<boolean>) => new Promise<void>((resolve) => {
-    const check = async () => { if (waiters.has(check) && await condition()) { waiters.delete(check); resolve(); } };
+  // Checks run on every wake without waiting for the last one; the test waits for them all before its host closes.
+  const checking = new Set<Promise<void>>();
+  const until = (condition: () => boolean | Promise<boolean>) => new Promise<void>((resolve, reject) => {
+    const check = () => {
+      const run = (async () => {
+        if (!waiters.has(check)) return;
+        try {
+          if (await condition()) { waiters.delete(check); resolve(); }
+        } catch (error) {
+          if (waiters.delete(check)) reject(error);
+        }
+      })();
+      checking.add(run);
+      void run.finally(() => checking.delete(run));
+    };
     waiters.add(check);
-    void check();
+    check();
   });
+  const settledChecks = async () => { while (checking.size > 0) await Promise.all([...checking]); };
   const host = await createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
     onAutomationClaims: () => { executor?.notifyClaimed(); wake(); },
     onDatasetsChanged: () => executor?.datasetsChanged() });
   hosts.push(host);
+  drains.push(settledChecks);
   const blobs = new Map<string, Uint8Array>();
   const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
     const params = request.params as Record<string, unknown>;
@@ -142,6 +192,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     readAutomationGroupSkips: async () => ({ aheadAtMs: null, lateAtMs: null }),
   } as unknown as CollectionAutomationEngine;
   let roster = options.roster ?? OWNER;
+  let afterInvoke = options.afterInvoke;
   let hostOpen = options.hostOpen ?? true;
   // Rules the executor sees in place of the approved ones, as after a schema change it indexes.
   let indexed: DatasetDefinition | null = null;
@@ -202,7 +253,14 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
         revision: (datasetId: string) => ({ ...host.automations.revision(datasetId), definition: override }) };
       const resolving = rulesResolve ? current : { ...current, resolves: () => false };
       const moved = unpressable;
-      const automations = moved === null ? resolving : { ...resolving, assertPressable: () => { throw new Error(moved); } };
+      const pressable = moved === null ? resolving : { ...resolving, assertPressable: () => { throw new Error(moved); } };
+      const after = afterInvoke;
+      const automations = after === undefined ? pressable : { ...pressable, invoke: async (...args: Parameters<typeof pressable.invoke>) => {
+        const result = await pressable.invoke(...args);
+        afterInvoke = undefined;
+        await after();
+        return result;
+      } };
       const result = await work(automations);
       wake();
       return result;
@@ -223,6 +281,39 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
 }
 
 describe("Collection automations on a dataset", () => {
+  it("runs a change's automation on a dataset whose operations someone wrote, from the change's facts alone", async () => {
+    const f = await world({ operations: AUTHORED_OPERATIONS });
+    await f.writeAutomations(closePaid("      - notify: 'Invoice {record.id} paid, was {previous.Paid}'\n        to: [user-owner]\n"));
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [PAID]: false, [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    expect(f.notices).toEqual([expect.objectContaining({ body: `Invoice ${invoice} paid, was false` })]);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+  });
+
+  it("stops a run that must compare a value too large for its claim, instead of comparing it as empty", async () => {
+    const f = await world({ operations: AUTHORED_OPERATIONS });
+    await f.writeAutomations("  - id: close-paid\n    name: Cleared notes\n    when:\n      field-changed: Notes\n      to: null\n    do:\n      - notify: Cleared\n        to: [user-owner]\n");
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open", [NOTES]: "short" });
+    await f.edit(invoice, { [NOTES]: "n".repeat(9000) });
+    await f.until(() => f.claims()[0]?.state === "failed");
+    expect(f.claims()[0]?.error).toBe("The new value of Notes is too large for dohc to compare without reading the record.");
+    expect(f.notices).toEqual([]);
+  });
+
+  it("stops a run whose formula reads a field dohc did not read, instead of reading it as empty", async () => {
+    const f = await world({ operations: AUTHORED_OPERATIONS });
+    await f.writeAutomations(closePaid("      - if: record.Status == \"Open\"\n        do:\n          - notify: Open\n            to: [user-owner]\n        otherwise:\n          - notify: Not open\n            to: [user-owner]\n"));
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [PAID]: false, [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "failed");
+    expect(f.claims()[0]?.error).toMatch(/Formulas can read only this record's id, not Status\./);
+    expect(f.notices).toEqual([]);
+  });
+
   it("sets a field through the pinned edit when a watched field changes, once, and History names the automation", async () => {
     const f = await world();
     await f.executor.open();
@@ -642,7 +733,7 @@ describe("Collection automations on a dataset", () => {
     const claimId = f.claims()[0]!.claimId;
     const trash = async () => { throw new Error("A dataset's added records stay."); };
     expect(await f.executor.undo({ automationId: AUTOMATION, claimId }, trash)).toEqual({
-      status: "undone", reverted: 1, removed: 0, kept: 1, changedSince: 1, missing: 0, irreversible: 0,
+      status: "undone", reverted: 1, removed: 0, kept: 1, changedSince: 1, missing: 0, irreversible: 0, actions: 0,
     });
     expect((await f.record(invoice))?.values).toMatchObject({ [STATUS]: "Open", [NOTES]: "mine", [PAID]: true });
     expect((await f.records()).some((row) => row.values[NOTES] === "Log")).toBe(true);
@@ -741,6 +832,96 @@ ${step}`;
   const press = (f: Awaited<ReturnType<typeof world>>, input: { recordId: string; pressId: string; pressedBy?: string; field?: string }, description = owner(f)) =>
     f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, ...input, recordId: JSON.stringify(input.recordId) },
       description, () => undefined);
+
+  it("runs a press on a dataset whose operations someone wrote, calling none of them for its own checks", async () => {
+    const f = await world({ operations: AUTHORED_OPERATIONS });
+    await f.writeAutomations(markPaid("      - notify: 'Invoice {record.id} was pressed'\n        to: [user-owner]\n"));
+    await f.executor.open();
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+      .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION }]);
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    const pressed = await press(f, { recordId: invoice, pressId: pressId(12) });
+    if (pressed.busy) throw new Error("The press ran.");
+    await f.until(() => f.settled.length === 1);
+    expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "done", error: null }]);
+    expect(f.notices).toEqual([expect.objectContaining({ body: `Invoice ${invoice} was pressed` })]);
+    // A step that changes records still refuses these operations.
+    await f.writeAutomations(markPaid());
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
+    const refusal = "Budget's operations were written or changed outside dohc, so Set fields, Add record, and Find steps cannot use them.";
+    await f.until(async () => JSON.stringify(await f.executor.automationsIn("Budget")).includes(refusal));
+  });
+
+  const settle = "      - invoke: invoices.settle\n        input:\n          id: '=record.id'\n          note: pressed\n";
+  const watchStatus = `  - id: watch
+    name: Watch status
+    when:
+      field-changed: Status
+    do:
+      - notify: Status changed
+        to: [user-owner]
+`;
+
+  it("runs a button's action as the automation, and the action's change starts other automations one step deeper, never its own", async () => {
+    const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
+    await f.writeAutomations(markPaid(settle) + watchStatus);
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    const pressed = await press(f, { recordId: invoice, pressId: pressId(20) });
+    if (pressed.busy) throw new Error("The press ran.");
+    await f.until(() => f.settled.length === 1 && f.host.automations.claims("collection:Budget#watch")[0]?.state === "done");
+    expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "done", error: null }]);
+    expect((await f.record(invoice))?.values[STATUS]).toBe(`Settled by ${BUTTON_AUTOMATION}: pressed`);
+    // History names the automation behind the action's commit.
+    expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ operation: "invoices.settle", automation: { automationId: BUTTON_AUTOMATION, depth: 1 } });
+    expect(f.host.automations.claims("collection:Budget#watch")).toEqual([expect.objectContaining({ state: "done", depth: 1 })]);
+    expect(f.notices).toEqual([expect.objectContaining({ body: "Status changed" })]);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([expect.objectContaining({ claimId: pressed.claimId })]);
+    await f.executor.dispose();
+  });
+
+  it("runs a button's action once when dohc stops after the action committed and before the run recorded it", async () => {
+    let started: () => void = () => undefined, release: () => void = () => undefined;
+    const committed = new Promise<void>((resolve) => { started = resolve; });
+    const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS, afterInvoke: async () => {
+      started();
+      await new Promise<void>((resolve) => { release = resolve; });
+      throw new Error("The workspace closed.");
+    } });
+    await f.writeAutomations(markPaid(settle));
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    const pressed = await press(f, { recordId: invoice, pressId: pressId(22) });
+    if (pressed.busy) throw new Error("The press ran.");
+    await committed;
+    const disposed = f.executor.dispose();
+    release();
+    await disposed;
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toMatchObject([{ state: "pending" }]);
+    // The next executor sends the saved request under the same key: the host answers from its receipt.
+    f.makeExecutor();
+    await f.executor.open();
+    await f.until(() => f.host.automations.claims(BUTTON_AUTOMATION)[0]?.state === "done");
+    const settles = f.host.history({ datasetId: definition.datasetId }).entries.filter((entry) => entry.operation === "invoices.settle");
+    expect(settles).toHaveLength(1);
+    expect((await f.record(invoice))?.values[STATUS]).toBe(`Settled by ${BUTTON_AUTOMATION}: pressed`);
+    await f.executor.dispose();
+  });
+
+  it("stops an action only you can use while someone else can edit the automation, and refuses a press by someone the action is not granted to", async () => {
+    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+    const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS, roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
+    await f.writeAutomations(markPaid(settle));
+    await f.executor.open();
+    const reason = "Only you can use invoices.settle in Budget, and ana@dohc.test can also edit these automations.";
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ reach: { kind: "checked", steps: expect.arrayContaining([{ verdict: "stopped", reason }]) } }] });
+    const { id: invoice } = await f.create({});
+    const described = owner(f);
+    const withoutAction = { ...described, operations: described.operations.filter((operation) => operation.operationId !== SETTLE) };
+    await expect(press(f, { recordId: invoice, pressId: pressId(21) }, withoutAction)).rejects.toThrow("Only people who can edit Invoices can use this button.");
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    await f.executor.dispose();
+  });
 
   it("runs a press on the record as it is now, for the person who pressed, once, and tells the window how it settled", async () => {
     const f = await world();

@@ -872,3 +872,41 @@ fn failure_note_mark_is_idempotent_and_requires_one_transition() {
         "require/update more than the one false->true transition -> replay fails or false remains."
     );
 }
+
+#[test]
+fn latest_run_includes_unlinked_runs_and_scopes_workspace_and_thread() {
+    let (_scratch, mut store) = open_store();
+    assert!(
+        LinkedChatStore::new(&mut store)
+            .latest_run_for_thread(WS, "thread")
+            .expect("empty")
+            .is_none()
+    );
+    claimed_run(&mut store, "trigger-1", "thread", "run-1", 20);
+    LinkedChatStore::new(&mut store)
+        .complete_dispatch(WS, "run-1", 0, 21, &NO_FAULTS)
+        .expect("complete");
+    claimed_run(&mut store, "trigger-2", "thread", "run-2", 30);
+    LinkedChatStore::new(&mut store)
+        .complete_dispatch(WS, "run-2", 7, 31, &NO_FAULTS)
+        .expect("fail");
+    let chats = LinkedChatStore::new(&mut store);
+    let run = chats
+        .latest_run_for_thread(WS, "thread")
+        .expect("read")
+        .expect("run");
+    assert_eq!(run.run_id, "run-2");
+    assert_eq!(run.exit_code, Some(7));
+    assert!(
+        chats
+            .latest_run_for_thread(OTHER_WS, "thread")
+            .expect("other workspace")
+            .is_none()
+    );
+    assert!(
+        chats
+            .latest_run_for_thread(WS, "other-thread")
+            .expect("other thread")
+            .is_none()
+    );
+}

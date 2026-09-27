@@ -360,10 +360,18 @@ function formulasOf(automation: Automation): string[] {
   if (when.kind === "starts-matching") add(when.condition);
   if (automation.if !== null) add(automation.if);
   for (const step of automation.do) {
+    for (const { expression } of actionFormulas(step)) add(expression);
     if (step.kind !== "set" && step.kind !== "add-record") continue;
     for (const { value } of step.values) if (value.kind === "formula") add(value.expression);
   }
   return formulas;
+}
+
+/** The input formulas of a step's actions, inside If branches too. The builder shows action steps as they are in the file. */
+function actionFormulas(step: AutomationStep): Array<{ key: string; expression: string }> {
+  if (step.kind === "if") return [...step.do, ...step.otherwise].flatMap(actionFormulas);
+  if (step.kind !== "invoke") return [];
+  return step.input.flatMap(({ key, value }) => (value.kind === "formula" ? [{ key, expression: value.expression }] : []));
 }
 
 /** A trigger of `kind`, watching the table the current one names, or else `own`: this Collection's dataset table, or null. */
@@ -616,6 +624,11 @@ export function AutomationBuilder(props: {
   });
   if (draft.steps.length === 0) problems.set("do", "Add a step.");
   draft.steps.forEach(({ step, rows }, index) => {
+    // An action's input is not edited here, so its syntax error shows on the step.
+    for (const { key, expression } of actionFormulas(step)) {
+      const error = syntaxErrors.get(expression);
+      if (error !== undefined && !problems.has(`do/${index}`)) problems.set(`do/${index}`, error.replace(/^This formula/u, `The formula for ${key}`));
+    }
     const editable = editableStep(step, table);
     if (editable === null) return;
     if (rows.length === 0) problems.set(`do/${index}/values`, editable.kind === "set" ? "Add a field to set." : "Add a field.");

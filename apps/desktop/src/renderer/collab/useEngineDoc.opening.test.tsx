@@ -34,11 +34,12 @@ afterEach(async () => {
 
 function Harness(props: {
   path: string;
+  workspaceId?: string;
   enabled?: boolean;
   reopenKey?: number;
 }) {
   const engine = useEngineDoc({
-    workspaceId: "ws-1",
+    workspaceId: props.workspaceId ?? "ws-1",
     path: props.path,
     enabled: props.enabled ?? true,
     ...(props.reopenKey === undefined ? {} : { reopenKey: props.reopenKey }),
@@ -134,6 +135,29 @@ it("stays opening while the open is held, then binds", async () => {
     expect(screen.getByTestId("available").textContent).toBe("true"),
   );
   expect(screen.getByTestId("opening").textContent).toBe("false");
+});
+
+it("does not bind a late open from the previous workspace", async () => {
+  const first = deferredBridge(), second = deferredBridge();
+  vi.stubGlobal("dohcDesktop", {
+    ...second.api,
+    openEngineYDocSession: ({ workspaceId }: { workspaceId: string }) =>
+      workspaceId === "ws-1"
+        ? first.api.openEngineYDocSession()
+        : second.api.openEngineYDocSession(),
+  });
+  const view = render(<Harness path="note.md" workspaceId="ws-1" />);
+  await waitFor(() => expect(first.api.openEngineYDocSession).toHaveBeenCalledOnce());
+  view.rerender(<Harness path="note.md" workspaceId="ws-2" />);
+  await waitFor(() => expect(second.api.openEngineYDocSession).toHaveBeenCalledOnce());
+  rendered = [];
+  first.bind();
+  await waitFor(() => expect(second.api.closeEngineYDocSession).toHaveBeenCalledOnce());
+  expect(screen.getByTestId("opening").textContent).toBe("true");
+  expect(screen.getByTestId("available").textContent).toBe("false");
+  expect(rendered.every((state) => !state.hasDoc)).toBe(true);
+  second.bind();
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 });
 
 it("separates 'not engine-backed' from 'opening' — both are available:false", async () => {

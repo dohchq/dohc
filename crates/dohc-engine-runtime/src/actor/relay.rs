@@ -14,7 +14,7 @@ use dohc_engine_sync::{
     ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareViewPullOutcome,
     ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, adopt_join_identity,
-    read_sync_identity,
+    create_claim_identity, read_sync_identity,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
@@ -59,6 +59,7 @@ pub enum RelayOperation {
     },
     Claim {
         workspace_id: String,
+        account_id: Option<String>,
         new_origin_id: String,
         new_replication_epoch: String,
         new_stream_identity: String,
@@ -1154,6 +1155,29 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn reset_claim_refusal(
+        &self,
+        workspace_id: String,
+        account_id: Option<String>,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _cache| {
+            match store.write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE sync_identity SET claim_state='pending', claim_account_id=NULL \
+                     WHERE workspace_id=?1 AND claim_state <> 'pending' \
+                     AND (?2 IS NULL OR claim_account_id IS NOT ?2)",
+                    rusqlite::params![workspace_id, account_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })? {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
     /// How many changes that did not originate on this computer the engine
     /// has applied to the workspace; 0 before the first.
     pub async fn remote_changes_applied(&self, workspace_id: String) -> Result<i64, RuntimeError> {
@@ -1505,6 +1529,7 @@ fn run_relay_operation(
         }
         RelayOperation::Claim {
             workspace_id,
+            account_id,
             new_origin_id,
             new_replication_epoch,
             new_stream_identity,
@@ -1513,7 +1538,7 @@ fn run_relay_operation(
             let identity = match read_sync_identity(store, &workspace_id)? {
                 Some(identity) => identity,
                 None => {
-                    match adopt_join_identity(
+                    match create_claim_identity(
                         store,
                         &workspace_id,
                         &new_origin_id,
@@ -1531,11 +1556,16 @@ fn run_relay_operation(
                         .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?
                 }
             };
-            client.claim_workspace(ClaimRequest {
-                workspace_id,
-                replication_epoch: identity.replication_epoch,
-                stream_identity: identity.stream_identity,
-            })?;
+            client.claim_workspace(
+                store,
+                ClaimRequest {
+                    workspace_id,
+                    replication_epoch: identity.replication_epoch,
+                    stream_identity: identity.stream_identity,
+                },
+                account_id.as_deref(),
+                &NoFaults,
+            )?;
             Ok(RelayOperationOutcome::Claimed)
         }
         RelayOperation::AdoptJoinIdentity {
@@ -1717,6 +1747,94 @@ mod share_view_identity_tests {
     use dohc_engine_sync::ShareAccess;
     use dohc_engine_testkit::ScratchDir;
     use rusqlite::OptionalExtension;
+
+    #[test]
+    fn claim_creation_stays_pending_across_restart_until_transport_confirmation() {
+        for before_transport in [true, false] {
+            let scratch = ScratchDir::new().unwrap();
+            let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+            let mut store = EngineStore::open(&path, 1_000).unwrap();
+            let operation = RelayOperation::Claim {
+                workspace_id: "ws".to_owned(),
+                account_id: Some("account-a".to_owned()),
+                new_origin_id: "origin".to_owned(),
+                new_replication_epoch: "epoch".to_owned(),
+                new_stream_identity: "stream".to_owned(),
+                created_at_ms: 1_000,
+            };
+            let transport = DeferredRelayTransport::default();
+            let mut cache = WriterDocCache::new();
+            if before_transport {
+                create_claim_identity(
+                    &mut store, "ws", "origin", "epoch", "stream", 1_000, &NoFaults,
+                )
+                .unwrap();
+            } else {
+                let result = execute_relay_operation(
+                    &mut store,
+                    &mut cache,
+                    transport.clone(),
+                    operation.clone(),
+                    &LeaseRegistry::default(),
+                    &ClaimAnnouncer::default(),
+                );
+                assert!(
+                    matches!(result, Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING)
+                );
+            }
+            drop(store);
+            let mut store = EngineStore::open(&path, 2_000).unwrap();
+            let push = RelayOperation::Push {
+                workspace_id: "ws".to_owned(),
+                now_ms: 2_000,
+                max_read_bytes: 0,
+            };
+            assert!(matches!(
+                execute_relay_operation(
+                    &mut store,
+                    &mut cache,
+                    transport.clone(),
+                    push.clone(),
+                    &LeaseRegistry::default(),
+                    &ClaimAnnouncer::default()
+                ),
+                Err(RuntimeError::Relay(RelayError::IdentityRequired))
+            ));
+            let result = execute_relay_operation(
+                &mut store,
+                &mut cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+            );
+            assert!(result.is_err());
+            let request = transport.take_pending().unwrap();
+            assert!(matches!(request, RelayIoRequest::Claim(_)));
+            transport.complete(request, Ok(RelayIoResponse::Claim(ClaimResponse)));
+            assert!(matches!(
+                execute_relay_operation(
+                    &mut store,
+                    &mut cache,
+                    transport,
+                    operation,
+                    &LeaseRegistry::default(),
+                    &ClaimAnnouncer::default()
+                ),
+                Ok(RelayOperationOutcome::Claimed)
+            ));
+            let state: Option<String> = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT claim_state FROM sync_identity WHERE workspace_id='ws'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(state, None);
+        }
+    }
 
     fn record(store: &mut EngineStore, access: ShareAccess) -> ShareViewIdentityRecord {
         let mut doc_cache = WriterDocCache::new();

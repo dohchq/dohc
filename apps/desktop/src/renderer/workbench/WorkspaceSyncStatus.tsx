@@ -57,7 +57,9 @@ export function WorkspaceSyncStatus({ syncStatus }: {
     : "Checking status";
   const shownLabel = syncStatus?.updateRequired
     ? UPDATE_REQUIRED_LABEL[syncStatus.updateRequired]
-    : label;
+    : state === "syncing" && syncStatus?.claimingIdentity
+      ? "Setting up sync…"
+      : label;
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either.
   const liveDelivery = syncStatus?.ownerLiveDelivery;

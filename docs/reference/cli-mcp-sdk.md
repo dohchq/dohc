@@ -243,11 +243,11 @@ Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, upda
 
 ### `dohc_read_chat`
 
-Read one dohc Chat thread: its messages (with author kind and display name) and a read-only text projection.
+Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.
 
 - `threadId`: `string`. Required.
 
-Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId? }[], projection: { path, readOnly: true, text } } | { ok: false, reason }`.
+Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId? }[], projection: { path, readOnly: true, text } } | { ok: false, reason }`.
 
 ### `dohc_list_groups`
 
@@ -370,6 +370,56 @@ Two environment variables also change what the CLI does:
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
 
+### `dohc document`
+
+Read, edit, and create live Markdown documents.
+
+Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
+
+#### `dohc document read`
+
+```sh
+dohc document read <path> [options]
+```
+
+Read the current Markdown, including edits in an open editor.
+
+Read before editing. Without --json, prints the Markdown byte for byte.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, markdown }`.
+
+#### `dohc document edit`
+
+```sh
+dohc document edit <path> [-] [options]
+```
+
+Replace matching text or append Markdown through the live document.
+
+Use - as the body to read it from stdin. Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8. Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind. Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document.
+
+- `--text <markdown>`: Use this Markdown as the body. An empty string is allowed.
+- `--agent <name>`: Record this agent name with the change.
+- `--find <markdown>`: Replace this exact, unique match. Omit to append.
+- `--request-id <key>`: Reuse this key when retrying the same edit, as with dohc_edit_document.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, changed, warning? }`.
+
+#### `dohc document create`
+
+```sh
+dohc document create <path> [-] [options]
+```
+
+Create a Markdown document without overwriting an existing file.
+
+Use - as the body to read it from stdin. Use --text instead to supply Markdown. With neither, create an empty document. The path must end in .md or .markdown. Frontmatter is refused.
+
+- `--text <markdown>`: Use this Markdown as the body. An empty string is allowed.
+- `--agent <name>`: Record this agent name with the change.
+
+With `--json`, prints `{ schemaVersion, ok: true, path }`.
+
 ### `dohc chat`
 
 Read and post in Groups and threads.
@@ -416,7 +466,7 @@ Show a thread or message and mark the thread read.
 
 - `--peek`: Show it without changing what is marked read. A read-only shared view requires it.
 
-With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId? }[] }`.
+With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId? }[] }`.
 
 #### `dohc chat post`
 
@@ -1003,6 +1053,7 @@ Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactiv
 - `workspaceId`: `string`. Required.
 - `approvalId`: `UUID`. Required.
 - `candidateDigest`: `SHA-256 hex`. Required.
+- `linkReads`: `({ operationId: UUID, fieldIds: UUID[] })[]`
 
 Returns `{ kind: "published", publicationId, authorityRevision, local?: true }`.
 

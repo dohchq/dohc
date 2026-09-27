@@ -4,6 +4,7 @@ import { bridge } from "./bridge";
 export const ORPHANED_DRAFT_STORAGE_KEY = "dohc-set-aside-drafts";
 export const ORPHANED_DRAFT_STORAGE_PREFIX = `${ORPHANED_DRAFT_STORAGE_KEY}:`;
 export const ORPHANED_DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const STORED_DRAFT_VERSION = 1;
 type StoredOrphanedDraft = { id: number; workspaceId: string; path: string; text: string; capturedAtMs: number };
 // Numeric handles belong to this renderer. Each durable recovery owns one key,
 // so another window never rewrites an array containing this window's work.
@@ -11,6 +12,13 @@ const keys = new Map<number, string>();
 const expected = new Map<number, string>();
 function persistable(path: string): boolean {
   return classifyEngineFilePathForRead(path, bridge().platform).kind === "tracked";
+}
+function unsupportedVersion(value: unknown): boolean {
+  // Missing versions are the original version 1 format. Leave unknown formats untouched.
+  return typeof value === "object" && value !== null && "version" in value && value.version !== STORED_DRAFT_VERSION;
+}
+function serialize(draft: StoredOrphanedDraft): string {
+  return JSON.stringify({ ...draft, version: STORED_DRAFT_VERSION });
 }
 function valid(value: unknown): value is StoredOrphanedDraft {
   if (typeof value !== "object" || value === null) return false;
@@ -36,6 +44,7 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
       let row: unknown;
       const raw = localStorage.getItem(key);
       try { row = JSON.parse(raw ?? "null"); } catch { remove(key); continue; }
+      if (unsupportedVersion(row)) continue;
       if (!valid(row) || !persistable(row.path)) { remove(key); continue; }
       const capturedAtMs = Number.isFinite(row.capturedAtMs) && row.capturedAtMs > 0 ? row.capturedAtMs : nowMs;
       if (nowMs - capturedAtMs >= ORPHANED_DRAFT_RETENTION_MS) { remove(key); continue; }
@@ -50,7 +59,7 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
         durableRaw = undefined;
         try {
           if (localStorage.getItem(key) === raw) {
-            const normalized = JSON.stringify({ ...row, id, capturedAtMs });
+            const normalized = serialize({ ...row, id, capturedAtMs });
             localStorage.setItem(key, normalized);
             durableRaw = normalized;
           }
@@ -68,7 +77,7 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
 function write(draft: StoredOrphanedDraft, key: string): boolean {
   if (!persistable(draft.path)) return false;
   try {
-    const raw = JSON.stringify(draft);
+    const raw = serialize(draft);
     localStorage.setItem(key, raw);
     keys.set(draft.id, key); expected.set(draft.id, raw);
     return true;
@@ -100,14 +109,14 @@ export function remapStoredDraftPaths(workspaceId: string, project: (path: strin
     try {
       const raw = localStorage.getItem(key);
       const row: unknown = JSON.parse(raw ?? "null");
-      if (!valid(row) || row.workspaceId !== workspaceId) continue;
+      if (unsupportedVersion(row) || !valid(row) || row.workspaceId !== workspaceId) continue;
       const path = project(row.path);
       if (path === null || path === row.path) continue;
       if (!persistable(path)) {
         remove(key);
         for (const id of ids) { expected.delete(id); dropped.add(id); }
       } else {
-        const next = JSON.stringify({ ...row, path });
+        const next = serialize({ ...row, path });
         localStorage.setItem(key, next);
         // Only advance handles that still describe the bytes just remapped.
         // Another window's replacement must not make stale local text durable.

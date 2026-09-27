@@ -607,9 +607,9 @@ describe("persistent dataset worker",()=>{
           child.on("error",options.onError);child.on("close",options.onExit);
           return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
         };
-        // This test is about the CPU budget, not the silence watchdog: under a loaded gate the 6 s stop plus the
-        // query can pass 30 s without a progress report. 50 s stays inside the test's 60 s limit, so a real stall still fails.
-        const worker=await open({limits:{cpuBudgetMs:5_000}},launch,{silenceMs:50_000});
+        // This test is about the CPU budget, not the silence watchdog. A loaded gate has stretched the 6 s stop plus
+        // the query past 50 s without a progress report, so silence is only a hang guard here, inside the 180 s limit.
+        const worker=await open({limits:{cpuBudgetMs:5_000}},launch,{silenceMs:170_000});
         // Under a second of CPU on an idle machine and about two under heavy load, well inside the budget.
         const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) AS total FROM n')}}"});
         await stall;
@@ -619,7 +619,7 @@ describe("persistent dataset worker",()=>{
         expect(repliedAt).toBeGreaterThan(resumedAt);
       });
     } finally {suspender?.stdin!.end();}
-  },60_000);
+  },180_000);
 
   it("recovers a commit whose acknowledgement was lost",async()=>{
     await fixture(async({root,open})=>{
@@ -643,5 +643,16 @@ describe("persistent dataset worker",()=>{
       expect((await recovered.prepare({...operation(cursor),readOnly:true})).result).toEqual([{id:1,value:"committed"}]);
       expect((await readFile(checkpointPath)).byteLength).toBeGreaterThan(100);
     });
+  });
+});
+
+it("bounds each operation's SQL tables while retaining the full schema for recovery", async () => {
+  await fixture(async ({ open }) => {
+    const worker = await open({ schemaSql: schemaSql + " CREATE TABLE other(ROWID INTEGER PRIMARY KEY,value TEXT NOT NULL);", tables: ["items", "other"] });
+    const read = { ...operation(), readOnly: true, tables: ["items"], source: "globalThis.operations={run(ctx,input){return ctx.db.query(input.sql);}}" };
+    await expect(worker.prepare({ ...read, input: { sql: "SELECT * FROM other" } })).rejects.toThrow();
+    await expect(worker.prepare({ ...read, input: { sql: "SELECT * FROM items" } })).resolves.toMatchObject({ result: [] });
+    await expect(worker.prepare({ ...read, tables: ["items", "other"], input: { sql: "SELECT ROWID,value FROM other" } })).resolves.toMatchObject({ result: [] });
+    await expect(worker.prepare({ ...read, tables: ["missing"], input: {} })).rejects.toThrow("exceed");
   });
 });
