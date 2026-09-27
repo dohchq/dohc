@@ -67,6 +67,7 @@ export interface PostNoticeInput {
 }
 
 export interface NoticeStore {
+  recordSyncRefusals(workspaceId: string, refusals: readonly import("../workspaces/engineRelayClient").WorkspacePullRefusal[]): Promise<void>;
   // Throws when the notice breaks the relay's rules, before keeping it.
   postNotice(input: PostNoticeInput): Promise<void>;
   // The rows and the key of the signed-in account they belong to, read
@@ -122,6 +123,7 @@ const LocalRow = z.object({
   workspaceId: NoticeRow.shape.workspaceId,
   title: NoticeRow.shape.title,
   body: NoticeRow.shape.body,
+  detail: NoticeRow.shape.detail,
   target: NoticeTargetShape,
   createdAtMs: NoticeRow.shape.createdAtMs,
   readAtMs: NoticeRow.shape.readAtMs,
@@ -151,7 +153,10 @@ const RelayRow = z.object({
 });
 type RelayRow = z.infer<typeof RelayRow>;
 
-const LocalFile = z.object({ version: z.literal(1), rows: z.array(LocalRow) });
+const LocalFile = z.object({
+  version: z.literal(1), rows: z.array(LocalRow),
+  refusalReports: z.record(z.string(), z.array(z.string())).default({}),
+});
 type LocalFile = z.infer<typeof LocalFile>;
 
 const OutboxMark = z.object({
@@ -276,7 +281,7 @@ export function createNoticeStore(deps: {
 
   async function loadLocal(): Promise<LocalFile> {
     if (!localFile) {
-      localFile = await load("local.json", LocalFile, { version: 1, rows: [] });
+      localFile = await load("local.json", LocalFile, { version: 1, rows: [], refusalReports: {} });
       if (pruneLocal(localFile)) await saveLocal(localFile);
     }
     return localFile;
@@ -290,8 +295,10 @@ export function createNoticeStore(deps: {
   }
 
   function pruneLocal(file: LocalFile): boolean {
-    const kept = retained(file.rows, LOCAL_NOTICE_ROW_LIMIT, nowMs());
-    if (kept === file.rows) return false;
+    const pending = file.rows.filter(row => row.kind === "sync-refusal" && row.dismissedAtMs === null);
+    const rest = file.rows.filter(row => !pending.includes(row));
+    const kept = [...pending, ...retained(rest, Math.max(0, LOCAL_NOTICE_ROW_LIMIT - pending.length), nowMs())];
+    if (kept.length === file.rows.length) return false;
     file.rows = kept;
     return true;
   }
@@ -593,6 +600,43 @@ export function createNoticeStore(deps: {
     return running;
   }
 
+  async function recordSyncRefusals(workspaceId: string, refusals: readonly import("../workspaces/engineRelayClient").WorkspacePullRefusal[]): Promise<void> {
+    await locked(async () => {
+      const prior = await loadLocal();
+      const file = { ...prior, rows: [...prior.rows], refusalReports: {...prior.refusalReports} };
+      const entries = refusals.map(refusal => ({ refusal, noticeId: "sync-refusal-" + createHash("sha256")
+        .update(JSON.stringify([workspaceId, refusal.originId, refusal.originSeq])).digest("hex") }));
+      const reportIds = new Set(entries.map(entry => entry.noticeId));
+      const recorded = new Set((file.refusalReports[workspaceId] ?? []).filter(id => reportIds.has(id)));
+      const progress = [...recorded];
+      file.refusalReports[workspaceId] = progress;
+      for (const {refusal, noticeId} of entries) {
+        if (recorded.has(noticeId)) continue;
+        if (file.rows.some(row => row.noticeId === noticeId)) { recorded.add(noticeId); progress.push(noticeId); continue; }
+        if (file.rows.length >= LOCAL_NOTICE_ROW_LIMIT) {
+          const replaceable = file.rows.filter(row => row.kind !== "sync-refusal" || row.dismissedAtMs !== null)
+            .sort((left, right) => Number(left.readAtMs === null) - Number(right.readAtMs === null) || left.createdAtMs - right.createdAtMs)[0];
+          if (!replaceable) {
+            await saveLocal(file);
+            deps.onChanged();
+            throw new Error("Notices are full. Dismiss reviewed notices, then try sync again.");
+          }
+          file.rows.splice(file.rows.indexOf(replaceable), 1);
+        }
+        const body = refusal.reason.startsWith("dohc could not") ? refusal.reason :
+          `dohc could not apply a change from another computer. ${refusal.reason} Review the changed file on that computer.`;
+        file.rows.push(LocalRow.parse({ noticeId, workspaceId, kind: "sync-refusal",
+          title: "A change needs your review",
+          body: [...body].length > 500 ? [...body].slice(0, 400).join("") + "… Review this change on the other computer." : body,
+          detail: body, target: {}, createdAtMs: nowMs(), readAtMs: null, dismissedAtMs: null }));
+        recorded.add(noticeId);
+        progress.push(noticeId);
+      }
+      await saveLocal(file);
+    });
+    deps.onChanged();
+  }
+
   async function postNotice(input: PostNoticeInput): Promise<void> {
     const content = NoticeContent.parse({
       noticeId: input.noticeId,
@@ -723,6 +767,7 @@ export function createNoticeStore(deps: {
         senderLabel: null,
         title: row.title,
         body: row.body,
+        ...(row.detail === undefined ? {} : { detail: row.detail }),
         target: row.target,
         createdAtMs: row.createdAtMs,
         readAtMs: row.readAtMs,
@@ -894,7 +939,7 @@ export function createNoticeStore(deps: {
     void sync();
   }
 
-  return { postNotice, list, mark, sync, dismissFirst, withdraw };
+  return { recordSyncRefusals, postNotice, list, mark, sync, dismissFirst, withdraw };
 }
 
 // Folds one page into the stored rows. A page that starts the list over

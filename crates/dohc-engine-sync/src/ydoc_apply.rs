@@ -2606,21 +2606,34 @@ pub(crate) fn drain_inactive_ydoc_updates(
         return Ok(Vec::new());
     }
     let search_policy = search_policy_for_store(store);
-    let result = store.write_with(faults, |tx| {
+    let mut all_refusals = Vec::new();
+    loop {
+        let result = store.write_with(faults, |tx| {
         let mut statement = tx.prepare(
-            "SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json \
+            "SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json,b.byte_length \
              FROM ydoc_deferred_updates d JOIN ydoc_inactive_lineages l \
              ON l.workspace_id=d.workspace_id AND l.version_id=d.version_id \
              AND l.object_id=d.object_id AND l.lineage_claim_id=d.lineage_claim_id \
              JOIN replication_log r ON r.workspace_id=d.workspace_id \
              AND r.origin_id=d.origin_id AND r.origin_seq=d.origin_seq \
-             WHERE d.workspace_id=?1 ORDER BY d.version_id,d.object_id,d.lineage_claim_id,d.relay_seq,r.origin_id,r.origin_seq",
+             LEFT JOIN binary_blobs b ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
+             WHERE d.workspace_id=?1 ORDER BY d.version_id,d.object_id,d.lineage_claim_id,d.origin_id,d.origin_seq LIMIT 256",
         ).map_err(SyncError::corrupt)?;
         let rows = statement.query_map([workspace_id], |row| Ok((
-            row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?,
+            row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?,
         ))).map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)?;
         let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
-        for (origin, seq, at, json) in rows {
+        let mut batch_bytes = 0;
+        let mut processed = 0;
+        for (origin, seq, at, json, byte_length) in rows {
+            let cost = usize::try_from(byte_length.ok_or(SyncError::BlobInvalid)?).map_err(SyncError::corrupt)?.saturating_add(json.len());
+            // One admitted update is at most 20 MiB, plus a 256 KiB payload.
+            if batch_bytes + cost > 24 * 1024 * 1024 {
+                if processed == 0 { return Err(SyncError::BlobInvalid); }
+                break;
+            }
+            batch_bytes += cost;
+            processed += 1;
             let payload: YdocUpdatePayload = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
             let bytes = get_binary_blob(tx, &payload.update_blob_sha256).map_err(SyncError::Storage)?.ok_or(SyncError::BlobInvalid)?;
             if hex_sha256(&bytes) != payload.update_blob_sha256 { return Err(SyncError::BlobInvalid); }
@@ -2646,11 +2659,17 @@ pub(crate) fn drain_inactive_ydoc_updates(
                     params![workspace_id,origin,seq]).map_err(SyncError::persist)?;
             }
         }
-        Ok::<_,SyncError>(refusals)
+        Ok::<_,SyncError>((processed,refusals))
     })?;
-    match result {
-        TxnOutcome::Committed(refusals) => Ok(refusals),
-        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+        match result {
+            TxnOutcome::Committed((processed, refusals)) => {
+                all_refusals.extend(refusals);
+                if processed == 0 {
+                    return Ok(all_refusals);
+                }
+            }
+            TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+        }
     }
 }
 
@@ -2719,8 +2738,11 @@ fn apply_inactive_batch_in_tx(
     let full_sha = dohc_engine_storage::put_binary_blob(tx, &merged).map_err(SyncError::Storage)?;
     let vector_sha = dohc_engine_storage::put_binary_blob(tx, &doc.encode_state_vector())
         .map_err(SyncError::Storage)?;
+    // Keep the archive's original vector rooted: a conflict.resolve journal
+    // entry can still name it after the compacted vector advances.
     tx.execute(
         "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256=?5,state_vector_blob_sha256=?6, \
+        last_surfaced_state_vector_blob_sha256=COALESCE(last_surfaced_state_vector_blob_sha256,state_vector_blob_sha256), \
         last_surfaced_projection_sha256=?7,updated_at_ms=?8 \
         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
         params![
@@ -2737,7 +2759,7 @@ fn apply_inactive_batch_in_tx(
     .map_err(SyncError::persist)?;
     for sha in [&old_full_sha, &old_vector_sha] {
         if sha != &full_sha && sha != &vector_sha {
-            delete_replaced_inactive_blob(tx, sha)?;
+            delete_replaced_inactive_blob(tx, key, &payload.lineage_claim_id, sha)?;
         }
     }
     if doc.has_pending_dependencies() {
@@ -2811,12 +2833,16 @@ fn apply_inactive_batch_in_tx(
 
 fn delete_replaced_inactive_blob(
     tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    claim: &str,
     sha: &str,
 ) -> Result<(), SyncError> {
     match tx.execute(
         "DELETE FROM binary_blobs WHERE sha256=?1 AND NOT EXISTS \
-        (SELECT 1 FROM replication_log WHERE instr(payload_json,?1)>0)",
-        [sha],
+        (SELECT 1 FROM replication_log WHERE op_kind='ydoc.update' AND workspace_id=?2 \
+         AND json_extract(payload_json,'$.versionId')=?3 AND json_extract(payload_json,'$.objectId')=?4 \
+         AND json_extract(payload_json,'$.lineageClaimId')=?5 AND json_extract(payload_json,'$.updateBlobSha256')=?1)",
+        params![sha,key.workspace_id,key.version_id,key.object_id,claim],
     ) {
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(error, message))

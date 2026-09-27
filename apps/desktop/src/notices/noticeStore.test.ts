@@ -933,3 +933,59 @@ describe("notices for another person", () => {
     // Filling a list of 1,000 rows takes seconds on a loaded machine.
   }, 60_000);
 });
+
+it("keeps sync refusals after restart and never ages out an unreviewed refusal", async () => {
+  const first = await computer(null);
+  const refusal = { originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input",
+    reason: 'dohc could not apply the resolution for "doc.md" because the document is too large. Review its conflict.' };
+  await first.store.recordSyncRefusals(WORKSPACE, [refusal, refusal]);
+  const long = {...refusal, originSeq: 2, reason: refusal.reason + "x".repeat(1_000)};
+  await first.store.recordSyncRefusals(WORKSPACE, [long]);
+  clock += 365 * 24 * 60 * 60_000;
+  const restarted = await computer(null, { directory: first.directory });
+  const { notices } = await restarted.store.list();
+  expect(notices).toHaveLength(2);
+  expect(notices.find(row => row.detail === long.reason)?.body.length).toBeLessThanOrEqual(500);
+  expect(notices.find(row => row.detail === long.reason)?.body).toContain("Review this change on the other computer.");
+  expect(notices[0]).toMatchObject({ store: "local", kind: "sync-refusal", workspaceId: WORKSPACE, body: refusal.reason });
+  await restarted.store.mark(notices, "dismissed", null);
+  const again = await computer(null, { directory: first.directory });
+  expect((await again.store.list()).notices).toEqual([]);
+});
+
+it("keeps the pending refusal when local Notices have reached their limit", async () => {
+  const first = await computer(null);
+  const refusals = Array.from({length: 500}, (_, originSeq) => ({originId: "peer", originSeq,
+    opKind: "conflict.resolve", code: "invalid-input", reason: "Review doc.md on the other computer."}));
+  await first.store.recordSyncRefusals(WORKSPACE, refusals);
+  await expect(first.store.recordSyncRefusals(WORKSPACE, [{...refusals[0]!, originSeq: 501}])).rejects.toThrow("Notices are full");
+  const restarted = await computer(null, { directory: first.directory });
+  const listed = (await restarted.store.list()).notices;
+  expect(listed).toHaveLength(500);
+  await restarted.store.mark([listed[0]!], "dismissed", null);
+  await restarted.store.recordSyncRefusals(WORKSPACE, [{...refusals[0]!, originSeq: 501}]);
+  expect((await restarted.store.list()).notices).toHaveLength(500);
+});
+
+it("resumes a large refusal report after restart and dismissal", async () => {
+  const first = await computer(null);
+  const refusals = Array.from({length: 1_001}, (_, originSeq) => ({originId: "peer", originSeq,
+    opKind: "conflict.resolve", code: "invalid-input", reason: "Review file-" + originSeq + ".md."}));
+  await expect(first.store.recordSyncRefusals(WORKSPACE, refusals)).rejects.toThrow("Notices are full");
+  const seen = new Set<string>();
+  for (let page = 0; page < 2; page++) {
+    const current = await computer(null, {directory: first.directory});
+    const rows = (await current.store.list()).notices;
+    expect(rows).toHaveLength(500);
+    for (const row of rows) seen.add(row.body);
+    await current.store.mark(rows, "dismissed", null);
+    refusals.reverse();
+    if (page === 0) await expect(current.store.recordSyncRefusals(WORKSPACE, refusals)).rejects.toThrow("Notices are full");
+    else await current.store.recordSyncRefusals(WORKSPACE, refusals);
+  }
+  const final = await computer(null, {directory: first.directory});
+  const rows = (await final.store.list()).notices;
+  expect(rows).toHaveLength(1);
+  seen.add(rows[0]!.body);
+  expect(seen.size).toBe(1_001);
+});

@@ -10,6 +10,7 @@ export type ShellErrorKind =
   | "tab-limit"
   | "workspace-search"
   | "cloud-sync"
+  | "sync-refusal"
   | "import-files"
   | "share-refresh"
   | DirectWriteNoticeKind
@@ -196,6 +197,16 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
+  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void) => {
+    setShellErrors(current => [
+      ...current.filter(error => error.kind !== "sync-refusal"),
+      ...notices.map(notice => {
+        const prior = current.find(error => error.id === notice.noticeId);
+        return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
+          details: [["Detail", notice.detail ?? notice.body]] as const, atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null, retry };
+      }),
+    ]);
+  }, []);
   // Snapshot lanes share one surface. Keep the lane in the message so the
   // user can tell which value went stale, then show the cause and a retry.
   //
@@ -291,7 +302,9 @@ export function useShellError(workspaceId: string) {
     // Clearing first is what shows the control took: the read is on its
     // way, and a failure that is being retried is no longer the newest
     // thing this surface knows. The retry runs once, outside the updater.
-    setShellErrors((current) => current.filter((error) => error.id !== id));
+    setShellErrors(current => target?.kind === "sync-refusal"
+      ? current
+      : current.filter(error => error.id !== id));
     target?.retry?.();
   }, []);
 
@@ -303,6 +316,7 @@ export function useShellError(workspaceId: string) {
     reportSearchError,
     clearSearchError,
     reportSyncFailure,
+    showSyncRefusals,
     clearSyncFailure,
     showTabLimitError,
     clearTabLimitError,

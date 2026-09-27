@@ -2646,6 +2646,31 @@ fn open_divergent_result_review(
     Ok((review_id, inserted))
 }
 
+pub(crate) fn archive_refused_successor_in_tx(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<String, SyncError> {
+    let validated = validate_conflict_resolve_v1(
+        &envelope.payload,
+        ConflictResolveEnvelopeContext {
+            workspace_id: &envelope.workspace_id,
+            recorded_at_ms: envelope.recorded_at_ms,
+        },
+    )?;
+    require_imported_roots(tx, &validated)?;
+    let payload = &validated.payload;
+    if payload
+        .lineage_transition
+        .as_ref()
+        .is_some_and(|transition| transition.successor.is_some())
+    {
+        let (_, live) = classify_imported_head(tx, payload)?;
+        let (review_id, _) = open_divergent_result_review(tx, payload, &live)?;
+        archive_conflicting_successor(tx, payload, &review_id, envelope.recorded_at_ms)?;
+    }
+    Ok(payload.paths[payload.result.path_ref()].clone())
+}
+
 fn archive_conflicting_successor(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
@@ -5336,6 +5361,138 @@ mod tests {
     }
 
     #[test]
+    fn missing_inactive_update_blob_is_reported_without_deleting_the_queue_row() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let sha = store
+            .put_binary_blob(&old.doc.plaintext_insert(0, "late "))
+            .unwrap();
+        let mut op = imported_envelope(
+            1,
+            "ydoc.update",
+            json!({"versionId":"main","objectId":"object-a","path":"doc.md",
+            "contentKind":"plaintext","updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+        );
+        op.relay_seq = Some(2);
+        crate::router::apply_replication_envelope_in_batch(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            true,
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&sha])
+                    .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults),
+            Err(SyncError::BlobInvalid)
+        ));
+        let queued: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(queued, 1);
+    }
+
+    #[test]
+    fn inactive_byte_budget_commits_a_prefix_before_the_next_transaction() {
+        use dohc_engine_storage::{FaultAction, FaultPoint};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct StopSecondCommit(AtomicUsize);
+        impl dohc_engine_storage::FaultInjector for StopSecondCommit {
+            fn poll(&self, point: FaultPoint) -> FaultAction {
+                if point == FaultPoint::StorageBeforePersist
+                    && self.0.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    FaultAction::Crash
+                } else {
+                    FaultAction::Continue
+                }
+            }
+        }
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        for seq in 0..3 {
+            let update = old.doc.plaintext_insert(0, &"x".repeat(9 * 1024 * 1024));
+            let sha = store.put_binary_blob(&update).unwrap();
+            let op = ReplicationEnvelope {
+                workspace_id: "ws".into(),
+                origin_id: "byte-budget".into(),
+                origin_seq: seq,
+                relay_seq: Some(100 + seq),
+                op_kind: "ydoc.update".into(),
+                recorded_at_ms: 30 + seq,
+                payload: json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"plaintext",
+                    "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+            };
+            crate::router::apply_replication_envelope_in_batch(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                true,
+            )
+            .unwrap();
+        }
+        let fault = StopSecondCommit(AtomicUsize::new(0));
+        assert!(matches!(
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &fault),
+            Err(SyncError::FaultCrash)
+        ));
+        let queued: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            queued, 1,
+            "two 9 MiB updates commit; the next transaction rolls back"
+        );
+        let refusals =
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults).unwrap();
+        assert_eq!(refusals.len(), 1);
+        let bytes: Vec<u8> = store.read_with(|conn| conn.query_row("SELECT b.bytes FROM ydoc_inactive_lineages l JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256 WHERE l.lineage_claim_id=?1", [&claim], |row| row.get(0))).unwrap();
+        let archived = dohc_engine_collab::Ydoc::wire();
+        archived.apply(&bytes).unwrap();
+        assert_eq!(archived.plaintext_string(), old.doc.plaintext_string());
+    }
+
+    #[test]
     fn inactive_updates_queue_as_rows_and_compact_once_per_batch() {
         let (_scratch, mut store, key, built) = receiver_fixture();
         let old = dohc_engine_collab::load_persisted(&store, &key)
@@ -5366,10 +5523,10 @@ mod tests {
         };
         for batch in 0..2 {
             let before = state_sha(&store);
-            for index in 0..12 {
+            for index in 0..257 {
                 let update = old.doc.plaintext_insert(0, "late ");
                 let sha = store.put_binary_blob(&update).unwrap();
-                let seq = batch * 12 + index;
+                let seq = batch * 257 + index;
                 let op = ReplicationEnvelope {
                     workspace_id: "ws".into(),
                     origin_id: "batch-archive".into(),
@@ -5417,7 +5574,7 @@ mod tests {
                     })
                 })
                 .unwrap();
-            assert_eq!(queued, 12);
+            assert_eq!(queued, 257);
             assert!(
                 crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
                     .unwrap()
@@ -5429,7 +5586,7 @@ mod tests {
                 conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'", [], |row| row.get(0))?,
             ))).unwrap();
             assert_eq!(queued, 0);
-            assert_eq!(recovery_moments, batch + 1);
+            assert_eq!(recovery_moments, (batch + 1) * 2);
             assert_eq!(text, old.doc.plaintext_string());
             if batch > 0 {
                 assert!(
@@ -5595,7 +5752,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_active_content_refuses_resolution_and_acknowledges_replay() {
+    fn oversized_active_content_refuses_resolution_and_preserves_later_successor_edits() {
         let (_scratch, mut store, key, built) = receiver_fixture();
         let doc = dohc_engine_collab::load_persisted(&store, &key)
             .unwrap()
@@ -5616,6 +5773,25 @@ mod tests {
             |_tx, _outcome, _sha| Ok(()),
         )
         .unwrap();
+        let successor = built
+            .validated
+            .payload
+            .lineage_transition
+            .as_ref()
+            .unwrap()
+            .successor
+            .as_ref()
+            .unwrap();
+        let successor_claim = successor.lineage_claim_id.clone();
+        let successor_doc = dohc_engine_collab::Ydoc::wire();
+        successor_doc
+            .apply(
+                &store
+                    .get_binary_blob(&successor.update_blob_sha256)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
         let parent = imported_envelope(0, "conflict.resolve", built.value);
         let outcome = crate::apply_replication_envelope(
             &mut store,
@@ -5650,6 +5826,33 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(replay.primary, crate::ApplyDisposition::Skipped));
+        let update = successor_doc.plaintext_insert(0, "later winner edit ");
+        let sha = store.put_binary_blob(&update).unwrap();
+        let mut later = imported_envelope(
+            1,
+            "ydoc.update",
+            json!({
+                "versionId":"main", "objectId":"object-a", "path":"doc.md", "contentKind":"plaintext",
+                "lineageClaimId":successor_claim, "updateBlobSha256":sha, "isBaseState":false
+            }),
+        );
+        later.relay_seq = Some(2);
+        let later = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &later,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(later.primary, crate::ApplyDisposition::Applied(_)),
+            "{later:?}"
+        );
+        let recovered: String = store.read_with(|conn| conn.query_row(
+            "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'",
+            [], |row| row.get(0))).expect("later winner edit must be visible");
+        assert_eq!(recovered, successor_doc.plaintext_string());
     }
 
     #[test]

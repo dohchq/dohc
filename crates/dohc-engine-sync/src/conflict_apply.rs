@@ -8,7 +8,7 @@ use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{Transaction, params};
 use serde::Deserialize;
 
-use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError, apply_envelope_with};
+use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictApplyResult {
@@ -52,30 +52,46 @@ pub fn apply_conflict_envelope(
         )?;
     }
     let search_policy = crate::file_search::search_policy_for_store(store);
-    apply_envelope_with(store, envelope, faults, |tx, op| {
-        match op.op_kind.as_str() {
-            "conflict.open" => apply_open(tx, op),
-            "conflict.resolve" => {
-                crate::conflict_resolve_v1::apply_imported_conflict_resolve_v1_in_tx(
-                    tx,
-                    op,
-                    search_policy.as_ref(),
-                    leases,
+    use crate::apply::{MutationOutcome, apply_envelope_with_mutation_outcome};
+    apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
+        if op.op_kind == "conflict.open" {
+            return apply_open(tx, op).map(MutationOutcome::Applied);
+        }
+        tx.execute_batch("SAVEPOINT dohc_conflict_resolution")
+            .map_err(SyncError::persist)?;
+        let result = crate::conflict_resolve_v1::apply_imported_conflict_resolve_v1_in_tx(
+            tx,
+            op,
+            search_policy.as_ref(),
+            leases,
+        );
+        match result {
+            Err(SyncError::ProjectionTooLarge {
+                constraint,
+                actual_bytes,
+                limit_bytes,
+            }) => {
+                tx.execute_batch(
+                    "ROLLBACK TO dohc_conflict_resolution; RELEASE dohc_conflict_resolution",
                 )
-                .map_err(|error| match error {
-                    SyncError::ProjectionTooLarge {
-                        constraint,
-                        actual_bytes,
-                        limit_bytes,
-                    } => SyncError::InputTooLarge {
-                        constraint,
-                        observed_bytes: actual_bytes,
-                        limit_bytes,
-                    },
-                    error => error,
+                .map_err(SyncError::persist)?;
+                let path = crate::conflict_resolve_v1::archive_refused_successor_in_tx(tx, op)?;
+                let error = SyncError::InputTooLarge {
+                    constraint,
+                    observed_bytes: actual_bytes,
+                    limit_bytes,
+                };
+                Ok(MutationOutcome::RefusedRetainingMutation {
+                    reason: format!(
+                        "dohc could not apply the resolution for \"{path}\" because the document is too large. Review its conflict before choosing a copy. {error}"
+                    ),
                 })
             }
-            _ => Err(SyncError::UnsupportedOperation),
+            result => {
+                tx.execute_batch("RELEASE dohc_conflict_resolution")
+                    .map_err(SyncError::persist)?;
+                result.map(MutationOutcome::Applied)
+            }
         }
     })
 }

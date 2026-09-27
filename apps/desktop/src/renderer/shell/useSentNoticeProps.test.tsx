@@ -87,6 +87,11 @@ function setup(
 }
 
 describe("opening a sent notice", () => {
+  it("keeps other and removed workspace refusals reachable while this shell shows its own", () => {
+    const notices = ["notes", "other", "removed"].map(workspaceId => notice({kind: "sync-refusal", store: "local", workspaceId, recipientShareId: null, noticeId: workspaceId}));
+    const {result} = setup(notices, [workspace("notes"), workspace("other")]);
+    expect(result.current.sentNotices.map(row => row.notice.workspaceId)).toEqual(["other", "removed"]);
+  });
   it("marks it read and opens its file in this workspace's shared-with-me, naming its folder", async () => {
     const here = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
     const { result, sentNotices, openFile, onSwitchWorkspace } = setup([notice()], [here]);

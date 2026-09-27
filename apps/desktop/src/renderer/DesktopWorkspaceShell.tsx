@@ -786,6 +786,7 @@ export function DesktopWorkspaceShell(props: {
     reportSearchError,
     clearSearchError,
     reportSyncFailure,
+    showSyncRefusals,
     clearSyncFailure,
     showTabLimitError,
     clearTabLimitError,
@@ -4575,15 +4576,36 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
+  useEffect(() => {
+    showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
+      notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry);
+  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry]);
+  const hideWorkspaceError = useCallback((id: string) => {
+    hideShellError(id);
+    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+    if (!refusal) return;
+    const askedFor = workspaceId;
+    void props.sentNotices!.read([refusal]).catch(error => {
+      if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error);
+    });
+  }, [hideShellError, props.sentNotices, workspaceId, reportShellError]);
   // A dismissed sync failure stays dismissed until it ends, across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
       if (shellErrors.find((error) => error.id === id)?.kind === "cloud-sync") {
         syncFailureNotice.noteDismissed();
       }
-      dismissShellError(id);
+      const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+      if (refusal) {
+        const askedFor = workspaceId;
+        void props.sentNotices!.dismiss(refusal).then(() => {
+          if (workspaceIdRef.current === askedFor) dismissShellError(id);
+        }, error => {
+          if (workspaceIdRef.current === askedFor) reportShellError("dohc could not dismiss this Notice.", error);
+        });
+      } else dismissShellError(id);
     },
-    [dismissShellError, shellErrors, syncFailureNotice],
+    [dismissShellError, shellErrors, syncFailureNotice, props.sentNotices, workspaceId, reportShellError],
   );
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
@@ -4847,7 +4869,7 @@ export function DesktopWorkspaceShell(props: {
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
-              onHideWorkspaceError={hideShellError}
+              onHideWorkspaceError={hideWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
               {...(isShareView

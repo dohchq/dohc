@@ -638,7 +638,16 @@ export interface EngineRelayWorkspaceClient {
   }): Promise<PushDirectWritesResult>;
 }
 
+export interface WorkspacePullRefusal {
+  originId: string;
+  originSeq: number;
+  opKind: string;
+  code: string;
+  reason: string;
+}
+
 export interface EngineRelayClientOptions {
+  recordRefusals?(workspace: EngineWorkspace, refusals: WorkspacePullRefusal[]): Promise<void>;
   sessions: EngineWorkspaceSessions;
   routes: RelayTransportRouteGuard;
   /** Closes the captured binding without re-entering this client's request lane. */
@@ -650,6 +659,7 @@ export interface EngineRelayClientOptions {
 const DEFAULT_RELAY_REQUEST_DEADLINE_MS = 30_000;
 
 export class EngineRelayClient {
+  private readonly recordRefusals: EngineRelayClientOptions["recordRefusals"];
   private readonly sessions: EngineWorkspaceSessions;
   private readonly routes: RelayTransportRouteGuard;
   private readonly closeWorkspaceBinding: (workspace: EngineWorkspace) => Promise<void>;
@@ -660,6 +670,7 @@ export class EngineRelayClient {
   private readonly lanes = new Map<string | symbol, Promise<void>>();
 
   constructor(options: EngineRelayClientOptions) {
+    this.recordRefusals = options.recordRefusals;
     this.sessions = options.sessions;
     this.routes = options.routes;
     this.closeWorkspaceBinding = options.closeWorkspaceBinding ??
@@ -869,6 +880,17 @@ export class EngineRelayClient {
           );
           for (const path of pageChangedPaths) {
             changed.set(`${path.versionId}\0${path.path}`, path);
+          }
+          if (!Array.isArray(result.refusals)) throw new Error("Rust engine sync.pull.refusals must be an array.");
+          const pageRefusals = result.refusals.map((entry, index): WorkspacePullRefusal => {
+            const at = `sync.pull.refusals[${index}]`;
+            const row = resultRecord(entry, at);
+            return { originId: stringField(row, "originId", at), originSeq: numberField(row, "originSeq", at),
+              opKind: stringField(row, "opKind", at), code: stringField(row, "code", at), reason: stringField(row, "reason", at) };
+          });
+          if (pageRefusals.length) {
+            if (!this.recordRefusals) throw new Error("Sync refusals need a persistent Notice recorder.");
+            await this.recordRefusals(workspace, pageRefusals);
           }
           await materializePage(pageChangedPaths);
           appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);

@@ -5389,6 +5389,7 @@ export const NoticeRow = z.object({
   senderLabel: codePoints(1, NOTICE_SENDER_LABEL_MAX_CHARS).nullable(),
   title: codePoints(1, NOTICE_TITLE_MAX_CHARS),
   body: codePoints(0, NOTICE_BODY_MAX_CHARS),
+  detail: z.string().max(262_144).optional(),
   // Null once the person can no longer open what the notice pointed at.
   target: NoticeTargetShape.nullable(),
   createdAtMs: z.number().int().nonnegative(),
