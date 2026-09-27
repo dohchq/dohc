@@ -105,6 +105,9 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(windows)]
+mod readonly_link;
+
 /// Maximum bytes the pipeline will materialize or read back for comparison. A
 /// job's content came from a bounded blob; the on-disk comparison read is
 /// bounded the same way so a giant external file cannot blow memory.
@@ -233,7 +236,7 @@ impl AtomicReplacer for StdReplacer {}
 ///
 /// Windows claims the target with a hard link, then removes the incoming name.
 /// Read-only links use the standard library's ignore-readonly deletion. If a
-/// drive refuses it, cleanup temporarily clears and then restores attributes.
+/// drive refuses it, cleanup journals attributes before temporarily clearing them.
 /// Filesystems without hard links use the check-then-rename fallback below.
 ///
 /// Linux and macOS ask the kernel for an exclusive rename. Other Unix
@@ -245,11 +248,12 @@ impl AtomicReplacer for StdReplacer {}
 /// can lose, and reports [`Placement::CheckThenRename`].
 #[cfg(windows)]
 fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+    readonly_link::recover_one(incoming, target)?;
     place_with_hard_link(
         incoming,
         target,
         || std::fs::hard_link(incoming, target),
-        || remove_placement_link(incoming),
+        || remove_placement_link(incoming, target),
     )
 }
 
@@ -290,7 +294,11 @@ fn placement_is_linked(incoming: &Path, target: &Path) -> std::io::Result<bool> 
 }
 
 #[cfg(windows)]
-fn remove_placement_link(incoming: &Path) -> std::io::Result<()> {
+fn remove_placement_link(incoming: &Path, target: &Path) -> std::io::Result<()> {
+    // Rust 1.96.1's unlink opens this name with DELETE access, then calls
+    // SetFileInformationByHandle(FileDispositionInfoEx) with DELETE,
+    // POSIX_SEMANTICS and IGNORE_READONLY_ATTRIBUTE on access denied.
+    // It preserves the original access-denied error if that API is unsupported.
     match std::fs::remove_file(incoming) {
         Ok(()) => return Ok(()),
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
@@ -303,31 +311,7 @@ fn remove_placement_link(incoming: &Path) -> std::io::Result<()> {
         }
         Err(err) => return Err(err),
     }
-    remove_readonly_placement_link(incoming, || std::fs::remove_file(incoming))
-}
-
-#[cfg(windows)]
-#[allow(
-    clippy::permissions_set_readonly_false,
-    reason = "Windows-only attribute restoration; Unix permission bits are never changed"
-)]
-fn remove_readonly_placement_link(
-    incoming: &Path,
-    remove: impl FnOnce() -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    // Pin the inode so restoration cannot change a replacement at either name.
-    let file = std::fs::OpenOptions::new()
-        .access_mode(0x80 | 0x100) // FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES
-        .custom_flags(0x0020_0000) // FILE_FLAG_OPEN_REPARSE_POINT
-        .open(incoming)?;
-    let original = file.metadata()?.permissions();
-    let mut writable = original.clone();
-    writable.set_readonly(false);
-    file.set_permissions(writable)?;
-    let removed = remove();
-    file.set_permissions(original)?;
-    removed
+    readonly_link::remove(incoming, target, || std::fs::remove_file(incoming))
 }
 
 #[cfg(windows)]
@@ -2316,6 +2300,8 @@ fn staging_dir(root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
     } else {
         ensure_target_symlink_free(root, &dir)?;
     }
+    #[cfg(windows)]
+    readonly_link::recover_all(root, &dir).map_err(|err| MaterializeError::io(&dir, &err))?;
     Ok(dir)
 }
 
@@ -4732,15 +4718,16 @@ mod tests {
         use std::os::windows::fs::MetadataExt;
         for fail in [true, false] {
             let scratch = Scratch::new("readonly-unlink");
-            let incoming = scratch.root.join("staged.md");
-            let target = scratch.root.join("target.md");
+            let root = std::fs::canonicalize(&scratch.root).unwrap();
+            let incoming = staging_dir(&root, true).unwrap().join("staged.md");
+            let target = root.join("target.md");
             std::fs::write(&incoming, b"outside").unwrap();
             let mut permissions = std::fs::metadata(&incoming).unwrap().permissions();
             permissions.set_readonly(true);
             std::fs::set_permissions(&incoming, permissions).unwrap();
             let attrs = std::fs::metadata(&incoming).unwrap().file_attributes();
             std::fs::hard_link(&incoming, &target).unwrap();
-            let result = remove_readonly_placement_link(&incoming, || {
+            let result = readonly_link::remove(&incoming, &target, || {
                 assert!(!std::fs::metadata(&incoming)?.permissions().readonly());
                 if fail {
                     Err(std::io::Error::from_raw_os_error(32))
@@ -4862,6 +4849,106 @@ mod tests {
             attributes
         );
         std::fs::set_permissions(&target, original_permissions).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_crash_after_staging_unlink_keeps_live_attributes() {
+        use std::os::windows::fs::MetadataExt;
+        let scratch = Scratch::new("readonly-native-crash");
+        let incoming = scratch.root.join("staged.md");
+        let target = scratch.root.join("target.md");
+        std::fs::write(&incoming, b"outside").unwrap();
+        let mut permissions = std::fs::metadata(&incoming).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&incoming, permissions).unwrap();
+        let attributes = std::fs::metadata(&incoming).unwrap().file_attributes();
+        let result = place_with_hard_link(
+            &incoming,
+            &target,
+            || std::fs::hard_link(&incoming, &target),
+            || {
+                remove_placement_link(&incoming, &target)?;
+                // Stop after the native unlink, before placement reports success.
+                Err(std::io::Error::from(ErrorKind::Interrupted))
+            },
+        );
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::Interrupted);
+        assert!(!incoming.exists());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().file_attributes(),
+            attributes
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_readonly_fallback_crash_recovers_without_staged_file_or_job() {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        for unlink in [false, true] {
+            let scratch = Scratch::new("readonly-fallback-crash");
+            let root = std::fs::canonicalize(&scratch.root).unwrap();
+            let incoming = staging_dir(&root, true).unwrap().join("staged.md");
+            let target = root.join("target.md");
+            let store = EngineStore::open(&scratch.db(), 1).unwrap();
+            drop(store);
+            drop(
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .attributes(0x2 | 0x20)
+                    .open(&incoming)
+                    .unwrap(),
+            );
+            std::fs::write(&incoming, b"outside").unwrap();
+            let mut permissions = std::fs::metadata(&incoming).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&incoming, permissions).unwrap();
+            let attributes = std::fs::metadata(&incoming).unwrap().file_attributes();
+            std::fs::hard_link(&incoming, &target).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| {
+                    let _ = readonly_link::remove(&incoming, &target, || {
+                        assert!(!std::fs::metadata(&target)?.permissions().readonly());
+                        if unlink {
+                            std::fs::remove_file(&incoming)?;
+                        }
+                        panic!("crash before attribute restoration");
+                    });
+                })
+                .is_err()
+            );
+            assert_eq!(incoming.exists(), !unlink);
+            let store = EngineStore::open(&scratch.db(), 2).unwrap();
+            // Failed recovery must retain the durable word for a later retry.
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(incoming.with_extension("md.restore-attributes"))
+                .unwrap();
+            recover_displacements(&store, &root, None, &options_with(&StdReplacer)).unwrap();
+            assert!(workspace_recovery_unavailable(&root));
+            drop(lock);
+            recover_displacements(&store, &root, None, &options_with(&StdReplacer)).unwrap();
+            assert!(!workspace_recovery_unavailable(&root));
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().file_attributes(),
+                attributes
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+            if !unlink {
+                rename_no_replace(&incoming, &target).unwrap();
+            }
+            assert_eq!(
+                std::fs::read_dir(root.join(STAGING_DIR)).unwrap().count(),
+                0
+            );
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().file_attributes(),
+                attributes
+            );
+        }
     }
 
     /// The inverse: a real sharing violation that survives every attempt
