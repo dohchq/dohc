@@ -71,6 +71,7 @@ struct RelayWorkspaceParams {
 struct DismissRefusalParams {
     workspace_id: String,
     notice_id: String,
+    refusal_coordinates: Vec<dohc_engine_sync::RefusalCoordinate>,
 }
 
 #[derive(Deserialize)]
@@ -1039,7 +1040,11 @@ impl EngineService {
             ));
         }
         open.actor
-            .dismiss_sync_refusal(open.workspace_id.clone(), params.notice_id)
+            .dismiss_sync_refusal(
+                open.workspace_id.clone(),
+                params.notice_id,
+                params.refusal_coordinates,
+            )
             .await
             .map_err(map_runtime)?;
         Ok(json!({}))

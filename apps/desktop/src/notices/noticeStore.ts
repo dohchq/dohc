@@ -25,7 +25,7 @@ import {
   type SyncRelayConnection,
   type PostableNoticeKind,
 } from "@dohc/workspace-contracts/relay";
-import { NoticeRow, NoticeTargetShape, type NoticeRef } from "../ipc/bridgeContract";
+import { NoticeRow, NoticeTargetShape, RefusalCoordinate, type NoticeRef } from "../ipc/bridgeContract";
 import { relayRequest } from "../workspaces/relayRequest";
 
 // The local file holds only this computer's notices, so it keeps fewer rows.
@@ -118,6 +118,8 @@ const PostRequest = z.object({
 }).and(Reach);
 
 const LocalRow = z.object({
+  refusalCoordinates: NoticeRow.shape.refusalCoordinates,
+  pendingRefusalDismissals: z.array(RefusalCoordinate).optional(),
   noticeId: NoticeRow.shape.noticeId,
   kind: NoticeRow.shape.kind,
   workspaceId: NoticeRow.shape.workspaceId,
@@ -134,11 +136,21 @@ const LocalRow = z.object({
 type LocalRow = z.infer<typeof LocalRow>;
 
 export const RefusalNotices = z.object({ notices: z.array(z.object({
+  refusalCoordinates: z.array(RefusalCoordinate),
   noticeId: z.string(), originId: z.string(), originSeq: z.number(), reason: z.string(),
   document: z.object({ versionId: z.string().nullable(), path: z.string().nullable(), objectId: z.string(),
     lineageClaimId: z.string(), conflictId: z.string().nullable() }).nullable(),
 })) });
 type RefusalNotice = z.infer<typeof RefusalNotices>["notices"][number];
+
+function coordinateKey(coordinate: RefusalCoordinate): string {
+  return JSON.stringify([coordinate.originId, coordinate.originSeq]);
+}
+
+function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinate[]): RefusalCoordinate[] {
+  const keys = new Set(removed.map(coordinateKey));
+  return rows.filter(row => !keys.has(coordinateKey(row)));
+}
 
 const RelayRow = z.object({
   noticeId: NoticeRow.shape.noticeId,
@@ -236,7 +248,7 @@ export function createNoticeStore(deps: {
   onChanged(): void;
   // Null keeps cached rows for a workspace whose engine could not be read.
   refusalNotices?(openedWorkspaceId?: string): Promise<{ workspaceId: string; notices: RefusalNotice[] | null }[]>;
-  dismissRefusal?(workspaceId: string, noticeId: string): Promise<void>;
+  dismissRefusal?(workspaceId: string, noticeId: string, refusalCoordinates: RefusalCoordinate[]): Promise<void>;
   nowMs?: () => number;
   outboxPostLimit?: number;
 }): NoticeStore {
@@ -623,14 +635,21 @@ export function createNoticeStore(deps: {
         if (notices === null) continue;
         for (const refusal of notices) {
           const previous = previousRows.get(refusal.noticeId);
-          if (previous?.dismissedAtMs != null) {
-            // Keep the durable dismissal hidden until a later engine read confirms it is gone.
-            rows.push(previous);
+          const currentKeys = new Set(refusal.refusalCoordinates.map(coordinateKey));
+          const pendingRefusalDismissals = (previous?.pendingRefusalDismissals ?? [])
+            .filter(row => currentKeys.has(coordinateKey(row)));
+          if (pendingRefusalDismissals.length > 0) {
             try {
-              await deps.dismissRefusal?.(workspaceId, refusal.noticeId);
+              await deps.dismissRefusal?.(workspaceId, refusal.noticeId, pendingRefusalDismissals);
             } catch (error) {
               console.warn("[notices] could not apply queued sync refusal dismissal", workspaceId, error);
             }
+          }
+          const refusalCoordinates = withoutCoordinates(refusal.refusalCoordinates, pendingRefusalDismissals);
+          if (refusalCoordinates.length === 0 && previous) {
+            // Keep only the shown refusals hidden until an engine read confirms their deletion.
+            rows.push({ ...previous, refusalCoordinates, pendingRefusalDismissals,
+              dismissedAtMs: previous.dismissedAtMs ?? nowMs() });
             continue;
           }
           const document = refusal.document;
@@ -640,11 +659,14 @@ export function createNoticeStore(deps: {
             ? "Open its conflict and choose a copy."
             : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
           rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: "sync-refusal",
+            refusalCoordinates, pendingRefusalDismissals,
             title: "A change needs your review", body,
             detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
               `Lineage: ${document?.lineageClaimId ?? "unknown"}`, `Origin: ${refusal.originId}:${refusal.originSeq}`].join("\n"),
             target: NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {},
-            createdAtMs: previous?.createdAtMs ?? nowMs(), readAtMs: previous?.readAtMs ?? null, dismissedAtMs: null }));
+            createdAtMs: previous?.dismissedAtMs == null ? previous?.createdAtMs ?? nowMs() : nowMs(),
+            readAtMs: withoutCoordinates(refusalCoordinates, previous?.refusalCoordinates ?? []).length === 0
+              ? previous?.readAtMs ?? null : null, dismissedAtMs: null }));
         }
       }
       if (JSON.stringify(rows) === JSON.stringify(prior.rows)) return false;
@@ -788,6 +810,7 @@ export function createNoticeStore(deps: {
         title: row.title,
         body: row.body,
         ...(row.detail === undefined ? {} : { detail: row.detail }),
+        ...(row.refusalCoordinates === undefined ? {} : { refusalCoordinates: row.refusalCoordinates }),
         target: row.target,
         createdAtMs: row.createdAtMs,
         readAtMs: row.readAtMs,
@@ -832,16 +855,24 @@ export function createNoticeStore(deps: {
   async function mark(refs: readonly NoticeRef[], mark: NoticeMark, account: string | null): Promise<void> {
     const session = refs.some((ref) => ref.store === "account") ? await deps.session() : null;
     const changed = await locked(async () => {
-      const localIds = new Set(refs.filter((ref) => ref.store === "local").map((ref) => ref.noticeId));
+      const localRefs = new Map(refs.filter((ref) => ref.store === "local").map(ref => [ref.noticeId, ref]));
       let localChanged = false;
-      if (localIds.size > 0) {
+      if (localRefs.size > 0) {
         const file = await loadLocal();
         for (const row of file.rows) {
-          if (!localIds.has(row.noticeId)) continue;
+          const ref = localRefs.get(row.noticeId);
+          if (!ref) continue;
           if (row.dismissedAtMs !== null || (mark === "read" && row.readAtMs !== null)) continue;
           if (mark === "dismissed" && row.kind === "sync-refusal" && row.workspaceId) {
-            if (!deps.dismissRefusal) throw new Error("The engine could not dismiss this Notice. Try again.");
-            await deps.dismissRefusal(row.workspaceId, row.noticeId);
+            const shown = ref.refusalCoordinates;
+            if (!shown?.length || !deps.dismissRefusal) throw new Error("The engine could not dismiss this Notice. Try again.");
+            await deps.dismissRefusal(row.workspaceId, row.noticeId, shown);
+            row.pendingRefusalDismissals = [...(row.pendingRefusalDismissals ?? []),
+              ...withoutCoordinates(shown, row.pendingRefusalDismissals ?? [])];
+            row.refusalCoordinates = withoutCoordinates(row.refusalCoordinates ?? [], shown);
+            if (row.refusalCoordinates.length === 0) row.dismissedAtMs = nowMs();
+            localChanged = true;
+            continue;
           }
           if (mark === "read") row.readAtMs = nowMs();
           else row.dismissedAtMs = nowMs();

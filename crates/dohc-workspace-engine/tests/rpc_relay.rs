@@ -2146,7 +2146,7 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
         ("sync.refusalNotices", json!({ "workspaceId": "other" })),
         (
             "sync.dismissRefusal",
-            json!({ "workspaceId": "other", "noticeId": "sync-refusal-missing" }),
+            json!({ "workspaceId": "other", "noticeId": "sync-refusal-missing", "refusalCoordinates": [] }),
         ),
         (
             "sync.commitCursor",
@@ -3026,7 +3026,7 @@ async fn refusal_notices_list_and_dismiss_without_a_relay() {
                 &handle,
                 &mut id,
                 "sync.dismissRefusal",
-                json!({"workspaceId":"ws-refusal","noticeId":listed["notices"][0]["noticeId"]}),
+                json!({"workspaceId":"ws-refusal","noticeId":listed["notices"][0]["noticeId"],"refusalCoordinates":listed["notices"][0]["refusalCoordinates"]}),
             )
             .await;
         }

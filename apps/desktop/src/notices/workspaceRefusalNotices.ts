@@ -3,6 +3,7 @@ import type { AttachedEngineWorkspace, EngineWorkspaceSessions } from "@dohc/wor
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import { RefusalNotices } from "./noticeStore";
+import type { RefusalCoordinate } from "../ipc/bridgeContract";
 
 export function createWorkspaceRefusalNotices(deps: {
   sessions(): EngineWorkspaceSessions | null;
@@ -36,12 +37,12 @@ export function createWorkspaceRefusalNotices(deps: {
         return { workspaceId, notices: result.status === "fulfilled" ? result.value : null };
       });
     },
-    dismissRefusal: async (workspaceId: string, noticeId: string) => {
+    dismissRefusal: async (workspaceId: string, noticeId: string, refusalCoordinates: RefusalCoordinate[]) => {
       const sessions = deps.sessions();
       if (!sessions) return;
       await deps.withOperation(workspaceId, ({ workspace }) =>
         sessions.runIfOpen(deps.workspaceForRegistered(workspace), async ({ client, workspace: handle }) => {
-          await new WorkspaceDaemonRequester(client).request("sync.dismissRefusal", { workspaceId, noticeId }, { workspace: handle });
+          await new WorkspaceDaemonRequester(client).request("sync.dismissRefusal", { workspaceId, noticeId, refusalCoordinates }, { workspace: handle });
         }),
       );
     },

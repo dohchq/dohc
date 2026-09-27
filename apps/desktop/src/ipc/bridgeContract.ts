@@ -5378,8 +5378,11 @@ export const NoticeTargetShape = z.object({
   automation: NOTICE_TARGET_FIELD,
   run: NOTICE_TARGET_FIELD,
 });
+export const RefusalCoordinate = z.object({ originId: z.string(), originSeq: z.number().int() });
+export type RefusalCoordinate = z.infer<typeof RefusalCoordinate>;
 export const NoticeRow = z.object({
   store: NoticeStoreName,
+  refusalCoordinates: z.array(RefusalCoordinate).optional(),
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
   kind: z.string().min(1).max(64),
   // A local row names this computer's workspace. An account row names the
@@ -5399,6 +5402,7 @@ export const NoticeRow = z.object({
 export type NoticeRow = z.infer<typeof NoticeRow>;
 export const NoticeRef = z.object({
   store: NoticeStoreName,
+  refusalCoordinates: NoticeRow.shape.refusalCoordinates,
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
 });
 export type NoticeRef = z.infer<typeof NoticeRef>;

@@ -10,7 +10,8 @@ import { createTestScratch } from "../workspaces/testTemp";
 import { createWorkspaceRefusalNotices } from "./workspaceRefusalNotices";
 import { createNoticeStore, type NoticeStore } from "./noticeStore";
 
-const notice = { noticeId: "refusal", originId: "peer", originSeq: 1, reason: "seed-lineage-conflict", document: null };
+const notice = { noticeId: "refusal", originId: "peer", originSeq: 1,
+  refusalCoordinates: [{ originId: "peer", originSeq: 1 }], reason: "seed-lineage-conflict", document: null };
 
 async function fixture(shareView?: RegistryEntry["shareView"]) {
   const workspace: RegistryEntry = {
@@ -24,10 +25,16 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
   });
   let pending = [notice];
   const sendRequest = vi.fn(async (request: Request): Promise<Response> => {
-    if (request.method === "sync.dismissRefusal") pending = [];
+    if (request.method === "sync.dismissRefusal") {
+      const { noticeId, refusalCoordinates } = request.params as { noticeId: string; refusalCoordinates: typeof notice.refusalCoordinates };
+      pending = pending.filter(row => row.noticeId !== noticeId || !refusalCoordinates.some(
+        coordinate => coordinate.originId === row.originId && coordinate.originSeq === row.originSeq));
+    }
     return { id: request.id,
       result: request.method === "workspace.open" ? { workspace: "handle" }
-        : request.method === "sync.refusalNotices" ? { notices: pending }
+        : request.method === "sync.refusalNotices" ? { notices: pending.length === 0 ? [] : [{
+          ...pending[pending.length - 1], refusalCoordinates: pending.flatMap(row => row.refusalCoordinates),
+        }] }
         : request.method === "sync.dismissRefusal" ? { dismissed: true } : { closed: true },
     };
   });
@@ -54,6 +61,7 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
   const createStore = () => store = createNoticeStore({ directory, session: async () => null,
     installId: () => "install", onChanged, nowMs: () => now, ...refusals });
   return { ...refusals, deps, sendRequest, authorities, createStore, onChanged,
+    arriveRefusal: () => { pending.push({ ...notice, originSeq: 2, refusalCoordinates: [{ originId: "peer", originSeq: 2 }] }); },
     advanceYear: () => { now += 365 * 24 * 60 * 60_000; },
     closeEditor: () => authorities.withOperation(workspace.workspaceId, operation =>
       sessions.closeWorkspace(received.workspaceForRegistered(operation.workspace))),
@@ -77,7 +85,7 @@ describe("workspace refusal notices", () => {
       expect(await f.openEditor()).toBe("handle");
       expect(f.onChanged).toHaveBeenCalledOnce();
       expect((await store.list()).notices).toEqual([expect.objectContaining({ noticeId: "refusal" })]);
-      await f.dismissRefusal("workspace", "refusal");
+      await f.dismissRefusal("workspace", "refusal", notice.refusalCoordinates);
       expect(f.sendRequest.mock.calls.filter(([request]) => request.method === "workspace.open")).toHaveLength(1);
       expect(f.sendRequest.mock.calls.find(([request]) => request.method === "sync.dismissRefusal")?.[0]).toMatchObject({ workspace: "handle" });
     } finally { await f.close(); }
@@ -116,6 +124,45 @@ describe("workspace refusal notices", () => {
       expect(f.sendRequest.mock.calls.filter(([request]) => request.method === "sync.dismissRefusal")).toHaveLength(1);
       expect((await restarted.list()).notices).toEqual([]);
       expect(f.sendRequest.mock.calls.filter(([request]) => request.method === "workspace.open")).toHaveLength(1);
+    } finally { await f.close(); }
+  });
+
+  it("keeps a newer refusal when a closed-workspace dismissal applies after restart", async () => {
+    const f = await fixture();
+    try {
+      await f.openEditor();
+      const store = f.createStore();
+      const [shown] = (await store.list()).notices;
+      await f.closeEditor();
+      await store.mark([shown!], "dismissed", null);
+      f.arriveRefusal();
+      const restarted = f.createStore();
+      await f.openEditor();
+      const [remaining] = (await restarted.list()).notices;
+      expect(remaining).toMatchObject({ noticeId: shown!.noticeId, readAtMs: null,
+        refusalCoordinates: [{ originId: "peer", originSeq: 2 }] });
+      expect(f.sendRequest.mock.calls.filter(([request]) => request.method === "sync.dismissRefusal")
+        .map(([request]) => request.params)).toEqual([{ workspaceId: "workspace", noticeId: "refusal",
+          refusalCoordinates: [{ originId: "peer", originSeq: 1 }] }]);
+      await restarted.mark([remaining!], "dismissed", null);
+      expect((await restarted.list()).notices).toEqual([]);
+    } finally { await f.close(); }
+  });
+
+  it.each([false, true])("keeps a newer refusal after list then dismiss (cache refreshed: %s)", async (refresh) => {
+    const f = await fixture();
+    try {
+      await f.openEditor();
+      const store = f.createStore();
+      const [shown] = (await store.list()).notices;
+      f.arriveRefusal();
+      if (refresh) await store.refreshRefusals();
+      await store.mark([shown!], "dismissed", null);
+      const [remaining] = (await store.list()).notices;
+      expect(remaining).toMatchObject({ noticeId: shown!.noticeId,
+        refusalCoordinates: [{ originId: "peer", originSeq: 2 }] });
+      expect(f.sendRequest.mock.calls.find(([request]) => request.method === "sync.dismissRefusal")?.[0].params)
+        .toEqual({ workspaceId: "workspace", noticeId: "refusal", refusalCoordinates: notice.refusalCoordinates });
     } finally { await f.close(); }
   });
 

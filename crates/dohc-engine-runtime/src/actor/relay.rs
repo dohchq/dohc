@@ -1147,10 +1147,17 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         notice_id: String,
+        refusal_coordinates: Vec<dohc_engine_sync::RefusalCoordinate>,
     ) -> Result<(), RuntimeError> {
         self.run(move |store, _cache| {
-            dohc_engine_sync::dismiss_refusal_notice(store, &workspace_id, &notice_id, &NoFaults)
-                .map_err(RuntimeError::from)
+            dohc_engine_sync::dismiss_refusal_notice(
+                store,
+                &workspace_id,
+                &notice_id,
+                &refusal_coordinates,
+                &NoFaults,
+            )
+            .map_err(RuntimeError::from)
         })
         .await
     }

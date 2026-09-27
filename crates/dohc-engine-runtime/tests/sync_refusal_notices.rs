@@ -63,14 +63,21 @@ async fn refusal_notices_survive_restart_and_dismiss_with_workspace_scope() {
     );
     let id = result[0].notice_id.clone();
     actor
-        .dismiss_sync_refusal("other".into(), id.clone())
+        .dismiss_sync_refusal(
+            "other".into(),
+            id.clone(),
+            result[0].refusal_coordinates.clone(),
+        )
         .await
         .unwrap();
     assert_eq!(
         actor.sync_refusal_notices("ws".into()).await.unwrap().len(),
         1
     );
-    actor.dismiss_sync_refusal("ws".into(), id).await.unwrap();
+    actor
+        .dismiss_sync_refusal("ws".into(), id, result[0].refusal_coordinates.clone())
+        .await
+        .unwrap();
     assert!(
         actor
             .sync_refusal_notices("ws".into())

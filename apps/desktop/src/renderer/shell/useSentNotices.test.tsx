@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NOTICE_MARK_BATCH_MAX, type MarkNoticesPayload, type NoticeRow } from "../../ipc/bridgeContract";
+import { NOTICE_MARK_BATCH_MAX, MarkNoticesPayload, type NoticeRow } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
-import { SENT_NOTICE_TOAST_MS, useSentNotices } from "./useSentNotices";
+import { SENT_NOTICE_TOAST_MS, sentNoticeRef, useSentNotices } from "./useSentNotices";
 
 const ANA = "https://server.test#https://relay.test#ana";
 const BEN = "https://server.test#https://relay.test#ben";
@@ -61,6 +61,22 @@ async function arrive(next: NoticeRow[], nextAccount: string | null = account) {
 }
 
 describe("sent notices in a window", () => {
+  it("carries the shown refusal coordinates and releases dismissal for a newer refusal", async () => {
+    const shown = notice("refusal", { store: "local", kind: "sync-refusal",
+      refusalCoordinates: [{ originId: "peer", originSeq: 1 }] });
+    listed = [shown];
+    const { result } = renderHook(() => useSentNotices(true));
+    await waitFor(() => expect(result.current.notices).toHaveLength(1));
+    bridge.markNotices.mockImplementation(async payload => {
+      expect(MarkNoticesPayload.parse(payload).notices).toEqual([{
+        store: "local", noticeId: "refusal", refusalCoordinates: shown.refusalCoordinates,
+      }]);
+      listed = [{ ...shown, refusalCoordinates: [{ originId: "peer", originSeq: 2 }] }];
+    });
+    await act(async () => result.current.dismiss(sentNoticeRef(shown)));
+    expect(result.current.notices).toEqual(listed);
+  });
+
   it("gives no toast for what was already there when the window opened", async () => {
     listed = [notice("before")];
     const { result } = renderHook(() => useSentNotices(true));

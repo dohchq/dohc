@@ -4601,9 +4601,7 @@ export function DesktopWorkspaceShell(props: {
       const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
       if (refusal) {
         const askedFor = workspaceId;
-        void props.sentNotices!.dismiss(refusal).then(() => {
-          if (workspaceIdRef.current === askedFor) dismissShellError(id);
-        }, error => {
+        void props.sentNotices!.dismiss(refusal).catch(error => {
           if (workspaceIdRef.current === askedFor) reportShellError("dohc could not dismiss this Notice.", error);
         });
       } else dismissShellError(id);

@@ -1,6 +1,6 @@
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome, hex_sha256};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::SyncError;
@@ -44,10 +44,18 @@ pub struct RefusalDocument {
 #[serde(rename_all = "camelCase")]
 pub struct RefusalNotice {
     pub notice_id: String,
+    pub refusal_coordinates: Vec<RefusalCoordinate>,
     pub origin_id: String,
     pub origin_seq: i64,
     pub reason: String,
     pub document: Option<RefusalDocument>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefusalCoordinate {
+    pub origin_id: String,
+    pub origin_seq: i64,
 }
 
 fn document(payload: &Value) -> Option<RefusalDocument> {
@@ -152,6 +160,10 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
                 serde_json::json!([workspace_id, "coordinate", origin_id, origin_seq])
             };
             Ok(RefusalNotice {
+                refusal_coordinates: vec![RefusalCoordinate {
+                    origin_id: origin_id.clone(),
+                    origin_seq,
+                }],
                 notice_id: format!(
                     "sync-refusal-{}",
                     hex_sha256(identity.to_string().as_bytes())
@@ -170,7 +182,7 @@ pub fn list_refusal_notices(
     workspace_id: &str,
 ) -> Result<Vec<RefusalNotice>, SyncError> {
     store.read_with(|conn| {
-        let mut notices = std::collections::BTreeMap::new();
+        let mut notices = std::collections::BTreeMap::<String, RefusalNotice>::new();
         for mut row in rows(conn, workspace_id)? {
             if let Some(doc) = &mut row.document
                 && let Some(conflict) = &doc.conflict_id
@@ -180,6 +192,10 @@ pub fn list_refusal_notices(
                     params![workspace_id, conflict], |row| row.get(0),
                 ).map_err(SyncError::corrupt)?;
                 if !open { doc.conflict_id = None; }
+            }
+            if let Some(mut previous) = notices.remove(&row.notice_id) {
+                previous.refusal_coordinates.append(&mut row.refusal_coordinates);
+                row.refusal_coordinates = previous.refusal_coordinates;
             }
             notices.insert(row.notice_id.clone(), row);
         }
@@ -201,11 +217,13 @@ pub fn dismiss_refusal_notice(
     store: &mut EngineStore,
     workspace_id: &str,
     notice_id: &str,
+    refusal_coordinates: &[RefusalCoordinate],
     faults: &dyn FaultInjector,
 ) -> Result<(), SyncError> {
+    let shown: std::collections::HashSet<_> = refusal_coordinates.iter().collect();
     match store.write_with(faults, |tx| {
         for row in rows(tx, workspace_id)? {
-            if row.notice_id == notice_id {
+            if row.notice_id == notice_id && shown.contains(&row.refusal_coordinates[0]) {
                 delete_row(tx, workspace_id, &row)?;
             }
         }
@@ -341,7 +359,12 @@ mod tests {
             .unwrap()
             .notice_id
             .clone();
-        dismiss_refusal_notice(&mut store, "ws", &main_id, &NoFaults).unwrap();
+        let coordinates = &notices
+            .iter()
+            .find(|notice| notice.notice_id == main_id)
+            .unwrap()
+            .refusal_coordinates;
+        dismiss_refusal_notice(&mut store, "ws", &main_id, coordinates, &NoFaults).unwrap();
         let remaining = list_refusal_notices(&store, "ws").unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(
@@ -371,6 +394,50 @@ mod tests {
                 .as_deref(),
             Some("branch")
         );
+    }
+
+    #[test]
+    fn dismissal_preserves_refusals_arriving_after_list() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        refuse(&mut store, "ws", "object", "lineage", 0);
+        refuse(&mut store, "ws", "object", "lineage", 1);
+        let shown = list_refusal_notices(&store, "ws").unwrap().remove(0);
+        assert_eq!(shown.refusal_coordinates.len(), 2);
+        refuse(&mut store, "ws", "object", "lineage", 2);
+        // A different origin can use a lower sequence on the same lineage.
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) SELECT workspace_id,'another-peer',0,op_kind,payload_json,recorded_at_ms,imported FROM replication_log WHERE workspace_id='ws' AND origin_id='peer' AND origin_seq=2", []).unwrap();
+            tx.execute("INSERT INTO replication_pending_refusals (workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) SELECT workspace_id,'another-peer',0,op_kind,reason_code,reason_message FROM replication_pending_refusals WHERE workspace_id='ws' AND origin_id='peer' AND origin_seq=2", []).unwrap();
+            Ok::<_, SyncError>(())
+        }).unwrap();
+        for _ in 0..2 {
+            dismiss_refusal_notice(
+                &mut store,
+                "ws",
+                &shown.notice_id,
+                &shown.refusal_coordinates,
+                &NoFaults,
+            )
+            .unwrap();
+            let remaining = list_refusal_notices(&store, "ws").unwrap();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].notice_id, shown.notice_id);
+            assert_eq!(
+                remaining[0].refusal_coordinates,
+                vec![
+                    RefusalCoordinate {
+                        origin_id: "peer".into(),
+                        origin_seq: 2
+                    },
+                    RefusalCoordinate {
+                        origin_id: "another-peer".into(),
+                        origin_seq: 0
+                    },
+                ]
+            );
+        }
     }
 
     #[test]
@@ -471,9 +538,18 @@ mod tests {
         assert_eq!(list_refusal_notices(&store, "other").unwrap().len(), 1);
         refuse(&mut store, "ws", "object-a", "inactive", 2);
         assert_eq!(list_refusal_notices(&store, "ws").unwrap().len(), 1);
-        dismiss_refusal_notice(&mut store, "other", &id, &NoFaults).unwrap();
+        let shown = list_refusal_notices(&store, "ws").unwrap().remove(0);
+        dismiss_refusal_notice(
+            &mut store,
+            "other",
+            &id,
+            &shown.refusal_coordinates,
+            &NoFaults,
+        )
+        .unwrap();
         assert_eq!(list_refusal_notices(&store, "ws").unwrap().len(), 1);
-        dismiss_refusal_notice(&mut store, "ws", &id, &NoFaults).unwrap();
+        dismiss_refusal_notice(&mut store, "ws", &id, &shown.refusal_coordinates, &NoFaults)
+            .unwrap();
         drop(store);
         let mut store = EngineStore::open(&db, 4).unwrap();
         assert!(list_refusal_notices(&store, "ws").unwrap().is_empty());
