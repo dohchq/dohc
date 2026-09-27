@@ -1473,6 +1473,8 @@ describe("Collection automations", () => {
     // Starting over makes new messages too, so the person hears that first.
     expect(DEFINITION_CHANGED_ERROR).toContain("It may repeat changes, posts, direct messages, and notices the earlier run already made.");
     expect((await w.executor.runs(TASKS))[0]).toMatchObject({ definitionChanged: true });
+    // Reading the run says Try again starts over, as the refusal above does.
+    expect(await w.executor.run(TASKS, claim.claimId)).toMatchObject({ state: "failed", startsOver: true });
 
     await w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: true });
     await w.until(() => claim.state === "done");
@@ -1662,6 +1664,37 @@ describe("Collection automations", () => {
     const [run] = await w.executor.runs("collection:Tasks#chain");
     expect(run!.writes.filter((write) => write.kind === "field").map((write) => write.kind === "field" && [write.before, write.after]))
       .toEqual([[0, 1], [1, 2]]);
+  });
+
+  it("reads one run with what started it and what each step changed", async () => {
+    const two = "  - id: two\n    name: Two\n    when: {field-changed: Status}\n    do: [{set: {Count: 1}}, {set: {Note: a}}]\n";
+    const w = await world({ automations: { Tasks: two } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 0 });
+    // Step 1 lands; step 2 cannot open the record.
+    w.failOpenAt(2);
+    const claim = w.claim("collection:Tasks#two", task, { actorKind: "agent" });
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    const read = await w.executor.run("collection:Tasks#two", claim.claimId);
+    expect(read).toMatchObject({
+      claimId: claim.claimId,
+      state: "failed",
+      error: "The record is open in a live session elsewhere.",
+      trigger: { kind: "changed", recordId: task.id, by: "agent", depth: 0 },
+      steps: [{ step: 1, writes: [{ kind: "field", recordId: task.id, path: task.path, field: "Count", before: 0, after: 1 }] }],
+      failedStep: 2,
+      startsOver: false,
+    });
+    expect(read).not.toHaveProperty("writes");
+    const [listed] = await w.executor.runs("collection:Tasks#two");
+    expect(listed!.trigger).toEqual(read!.trigger);
+    // Another computer's run, or one history no longer shows, is not here.
+    await expect(w.executor.run("collection:Tasks#two", "atc_elsewhere")).resolves.toBeNull();
+
+    await w.executor.retry({ automationId: "collection:Tasks#two", claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(await w.executor.run("collection:Tasks#two", claim.claimId)).toMatchObject({ failedStep: null, startsOver: false, steps: [{ step: 1 }, { step: 2 }] });
   });
 
   const ITEMS = "  - id: tick\n    name: Tick\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {Count: '=record.Count + 1'}\n        records: items\n";
@@ -1982,6 +2015,16 @@ describe("Collection automations", () => {
     expect(stopped).toMatchObject({ undone: false });
     await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false }))
       .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
+    // Even once the automation changes, reading the run does not offer to start over: Try again refuses.
+    await w.writeAutomations("Tasks", STAMP.replace("Title: Stamped", "Title: Stamped again"));
+    // The executor reads the file again before it answers.
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    expect(await w.executor.run("collection:Tasks#stamp", claim.claimId)).toMatchObject({ definitionChanged: true, startsOver: false });
+    await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: true }))
+      .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
+    await w.writeAutomations("Tasks", STAMP);
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    expect(await w.executor.run("collection:Tasks#stamp", claim.claimId)).toMatchObject({ definitionChanged: false });
     // A requeue from the engine's recovery does not resume the plan either.
     claim.state = "pending";
     w.requeue(claim);

@@ -25,6 +25,7 @@ import { ListNoticesResult } from "../ipc/bridgeContract";
 import {
   FAILED_ELSEWHERE_BODY,
   RETRY_ELSEWHERE,
+  retryAutomationRun,
   retryFromFailureNotice,
   sendFailureNotices,
   switchedOffNotice,
@@ -1007,6 +1008,63 @@ describe("automation notices reach the people involved", () => {
     expect((await desktop.store.list()).notices).toEqual([]);
   });
 
+  it("refuses an agent's Try again for another computer's run with the notice that names it, even once dismissed", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "owner"), { installId: "install-a" });
+    const desktop = await computer(account(server, "owner"), { installId: "install-b" });
+    await sendFailureNotices(sender(laptop.store, "install-a"), WORKSPACE, report(1));
+    await laptop.store.sync();
+    await desktop.store.sync();
+    const run = { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false };
+    const retry = vi.fn(async () => ({ status: "queued" as const, press: false }));
+    const elsewhere = {
+      status: "refused",
+      reason: RETRY_ELSEWHERE,
+      notice: { title: 'Automation "Stamp the finish date" failed', body: "The record is open elsewhere. It ran on Computer install-a." },
+    };
+    const onDesktop = { notices: desktop.store, installId: "install-b", holds: async () => false, retry };
+
+    await expect(retryAutomationRun(onDesktop, run)).resolves.toEqual(elsewhere);
+    // Dismissed on this computer, the notice still names where the run is.
+    const [row] = (await desktop.store.list()).notices;
+    await desktop.store.mark([refOf(row!)], "dismissed", desktop.signedIn!.key);
+    expect((await desktop.store.list()).notices).toEqual([]);
+    await expect(retryAutomationRun(onDesktop, run)).resolves.toEqual(elsewhere);
+    expect(retry).not.toHaveBeenCalled();
+
+    // A run no notice names goes to this computer's executor, which says why it cannot.
+    await expect(retryAutomationRun(onDesktop, { ...run, claimId: "atc_9" })).resolves.toEqual({ status: "queued", press: false });
+    expect(retry).toHaveBeenLastCalledWith({ automationId: AUTOMATION, claimId: "atc_9", startOver: false });
+
+    // The computer that holds the claim runs it, as the panel's Try again does, without reading notices.
+    const sentFailure = vi.fn(laptop.store.sentFailure);
+    await expect(retryAutomationRun({ notices: { sentFailure }, installId: "install-a", holds: async () => true, retry }, run))
+      .resolves.toEqual({ status: "queued", press: false });
+    expect(retry).toHaveBeenLastCalledWith({ automationId: AUTOMATION, claimId: "atc_1", startOver: false });
+    expect(sentFailure).not.toHaveBeenCalled();
+  });
+
+  it("names another computer only from a notice this person sent", async () => {
+    const server = await relay();
+    const shareId = await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const owner = await computer(account(server, "owner"), { installId: "install-a" });
+    // Someone the owner shared with names the owner's run, and the owner reads it in their own workspace.
+    server.storage.postNotice({
+      noticeId: "automation-failed:ana", recipientUserId: "owner", reach: { shareId }, kind: "automation-failed",
+      title: "Stamp failed", body: "It ran on Ana's laptop.",
+      target: { automation: AUTOMATION, path: "trip/tasks/automations.yaml", run: "atc_1" },
+      originInstallId: "install-c", senderUserId: "ana", senderLabel: "Ana", nowMs: clock,
+    });
+    await owner.store.sync();
+    expect((await owner.store.list()).notices).toEqual([expect.objectContaining({ workspaceId: WORKSPACE, target: expect.objectContaining({ run: "atc_1" }) })]);
+    const retry = vi.fn(async () => ({ status: "queued" as const, press: false }));
+    await expect(retryAutomationRun(
+      { notices: owner.store, installId: "install-a", holds: async () => false, retry },
+      { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false },
+    )).resolves.toEqual({ status: "queued", press: false });
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a run's notice on this computer while nobody is signed in, and tries it again here", async () => {
     const alone = await computer(null, { installId: "install-a" });
     await sendFailureNotices(sender(alone.store, "install-a"), WORKSPACE, report(1));
@@ -1104,6 +1162,15 @@ describe("automation notices reach the people involved", () => {
       { notice: refOf(crafted), account: ana.signedIn!.key, startOver: false },
     )).resolves.toEqual({ status: "refused", reason: RETRY_ELSEWHERE });
     expect(retry).not.toHaveBeenCalled();
+    // Nor does it stop Ana's own Try again of a run her computer holds, or names another computer for it.
+    const own = vi.fn(async () => ({ status: "queued" as const, press: false }));
+    for (const holds of [true, false]) {
+      await expect(retryAutomationRun(
+        { notices: ana.store, installId: "install-c", holds: async () => holds, retry: own },
+        { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false },
+      )).resolves.toEqual({ status: "queued", press: false });
+    }
+    expect(own).toHaveBeenCalledTimes(2);
   });
 
   describe("History of an automation", () => {

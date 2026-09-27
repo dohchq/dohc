@@ -87,6 +87,16 @@ export interface NoticeStore {
   withdraw(noticeId: string): Promise<void>;
   // Sends waiting posts and marks, then pulls changes. Never rejects.
   sync(): Promise<void>;
+  // The failure notice the signed-in person sent themselves about one run,
+  // dismissed or not, with the computer that posted it, or null. Only read,
+  // never shown.
+  sentFailure(run: { workspaceId: string; automationId: string; claimId: string }): Promise<SentFailure | null>;
+}
+
+export interface SentFailure {
+  title: string;
+  body: string;
+  originInstallId: string;
 }
 
 const kindValues = Object.keys(NOTICE_KINDS) as [NoticeKind, ...NoticeKind[]];
@@ -906,7 +916,26 @@ export function createNoticeStore(deps: {
     void sync();
   }
 
-  return { postNotice, list, mark, sync, dismissFirst, withdraw };
+  async function sentFailure(run: { workspaceId: string; automationId: string; claimId: string }): Promise<SentFailure | null> {
+    const session = await deps.session();
+    if (!session) return null;
+    const names = (kind: string, workspaceId: string | null | undefined, target: NoticeTarget | null) =>
+      kind === "automation-failed" && workspaceId === run.workspaceId &&
+      target?.automation === run.automationId && target.run === run.claimId;
+    return await locked(async () => {
+      const file = await loadAccount(session.account);
+      // An account that signed out meanwhile names no computer for this one.
+      if (!session.isCurrent()) return null;
+      const row = file.rows.find((candidate) =>
+        candidate.senderUserId === session.account.userId && names(candidate.kind, candidate.workspaceId, candidate.target));
+      if (row) return { title: row.title, body: row.body, originInstallId: row.originInstallId };
+      // Your own post, not pulled back yet.
+      const post = file.posts.find(({ request }) => names(request.kind, request.workspaceId, request.target));
+      return post ? { title: post.request.title, body: post.request.body, originInstallId: post.request.originInstallId } : null;
+    });
+  }
+
+  return { postNotice, list, mark, sync, dismissFirst, withdraw, sentFailure };
 }
 
 // Folds one page into the stored rows. A page that starts the list over

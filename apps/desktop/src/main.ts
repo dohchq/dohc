@@ -228,6 +228,7 @@ import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
 import {
+  retryAutomationRun,
   retryFromFailureNotice,
   sendFailureNotices,
   switchedOffNotice,
@@ -3835,6 +3836,26 @@ const { startDesktopCliServer } = createDesktopCliServer({
   ownerAppResponses:input=>{
     if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
     return ownerAppResponsesForCli(input);
+  },
+  // The executor calls the Automations panel's IPC makes. A CLI request
+  // opened the workspace, and each call waits for its automations to load.
+  automations: (workspace) => {
+    const opened = async () => {
+      const automations = collectionAutomationsOf(workspace.workspaceId);
+      if (!automations) throw new Error("This workspace was closed.");
+      await automations.open();
+      return automations;
+    };
+    return {
+      runs: async (automationId) => (await opened()).runs(automationId),
+      run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
+      retry: (input) => retryAutomationRun({
+        notices: noticeStore(),
+        installId: localReactorFallbackId(),
+        holds: async (run) => (await (await opened()).run(run.automationId, run.claimId)) !== null,
+        retry: async (run) => (await opened()).retry(run),
+      }, { workspaceId: workspace.workspaceId, ...input }),
+    };
   },
   findWorkspace,
   listWorkspaces,
