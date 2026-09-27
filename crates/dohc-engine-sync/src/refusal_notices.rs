@@ -116,7 +116,13 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
                         .optional()
                         .map_err(SyncError::corrupt)?;
                 }
-                serde_json::json!([workspace_id, "lineage", doc.object_id, doc.lineage_claim_id])
+                serde_json::json!([
+                    workspace_id,
+                    "lineage",
+                    doc.version_id,
+                    doc.object_id,
+                    doc.lineage_claim_id
+                ])
             } else {
                 serde_json::json!([workspace_id, "coordinate", origin_id, origin_seq])
             };
@@ -188,19 +194,27 @@ pub fn dismiss_refusal_notice(
 pub(crate) fn clear_lineage_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
+    version_id: &str,
     object_id: &str,
     lineage_claim_id: &str,
 ) -> Result<(), SyncError> {
     tx.execute(
-        "DELETE FROM replication_pending_refusals AS p WHERE p.workspace_id=?1 AND COALESCE(p.report_id,'') != ?4 AND EXISTS( \
+        "DELETE FROM replication_pending_refusals AS p WHERE p.workspace_id=?1 AND COALESCE(p.report_id,'') != ?4 \
+         AND (p.reason_message GLOB 'plaintext projection exceeds *' \
+           OR p.reason_message GLOB 'richdoc projection exceeds *' \
+           OR p.reason_message GLOB 'scene projection exceeds *' \
+           OR p.reason_message IN ('ydoc.update content kind does not match the established lineage', \
+             'ydoc.update content kind must be `plaintext`, `richdoc`, or `scene`')) AND EXISTS( \
          SELECT 1 FROM replication_log r WHERE r.workspace_id=p.workspace_id \
          AND r.origin_id=p.origin_id AND r.origin_seq=p.origin_seq \
          AND COALESCE(json_extract(r.payload_json,'$.objectId'), \
            json_extract(r.payload_json,'$.transition.result.objectId'), \
            json_extract(r.payload_json,'$.transition.current.objectId'))=?2 \
          AND COALESCE(json_extract(r.payload_json,'$.lineageClaimId'), \
-           json_extract(r.payload_json,'$.lineageTransition.successor.lineageClaimId'))=?3)",
-        params![workspace_id, object_id, lineage_claim_id, crate::apply::DIRECT_RPC_REFUSAL_REPORT_ID],
+           json_extract(r.payload_json,'$.lineageTransition.successor.lineageClaimId'))=?3 \
+         AND COALESCE(json_extract(r.payload_json,'$.versionId'), \
+           json_extract(r.payload_json,'$.targetVersionId'))=?5)",
+        params![workspace_id, object_id, lineage_claim_id, crate::apply::DIRECT_RPC_REFUSAL_REPORT_ID, version_id],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -251,6 +265,17 @@ mod tests {
     use serde_json::json;
 
     fn refuse(store: &mut EngineStore, workspace: &str, object: &str, lineage: &str, seq: i64) {
+        refuse_in_version(store, workspace, "main", object, lineage, seq);
+    }
+
+    fn refuse_in_version(
+        store: &mut EngineStore,
+        workspace: &str,
+        version: &str,
+        object: &str,
+        lineage: &str,
+        seq: i64,
+    ) {
         let envelope = ReplicationEnvelope {
             workspace_id: workspace.into(),
             origin_id: "peer".into(),
@@ -258,15 +283,81 @@ mod tests {
             relay_seq: Some(seq),
             op_kind: "ydoc.update".into(),
             recorded_at_ms: seq,
-            payload: json!({"versionId":"main","objectId":object,"lineageClaimId":lineage,"path":"same.md","conflictId":"review"}),
+            payload: json!({"versionId":version,"objectId":object,"lineageClaimId":lineage,"path":"same.md","conflictId":"review"}),
         };
         let outcome = apply_envelope_with(store, &envelope, &NoFaults, |_, _| {
             Err::<(), _>(SyncError::InvalidInput {
-                reason: "projection exceeds limit",
+                reason: "plaintext projection exceeds MAX_TEXT_BYTES: limit 10 bytes, observed at least 11 bytes",
             })
         })
         .unwrap();
         assert!(matches!(outcome.primary, ApplyDisposition::Refused(_)));
+    }
+
+    #[test]
+    fn lineage_cleanup_and_dismissal_are_scoped_to_version() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        refuse(&mut store, "ws", "object", "lineage", 0);
+        refuse_in_version(&mut store, "ws", "branch", "object", "lineage", 1);
+        let notices = list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(notices.len(), 2);
+        let main_id = notices
+            .iter()
+            .find(|notice| notice.document.as_ref().unwrap().version_id.as_deref() == Some("main"))
+            .unwrap()
+            .notice_id
+            .clone();
+        dismiss_refusal_notice(&mut store, "ws", &main_id, &NoFaults).unwrap();
+        let remaining = list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0]
+                .document
+                .as_ref()
+                .unwrap()
+                .version_id
+                .as_deref(),
+            Some("branch")
+        );
+
+        refuse(&mut store, "ws", "object", "lineage", 2);
+        store
+            .write_with(&NoFaults, |tx| {
+                clear_lineage_in_tx(tx, "ws", "main", "object", "lineage")
+            })
+            .unwrap();
+        let remaining = list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0]
+                .document
+                .as_ref()
+                .unwrap()
+                .version_id
+                .as_deref(),
+            Some("branch")
+        );
+    }
+
+    #[test]
+    fn successful_projection_keeps_replay_validation_refusals() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        refuse(&mut store, "ws", "object", "lineage", 0);
+        refuse(&mut store, "ws", "object", "lineage", 1);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_pending_refusals SET reason_message='inactive Y.Doc update fails replay validation' WHERE origin_seq=0",
+                [],
+            ).unwrap();
+            clear_lineage_in_tx(tx, "ws", "main", "object", "lineage")
+        }).unwrap();
+        let remaining = list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].origin_seq, 0);
     }
 
     #[test]
@@ -301,8 +392,8 @@ mod tests {
         assert_eq!(list_refusal_notices(&store, "ws").unwrap()[0].notice_id, id);
         store
             .write_with(&NoFaults, |tx| {
-                clear_lineage_in_tx(tx, "ws", "object-b", "inactive")?;
-                clear_lineage_in_tx(tx, "ws", "object-a", "active")?;
+                clear_lineage_in_tx(tx, "ws", "main", "object-b", "inactive")?;
+                clear_lineage_in_tx(tx, "ws", "main", "object-a", "active")?;
                 clear_conflict_in_tx(tx, "ws", "unrelated")
             })
             .unwrap();
@@ -323,7 +414,7 @@ mod tests {
         refuse(&mut store, "ws", "object-a", "inactive", 3);
         store
             .write_with(&NoFaults, |tx| {
-                clear_lineage_in_tx(tx, "ws", "object-a", "inactive")
+                clear_lineage_in_tx(tx, "ws", "main", "object-a", "inactive")
             })
             .unwrap();
         assert!(list_refusal_notices(&store, "ws").unwrap().is_empty());

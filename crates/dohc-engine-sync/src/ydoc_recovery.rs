@@ -1101,9 +1101,17 @@ pub(crate) fn redelivered_change(
 
 fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncError {
     match error {
+        DomainError::PayloadTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        } => SyncError::ProjectionTooLarge {
+            constraint,
+            limit_bytes,
+            actual_bytes: observed_bytes,
+        },
         DomainError::InvalidText { .. }
         | DomainError::InvalidPath { .. }
-        | DomainError::PayloadTooLarge { .. }
         | DomainError::InvalidInput { .. } => SyncError::InvalidInput { reason },
         hard => map_domain_hard_error(hard),
     }

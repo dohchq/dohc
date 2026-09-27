@@ -233,7 +233,8 @@ export function createNoticeStore(deps: {
   session(): Promise<NoticeSession | null>;
   installId(): string;
   onChanged(): void;
-  refusalNotices?(): Promise<{ workspaceId: string; notices: RefusalNotice[] }[]>;
+  // Null keeps cached rows for a workspace whose engine could not be read.
+  refusalNotices?(): Promise<{ workspaceId: string; notices: RefusalNotice[] | null }[]>;
   dismissRefusal?(workspaceId: string, noticeId: string): Promise<void>;
   nowMs?: () => number;
   outboxPostLimit?: number;
@@ -614,8 +615,10 @@ export function createNoticeStore(deps: {
       const workspaces = await readRefusals();
       const prior = await loadLocal();
       const previousRows = new Map(prior.rows.map(row => [row.noticeId, row]));
-      const rows = prior.rows.filter(row => row.kind !== "sync-refusal");
+      const failedWorkspaces = new Set(workspaces.filter(row => row.notices === null).map(row => row.workspaceId));
+      const rows = prior.rows.filter(row => row.kind !== "sync-refusal" || (row.workspaceId !== null && failedWorkspaces.has(row.workspaceId)));
       for (const { workspaceId, notices } of workspaces) {
+        if (notices === null) continue;
         for (const refusal of notices) {
           const previous = previousRows.get(refusal.noticeId);
           const document = refusal.document;
@@ -750,7 +753,9 @@ export function createNoticeStore(deps: {
   }
 
   async function list(): Promise<{ account: string | null; notices: NoticeRow[] }> {
-    await refreshRefusals();
+    await refreshRefusals().catch(error => {
+      console.warn("[notices] could not refresh sync refusals", error);
+    });
     const account = (await deps.session())?.account ?? null;
     return await locked(async () => {
       const local = await loadLocal();

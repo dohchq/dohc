@@ -1936,8 +1936,8 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
         "only the two valid parked updates may enter the lineage"
     );
     assert_eq!(
-        refusal_rows, 0,
-        "the later successful update clears the Notice for this lineage"
+        refusal_rows, 1,
+        "the rejected update never entered the lineage, so its refusal must survive"
     );
     assert_eq!(
         drain_deferred_ydoc_for_key(

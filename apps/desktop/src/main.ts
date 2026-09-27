@@ -901,13 +901,21 @@ function noticeStore(): NoticeStore {
     onChanged: notifyNoticesChanged,
     refusalNotices: async () => {
       const sessions = desktopEngine.sessions;
-      if (!sessions) return [];
-      return Promise.all(listWorkspaces().map(workspace => sessions.run(workspace, async ({ client, workspace: handle }) => {
+      const workspaces = listWorkspaces();
+      if (!sessions) return workspaces.map(({ workspaceId }) => ({ workspaceId, notices: null }));
+      const results = await Promise.allSettled(workspaces.map(async workspace => sessions.run(workspace, async ({ client, workspace: handle }) => {
         const result = await new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {
           workspaceId: workspace.workspaceId,
         }, { workspace: handle });
-        return { workspaceId: workspace.workspaceId, notices: RefusalNotices.parse(result).notices };
+        return RefusalNotices.parse(result).notices;
       })));
+      return results.map((result, index) => {
+        const { workspaceId } = workspaces[index]!;
+        if (result.status === "rejected") {
+          console.warn("[notices] could not read workspace sync refusals", workspaceId, result.reason);
+        }
+        return { workspaceId, notices: result.status === "fulfilled" ? result.value : null };
+      });
     },
     dismissRefusal: async (workspaceId, noticeId) => {
       const workspace = findWorkspace(workspaceId);

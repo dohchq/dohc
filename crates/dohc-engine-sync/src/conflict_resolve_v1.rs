@@ -5814,7 +5814,14 @@ mod tests {
                 crate::read_replication_acked_seq(&store, "ws", "late-archive").unwrap(),
                 0
             );
-            assert_eq!(crate::list_refusal_notices(&store, "ws").unwrap().len(), 1);
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert_eq!(notices.len(), 1);
+            assert!(
+                notices[0]
+                    .reason
+                    .starts_with("plaintext projection exceeds MAX_TEXT_BYTES:"),
+                "{notices:?}"
+            );
             let active = dohc_engine_collab::load_persisted(&store, &key)
                 .unwrap()
                 .unwrap();

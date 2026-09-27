@@ -985,3 +985,52 @@ it("recovers engine Notices even if the desktop file was lost", async () => {
   const fresh = await computer(null, {refusalNotices});
   expect((await fresh.store.list()).notices).toHaveLength(1);
 });
+
+it("keeps unavailable workspace refusals while refreshing other workspaces", async () => {
+  const refusal = (noticeId: string) => ({ noticeId, originId: "peer", originSeq: 1,
+    reason: "Review this file", document: null });
+  let pending: Awaited<ReturnType<NonNullable<Parameters<typeof createNoticeStore>[0]["refusalNotices"]>>> = [
+    { workspaceId: WORKSPACE, notices: [refusal("sync-refusal-a")] },
+    { workspaceId: "unavailable", notices: [refusal("sync-refusal-b")] },
+  ];
+  const refusalNotices = async () => pending;
+  const first = await computer(null, { refusalNotices });
+  await first.store.postNotice(notice());
+  const cached = (await first.store.list()).notices.find(row => row.noticeId === "sync-refusal-b")!;
+  await first.store.mark([cached], "read", null);
+  pending = [
+    { workspaceId: WORKSPACE, notices: [refusal("sync-refusal-c")] },
+    { workspaceId: "unavailable", notices: null },
+  ];
+  const restarted = await computer(null, { directory: first.directory, refusalNotices });
+  const rows = (await restarted.store.list()).notices;
+  expect(rows.map(row => row.noticeId).sort()).toEqual(["agent-run:1", "sync-refusal-b", "sync-refusal-c"]);
+  expect(rows.find(row => row.noticeId === "sync-refusal-b")!.readAtMs).not.toBeNull();
+  pending = pending.map(row => ({ ...row, notices: [] }));
+  expect((await restarted.store.list()).notices.map(row => row.noticeId)).toEqual(["agent-run:1"]);
+});
+
+it("lists cached, local, and account Notices when the refusal reader fails", async () => {
+  const server = await relay();
+  let failRead = false;
+  const first = await computer(account(server, "owner"), {
+    refusalNotices: async () => {
+      if (failRead) throw new Error("engine unavailable");
+      return [{ workspaceId: WORKSPACE, notices: [{ noticeId: "sync-refusal-cached", originId: "peer",
+        originSeq: 1, reason: "Review this file", document: null }] }];
+    },
+  });
+  await first.store.postNotice(notice());
+  await first.store.sync();
+  await first.store.list();
+  failRead = true;
+  first.reach.clear();
+  await first.store.postNotice(notice({ noticeId: "local-notice" }));
+  const rows = (await first.store.list()).notices;
+  expect(rows).toHaveLength(3);
+  expect(rows).toEqual(expect.arrayContaining([
+    expect.objectContaining({ noticeId: "agent-run:1", store: "account" }),
+    expect.objectContaining({ noticeId: "local-notice", store: "local" }),
+    expect.objectContaining({ noticeId: "sync-refusal-cached", store: "local" }),
+  ]));
+});

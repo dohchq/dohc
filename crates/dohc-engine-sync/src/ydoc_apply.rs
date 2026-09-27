@@ -2807,6 +2807,7 @@ fn apply_inactive_batch_in_tx(
                 crate::refusal_notices::clear_lineage_in_tx(
                     tx,
                     &key.workspace_id,
+                    &key.version_id,
                     &key.object_id,
                     &payload.lineage_claim_id,
                 )?;
@@ -3239,6 +3240,7 @@ pub fn project_and_write_in_tx(
         crate::refusal_notices::clear_lineage_in_tx(
             tx,
             &key.workspace_id,
+            &key.version_id,
             &key.object_id,
             &lineage,
         )?;
