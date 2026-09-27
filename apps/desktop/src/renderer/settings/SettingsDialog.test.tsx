@@ -16,6 +16,7 @@ import { pushOverlay, removeOverlay } from "../overlayStack";
 import { Overlay } from "../Overlay";
 import type { ScheduleHostResult } from "../../ipc/bridgeContract";
 import { SettingsDialog } from "./SettingsDialog";
+import { applyLookSettings } from "../theme";
 import { deferred } from "../../testing/deferred";
 
 const config = {
@@ -264,6 +265,51 @@ describe("SettingsDialog", () => {
     expect(bridge.setTitlebarTheme).toHaveBeenCalledWith({ theme: "dark" });
   });
 
+  it("saves your colors, the accent, and the editor type, and opens the settings file", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+    const saved = () => bridge.setUserSettings.mock.lastCall?.[0].settings;
+
+    const yours = await screen.findByTestId("settings-row-your-color");
+    await user.click(within(yours).getByRole("radio", { name: "Teal" }));
+    expect(saved()?.appearance.yourColor).toBe("teal");
+    expect(within(yours).getByRole("radio", { name: "Teal" }).getAttribute("aria-checked")).toBe("true");
+
+    const agent = screen.getByTestId("settings-row-your-agent-color");
+    await user.click(within(agent).getByRole("radio", { name: "Plum" }));
+    expect(saved()?.appearance.yourAgentColor).toBe("plum");
+
+    // The picker saves once, when it closes, not on each step of a drag.
+    const picker = within(screen.getByTestId("settings-row-accent")).getByLabelText("Accent color");
+    const calls = bridge.setUserSettings.mock.calls.length;
+    fireEvent.input(picker, { target: { value: "#224488" } });
+    expect(bridge.setUserSettings.mock.calls.length).toBe(calls);
+    fireEvent.change(picker, { target: { value: "#224488" } });
+    await waitFor(() => expect(bridge.setUserSettings.mock.calls.length).toBe(calls + 1));
+    expect(saved()?.appearance.accentColor).toBe("#224488");
+    expect(document.documentElement.style.getPropertyValue("--dohc-accent")).not.toBe("");
+    await user.click(within(screen.getByTestId("settings-row-accent")).getByRole("button", { name: "Reset" }));
+    expect(saved()?.appearance.accentColor).toBeNull();
+    expect(document.documentElement.style.getPropertyValue("--dohc-accent")).toBe("");
+
+    await user.click(within(screen.getByTestId("settings-row-editor-font")).getByRole("radio", { name: "Serif" }));
+    expect(saved()?.editor.fontFamily).toBe("serif");
+    await user.click(screen.getByRole("button", { name: "Larger editor text" }));
+    expect(saved()?.editor.fontSize).toBe(DEFAULT_USER_SETTINGS.editor.fontSize + 1);
+    expect(document.documentElement.style.getPropertyValue("--dohc-editor-font-size"))
+      .toBe(`${DEFAULT_USER_SETTINGS.editor.fontSize + 1}px`);
+
+    await user.click(screen.getByRole("button", { name: "Open settings file" }));
+    expect(bridge.openUserSettingsFile).toHaveBeenCalledOnce();
+  });
+
   it("shows the window zoom as a percentage and steps it through settings", async () => {
     const user = userEvent.setup();
     render(
@@ -317,9 +363,11 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(row.textContent).toContain("144%"));
   });
 
-  it("a zoom broadcast during the initial load is not painted over by it", async () => {
-    // The initial Promise.all retains a user-settings snapshot; a zoom pushed
-    // while it is in flight is newer and must survive the load resolving.
+  it("a broadcast during the initial load is not painted over by it", async () => {
+    // The initial Promise.all retains a user-settings snapshot; a change pushed
+    // while it is in flight is newer and must survive the load resolving,
+    // in the controls and in the window's look.
+    const onWorkspaceSettingsRead = vi.fn();
     let pushUserSettings: ((result: DesktopUserSettingsResult) => void) | undefined;
     bridge.onUserSettingsChanged.mockImplementationOnce((listener) => {
       pushUserSettings = listener;
@@ -333,6 +381,7 @@ describe("SettingsDialog", () => {
         workspacePath="/x"
         initialSection="appearance"
         onClose={() => {}}
+        onWorkspaceSettingsRead={onWorkspaceSettingsRead}
       />,
     );
 
@@ -341,23 +390,24 @@ describe("SettingsDialog", () => {
         throw new Error("User settings subscription was not registered.");
       }
     });
-    pushUserSettings?.({
-      settings: {
-        ...DEFAULT_USER_SETTINGS,
-        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 },
-      },
-      source: "stored",
-    });
+    const pushed = {
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2, accentColor: "#224488" },
+    };
+    // DesktopRoot applies the pushed look to the window.
+    applyLookSettings(pushed);
+    const accent = document.documentElement.style.getPropertyValue("--dohc-accent");
+    pushUserSettings?.({ settings: pushed, source: "stored" });
     load.resolve({ settings: DEFAULT_USER_SETTINGS, source: "default" });
 
     const row = await screen.findByTestId("settings-row-zoom");
     await waitFor(() => expect(row.textContent).toContain("144%"));
-    // The load's callback proves it ran to completion through its
-    // applyAppearanceSettings side effect — the titlebar mirror fires
-    // unconditionally right after the guarded repaint line. Waiting on it
-    // (not a timer) guarantees the stale repaint had its chance.
-    await waitFor(() => expect(bridge.setTitlebarTheme).toHaveBeenCalled());
+    // The load's callback reports the workspace settings after its user
+    // settings, so the stale read has had its chance once this fires.
+    await waitFor(() => expect(onWorkspaceSettingsRead).toHaveBeenCalled());
     expect(row.textContent).toContain("144%");
+    expect(document.documentElement.style.getPropertyValue("--dohc-accent")).toBe(accent);
+    applyLookSettings(DEFAULT_USER_SETTINGS);
   });
 
   it("an in-flight save's response cannot overwrite a newer zoom broadcast", async () => {
@@ -490,6 +540,8 @@ describe("SettingsDialog", () => {
   it("rolls back optimistic appearance changes when save fails", async () => {
     const user = userEvent.setup();
     bridge.setUserSettings.mockRejectedValueOnce(new Error("Disk full"));
+    // DesktopRoot has already applied the settings the dialog opens with.
+    applyLookSettings(DEFAULT_USER_SETTINGS);
     render(
       <SettingsDialog
         workspaceId="ws-1"

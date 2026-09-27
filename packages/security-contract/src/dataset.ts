@@ -69,7 +69,16 @@ export interface DatasetOperation {
   fieldIds: string[];
   /** The edit accepts its receipt's priorValues under the same record-version guard. */
   reversible?: true;
+  /**
+   * An action's reverse: the name of another action, or this one, in the same
+   * dataset. The action returns `{ undo }`, and Undo runs the reverse action
+   * with that value as its input. The host refuses to commit a result
+   * without a valid `undo` of at most DATASET_UNDO_BYTES.
+   */
+  reversedBy?: string;
 }
+/** The largest `undo` value a reversible action may return. */
+export const DATASET_UNDO_BYTES = 16 * 1024;
 /** Source-visible draft metadata. Parsing or sharing it grants no authority. */
 export interface DatasetDefinition {
   formatVersion: 1;
@@ -250,7 +259,7 @@ function table(value: unknown): DatasetTable {
   return result;
 }
 function operation(value: unknown): DatasetOperation {
-  const row = record(value, ["operationId", "name", "label", "tableId", "kind", "access", "readOnly", "fieldIds"], ["reversible"]);
+  const row = record(value, ["operationId", "name", "label", "tableId", "kind", "access", "readOnly", "fieldIds"], ["reversible", "reversedBy"]);
   const name = text(row.name, 64);
   if (!operationNames.test(name) || name.split(".").some(part => forbidden.has(part)) || !operationKinds.has(row.kind as DatasetOperationKind) || !["link", "helper", "owner"].includes(row.access as string)) fail();
   const result: DatasetOperation = { operationId: uuid(row.operationId), name, label: text(row.label), tableId: uuid(row.tableId),
@@ -261,6 +270,11 @@ function operation(value: unknown): DatasetOperation {
   if (Object.hasOwn(row, "reversible")) {
     if (row.reversible !== true || result.kind !== "edit" || result.readOnly) fail();
     result.reversible = true;
+  }
+  if (Object.hasOwn(row, "reversedBy")) {
+    const reverse = text(row.reversedBy, 64);
+    if (result.kind !== "action" || result.readOnly || !operationNames.test(reverse) || reverse.split(".").some(part => forbidden.has(part))) fail();
+    result.reversedBy = reverse;
   }
   unique(result.fieldIds);
   return result;
@@ -282,6 +296,11 @@ function definition(value: unknown): DatasetDefinition {
     }
   }
   for (const operation of result.operations) {
+    // A reverse is an action that changes records, in this dataset.
+    if (operation.reversedBy !== undefined) {
+      const reverse = result.operations.find(candidate => candidate.name === operation.reversedBy);
+      if (!reverse || reverse.kind !== "action" || reverse.readOnly) fail();
+    }
     const table = tables.get(operation.tableId);
     // An operation reads and writes columns. A button has none.
     if (!table || operation.fieldIds.some(id => !datasetColumnFields(table).some(field => field.fieldId === id))) fail();

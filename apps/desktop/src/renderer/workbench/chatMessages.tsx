@@ -1,5 +1,5 @@
 import { EMOJI_DATA } from "../editor/emojiData";
-import { AgentBadge } from "./AgentBadge";
+import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
@@ -682,6 +682,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   // A "New" hairline sits before this message, the first the reader has not seen.
   firstUnreadMessageId?: string | null;
 }) {
+  const isOwn = useIsOwnAuthor();
   const candidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
   const reactionsByMessage = useMemo(() => {
     const grouped = new Map<string, ChatReactionRecord[]>();
@@ -839,6 +840,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
               <ChatAvatar
                 name={message.authorDisplayName}
                 kind={message.authorKind}
+                own={isOwn(message.authorKind, message, props.reactionControls?.viewerAuthorId)}
                 size="comment"
               />
             )}
@@ -899,7 +901,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         </div>
       </li>
     );
-  }, [props, candidates, reactionsByMessage]);
+  }, [props, candidates, reactionsByMessage, isOwn]);
   if (props.loading || props.messages.length === 0) {
     return <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
       <p className={`m-0 text-center text-[11px] text-subtle ${props.loading ? "" : "pt-4"}`}>

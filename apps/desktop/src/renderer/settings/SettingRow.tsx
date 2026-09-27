@@ -1,4 +1,6 @@
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
+import { Check } from "lucide-react";
+import { IDENTITY_HUES, type IdentityHue } from "../tokens";
 
 export function SettingRow(props: {
   title: string;
@@ -166,5 +168,104 @@ export function SwitchControl(props: {
         }`}
       />
     </button>
+  );
+}
+
+// Spelled out so Tailwind sees every class.
+const HUE_FILLS: Record<IdentityHue, string> = {
+  rust: "bg-hue-rust",
+  amber: "bg-hue-amber",
+  olive: "bg-hue-olive",
+  teal: "bg-hue-teal",
+  blue: "bg-hue-blue",
+  indigo: "bg-hue-indigo",
+  plum: "bg-hue-plum",
+  rose: "bg-hue-rose",
+};
+
+/**
+ * One swatch per identity hue. A person's swatches are round and an agent's
+ * are rounded squares, the shapes of their avatars. null checks none: dohc
+ * picks the color.
+ */
+export function HueControl(props: {
+  label: string;
+  value: IdentityHue | null;
+  shape: "person" | "agent";
+  onChange: (value: IdentityHue) => void;
+}) {
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const currentIndex = Math.max(0, props.value === null ? 0 : IDENTITY_HUES.indexOf(props.value));
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const step = event.key === "ArrowRight" || event.key === "ArrowDown"
+      ? 1
+      : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+    if (step === 0) return;
+    event.preventDefault();
+    const index = (currentIndex + step + IDENTITY_HUES.length) % IDENTITY_HUES.length;
+    props.onChange(IDENTITY_HUES[index]!);
+    optionRefs.current[index]?.focus();
+  };
+
+  return (
+    <div role="radiogroup" aria-label={props.label} onKeyDown={handleKeyDown} className="flex items-center gap-1.5">
+      {IDENTITY_HUES.map((hue, index) => (
+        <button
+          key={hue}
+          ref={(element) => {
+            optionRefs.current[index] = element;
+          }}
+          type="button"
+          role="radio"
+          aria-label={hue[0]!.toUpperCase() + hue.slice(1)}
+          title={hue[0]!.toUpperCase() + hue.slice(1)}
+          aria-checked={props.value === hue}
+          tabIndex={index === currentIndex ? 0 : -1}
+          onClick={() => props.onChange(hue)}
+          className={`grid size-5 place-items-center text-bg transition-opacity hover:opacity-80 ${
+            props.shape === "person" ? "rounded-full" : "rounded-md"
+          } ${HUE_FILLS[hue]}`}
+        >
+          {props.value === hue ? <Check size={12} strokeWidth={2.5} aria-hidden /> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The system color picker. It saves when the picker closes, on the input's
+ * native change event: React's onChange fires on every step of a drag.
+ */
+export function ColorControl(props: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const onChange = useRef(props.onChange);
+  onChange.current = props.onChange;
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    const changed = () => onChange.current(input.value);
+    input.addEventListener("change", changed);
+    return () => input.removeEventListener("change", changed);
+  }, []);
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.value = props.value;
+  }, [props.value]);
+  return (
+    <label className="flex items-center gap-2">
+      <input
+        ref={inputRef}
+        type="color"
+        aria-label={props.label}
+        defaultValue={props.value}
+        className="h-6 w-8 cursor-pointer rounded-md border border-line bg-bg p-0.5"
+      />
+      <span className="font-mono text-[11px] text-muted">{props.value}</span>
+    </label>
   );
 }

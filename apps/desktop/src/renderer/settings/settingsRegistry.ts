@@ -33,7 +33,7 @@ export const SETTINGS_SECTIONS = [
     id: "appearance",
     label: "Appearance",
     scope: "User",
-    keywords: ["theme", "light", "dark", "system", "zoom", "sidebar", "views", "order", "hide"],
+    keywords: ["theme", "light", "dark", "system", "zoom", "accent", "color", "font", "editor", "text", "size", "sidebar", "views", "order", "hide"],
     Icon: MonitorCog,
   },
   {
