@@ -9,6 +9,7 @@ import {
   FindAutomationCollectionPayload,
   CheckCollectionAutomationPayload,
   ConfirmCollectionAutomationStepPayload,
+  ListAutomationGroupsPayload,
   ListAutomationTargetsPayload,
   ListAutomationHoldsPayload,
   ResetAutomationHoldsPayload,
@@ -25,6 +26,7 @@ import {
   type FindDatasetCollectionResult,
   type FindAutomationCollectionResult,
   type ConfirmCollectionAutomationStepResult,
+  type ListAutomationGroupsResult,
   type ListAutomationTargetsResult,
   type DeleteWorkspacePathPayload,
   type ListAutomationHoldsResult,
@@ -134,6 +136,16 @@ export function registerCollectionAutomationsIpc<
       await operation.state.collectionAutomations.undo(input, async (relativePath) => {
         await dependencies.deletePath(event, { workspaceId: input.workspaceId, relativePath });
       }));
+  });
+
+  registerHandler(CHANNELS.listAutomationGroups, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListAutomationGroupsPayload.parse(payload);
+    assertCollectionPath(input.collectionPath);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationGroupsResult> =>
+      dependencies.sharedViewOf(input.workspaceId)
+        ? { status: "unavailable" }
+        : { groups: await operation.state.collectionAutomations.groupsFor(input.collectionPath) });
   });
 
   registerHandler(CHANNELS.listAutomationTargets, async (event, payload) => {

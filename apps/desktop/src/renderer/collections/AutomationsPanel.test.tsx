@@ -7,6 +7,7 @@ import type {
   GetCollectionAutomationRunResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
+  ListAutomationGroupsResult,
   ListAutomationTargetsResult,
   RetryCollectionAutomationResult,
   ScheduleHostComputer,
@@ -148,6 +149,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     }),
     onCloudSessionChanged: vi.fn(() => () => undefined),
     createWorkspaceFile: vi.fn(async ({ relativePath }: { relativePath: string }) => ({ relativePath })),
+    listAutomationGroups: vi.fn(async (): Promise<ListAutomationGroupsResult> => ({ groups: [] })),
   };
   vi.stubGlobal("dohcDesktop", bridge);
   // Another writer changes the file; the panel reads it again, as it does
@@ -1536,6 +1538,137 @@ describe("the builder's Find and results", () => {
   }, 30_000);
 });
 
+describe("the builder's Groups", () => {
+  const openBuilder = async (user: ReturnType<typeof userEvent.setup>, name = "Stamp the finish date") =>
+    await user.click(await screen.findByRole("button", { name }));
+  const GROUPS = [
+    { name: "Board", slug: "board", ref: "Board", readStopped: "ana@dohc.test cannot read Board.", postStopped: "ana@dohc.test cannot post in Board." },
+    { name: "Trip", slug: "trip", ref: "Trip", readStopped: null, postStopped: null },
+  ];
+  const options = (name: string) => [...(screen.getByRole("combobox", { name }) as HTMLSelectElement).options]
+    .map((option) => [option.textContent, option.disabled]);
+
+  it("starts an automation from a Group's messages and posts in a Group, offering only Groups it can use", async () => {
+    const { bridge, written } = makeBridge(read([]));
+    bridge.listAutomationGroups.mockResolvedValue({ groups: GROUPS });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    // Groups are read only once a Group choice is on screen.
+    expect(bridge.listAutomationGroups).not.toHaveBeenCalled();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Trigger" }), "group-message");
+    await waitFor(() => expect(bridge.listAutomationGroups).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "Tasks" }));
+    await waitFor(() => expect(options("Group")).toEqual([["Choose a Group", true], ["Board (ana@dohc.test cannot read Board.)", true], ["Trip", false]]));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Group" }), "Trip");
+    await user.type(screen.getByRole("textbox", { name: "Starts with" }), " /task");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Remove the space at the start.")).toBeTruthy();
+    await user.clear(screen.getByRole("textbox", { name: "Starts with" }));
+    await user.type(screen.getByRole("textbox", { name: "Starts with" }), "/task");
+
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    await user.click(screen.getByRole("button", { name: "Post in a Group" }));
+    // The Groups are on hand now, so a new post starts in the first Group it can post in.
+    expect((screen.getByRole("combobox", { name: "Step 1, Group" }) as HTMLSelectElement).value).toBe("Trip");
+    await user.type(screen.getByRole("textbox", { name: "Step 1, message" }), "New task: ");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, insert value" }), "message.body");
+    expect((screen.getByRole("textbox", { name: "Step 1, message" }) as HTMLTextAreaElement).value).toBe("New task: {message.body}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]).toMatchObject({
+      when: { kind: "group-message", group: "Trip", startsWith: "/task" },
+      do: [{ kind: "post", text: "New task: {message.body}", group: "Trip" }],
+    });
+  }, 30_000);
+
+  it("chooses and writes Groups that share a name by slug, and says when a saved name matches two", async () => {
+    const { bridge } = makeBridge(read([summary({ ...stamp, do: [
+      { kind: "post", text: "Done", group: "Plans" },
+      { kind: "post", text: "Done", group: "plans-2" },
+    ] })]));
+    bridge.listAutomationGroups.mockResolvedValue({ groups: [
+      { name: "Plans", slug: "plans", ref: "plans", readStopped: null, postStopped: null },
+      { name: "Plans", slug: "plans-2", ref: "plans-2", readStopped: null, postStopped: null },
+    ] });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    expect(await within(screen.getByTestId("builder-step-0")).findByText("More than one Group is called Plans. Choose one.")).toBeTruthy();
+    expect(options("Step 2, Group")).toEqual([["Plans, plans", false], ["Plans, plans-2", false]]);
+    expect((screen.getByRole("combobox", { name: "Step 2, Group" }) as HTMLSelectElement).value).toBe("plans-2");
+    expect(within(screen.getByTestId("builder-step-1")).queryByText(/More than one Group/u)).toBeNull();
+  }, 30_000);
+
+  it("says Groups are unavailable in a shared view, and reports a failed read once", async () => {
+    const onError = vi.fn();
+    const { bridge } = makeBridge(read([summary({ ...stamp, do: [{ kind: "post", text: "Done", group: "" }, { kind: "post", text: "Done", group: "Trip" }] })]));
+    bridge.listAutomationGroups.mockResolvedValueOnce({ status: "unavailable" });
+    const user = userEvent.setup();
+    const { unmount } = render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await waitFor(() => expect(options("Step 1, Group")[0]).toEqual(["Groups are unavailable here", true]));
+    // A saved Group says so too.
+    expect(within(screen.getByTestId("builder-step-1")).getByText("Groups are unavailable in a shared view.")).toBeTruthy();
+    unmount();
+
+    bridge.listAutomationGroups.mockRejectedValue(new Error("offline"));
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await waitFor(() => expect(options("Step 1, Group")[0]).toEqual(["Groups could not be listed", true]));
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(bridge.listAutomationGroups.mock.calls.length).toBeGreaterThanOrEqual(3));
+    expect(onError.mock.calls.filter(([message]) => message === "dohc could not list the Groups an automation can use.")).toHaveLength(1);
+  }, 30_000);
+
+  it("reads nothing from a Try again once no Group is being chosen, and reports the next failure with its own", async () => {
+    const onError = vi.fn();
+    const { bridge } = makeBridge(read([summary({ ...stamp, do: [{ kind: "post", text: "Done", group: "Trip" }] })]));
+    bridge.listAutomationGroups.mockRejectedValueOnce(new Error("offline"));
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not list the Groups an automation can use.", expect.any(Error), expect.any(Function)));
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    const calls = bridge.listAutomationGroups.mock.calls.length;
+    act(() => (onError.mock.calls[0]![2] as () => void)());
+    expect(bridge.listAutomationGroups.mock.calls.length).toBe(calls);
+
+    // A new Post in a Group reads again, and a failure then is reported with a Try again that reads.
+    bridge.listAutomationGroups.mockRejectedValueOnce(new Error("offline"));
+    await user.click(screen.getByRole("button", { name: "Post in a Group" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    const again = bridge.listAutomationGroups.mock.calls.length;
+    act(() => (onError.mock.calls[1]![2] as () => void)());
+    expect(bridge.listAutomationGroups.mock.calls.length).toBe(again + 1);
+  }, 30_000);
+
+  it("keeps a saved Group it cannot use or find, says why, and shows a message's brace problem beside it", async () => {
+    const { bridge, written } = makeBridge(read([summary({ ...stamp, do: [
+      { kind: "post", text: "Done", group: "Board" },
+      { kind: "post", text: "Done", group: "Old" },
+      // A file may name a Group by its slug.
+      { kind: "post", text: "Done", group: "trip" },
+    ] })]));
+    bridge.listAutomationGroups.mockResolvedValue({ groups: GROUPS });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const board = screen.getByTestId("builder-step-0");
+    expect(await within(board).findByText("ana@dohc.test cannot post in Board.")).toBeTruthy();
+    expect((within(board).getByRole("combobox", { name: "Step 1, Group" }) as HTMLSelectElement).value).toBe("Board");
+    expect(within(screen.getByTestId("builder-step-1")).getByText("This computer has no Group named Old. Choose another.")).toBeTruthy();
+    expect(within(screen.getByTestId("builder-step-2")).queryByText(/no Group named/u)).toBeNull();
+
+    const message = screen.getByRole("textbox", { name: "Step 1, message" });
+    await user.clear(message);
+    await user.type(message, "Done {{record.Title");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await within(board).findByText(/^Check each \{expression\} in the message/u, undefined, SLOW)).toBeTruthy();
+    expect(message.getAttribute("aria-invalid")).toBe("true");
+    expect(written).toEqual([]);
+  }, 30_000);
+});
+
 describe("the builder's schedule", () => {
   const NOW = Date.UTC(2026, 8, 25, 10);
   // The builder shows a schedule's next run in the schedule's own time zone, and names it.
@@ -1915,6 +2048,55 @@ describe("the builder", () => {
       }],
     });
     expect(await screen.findByTestId("automation-when-status-becomes-done-set-finished-on-to-today")).toBeTruthy();
+  });
+
+  it("notifies you and wakes your agent in a workspace never shared, and never shows how steps name you", async () => {
+    const { written } = makeBridge({ status: "missing", you: "install-here" });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Changes to" }), "Done");
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    await user.click(screen.getByRole("button", { name: "Notify you" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Write a message.")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Step 1, message" }), "Task done");
+    await user.click(screen.getByRole("button", { name: "Wake your agent" }));
+    await user.type(screen.getByRole("textbox", { name: "Step 2, message" }), "Plan the next task");
+    expect(screen.getByTestId("builder-step-0").textContent).toContain("Notify you");
+    expect(screen.getByTestId("builder-step-1").textContent).toContain("Wake your agent");
+    expect(document.body.innerHTML).not.toContain("install-here");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations[0]!.do).toEqual([
+      { kind: "notify", text: "Task done", to: [{ kind: "literal", value: "install-here" }] },
+      { kind: "wake-agent", text: "Plan the next task", person: "install-here" },
+    ]);
+  });
+
+  it("keeps a message's lines, and says how to fix a brace it cannot read", async () => {
+    const told: Automation = { ...stamp, do: [{ kind: "notify", text: "Done\nNext: review", to: [{ kind: "literal", value: "install-here" }] }] };
+    const { written } = makeBridge({ status: "read", contentHash: HASH, automations: [summary(told)], addsStay: [], you: "install-here" });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const message = screen.getByRole("textbox", { name: "Step 1, message" }) as HTMLTextAreaElement;
+    expect(message.value).toBe("Done\nNext: review");
+    // userEvent reads "{{" as one "{".
+    await user.type(message, " {{");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Check each {expression} in the message: close its brace and fix its formula. To write a brace itself, type {{ or }}.", undefined, SLOW)).toBeTruthy();
+    expect(written).toEqual([]);
+  });
+
+  it("offers no step for you where steps cannot name you", async () => {
+    makeBridge({ status: "missing" });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    expect(screen.queryByRole("button", { name: "Notify you" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Wake your agent" })).toBeNull();
   });
 
   it("edits conditions as rows, keeps a number while it is typed, and keeps steps it cannot edit", async () => {

@@ -102,7 +102,7 @@ import {
 } from "./datasetAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, sameReachVerdict, type StoredReachVerdict } from "./reachVerdicts";
 import { createAutomationTargets } from "./automationTargets";
-import { chatNeedsOf, type ChatDirectory } from "./automationChat";
+import { chatNeedsOf, GROUP_ENDED, GROUP_READ_ONLY, type ChatDirectory } from "./automationChat";
 import type { GroupMessagesSkipped } from "./groupMessagesNotice";
 import {
   AUTOMATION_CHAIN_STOPPED,
@@ -336,6 +336,8 @@ export interface CollectionAutomationsOptions {
   onSchedulesChanged?(): void;
   /** Whether some computer can run the workspace's schedules and Group triggers. True unless set. */
   hostCanRun?(): Promise<boolean>;
+  /** The Groups in this computer's chat store, by name and slug; null when it cannot be read. None unless set. */
+  groupList?(): Promise<Array<{ name: string; slug: string }> | null>;
   /** The name a formula's `person` shows for the person who pressed a button. */
   personName(userId: string): string;
   /** Whether this computer's person may run a failed press again: the person who pressed it, or the workspace's owner. */
@@ -397,8 +399,11 @@ export type CollectionAutomationSummary =
     }
   | { valid: false; id: string | null; name: string | null; diagnostics: AutomationDiagnostic[] };
 
+// `you` is this computer's person as a step names them, in a workspace
+// proved never shared (automationReach.ts). The builder writes it for
+// "You", and never shows it.
 export type CollectionAutomationsFile =
-  | { status: "missing" }
+  | { status: "missing"; you?: string }
   | { status: "unreadable"; diagnostic: AutomationDiagnostic }
   | {
       status: "read";
@@ -412,6 +417,7 @@ export type CollectionAutomationsFile =
        * can edit.
        */
       addsStay: string[];
+      you?: string;
     };
 
 /** One field that switched-on automations set, with their names in file order. */
@@ -428,6 +434,20 @@ export interface CollectionAutomationTarget {
   stopped: string | null;
   /** Why a Find cannot read its records, or null. */
   findStopped: string | null;
+}
+
+/**
+ * A Group an automation can name: its name, its slug, and `ref`, the text a
+ * step writes to name it, which is its name unless that names another Group
+ * or none; with why its messages cannot start the automation, or it cannot
+ * take the automation's post, each null when it can.
+ */
+export interface CollectionAutomationGroup {
+  name: string;
+  slug: string;
+  ref: string;
+  readStopped: string | null;
+  postStopped: string | null;
 }
 
 /**
@@ -1374,10 +1394,11 @@ export class CollectionAutomations {
     const unapproved = await this.maybeDataset(collectionPath);
     const indexed = unapproved ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
     const collectionId = unapproved ? await this.describedDatasetId(collectionPath) : this.collectionIdOf(collectionPath);
-    if (!indexed || collectionId === null) return { status: "missing" };
+    const roster = await this.options.cachedRoster();
+    const you = roster.kind === "owner" && roster.localPersonId !== undefined ? { you: roster.localPersonId } : {};
+    if (!indexed || collectionId === null) return { status: "missing", ...you };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
     const { unsupported, reasonOf } = await this.reasonsIn(collectionPath, unapproved);
-    const roster = await this.options.cachedRoster();
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionId, entry.automation.id), collectionPath, automation: entry.automation }]
@@ -1431,7 +1452,7 @@ export class CollectionAutomations {
     const addsStay = dataset === undefined ? [] : dataset.definition.tables
       .filter((table) => datasetUndoDeletes(roster, collection, dataset.definition, table.tableId, dataset.grants).length === 0)
       .map((table) => table.name);
-    return { status: "read", contentHash: indexed.contentHash, automations, addsStay };
+    return { status: "read", contentHash: indexed.contentHash, automations, addsStay, ...you };
   }
 
   /**
@@ -1661,6 +1682,43 @@ export class CollectionAutomations {
   /** Where the verdicts are saved, for a person to look at. */
   reachVerdictsPath(): Promise<string> {
     return this.options.store.reachVerdictsPath();
+  }
+
+  /**
+   * The Groups in this computer's chat store that a Group trigger or a Post
+   * in a Group step in this Collection can name, with the reach check's
+   * reason, as a saved automation would get it, when one cannot be read or
+   * posted in. Names and reasons only; it reads no message.
+   */
+  async groupsFor(collectionPath: string): Promise<CollectionAutomationGroup[]> {
+    await this.ready();
+    const listed = [...((await this.options.groupList?.()) ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+    if (listed.length === 0) return [];
+    const roster = await this.options.cachedRoster();
+    const chat = roster.kind === "unknown"
+      ? null
+      : await this.options.chat.directory(roster, { groups: new Set(listed.map(({ slug }) => slug)), people: new Set() });
+    const collection = collectionNamed(collectionPath);
+    return listed.map(({ name, slug }) => {
+      // The name, where it names this Group as a run reads it; otherwise the slug, which always does.
+      const bySlug = chat?.group(slug);
+      const byName = chat?.group(name);
+      const ref = bySlug && byName && !("problem" in bySlug) && !("problem" in byName) && byName.channelId === bySlug.channelId ? name : slug;
+      const found = chat?.group(ref);
+      // A Group the directory cannot resolve can neither start nor take a message.
+      if (found && "problem" in found) return { name, slug, ref, readStopped: found.problem, postStopped: found.problem };
+      const group = found ? { channelWireId: found.wireId, name: found.name } : { channelWireId: null, name };
+      const [read, post] = checkAutomationReach(roster, {
+        id: "", collection, codeFiles: [], steps: [{ kind: "read-group", group }, { kind: "post", group }],
+      });
+      return {
+        name,
+        slug,
+        ref,
+        readStopped: found?.ended ? GROUP_ENDED : read && !read.allowed ? read.reason : null,
+        postStopped: found?.readOnly ? GROUP_READ_ONLY : post && !post.allowed ? post.reason : null,
+      };
+    });
   }
 
   /**
