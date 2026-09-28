@@ -80,7 +80,11 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 // `{ action: "change", collection, id, fields }`; and `output`, the value
 // `as` binds. It runs synchronously, for at most 1 second, with no network
 // or files. The executor applies its changes with the checks a set or
-// add-record step gets. Only document Collections run code steps for now.
+// add-record step gets. On a dataset Collection, the changes stay in the
+// table the automation watches, or the dataset's only table for a schedule
+// or a Group message, and each goes through the approved operation the ⚡
+// panel would pin for a step with the same fields. A schedule or a Group
+// message has no trigger record: `ctx.record` is null, and "set" fails.
 //
 //       - run: |
 //           const total = ctx.record.Price * ctx.record.Quantity;
