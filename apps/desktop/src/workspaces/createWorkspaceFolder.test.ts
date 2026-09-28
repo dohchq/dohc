@@ -64,7 +64,7 @@ describe("createWorkspaceFolder", () => {
 
     const legacy = join(base, "legacy");
     await mkdir(join(legacy, ".dohc"), { recursive: true });
-    expect(await readSyncHistory(legacy), "no record is no answer").toBe("unknown");
+    expect(await readSyncHistory(legacy), "no record is no answer").toBe("absent");
     await writeFile(join(legacy, ".dohc", "sync-history.json"), "{\"version\": 2, \"synced\": false}");
     expect(await readSyncHistory(legacy)).toBe("unknown");
   });

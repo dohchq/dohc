@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RegistryEntry } from "./registryStore";
@@ -15,7 +16,9 @@ import type { RegistryEntry } from "./registryStore";
 // longer one nobody else ever had a part in. A record from before dohc
 // kept this has no `receivedShare`, so it cannot say either way.
 
-export type SyncHistory = "never-synced" | "synced" | "unknown";
+// "absent" when the folder has no record, as one made before dohc kept it;
+// "unknown" when it has one dohc cannot read or parse, which may say synced.
+export type SyncHistory = "never-synced" | "synced" | "absent" | "unknown";
 
 interface HistoryRecord {
   synced: boolean;
@@ -39,7 +42,25 @@ export async function recordNeverSynced(rootPath: string): Promise<void> {
 /** The workspace synced or opened as a share. The record never goes back. */
 export function recordSynced(rootPath: string): void {
   mkdirSync(join(rootPath, ".dohc"), { recursive: true });
-  writeFileSync(historyPath(rootPath), historyText(true));
+  replaceRecord(rootPath, historyText(true));
+}
+
+// Written beside the record and renamed over it, so a crash never leaves a
+// cut-off record.
+function replaceRecord(rootPath: string, text: string): void {
+  const path = historyPath(rootPath);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, text);
+    renameSync(temporary, path);
+  } catch (error) {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // The write's own error says what went wrong.
+    }
+    throw error;
+  }
 }
 
 /**
@@ -59,7 +80,7 @@ export function recordReceivedShare(rootPath: string): void {
   }
   const record = parseRecord(text);
   if (record === null || record.synced || record.receivedShare === true) return;
-  writeFileSync(historyPath(rootPath), historyText(false, true));
+  replaceRecord(rootPath, historyText(false, true));
 }
 
 function parseRecord(text: string): HistoryRecord | null {
@@ -76,17 +97,22 @@ function parseRecord(text: string): HistoryRecord | null {
   return { synced, receivedShare: receivedShare ?? null };
 }
 
-async function readRecord(rootPath: string): Promise<HistoryRecord | null> {
+// The record, "absent" when there is no file, or null when dohc cannot read
+// or parse it. Only a missing file is no record: any other error may hide one.
+async function readRecord(rootPath: string): Promise<HistoryRecord | "absent" | null> {
+  let text: string;
   try {
-    return parseRecord(await readFile(historyPath(rootPath), "utf8"));
-  } catch {
-    return null;
+    text = await readFile(historyPath(rootPath), "utf8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : null;
   }
+  return parseRecord(text);
 }
 
-/** What the workspace's record says; "unknown" when it has none dohc can read. */
+/** What the workspace's record says. */
 export async function readSyncHistory(rootPath: string): Promise<SyncHistory> {
   const record = await readRecord(rootPath);
+  if (record === "absent") return "absent";
   return record === null ? "unknown" : record.synced ? "synced" : "never-synced";
 }
 
@@ -107,6 +133,6 @@ export async function provedNeverShared(
 ): Promise<boolean> {
   if (entry.remote || entry.shareView || entry.sharedChannels?.length || entry.shareMounts?.length) return false;
   const record = await readRecord(entry.rootPath);
-  if (record === null || record.synced || record.receivedShare !== false) return false;
+  if (record === null || record === "absent" || record.synced || record.receivedShare !== false) return false;
   return (await remoteChangesApplied()) === 0;
 }
