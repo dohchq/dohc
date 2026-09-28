@@ -208,6 +208,7 @@ import {
   CollectionAutomations,
   type AutomationSwitchedOff,
   type CollectionAutomationRetry,
+  type PressWaitReason,
 } from "@dohc/automation-executor/collection-automations";
 import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { AutomationScheduler } from "@dohc/automation-executor/automation-scheduler";
@@ -3765,6 +3766,8 @@ async function stopAllSitePreviews(): Promise<void> {
 }
 
 let datasetForCli: ((input: DatasetRequest) => Promise<DatasetResult>) | undefined;
+// A window's press path; the CLI's presses take it too.
+let pressNamedForCli: ReturnType<typeof registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>>["pressNamed"] | undefined;
 const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
 // Each workspace attachment's local dataset host, opened on first use and
 // closed when the attachment's state is disposed, after its automation
@@ -3864,6 +3867,32 @@ const { startDesktopCliServer } = createDesktopCliServer({
       }, { workspaceId: workspace.workspaceId, ...input }),
     };
   },
+  // A press goes through the press path a window's press takes, under this
+  // workspace's own operation. The dataset is described the way the CLI's
+  // dataset verbs describe it, and the executor opens before it is asked.
+  buttons: (workspace) => ({
+    press: async (input, by) => {
+      if (!pressNamedForCli || !datasetForCli) throw new Error("Buttons are not ready. Try again.");
+      const describe = datasetForCli;
+      let waiting: PressWaitReason | null = null;
+      const result = await pressNamedForCli({ ...input, workspaceId: workspace.workspaceId }, {
+        by,
+        withOperation: (work) => withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+          // A shared view runs no automations here; its presses go to the relay.
+          if (!shareViewIsPresent(operation.workspace.shareView)) await operation.state.collectionAutomations.open();
+          return await work(operation);
+        }),
+        describeDataset: async (datasetId) => {
+          const described = await describe({ action: "describe", workspaceId: workspace.workspaceId, datasetId });
+          if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
+          return described.dataset;
+        },
+        // No window hears how the run settles; the caller follows it in run history.
+        watch: (_claimId, reason) => { waiting = reason; },
+      });
+      return { result, waiting };
+    },
+  }),
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
@@ -5291,7 +5320,7 @@ function registerIpcHandlers(): void {
     watchPress: (workspaceId, claimId, sender) => pressWindows.watch(workspaceId, claimId, sender, null),
   });
 
-  registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+  pressNamedForCli = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation,
     readText: readWorkspaceTextIfPresent,
@@ -5347,7 +5376,7 @@ function registerIpcHandlers(): void {
         .press(shareId, input);
     },
     pressWindows,
-  });
+  }).pressNamed;
 
   registerStopAndRestoreIpc<
     WebContents,

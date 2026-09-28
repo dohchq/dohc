@@ -21,6 +21,7 @@ use dohc_engine_domain::AutomationScheduleMark;
 use dohc_engine_domain::AutomationSettle;
 use dohc_engine_domain::AutomationSubscription;
 use dohc_engine_domain::AutomationTrigger;
+use dohc_engine_domain::PressActor;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -195,7 +196,32 @@ struct AutomationPressParams {
     automation_id: String,
     record_id: String,
     pressed_by: String,
+    by: PressActorParams,
     now_ms: Option<i64>,
+}
+
+/// `{ "kind": "human" }`, or `{ "kind": "agent", "originId", "depth" }`.
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum PressActorParams {
+    // An empty struct, not a unit variant: serde's internally tagged unit
+    // variant ignores unknown fields, and this one must refuse them.
+    Human {},
+    Agent { origin_id: String, depth: u32 },
+}
+
+impl From<PressActorParams> for PressActor {
+    fn from(params: PressActorParams) -> Self {
+        match params {
+            PressActorParams::Human {} => PressActor::Human,
+            PressActorParams::Agent { origin_id, depth } => PressActor::Agent { origin_id, depth },
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -645,6 +671,7 @@ impl EngineService {
                     automation_id: params.automation_id,
                     record_id: params.record_id,
                     pressed_by: params.pressed_by,
+                    by: params.by.into(),
                 },
                 params.now_ms.unwrap_or(now_ms()?),
                 Arc::new(NoFaults),

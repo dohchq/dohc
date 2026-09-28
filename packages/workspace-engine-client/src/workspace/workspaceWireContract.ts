@@ -272,8 +272,18 @@ export type AutomationPressParams = WorkspaceJsonObject & {
    * it from its own checked identity, never from a renderer.
    */
   pressedBy: string;
+  by: AutomationPressActor;
   nowMs?: number;
 };
+
+/**
+ * Who made a press for the person who pressed: the person, or an agent
+ * acting for them, by its origin id, from a run at `depth`. The press claims
+ * at that depth, and stops at once at the chain cap.
+ */
+export type AutomationPressActor =
+  | { kind: "human" }
+  | { kind: "agent"; originId: string; depth: number };
 
 /** Mirrors AutomationRunNowParams in crates/dohc-workspace-engine. */
 export type AutomationRunNowParams = WorkspaceJsonObject & {
