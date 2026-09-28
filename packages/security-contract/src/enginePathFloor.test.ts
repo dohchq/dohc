@@ -1,9 +1,10 @@
 import { expect, it } from "vitest";
 import { classifyEngineFilePath, classifyEngineFilePathForRead } from "./enginePathFloor";
-import fixtures from "../../workspace-contracts/src/pathFoldFixtures.json";
+import fixtures from "../../../crates/dohc-engine-files/src/pathFoldFixtures.json";
 
 it.each(fixtures)("classifies shared fixture $input", ({ input, ignored }) => {
   expect(classifyEngineFilePath(`notes/${input}/x.md`).kind).toBe(ignored ? "ignored" : "tracked");
+  expect(classifyEngineFilePath(`${input}/x.md`).kind).toBe(ignored ? "ignored" : "tracked");
 });
 
 it.each([".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"])("ignores reserved name %s", (name) => {

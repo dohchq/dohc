@@ -1288,33 +1288,41 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
             return Err(MaterializeError::UnsafeTargetPath);
         }
         out.push(segment);
-        #[cfg(windows)]
-        {
-            reject_link_or_reparse(&out)?;
-            match std::fs::canonicalize(&out) {
-                Ok(resolved) => {
-                    let relative = resolved
-                        .strip_prefix(root)
-                        .map_err(|_| MaterializeError::UnsafeTargetPath)?;
-                    let relative = relative.to_string_lossy().replace('\\', "/");
-                    if crate::floor::has_ignored_segment(&relative)
-                        || crate::policy::is_shared_with_me_path(&relative)
-                    {
-                        return Err(MaterializeError::UnsafeTargetPath);
-                    }
-                    out = resolved;
-                }
-                Err(err) if err.kind() == ErrorKind::NotFound => {}
-                Err(err) => return Err(MaterializeError::io(&out, &err)),
-            }
-        }
     }
     #[cfg(windows)]
     {
+        // Check links before resolving aliases. Resolve the deepest existing
+        // path once, including an existing leaf so file aliases cannot bypass
+        // the sidecar and conflict-artifact floor.
+        let mut existing = root.to_path_buf();
+        for component in out.strip_prefix(root).unwrap().components() {
+            let candidate = existing.join(component);
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+                        return Err(MaterializeError::SymlinkTarget);
+                    }
+                    existing = candidate;
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => break,
+                Err(err) => return Err(MaterializeError::io(&candidate, &err)),
+            }
+        }
+        if existing != root {
+            let resolved = std::fs::canonicalize(&existing)
+                .map_err(|err| MaterializeError::io(&existing, &err))?;
+            let suffix = out.strip_prefix(&existing).unwrap();
+            out = if suffix.as_os_str().is_empty() {
+                resolved
+            } else {
+                resolved.join(suffix)
+            };
+        }
         let relative = out
             .strip_prefix(root)
             .map_err(|_| MaterializeError::UnsafeTargetPath)?;
-        if is_excluded_file(&relative.to_string_lossy().replace('\\', "/")) {
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if is_excluded_file(&relative) || crate::policy::is_shared_with_me_path(&relative) {
             return Err(MaterializeError::UnsafeTargetPath);
         }
     }
@@ -2948,6 +2956,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resolves_existing_ancestors_and_missing_suffixes() {
+        let scratch = Scratch::new("existing-ancestor");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        std::fs::create_dir_all(root.join("notes/deep")).unwrap();
+        std::fs::write(root.join("notes/deep/existing.md"), b"existing").unwrap();
+        for path in [
+            "notes/deep/existing.md",
+            "notes/deep/missing.md",
+            "notes/deep/new/more/missing.md",
+            "new/more/missing.md",
+        ] {
+            assert_eq!(resolve_target(&root, path).unwrap(), root.join(path));
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn resolves_existing_hashed_short_names_before_admitting_them() {
@@ -2973,13 +2997,20 @@ mod tests {
                 continue;
             }
             assert!(scratch.root.join(&alias).is_dir(), "{alias}");
-            assert!(
-                matches!(
-                    resolve_target(&root, &format!("{alias}/injected.md")),
-                    Err(MaterializeError::UnsafeTargetPath)
-                ),
-                "{alias}"
-            );
+            std::fs::create_dir(scratch.root.join(&name).join("existing")).unwrap();
+            for suffix in [
+                "injected.md",
+                "existing/injected.md",
+                "new/deep/injected.md",
+            ] {
+                assert!(
+                    matches!(
+                        resolve_target(&root, &format!("{alias}/{suffix}")),
+                        Err(MaterializeError::UnsafeTargetPath)
+                    ),
+                    "{alias}/{suffix}"
+                );
+            }
             checked_hashed_alias = true;
         }
         for index in 0..5 {
@@ -2999,6 +3030,17 @@ mod tests {
         );
         if !checked_hashed_alias {
             eprintln!("NTFS hashed short names were not generated on this test volume");
+        }
+        for name in ["notes.conflict", "ledger.db-wal"] {
+            std::fs::write(scratch.root.join(name), b"private").unwrap();
+            let alias = short_name(&scratch.root, name);
+            assert!(
+                matches!(
+                    resolve_target(&root, &alias),
+                    Err(MaterializeError::UnsafeTargetPath)
+                ),
+                "{alias}"
+            );
         }
     }
 

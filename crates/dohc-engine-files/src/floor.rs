@@ -49,10 +49,8 @@ struct FoldData {
 fn fold_data() -> &'static FoldData {
     static DATA: std::sync::OnceLock<FoldData> = std::sync::OnceLock::new();
     DATA.get_or_init(|| {
-        serde_json::from_str(include_str!(
-            "../../../packages/workspace-contracts/src/pathFoldData.json"
-        ))
-        .expect("checked-in Unicode folding data")
+        serde_json::from_str(include_str!("pathFoldData.json"))
+            .expect("checked-in Unicode folding data")
     })
 }
 
@@ -86,14 +84,16 @@ pub fn is_reserved_83_alias(segment: &str, reserved: &str) -> bool {
     let Some((base, digits)) = segment.split_once('~') else {
         return false;
     };
+    let stem = reserved.trim_start_matches('.');
     !base.is_empty()
         && segment.len() <= 8
+        && base.len() == stem.len().min(7usize.saturating_sub(digits.len()))
         && base
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         && !digits.is_empty()
         && digits.bytes().all(|b| b.is_ascii_digit())
-        && reserved.trim_start_matches('.').starts_with(base)
+        && stem.starts_with(base)
 }
 
 /// Reserved-name admission, including Win32 trailing aliases.
@@ -195,10 +195,7 @@ mod tests {
             folded: String,
             ignored: bool,
         }
-        let cases: Vec<Case> = serde_json::from_str(include_str!(
-            "../../../packages/workspace-contracts/src/pathFoldFixtures.json"
-        ))
-        .unwrap();
+        let cases: Vec<Case> = serde_json::from_str(include_str!("pathFoldFixtures.json")).unwrap();
         for case in cases {
             assert_eq!(fold_segment(&case.input), case.folded, "{}", case.input);
             assert_eq!(
@@ -207,13 +204,17 @@ mod tests {
                 "{}",
                 case.input
             );
-            let path = format!("notes/{}/x.md", case.input);
-            assert_eq!(
-                crate::policy::classify_engine_file_path(&path)
-                    == crate::policy::PathClassification::Ignored,
-                case.ignored,
-                "{path}"
-            );
+            for path in [
+                format!("notes/{}/x.md", case.input),
+                format!("{}/x.md", case.input),
+            ] {
+                assert_eq!(
+                    crate::policy::classify_engine_file_path(&path)
+                        == crate::policy::PathClassification::Ignored,
+                    case.ignored,
+                    "{path}"
+                );
+            }
         }
     }
 

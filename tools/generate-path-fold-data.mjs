@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // Input: CaseFolding.txt and DerivedCoreProperties.txt from this pinned UCD.
@@ -23,5 +23,8 @@ for (const line of read("DerivedCoreProperties.txt").split(/\r?\n/)) {
   if (previous && previous[1] + 1 === start) previous[1] = end;
   else ignorables.push([start, end]);
 }
-writeFileSync(new URL("../packages/workspace-contracts/src/pathFoldData.json", import.meta.url),
+const canonical = new URL("../crates/dohc-engine-files/src/pathFoldData.json", import.meta.url);
+writeFileSync(canonical,
   `${JSON.stringify({ source, license: "https://www.unicode.org/license.txt", mappings, ignorables }, null, 2)}\n`);
+// Keep the TypeScript runtime self-contained; pathFloor.test.ts checks drift.
+copyFileSync(canonical, new URL("../packages/workspace-contracts/src/pathFoldData.json", import.meta.url));

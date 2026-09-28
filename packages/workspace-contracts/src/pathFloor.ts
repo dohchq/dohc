@@ -19,7 +19,10 @@ const reservedSegments = [".dohc", ".git", "node_modules"];
 /** Inputs have already been folded by the caller. */
 export function isReserved83Alias(segment: string, reserved: string): boolean {
   const match = /^([a-z0-9_-]+)~([0-9]+)$/.exec(segment);
-  return segment.length <= 8 && match !== null && reserved.replace(/^\.+/, "").startsWith(match[1]);
+  const stem = reserved.replace(/^\.+/, "");
+  return segment.length <= 8 && match !== null
+    && match[1].length === Math.min(stem.length, 7 - match[2].length)
+    && stem.startsWith(match[1]);
 }
 
 export function isIgnoredPathSegment(segment: string, stripAliases = true): boolean {
