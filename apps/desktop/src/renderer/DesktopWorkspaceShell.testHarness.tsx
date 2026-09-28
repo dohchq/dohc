@@ -16,6 +16,8 @@ import type {
   ReadCrashReportResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
+  FindAutomationCollectionPayload,
+  FindAutomationCollectionResult,
   RetryCollectionAutomationResult,
   ChatChannelRecord,
   DismissShareSkipsPayload,
@@ -619,8 +621,9 @@ function makeBaseBridge(
     listCollectionAutomations: vi.fn(
       async (): Promise<ListCollectionAutomationsResult> => ({ status: "missing" }),
     ),
+    findAutomationCollection: vi.fn(async (_payload: FindAutomationCollectionPayload): Promise<FindAutomationCollectionResult> => ({ status: "missing" })),
     listCollectionAutomationRuns: vi.fn(
-      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [] }),
+      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [], next: null }),
     ),
     retryCollectionAutomation: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
