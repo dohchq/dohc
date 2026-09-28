@@ -1365,8 +1365,8 @@ describe("Collection automations", () => {
     w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Tasks"])] });
     await w.executor.open();
     await expect(w.executor.targetsFor("Tasks")).resolves.toEqual([
-      { path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget." },
-      { path: "Tasks", name: "Tasks", stopped: null },
+      { path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget.", findStopped: "ana@dohc.test cannot view Budget." },
+      { path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
     ]);
   });
 

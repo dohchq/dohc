@@ -236,6 +236,16 @@ describe("dataset automation steps", () => {
     expect(names(pinned.do)).toEqual(["invoices.edit", "invoices.edit", null]);
   });
 
+  it("pins a Find only to a read in its trigger's table, where another table's read fits too", () => {
+    const readable: DatasetDefinition = {
+      ...twoTables,
+      operations: [...twoTables.operations, { ...operation(24, "refunds.list", "read", [REFUND_STATUS]), tableId: REFUNDS }],
+    };
+    const find = (table: string) => automation("      - find: 'true'\n        as: all\n", `field-changed: Status\n      table: ${table}`);
+    expect(pinDatasetOperations(find("Invoices"), { definition: readable, generated: true }).do[0]).toMatchObject({ operation: "invoices.list" });
+    expect(pinDatasetOperations(find("Refunds"), { definition: readable, generated: true }).do[0]).toMatchObject({ operation: "refunds.list" });
+  });
+
   it("pins an Add record only to a create in its own table, and names another table's that fits", () => {
     const add = (table: string, step = "Status: New", operationName = "") =>
       automation(`      - add-record:\n          ${step}\n${operationName ? `        operation: ${operationName}\n` : ""}`, `field-changed: Status\n      table: ${table}`);

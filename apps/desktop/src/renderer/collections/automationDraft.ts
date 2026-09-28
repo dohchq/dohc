@@ -1,3 +1,4 @@
+import type { DatasetOperationKind } from "@dohc/security-contract/dataset";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
 import type { Automation, AutomationStep, AutomationValue } from "./automationSentence";
 
@@ -155,20 +156,25 @@ export function idFor(name: string, taken: ReadonlySet<string>): string {
 }
 
 /**
- * The dataset table a ⚡ panel shows, which is a Collection: its name, the
- * names of the approved operations on it, and every table in its dataset
- * with its fields, Button fields too, which a trigger on that table offers.
+ * The dataset table a ⚡ panel shows, which is a Collection: its name, and
+ * every table in its dataset by name, with its fields, Button fields too,
+ * which a trigger on that table offers, and its approved operations.
  */
 export interface AutomationTable {
   name: string;
-  operations: ReadonlySet<string>;
-  tables: ReadonlyMap<string, readonly FieldDefinition[]>;
+  tables: ReadonlyMap<string, AutomationDatasetTable>;
   /**
    * The dataset's actions, by name, label, and table; `reversible` when the
    * rules name a reverse. A new step offers this table's; a step the file
    * wrote may run another table's.
    */
   actions: ReadonlyArray<{ name: string; label: string; table: string; reversible: boolean }>;
+}
+
+/** One table of a dataset: its fields, and its approved operations by name and kind. */
+export interface AutomationDatasetTable {
+  fields: readonly FieldDefinition[];
+  operations: ReadonlyArray<{ name: string; kind: DatasetOperationKind }>;
 }
 
 /**

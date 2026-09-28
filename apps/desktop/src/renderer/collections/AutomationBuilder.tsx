@@ -48,8 +48,9 @@ import {
 // dataset it watches one table, whose fields Only if and Set fields offer.
 // An If holds its own Do and
 // Otherwise steps, which edit like the automation's. Steps the builder
-// cannot edit yet, such as Find, stay as they are and read as their
-// sentence; the file edits them. Save runs the file contract's check through main first,
+// cannot edit yet, such as a message, stay as they are and read as their
+// sentence; the file edits them. A Find or an added record can name its
+// result, and a later Set fields step in the same list can change it. Save runs the file contract's check through main first,
 // so it never writes what the parser would refuse, and the panel writes the
 // whole list over the content it read.
 
@@ -57,6 +58,7 @@ type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | nul
 type Target = Extract<ListAutomationTargetsResult, { collections: unknown }>["collections"][number];
 type SetStep = Extract<AutomationStep, { kind: "set" }>;
 type AddStep = Extract<AutomationStep, { kind: "add-record" }>;
+type FindStep = Extract<AutomationStep, { kind: "find" }>;
 type FieldValue = SetStep["values"][number];
 type Reach = ValidAutomationSummary["reach"];
 
@@ -451,9 +453,18 @@ const comparedValue = (field: FieldDefinition | undefined): ConditionRow["value"
  * A condition: rows of field comparisons that must all hold, or a formula.
  * Only if can also be Always; what a record starts to match cannot.
  */
+/**
+ * Which condition an editor edits: Only if, what a record starts to match,
+ * or the records a Find step reads. `number` and `key` name a Find's step.
+ */
+type ConditionPart =
+  | { kind: "condition" }
+  | { kind: "match" }
+  | { kind: "find"; number: number; key: number; dataset: boolean };
+
 function ConditionEditor(props: {
   /** Which condition this is, which names its controls. */
-  part: "condition" | "match";
+  part: ConditionPart;
   condition: ConditionDraft;
   /** What the rows write, which a switch to Formula starts from. */
   expression: string | null;
@@ -466,13 +477,19 @@ function ConditionEditor(props: {
   focusAfter: (key: string, change: () => void) => void;
   onChange: (change: (current: ConditionDraft) => ConditionDraft) => void;
 }) {
-  const { part, condition, problem, onChange } = props;
-  const only = part === "condition";
-  const name = only ? "Condition" : "Match condition";
+  const { condition, problem, onChange } = props;
+  const only = props.part.kind === "condition";
+  const find = props.part.kind === "find" ? props.part : null;
+  const name = find ? `Step ${find.number}, condition` : only ? "Condition" : "Match condition";
+  const part = find ? `find-${find.key}` : props.part.kind;
+  // What the executor can read: a document's Find checks one field; a dataset's compares fields with ==.
+  const operators = find === null ? Object.keys(OPERATOR_LABELS) as ConditionOperator[] : find.dataset ? ["is" as const] : ["is" as const, "contains" as const];
+  const most = find !== null && !find.dataset ? 1 : Infinity;
+  const empty = find ? "All records" : only ? "Always" : null;
   return (
     <>
       <select
-        aria-label={only ? "Condition" : "Match"}
+        aria-label={find ? `Step ${find.number}, records to find` : only ? "Condition" : "Match"}
         data-focus={`${part}-mode`}
         value={condition.mode}
         onChange={(event) => {
@@ -488,7 +505,7 @@ function ConditionEditor(props: {
         className={selectClass}
         {...(condition.mode === "formula" ? {} : invalid(problem(props.problemKey)))}
       >
-        {only ? <option value="always">Always</option> : null}
+        {empty === null ? null : <option value="always">{empty}</option>}
         <option value="rows">Fields match</option>
         <option value="formula">Formula</option>
       </select>
@@ -516,9 +533,8 @@ function ConditionEditor(props: {
                     onChange={(event) => replace({ ...row, operator: event.target.value as ConditionOperator })}
                     className={selectClass}
                   >
-                    {Object.entries(OPERATOR_LABELS).map(([operator, label]) => (
-                      <option key={operator} value={operator}>{label}</option>
-                    ))}
+                    {operators.includes(row.operator) ? null : <option value={row.operator}>{OPERATOR_LABELS[row.operator]}</option>}
+                    {operators.map((operator) => <option key={operator} value={operator}>{OPERATOR_LABELS[operator]}</option>)}
                   </select>
                   <LiteralInput
                     label={`${name} ${index + 1}, value`}
@@ -541,7 +557,7 @@ function ConditionEditor(props: {
                     const neighbor = condition.rows[index + 1] ?? condition.rows[index - 1];
                     props.focusAfter(neighbor ? `${part}-${neighbor.key}-remove` : `${part}-mode`, () => onChange((current) => {
                       const rows = current.rows.filter((entry) => entry.key !== key);
-                      return { ...current, rows, mode: rows.length === 0 && only ? "always" : current.mode };
+                      return { ...current, rows, mode: rows.length === 0 && empty !== null ? "always" : current.mode };
                     }));
                   }}
                 >
@@ -550,21 +566,23 @@ function ConditionEditor(props: {
               </div>
             );
           })}
-          <SecondaryButton
-            size="compact"
-            className="flex items-center gap-1 self-start"
-            onClick={() => {
-              const entry = props.newRow();
-              props.focusAfter(`${part}-${entry.key}-first`, () => onChange((current) => ({ ...current, rows: [...current.rows, entry] })));
-            }}
-          >
-            <Plus size={12} aria-hidden />
-            Add condition
-          </SecondaryButton>
+          {condition.rows.length < most ? (
+            <SecondaryButton
+              size="compact"
+              className="flex items-center gap-1 self-start"
+              onClick={() => {
+                const entry = props.newRow();
+                props.focusAfter(`${part}-${entry.key}-first`, () => onChange((current) => ({ ...current, rows: [...current.rows, entry] })));
+              }}
+            >
+              <Plus size={12} aria-hidden />
+              Add condition
+            </SecondaryButton>
+          ) : null}
         </>
       ) : condition.mode === "formula" ? (
         <input
-          aria-label={only ? "Condition formula" : "Condition to match"}
+          aria-label={find ? `Step ${find.number}, condition formula` : only ? "Condition formula" : "Condition to match"}
           value={condition.formula}
           spellCheck={false}
           placeholder={only ? 'record.Priority == "High"' : 'record.Status == "Blocked"'}
@@ -602,7 +620,15 @@ interface StepEntry {
   verdict: string | null;
   /** An If's Do and Otherwise steps, which the draft holds instead of the step's own lists; null for any other step. */
   branches: Record<Branch, StepEntry[]> | null;
+  /** What a Find step reads, which the draft holds instead of the step's condition; null for any other step. */
+  condition: ConditionDraft | null;
 }
+/**
+ * A result an earlier step names: the records a Find found, or the record
+ * an Add a record step added. `table` is the dataset table that holds them,
+ * or null outside a dataset or while the step has none.
+ */
+interface Binding { name: string; kind: "records" | "record"; collection: string | null; table: string | null }
 /** A list of steps: the automation's own, or an If's Do or Otherwise. */
 type ListId = "do" | `${number}/${Branch}`;
 
@@ -610,11 +636,15 @@ let nextKey = 0;
 const newKey = () => (nextKey += 1);
 const blankRow = (): Row => ({ key: newKey(), value: { field: "", value: { kind: "literal", value: "" } } });
 
-function entryOf(step: AutomationStep, verdict: string | null, branches: StepEntry["branches"] = null): StepEntry {
+function entryOf(step: AutomationStep, verdict: string | null, dataset: boolean, branches: StepEntry["branches"] = null): StepEntry {
   // An action's input shows as rows too: each row's field is the input's key.
   const values = step.kind === "set" || step.kind === "add-record" ? step.values
     : step.kind === "invoke" ? step.input.map(({ key, value }) => ({ field: key, value })) : [];
-  return { key: newKey(), step, rows: values.map((value) => ({ key: newKey(), value })), verdict, branches };
+  // "All records" is a Find of true.
+  const condition = step.kind === "find"
+    ? conditionDraftOf(step.condition === "true" ? null : step.condition, (rows) => findRowsFit(rows, dataset))
+    : null;
+  return { key: newKey(), step, rows: values.map((value) => ({ key: newKey(), value })), verdict, branches, condition };
 }
 
 /**
@@ -622,30 +652,48 @@ function entryOf(step: AutomationStep, verdict: string | null, branches: StepEnt
  * the list's first verdict among the automation's, which counts an If's
  * steps after the If and before the steps that follow it.
  */
-function entriesOf(steps: readonly AutomationStep[], reach: Reach | null, first: number): StepEntry[] {
+function entriesOf(steps: readonly AutomationStep[], reach: Reach | null, first: number, dataset: boolean): StepEntry[] {
   let next = first;
   return reachPlaces(steps, first).map((places, index) => {
     const step = steps[index]!;
     const start = next;
     next += places.length;
-    if (step.kind !== "if") return entryOf(step, verdictOf(places, reach));
-    return entryOf(step, null, {
-      do: entriesOf(step.do, reach, start),
-      otherwise: entriesOf(step.otherwise, reach, start + reachPlaces(step.do).flat().length),
+    if (step.kind !== "if") return entryOf(step, verdictOf(places, reach), dataset);
+    return entryOf(step, null, dataset, {
+      do: entriesOf(step.do, reach, start, dataset),
+      otherwise: entriesOf(step.otherwise, reach, start + reachPlaces(step.do).flat().length, dataset),
     });
   });
 }
 
-/** Each entry in reading order, with the list that holds it and its number among all steps. */
-function entriesInOrder(entries: readonly StepEntry[]) {
-  const all: Array<{ entry: StepEntry; list: readonly StepEntry[]; listId: ListId; index: number; number: number }> = [];
-  const walk = (list: readonly StepEntry[], listId: ListId) => list.forEach((entry, index) => {
-    all.push({ entry, list, listId, index, number: all.length + 1 });
-    if (entry.branches === null) return;
-    walk(entry.branches.do, `${entry.key}/do`);
-    walk(entry.branches.otherwise, `${entry.key}/otherwise`);
-  });
-  walk(entries, "do");
+/** The result a step names, or null. */
+function bindingOf(step: AutomationStep, table: AutomationTable | null, trigger: string | null): Binding | null {
+  if (step.kind !== "find" && step.kind !== "add-record") return null;
+  if (step.as === null) return null;
+  const home = table === null ? null : (tableOfStep(step, table, trigger) ?? null);
+  return { name: step.as, kind: step.kind === "find" ? "records" : "record", collection: step.collection, table: home };
+}
+
+/**
+ * Each entry in reading order, with the list that holds it, its number
+ * among all steps, and the results it can use: those named earlier in its
+ * list or in a list around it. A result named inside an If stays there.
+ */
+function entriesInOrder(entries: readonly StepEntry[], table: AutomationTable | null, trigger: string | null) {
+  const all: Array<{ entry: StepEntry; list: readonly StepEntry[]; listId: ListId; index: number; number: number; scope: readonly Binding[] }> = [];
+  const walk = (list: readonly StepEntry[], listId: ListId, outer: readonly Binding[]) => {
+    let scope = outer;
+    list.forEach((entry, index) => {
+      all.push({ entry, list, listId, index, number: all.length + 1, scope });
+      if (entry.branches !== null) {
+        walk(entry.branches.do, `${entry.key}/do`, scope);
+        walk(entry.branches.otherwise, `${entry.key}/otherwise`, scope);
+      }
+      const bound = bindingOf(entry.step, table, trigger);
+      if (bound !== null && bound.name !== "") scope = [...scope, bound];
+    });
+  };
+  walk(entries, "do", []);
   return all;
 }
 
@@ -701,7 +749,12 @@ function placeOf(
       listId = `${entry.key}/${kind}`;
       continue;
     }
-    if (name === undefined || (kind !== "set" && kind !== "add-record" && kind !== "input")) return { key: `step-${entry.key}`, name: null };
+    if (name === undefined) {
+      // A Find's condition, a result's name, and a Set's records each have a control where the step edits.
+      const control = kind === "find" ? "condition" : kind === "as" || kind === "records" ? kind : null;
+      return { key: control !== null && edits(entry) ? `step-${entry.key}/${control}` : `step-${entry.key}`, name: null };
+    }
+    if (kind !== "set" && kind !== "add-record" && kind !== "input") return { key: `step-${entry.key}`, name: null };
     const row = edits(entry) ? entry.rows.find(({ value }) => value.field === name) : undefined;
     return row === undefined ? { key: `step-${entry.key}`, name } : { key: `row-${row.key}/${part}`, name: null };
   }
@@ -763,22 +816,66 @@ function builderTriggerOf(trigger: AutomationTrigger): BuilderTrigger | null {
 }
 
 /**
- * A step the builder edits: fields set on the trigger record, or a record
- * added. In a dataset the builder adds records only to its own table, so an
- * Add record that names another Collection, or another table's operation,
- * reads as its sentence and the file edits it.
+ * A step the builder edits: fields set on a record, or a record added. In
+ * a dataset, an Add record that names another Collection, or an operation
+ * the dataset lacks, reads as its sentence and the file edits it.
  */
-function editableStep(step: AutomationStep, table: AutomationTable | null): SetStep | AddStep | null {
-  if (step.kind === "set") return step.records === null ? step : null;
-  if (step.kind !== "add-record") return null;
-  return table === null || (step.collection === null && (step.operation === null || table.operations.has(step.operation))) ? step : null;
+function editableStep(step: AutomationStep, table: AutomationTable | null, trigger: string | null): SetStep | AddStep | null {
+  if (step.kind === "set") return step;
+  return step.kind === "add-record" && inDataset(step, table, trigger) ? step : null;
 }
 
-const BRANCH_LABELS: Record<Branch, string> = { do: "Do", otherwise: "Otherwise" };
+/** A Find the builder edits: in a dataset, one on a table of its own, as an Add a record. */
+function editableFind(step: AutomationStep, table: AutomationTable | null, trigger: string | null): FindStep | null {
+  return step.kind === "find" && inDataset(step, table, trigger) ? step : null;
+}
 
-/** A condition's draft: rows when rows wrote it, else a formula; Always when there is none. */
-function conditionDraftOf(expression: string | null): ConditionDraft {
-  const read = expression === null ? [] : (conditionRows(expression) ?? []);
+/** True outside a dataset, or for a step that stays in its dataset on a table the builder can name. */
+function inDataset(step: AddStep | FindStep, table: AutomationTable | null, trigger: string | null): boolean {
+  return table === null || (step.collection === null && tableOfStep(step, table, trigger) !== undefined);
+}
+
+/**
+ * The dataset table a Find reads or an Add a record adds to: its
+ * operation's, or else `trigger`, the table the trigger watches, which
+ * saving pins it to. Null when the trigger watches no table, so the step
+ * must choose one; undefined for an operation the dataset does not have.
+ */
+function tableOfStep(step: AddStep | FindStep, table: AutomationTable, trigger: string | null): string | null | undefined {
+  return step.operation === null ? trigger : tableOfOperation(step.operation, table);
+}
+
+/** The dataset table that holds an operation, or undefined when the dataset has none of that name. */
+function tableOfOperation(operation: string, table: AutomationTable): string | undefined {
+  for (const [name, { operations }] of table.tables) {
+    if (operations.some((candidate) => candidate.name === operation)) return name;
+  }
+  return undefined;
+}
+
+// The operation a step of each kind needs, and what a table without one cannot do.
+const STEP_OPERATIONS = {
+  find: { kind: "read", missing: "cannot find records" },
+  "add-record": { kind: "create", missing: "cannot add records" },
+} as const;
+
+const BRANCH_LABELS: Record<Branch, string> = { do: "Do", otherwise: "Otherwise" };
+// A result name the file contract takes, apart from the reserved names main's check reports.
+const RESULT_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/u;
+
+/**
+ * The rows a Find can hold: in a dataset, fields compared with is; in a
+ * document Collection, one field with is or contains. Other rows stay a
+ * formula, which the executor refuses when it cannot read it.
+ */
+function findRowsFit(rows: readonly ConditionRow[], dataset: boolean): boolean {
+  return dataset ? rows.every((row) => row.operator === "is") : rows.length === 1 && rows[0]!.operator !== "is-not";
+}
+
+/** A condition's draft: rows when rows wrote it and `fit` takes them, else a formula; Always when there is none. */
+function conditionDraftOf(expression: string | null, fit: (rows: readonly ConditionRow[]) => boolean = () => true): ConditionDraft {
+  const parsed = expression === null ? null : conditionRows(expression);
+  const read = parsed !== null && fit(parsed) ? parsed : [];
   const rows = read.map((row) => ({ key: newKey(), row }));
   return {
     mode: expression === null ? "always" : rows.length > 0 ? "rows" : "formula",
@@ -799,13 +896,13 @@ interface Draft {
   steps: StepEntry[];
 }
 
-function draftOf(automation: Automation, reach: Reach | null): Draft {
+function draftOf(automation: Automation, reach: Reach | null, dataset: boolean): Draft {
   return {
     name: automation.name,
     when: automation.when,
     condition: conditionDraftOf(automation.if),
     matching: conditionDraftOf(automation.when.kind === "starts-matching" ? automation.when.condition : null),
-    steps: entriesOf(automation.do, reach, automation.when.kind === "group-message" ? 1 : 0),
+    steps: entriesOf(automation.do, reach, automation.when.kind === "group-message" ? 1 : 0, dataset),
   };
 }
 
@@ -823,8 +920,8 @@ export function AutomationBuilder(props: {
   cannotRun: string | null;
   /** The saved version's reach, or null for a new automation. */
   reach: Reach | null;
-  /** Undo keeps the records an Add record step adds to this dataset table: no approved delete qualifies. */
-  addsStay: boolean;
+  /** The dataset tables where Undo keeps the records an Add record step adds: no approved delete qualifies. */
+  addsStay: readonly string[];
   takenIds: ReadonlySet<string>;
   saving: boolean;
   /** The file has entries dohc cannot read, so nothing can be saved now. */
@@ -847,7 +944,7 @@ export function AutomationBuilder(props: {
   const { workspaceId, collectionPath, table, onError } = props;
   const isNew = props.automation.id === "";
   const problemIds = useId();
-  const [draft, setDraft] = useState(() => draftOf(props.automation, props.reach));
+  const [draft, setDraft] = useState(() => draftOf(props.automation, props.reach, props.table !== null));
   const [attempted, setAttempted] = useState(false);
   const [checking, setChecking] = useState(false);
   const [saveChosen, setSaveChosen] = useState(false);
@@ -885,15 +982,42 @@ export function AutomationBuilder(props: {
   // main cannot check a dataset's fields, so those names must change first.
   // On the table it was saved on, or a new one started on, a missing field only warns.
   const moved = watched !== watchedBy(props.baseline.when);
-  const watchedFields = table === null ? props.fields : (table.tables.get(watched) ?? []);
+  const watchedFields = table === null ? props.fields : (table.tables.get(watched)?.fields ?? []);
+  // The table a dataset step without an operation works on: the trigger's, or the only one. A schedule or a Group message has none.
+  const triggerTable = table === null ? null
+    : "table" in draft.when ? watched
+    : table.tables.size === 1 ? table.name : null;
   const recordFields = watchedFields.filter(holdsValue);
   const buttonFields = watchedFields.filter((field) => !holdsValue(field));
   const typeIn = (fields: readonly FieldDefinition[] | null, field: string): CollectionFieldType | null =>
     fields?.find((candidate) => candidate.name === field)?.type ?? null;
-  const targetOf = (step: AutomationStep) =>
-    step.kind === "add-record" ? (step.collection ?? collectionPath) : collectionPath;
-  /** The fields a step's rows name: the added record's, or the trigger record's. Null while they load. */
-  const fieldsOf = (step: AutomationStep) => (step.kind === "add-record" ? (schemas.get(targetOf(step)) ?? null) : recordFields);
+  const ordered = entriesInOrder(draft.steps, table, triggerTable);
+  const placedByKey = new Map(ordered.map((placed) => [placed.entry.key, placed]));
+  /** The result a Set fields step changes, when the step names one its list has. */
+  const recordsOf = (entry: StepEntry): Binding | undefined => {
+    const records = entry.step.kind === "set" ? entry.step.records : null;
+    return records === null ? undefined : placedByKey.get(entry.key)?.scope.find((bound) => bound.name === records);
+  };
+  /** The Collection a step's rows or condition name. */
+  const targetOf = (entry: StepEntry) => {
+    const { step } = entry;
+    if (step.kind === "add-record" || step.kind === "find") return step.collection ?? collectionPath;
+    return recordsOf(entry)?.collection ?? collectionPath;
+  };
+  /** The dataset table a step's rows or condition name, or null outside a dataset or while the step has none. */
+  const datasetTableOf = (entry: StepEntry): string | null => {
+    const { step } = entry;
+    if (table === null) return null;
+    if (step.kind === "find" || step.kind === "add-record") return tableOfStep(step, table, triggerTable) ?? null;
+    return recordsOf(entry)?.table ?? null;
+  };
+  /** The fields a step's rows or condition name: a found or added record's, or the trigger record's. Null while they load. */
+  const fieldsOf = (entry: StepEntry) => {
+    if (entry.step.kind === "set" && entry.step.records === null) return recordFields;
+    if (table === null) return schemas.get(targetOf(entry)) ?? null;
+    const home = datasetTableOf(entry);
+    return home === null ? [] : (table.tables.get(home)?.fields ?? []).filter(holdsValue);
+  };
   // Number fields hold typed text in the draft; the automation holds numbers.
   const numbered = (fields: readonly FieldDefinition[] | null, values: readonly Row[]): FieldValue[] =>
     values.map(({ value: entry }) => {
@@ -901,13 +1025,14 @@ export function AutomationBuilder(props: {
       const value = numberValue(typeIn(fields, entry.field), entry.value.value);
       return value === undefined ? entry : { field: entry.field, value: { kind: "literal", value } };
     });
-  const rowValue = (row: ConditionRow) => numberValue(typeIn(recordFields, row.field), row.value) ?? row.value;
+  const rowValue = (row: ConditionRow, fields: readonly FieldDefinition[] | null = recordFields) =>
+    numberValue(typeIn(fields, row.field), row.value) ?? row.value;
   // Rows nobody changed write the file's expression back as it was, such as "2" compared as text.
-  const conditionOf = (condition: ConditionDraft): string | null =>
+  const conditionOf = (condition: ConditionDraft, fields: readonly FieldDefinition[] | null = recordFields): string | null =>
     condition.mode === "always" ? null
       : condition.mode === "formula" ? condition.formula
       : condition.rows === condition.saved?.rows ? condition.saved.expression
-      : conditionFormula(condition.rows.map(({ row }) => ({ ...row, value: rowValue(row) })));
+      : conditionFormula(condition.rows.map(({ row }) => ({ ...row, value: rowValue(row, fields) })));
   const when: AutomationTrigger = draft.when.kind === "field-changed" && draft.when.to?.kind === "literal"
     ? {
         ...draft.when,
@@ -915,14 +1040,25 @@ export function AutomationBuilder(props: {
       }
     : draft.when.kind === "starts-matching" ? { ...draft.when, condition: conditionOf(draft.matching) ?? "" }
     : draft.when;
-  const stepOf = ({ step, rows, branches }: StepEntry): AutomationStep => {
+  const stepOf = (entry: StepEntry): AutomationStep => {
+    const { step, rows, branches } = entry;
     if (step.kind === "if" && branches !== null) return { ...step, do: branches.do.map(stepOf), otherwise: branches.otherwise.map(stepOf) };
+    if (step.kind === "find" && entry.condition !== null && editableFind(step, table, triggerTable) !== null) {
+      return { ...step, condition: conditionOf(entry.condition, fieldsOf(entry)) ?? "true" };
+    }
     const action = editableAction(step, table);
     if (action) return { ...action, input: rows.map(({ value: entry }) => ({ key: entry.field, value: entry.value })) };
-    const editable = editableStep(step, table);
+    const editable = editableStep(step, table, triggerTable);
+    if (editable === null) return step;
+    // A Set whose records moved to another table, as when its Find reads
+    // another now, drops the old table's operation, so saving pins one there.
+    const home = editable.kind === "set" && table !== null ? (editable.records === null ? watched : recordsOf(entry)?.table) : undefined;
+    // An operation the dataset lacks is a problem for the file to show, not a move.
+    const pinned = editable.kind === "set" && editable.operation !== null ? tableOfOperation(editable.operation, table!) : undefined;
+    const kept = pinned !== undefined && home !== undefined && home !== null && pinned !== home ? { ...editable, operation: null } : editable;
     // A step nobody edited stays as the file holds it, such as a number field's "001".
-    if (editable === null || JSON.stringify(rows.map(({ value }) => value)) === JSON.stringify(editable.values)) return step;
-    return { ...editable, values: numbered(fieldsOf(step), rows) };
+    if (kept === editable && JSON.stringify(rows.map(({ value }) => value)) === JSON.stringify(editable.values)) return step;
+    return { ...kept, values: numbered(fieldsOf(entry), rows) };
   };
   const automation: Automation = {
     ...props.automation,
@@ -931,10 +1067,10 @@ export function AutomationBuilder(props: {
     if: conditionOf(draft.condition),
     do: draft.steps.map(stepOf),
   };
-  const ordered = entriesInOrder(draft.steps);
   const full = ordered.length >= MAX_STEPS;
-  const placedByKey = new Map(ordered.map((placed) => [placed.entry.key, placed]));
-  const edits = (entry: StepEntry) => editableAction(entry.step, table) !== null || editableStep(entry.step, table) !== null;
+  const editableOf = (entry: StepEntry) => editableStep(entry.step, table, triggerTable);
+  const edits = (entry: StepEntry) =>
+    editableAction(entry.step, table) !== null || editableOf(entry) !== null || editableFind(entry.step, table, triggerTable) !== null;
   const dirty = JSON.stringify(automation) !== JSON.stringify(props.baseline);
   // What Save writes: a draft without a name takes its sentence, and a new
   // one an id from its name. Main checks exactly this.
@@ -968,8 +1104,8 @@ export function AutomationBuilder(props: {
     if (!props.leaveRequested) setSaveChosen(false);
   }, [props.leaveRequested]);
 
-  // The Collections an Add a record step can reach. The builder adds a
-  // dataset's records only to its own table, so it asks for none.
+  // The Collections a Find or an Add a record step can reach. A dataset's
+  // steps stay in its own tables, so it asks for none.
   useEffect(() => {
     if (table !== null) return;
     const epoch = scope.current();
@@ -985,7 +1121,8 @@ export function AutomationBuilder(props: {
 
   // The fields of each other Collection a step adds records to.
   const targetPaths = useMemo(
-    () => [...new Set(entriesInOrder(draft.steps).flatMap(({ entry: { step } }) => (step.kind === "add-record" && step.collection !== null ? [step.collection] : [])))],
+    () => [...new Set(entriesInOrder(draft.steps, table, triggerTable).flatMap(({ entry: { step } }) =>
+      ((step.kind === "add-record" || step.kind === "find") && step.collection !== null ? [step.collection] : [])))],
     [draft.steps],
   );
   useEffect(() => {
@@ -1051,14 +1188,15 @@ export function AutomationBuilder(props: {
   else if (automation.when.kind === "button" && lacks(buttonFields, automation.when.field)) {
     problems.set("when/button", `${automation.when.field} is not a button in ${watched}. Choose a button.`);
   }
-  const conditionProblems = (condition: ConditionDraft, key: string) => {
+  // A Find's rows name its Collection's fields, which a moved trigger does not change.
+  const conditionProblems = (condition: ConditionDraft, key: string, fields: readonly FieldDefinition[] | null = recordFields) => {
     if (condition.mode === "formula") formulaProblem(key, condition.formula);
     if (condition.mode !== "rows") return;
     if (condition.rows.length === 0) problems.set(key, "Add a condition.");
     for (const { key: entry, row } of condition.rows) {
       if (row.field === "") problems.set(`${key}/${entry}`, "Choose a field.");
-      else if (lacks(recordFields, row.field)) problems.set(`${key}/${entry}/field`, notAField(row.field));
-      else if (typeIn(recordFields, row.field) === "number" && row.value !== null && typeof rowValue(row) !== "number") {
+      else if (fields === recordFields && lacks(recordFields, row.field)) problems.set(`${key}/${entry}/field`, notAField(row.field));
+      else if (typeIn(fields, row.field) === "number" && row.value !== null && typeof rowValue(row, fields) !== "number") {
         problems.set(`${key}/${entry}`, "Enter a number.");
       }
     }
@@ -1078,8 +1216,23 @@ export function AutomationBuilder(props: {
   conditionProblems(draft.condition, "if");
   if (automation.when.kind === "starts-matching") conditionProblems(draft.matching, "when/condition");
   if (draft.steps.length === 0) problems.set(listProblem("do"), "Add a step.");
-  for (const { entry: { key, step, rows, branches } } of ordered) {
+  for (const { entry } of ordered) {
+    const { key, step, rows, branches } = entry;
     if (branches !== null && branches.do.length === 0) problems.set(listProblem(`${key}/do`), "Add a step.");
+    const bound = bindingOf(step, table, triggerTable);
+    if (step.kind === "find" && step.as === "") problems.set(`step-${key}/as`, "Name the result, so later steps can use it.");
+    else if (bound !== null && !RESULT_NAME.test(bound.name)) {
+      problems.set(`step-${key}/as`, "A result name starts with a letter or _, then uses only letters, digits, and _.");
+    }
+    const find = editableFind(step, table, triggerTable);
+    // A step in a dataset whose trigger watches no table names its own.
+    if ((find !== null || editableOf(entry)?.kind === "add-record") && table !== null && datasetTableOf(entry) === null) {
+      problems.set(`step-${key}/table`, "Choose a table.");
+    }
+    if (find !== null && entry.condition !== null) {
+      conditionProblems(entry.condition, `step-${key}/condition`, fieldsOf(entry));
+      continue;
+    }
     const action = editableAction(step, table);
     if (action !== null) {
       const seen = new Set<string>();
@@ -1091,17 +1244,17 @@ export function AutomationBuilder(props: {
       });
       continue;
     }
-    const editable = editableStep(step, table);
+    const editable = editableOf(entry);
     if (editable === null) continue;
     if (rows.length === 0) problems.set(`step-${key}/values`, editable.kind === "set" ? "Add a field to set." : "Add a field.");
-    if (editable.kind === "set" && automation.when.kind === "record-removed") {
+    if (editable.kind === "set" && editable.records === null && automation.when.kind === "record-removed") {
       problems.set(`step-${key}`, "A removed record has no fields to set. Choose another trigger, or remove this step.");
     }
     const seen = new Set<string>();
-    const fields = fieldsOf(step);
+    const fields = fieldsOf(entry);
     rows.forEach(({ key: row, value: entry }) => {
       if (entry.field === "") problems.set(`row-${row}/field`, "Choose a field.");
-      else if (editable.kind === "set" && lacks(recordFields, entry.field)) problems.set(`row-${row}/field`, notAField(entry.field));
+      else if (editable.kind === "set" && editable.records === null && lacks(recordFields, entry.field)) problems.set(`row-${row}/field`, notAField(entry.field));
       else if (seen.has(entry.field)) problems.set(`row-${row}/field`, `${entry.field} is in this step twice.`);
       seen.add(entry.field);
       if (entry.value.kind === "formula") formulaProblem(`row-${row}/value`, entry.value.expression);
@@ -1195,31 +1348,107 @@ export function AutomationBuilder(props: {
       setSteps(listId, (current) => current.filter((entry) => entry.key !== key)));
   };
   const addStep = (id: ListId, step: AutomationStep) => {
-    const entry = entryOf(step, null);
+    const entry = entryOf(step, null, table !== null);
     focusAfter(`step-${entry.key}-first`, () => setSteps(id, (current) => [...current, entry]));
   };
   const setRows = (key: number, rows: Row[]) => setStep(key, (entry) => ({ ...entry, rows }));
   const newCondition = (): ConditionEntry => ({ key: newKey(), row: { field: recordFields[0]?.name ?? "", operator: "is", value: comparedValue(recordFields[0]) } });
 
   /** One step: its controls, or its sentence where the builder cannot edit it yet. */
-  const stepItem = ({ entry, list, listId, index, number }: (typeof ordered)[number]): ReactNode => {
+  const stepItem = ({ entry, list, listId, index, number, scope }: (typeof ordered)[number]): ReactNode => {
     const { key, step, rows } = entry;
-    const editable = editableStep(step, table);
+    const editable = editableOf(entry);
+    const find = editableFind(step, table, triggerTable);
     const action = editableAction(step, table);
     const chosen = action === null ? undefined : table?.actions.find((candidate) => candidate.name === action.operation);
     // This table's actions, and the one the step runs when the file names another table's.
     const offered = (table?.actions ?? []).filter((candidate) => candidate.table === table?.name || candidate === chosen);
-    const targetPath = targetOf(step);
+    const targetPath = targetOf(entry);
+    // Main lists the Collections a step can change; a Find's read reach shows in its saved verdict.
     const targetStopped = step.kind === "add-record" && targetPath !== collectionPath
       ? (targets?.find((target) => target.path === targetPath)?.stopped ?? null)
       : null;
-    const fields = fieldsOf(step);
+    const fields = fieldsOf(entry);
+    const targetName = targetPath === collectionPath ? own : collectionName(targetPath);
+    // The Collection a Find reads or an Add a record adds to.
+    // A Find reads, so it offers what a Find can read, with why another cannot be; an Add a record offers what a step can change.
+    const findStopped = step.kind === "find" ? (targets?.find((target) => target.path === targetPath)?.findStopped ?? null) : null;
+    const choices = (targets ?? []).filter((target) => target.path !== collectionPath && (step.kind === "find" || target.stopped === null));
+    const collectionPicker = (named: AddStep | FindStep) => table !== null ? tablePicker(named) : (
+      <select
+        aria-label={`Step ${number}, Collection`}
+        data-focus={`step-${key}-first`}
+        value={targetPath}
+        onChange={(event) => setStep(key, (current) => ({ ...current, step: { ...named, collection: event.target.value === collectionPath ? null : event.target.value } }))}
+        className={selectClass}
+      >
+        <option value={collectionPath}>{own}</option>
+        {targetPath === collectionPath || choices.some((target) => target.path === targetPath)
+          ? null : <option value={targetPath}>{collectionName(targetPath)}</option>}
+        {choices.map((target) => {
+          const stop = step.kind === "find" ? target.findStopped : null;
+          return (
+            <option key={target.path} value={target.path} disabled={stop !== null && target.path !== targetPath}>
+              {stop === null ? target.name : `${target.name} (${stop})`}
+            </option>
+          );
+        })}
+      </select>
+    );
+    // In a dataset, the table the step works on: choosing one names that table's operation, which saving keeps.
+    const tablePicker = (named: AddStep | FindStep) => {
+      const needs = STEP_OPERATIONS[named.kind];
+      const home = datasetTableOf(entry);
+      return (
+        <select
+          aria-label={`Step ${number}, table`}
+          data-focus={`step-${key}-first`}
+          value={home ?? ""}
+          onChange={(event) => {
+            const chosen = event.target.value;
+            const operation = chosen === triggerTable ? null
+              : table!.tables.get(chosen)?.operations.find((candidate) => candidate.kind === needs.kind)?.name ?? null;
+            setStep(key, (current) => ({ ...current, step: { ...named, operation } }));
+          }}
+          className={selectClass}
+          {...invalid(problem(`step-${key}/table`))}
+        >
+          {home === null ? <option value="" disabled>Choose a table</option> : null}
+          {[...table!.tables].map(([name, { operations }]) => {
+            const able = name === triggerTable || operations.some((candidate) => candidate.kind === needs.kind);
+            return <option key={name} value={name} disabled={!able}>{able ? name : `${name} (${needs.missing})`}</option>;
+          })}
+        </select>
+      );
+    };
+    // The name later steps use for this step's result.
+    const resultName = (named: FindStep | AddStep) => (
+      <label className="flex items-center gap-1.5 text-[12px] text-muted">
+        <span className="shrink-0">Name result</span>
+        <input
+          aria-label={`Step ${number}, result name`}
+          value={named.as ?? ""}
+          spellCheck={false}
+          placeholder={named.kind === "find" ? "found" : "Optional"}
+          onChange={(event) => setStep(key, (current) => ({
+            ...current,
+            step: named.kind === "find" ? { ...named, as: event.target.value } : { ...named, as: event.target.value === "" ? null : event.target.value },
+          }))}
+          className={`${inputClass} font-mono text-[12px]`}
+          {...invalid(problem(`step-${key}/as`))}
+        />
+      </label>
+    );
+    const records = step.kind === "set" ? step.records : null;
+    const recordsKnown = records === null || scope.some((bound) => bound.name === records);
+    const hasRecord = !["record-removed", "schedule", "group-message"].includes(draft.when.kind);
     return (
       <div key={key} data-step data-testid={`builder-step-${number - 1}`} className={listId === "do" ? "rounded-lg border border-line bg-bg p-2" : "py-0.5"}>
         <div className="mb-1.5 flex items-center gap-1">
           <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
             {editable?.kind === "set" ? "Set fields"
             : editable?.kind === "add-record" ? "Add a record"
+            : find !== null ? "Find records"
             : action !== null ? "Run an action"
             : step.kind === "run" || step.kind === "run-file" ? "Run code"
             : step.kind === "if" ? "If"
@@ -1257,9 +1486,9 @@ export function AutomationBuilder(props: {
         ) : entry.verdict !== null ? (
           <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">{entry.verdict}</StatusLine>
         ) : null}
-        {table !== null && props.addsStay && editable?.kind === "add-record" ? (
+        {editable?.kind === "add-record" && props.addsStay.includes(datasetTableOf(entry) ?? "") ? (
           <StatusLine tone="muted" icon={Info} label="Undo keeps records">
-            Undo keeps the records this step adds. This Collection has no delete action available to the automation.
+            Undo keeps the records this step adds. {datasetTableOf(entry) === own ? "This Collection" : datasetTableOf(entry)} has no delete action available to the automation.
           </StatusLine>
         ) : null}
         {/* Anyone who can write the dataset, through an app too, can start a dataset's automation. */}
@@ -1372,6 +1601,26 @@ export function AutomationBuilder(props: {
               </div>
             ))}
           </div>
+        ) : find !== null && entry.condition !== null ? (
+          <div className="flex flex-col gap-2">
+            {collectionPicker(find)}
+            <Problem shown={problem(`step-${key}/table`)} />
+            {findStopped !== null ? <StatusLine tone="warning" icon={AlertTriangle} label="Out of reach">{findStopped}</StatusLine> : null}
+            <ConditionEditor
+              part={{ kind: "find", number, key, dataset: table !== null }}
+              condition={entry.condition}
+              expression={conditionOf(entry.condition, fields)}
+              fields={fields ?? []}
+              collection={targetName}
+              problemKey={`step-${key}/condition`}
+              problem={problem}
+              newRow={() => ({ key: newKey(), row: { field: fields?.[0]?.name ?? "", operator: "is", value: comparedValue(fields?.[0]) } })}
+              focusAfter={focusAfter}
+              onChange={(change) => setStep(key, (current) => ({ ...current, condition: change(current.condition!) }))}
+            />
+            {resultName(find)}
+            <Problem shown={problem(`step-${key}/as`)} />
+          </div>
         ) : editable === null ? (
           <p className="m-0 break-words text-[12px] leading-snug text-muted">
             <Sentence parts={stepParts(step)} />
@@ -1379,20 +1628,30 @@ export function AutomationBuilder(props: {
         ) : (
           <div className="flex flex-col gap-2">
             {editable.kind === "add-record" ? (
-              <select
-                aria-label={`Step ${number}, Collection`}
-                data-focus={`step-${key}-first`}
-                value={targetPath}
-                onChange={(event) => setStep(key, (current) => ({
-                  ...current,
-                  step: { ...editable, collection: event.target.value === collectionPath ? null : event.target.value },
-                }))}
-                className={selectClass}
-              >
-                <option value={collectionPath}>{own}</option>
-                {targetStopped !== null ? <option value={targetPath}>{collectionName(targetPath)}</option> : null}
-                {reachable.map((target) => <option key={target.path} value={target.path}>{target.name}</option>)}
-              </select>
+              <>
+                {collectionPicker(editable)}
+                <Problem shown={problem(`step-${key}/table`)} />
+              </>
+            ) : null}
+            {editable.kind === "set" && (scope.length > 0 || records !== null) ? (
+              <>
+                <select
+                  aria-label={`Step ${number}, record`}
+                  value={records ?? ""}
+                  onChange={(event) => setStep(key, (current) => ({ ...current, step: { ...editable, records: event.target.value === "" ? null : event.target.value } }))}
+                  className={selectClass}
+                  {...invalid(problem(`step-${key}/records`))}
+                >
+                  {hasRecord || records === null ? <option value="">The trigger record</option> : null}
+                  {recordsKnown ? null : <option value={records!}>{records}</option>}
+                  {scope.map((bound) => (
+                    <option key={bound.name} value={bound.name}>
+                      {bound.kind === "records" ? `Records found as ${bound.name}` : `Record added as ${bound.name}`}
+                    </option>
+                  ))}
+                </select>
+                <Problem shown={problem(`step-${key}/records`)} />
+              </>
             ) : null}
             {rows.map(({ key: rowKey, value: row }, rowIndex) => {
               const field = fields?.find((candidate) => candidate.name === row.field);
@@ -1406,7 +1665,7 @@ export function AutomationBuilder(props: {
                       label={`Step ${number}, field ${rowIndex + 1}`}
                       fields={fields}
                       value={row.field}
-                      collection={step.kind === "set" ? watched : targetPath === collectionPath ? own : collectionName(targetPath)}
+                      collection={step.kind === "set" && records === null ? watched : targetName}
                       focusKey={rowIndex === 0 && editable.kind === "set" ? `step-${key}-first` : `row-${rowKey}-first`}
                       problem={problem(`row-${rowKey}/field`)}
                       onChange={(next) => replace({
@@ -1452,6 +1711,12 @@ export function AutomationBuilder(props: {
               Add field
             </SecondaryButton>
             <Problem shown={problem(`step-${key}/values`)} />
+            {editable.kind === "add-record" ? (
+              <>
+                {resultName(editable)}
+                <Problem shown={problem(`step-${key}/as`)} />
+              </>
+            ) : null}
           </div>
         )}
         <Problem shown={problem(`step-${key}`)} />
@@ -1484,6 +1749,15 @@ export function AutomationBuilder(props: {
           <Plus size={12} aria-hidden />
           Add a record
         </SecondaryButton>
+        <SecondaryButton
+          size="compact"
+          className="flex items-center gap-1"
+          disabled={full}
+          onClick={() => addStep(listId, { kind: "find", condition: "true", collection: null, as: "", operation: null })}
+        >
+          <Plus size={12} aria-hidden />
+          Find records
+        </SecondaryButton>
         {table !== null && table.actions.some((candidate) => candidate.table === table.name) ? (
           <SecondaryButton
             size="compact"
@@ -1508,7 +1782,6 @@ export function AutomationBuilder(props: {
   const trigger = draft.when;
   const nextRun = trigger.kind === "schedule" ? nextRunOf(trigger) : null;
   const builderTrigger = builderTriggerOf(trigger);
-  const reachable = (targets ?? []).filter((target) => target.stopped === null && target.path !== collectionPath);
   const setWhen = (next: AutomationTrigger) => setDraft((current) => ({ ...current, when: next }));
   const waiting = props.reach?.kind === "waiting";
 
@@ -1638,7 +1911,7 @@ export function AutomationBuilder(props: {
             </>
           ) : trigger.kind === "starts-matching" ? (
             <ConditionEditor
-              part="match"
+              part={{ kind: "match" }}
               condition={draft.matching}
               expression={conditionOf(draft.matching)}
               fields={recordFields}
@@ -1765,7 +2038,7 @@ export function AutomationBuilder(props: {
         <section aria-label="Only if" className="flex flex-col gap-1.5">
           <SectionLabel>Only if</SectionLabel>
           <ConditionEditor
-            part="condition"
+            part={{ kind: "condition" }}
             condition={draft.condition}
             expression={automation.if}
             fields={recordFields}

@@ -225,11 +225,11 @@ function resolve(
     const fitting = candidates(definition, tables, kind, names);
     const named = step.operation === null ? undefined : definition.operations.find((operation) => operation.name === step.operation);
     let chosen = named !== undefined && fitting.includes(named) ? named : undefined;
-    // Pinning never moves an Add record to another table: it stays in its
-    // operation's table, or the trigger's when it names none, which is the
-    // table the ⚡ panel built it in. A trigger with no table leaves the
-    // dataset's only table. With no fit there, a person names one.
-    const home = step.kind === "add-record" ? (named ?? table ?? datasetTableNamed(definition, null))?.tableId : null;
+    // Pinning never moves an Add record or a Find to another table: it
+    // stays in its operation's table, or the trigger's when it names none,
+    // which is the table the ⚡ panel built it in. A trigger with no table
+    // leaves the dataset's only table. With no fit there, a person names one.
+    const home = step.kind === "set" ? null : (named ?? table ?? datasetTableNamed(definition, null))?.tableId;
     if (chosen === undefined && pin && pin(step) && home !== undefined) {
       chosen = fitting.find((operation) => home === null || operation.tableId === home);
     }
