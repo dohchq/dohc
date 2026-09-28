@@ -360,6 +360,12 @@ export interface SyncRelayShareWithGrantRow {
   grant: SyncRelayShareGrantRow;
 }
 
+// A grant the owner gave, with the newest grant generation at which it wrote
+// a Collection's automations.yaml directly (ADR 0013), or null.
+export interface SyncRelayGrantedShareRow extends SyncRelayShareWithGrantRow {
+  automationsGeneration: number | null;
+}
+
 export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
   dependents: SyncRelayShareGrantRow[];
   lastUsedAtMs: number | null;
@@ -924,7 +930,7 @@ export interface SyncRelayStorage {
     shareId: string,
     recipientUserId: string,
   ): SyncRelayShareGrantRow[];
-  listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[];
+  listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[];
   listLinkGrantsByWorkspace(
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,

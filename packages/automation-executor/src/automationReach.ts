@@ -44,18 +44,23 @@ export type RosterProblem =
   | { kind: "outdated-server" };
 
 /**
- * A share link that wrote a Collection's automations directly (ADR 0013)
- * and can no longer edit them: revoked, or narrowed below Edit. What it
+ * A grant that wrote a Collection's automations directly (ADR 0013) and can
+ * no longer edit them: revoked, or narrowed below Edit. `holder` says
+ * whether a named person or a share link held it; a person's email may be
+ * unknown. What it
  * wrote may still be there, and this computer may never have checked it
- * while the link could edit. So a step this link could not have run waits
- * for a current editor once, as if the link had just left (ADR 0012).
+ * while the grant could edit, as when the owner revoked it from another
+ * computer before this one pulled. So a step it could not have run waits
+ * for a current editor once, as if its holder had just left (ADR 0012).
  * `generation` is the newest grant generation it wrote automations under,
- * so a later editing period of the same link is new evidence. `files` is
- * the scope its grant covered, read as Edit.
+ * so a later editing period of the same grant is new evidence. `files` is
+ * the scope the grant covered, read as Edit.
  */
-export interface FormerLinkEditor {
+export interface FormerEditor {
   grantId: string;
   generation: number;
+  holder: "person" | "link";
+  recipientEmail: string | null;
   files: { paths: readonly string[]; versionId: string | null };
 }
 
@@ -63,7 +68,7 @@ export interface FormerLinkEditor {
 export type ReachRoster =
   // The owner's computer. A workspace that does not sync has no grants, and
   // its owner is this computer's person, whose account may be unknown.
-  | { kind: "owner"; ownerUserId: string | null; grants: readonly RosterGrant[]; formerLinks?: readonly FormerLinkEditor[] }
+  | { kind: "owner"; ownerUserId: string | null; grants: readonly RosterGrant[]; formerEditors?: readonly FormerEditor[] }
   | { kind: "unknown"; problem: RosterProblem }
   // A collaborator's computer. The relay tells a recipient only about their
   // own grant, so the other editors are unknown. The recipient's grant bounds
@@ -161,7 +166,8 @@ interface Person {
   userId: string | null;
   email: string | null;
   grants: RosterGrant[];
-  // A share link: the name that tells it apart from other links.
+  // The name that tells this editor apart when an email cannot: a share
+  // link, or a former editor dohc has no email for.
   link?: { name: string };
 }
 
@@ -270,18 +276,27 @@ function linkPerson(grant: RosterGrant, who: string): Person {
   return { userId: null, email: null, grants: [grant], link: { name: path ? `${who} to ${path}` : who } };
 }
 
-// The former links that could have written any of `sources`, each as the
-// editor it was.
+// The former editors that could have written any of `sources`, each on its
+// own, as the editor that grant made them. A named one is not joined with
+// the same person's current grants.
 function formerEditorsOf(roster: ReachRoster, sources: readonly string[]): Array<Person & { evidence: string }> {
   if (roster.kind !== "owner") return [];
-  return (roster.formerLinks ?? [])
-    .map((link) => ({
-      evidence: `${link.grantId}#${link.generation}`,
-      ...linkPerson({
-        grantId: link.grantId, recipientUserId: null, recipientEmail: null,
-        files: { ...link.files, access: "edit" }, channel: null,
-      }, "Anyone who had your share link"),
-    }))
+  return (roster.formerEditors ?? [])
+    .map((former) => {
+      const grant: RosterGrant = {
+        grantId: former.grantId, recipientUserId: null, recipientEmail: former.recipientEmail,
+        files: { ...former.files, access: "edit" }, channel: null,
+      };
+      const path = former.files.paths[0];
+      const person: Person = former.holder === "link"
+        ? linkPerson(grant, "Anyone who had your share link")
+        : {
+            userId: null, email: former.recipientEmail, grants: [grant],
+            // A person dohc has no email for is named by what they had.
+            ...(former.recipientEmail === null ? { link: { name: path ? `Someone you shared ${path} with` : "Someone you shared with" } } : {}),
+          };
+      return { evidence: `${former.grantId}#${former.generation}`, ...person };
+    })
     .filter((person) => sources.some((path) => canEdit(person, path)));
 }
 
