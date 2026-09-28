@@ -8,6 +8,7 @@ import type {
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
   ListAutomationGroupsResult,
+  ListAutomationPeopleResult,
   ListAutomationTargetsResult,
   RetryCollectionAutomationResult,
   ScheduleHostComputer,
@@ -141,7 +142,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       failureListeners.push(listener);
       return () => undefined;
     }),
-    onAutomationHoldsChanged: vi.fn(() => () => undefined),
+    onAutomationHoldsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
     readScheduleHost: vi.fn(async (_payload: { workspaceId: string }): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
     onScheduleHostChanged: vi.fn((listener: (workspaceId: string) => void) => {
       hostListeners.add(listener);
@@ -150,6 +151,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     onCloudSessionChanged: vi.fn(() => () => undefined),
     createWorkspaceFile: vi.fn(async ({ relativePath }: { relativePath: string }) => ({ relativePath })),
     listAutomationGroups: vi.fn(async (): Promise<ListAutomationGroupsResult> => ({ groups: [] })),
+    listAutomationPeople: vi.fn(async (): Promise<ListAutomationPeopleResult> => ({ status: "listed", people: [] })),
   };
   vi.stubGlobal("dohcDesktop", bridge);
   // Another writer changes the file; the panel reads it again, as it does
@@ -1666,6 +1668,257 @@ describe("the builder's Groups", () => {
     expect(await within(board).findByText(/^Check each \{expression\} in the message/u, undefined, SLOW)).toBeTruthy();
     expect(message.getAttribute("aria-invalid")).toBe("true");
     expect(written).toEqual([]);
+  }, 30_000);
+});
+
+describe("the builder's people", () => {
+  const openBuilder = async (user: ReturnType<typeof userEvent.setup>, name = "Stamp the finish date") =>
+    await user.click(await screen.findByRole("button", { name }));
+  const TO_YOU = "A direct message goes to another person. To reach yourself, use Notify.";
+  const NO_DM_BOB = "There is no direct message with bob@dohc.test yet. Start one first: automations never start one.";
+  const PEOPLE = [
+    { userId: "user-owner", name: "you", you: true, dmStopped: TO_YOU, noticeStopped: null },
+    { userId: "user-ana", name: "ana@dohc.test", you: false, dmStopped: null, noticeStopped: "ana@dohc.test cannot view Tasks." },
+    { userId: "user-bob", name: "bob@dohc.test", you: false, dmStopped: NO_DM_BOB, noticeStopped: null },
+  ];
+  const options = (name: string) => [...(screen.getByRole("combobox", { name }) as HTMLSelectElement).options]
+    .map((option) => [option.textContent, option.disabled]);
+  const chosen = (name: string) => {
+    const select = screen.getByRole("combobox", { name }) as HTMLSelectElement;
+    return select.options[select.selectedIndex]?.textContent;
+  };
+  const literal = (value: string) => ({ kind: "literal" as const, value });
+
+  it("sends a direct message only where a conversation exists, or to a person a formula names", async () => {
+    const { bridge, written } = makeBridge(read([]));
+    bridge.listAutomationPeople.mockResolvedValue({ status: "listed", people: PEOPLE });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Changes to" }), "Done");
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    // People are read only once a step that names them is on screen.
+    expect(bridge.listAutomationPeople).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Send a direct message" }));
+    await waitFor(() => expect(bridge.listAutomationPeople).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "Tasks" }));
+    await waitFor(() => expect(options("Step 1, person 1")).toEqual([
+      ["Choose a person", true], [`You (${TO_YOU})`, true], ["ana@dohc.test", false], [`bob@dohc.test (${NO_DM_BOB})`, true], ["Formula", false],
+    ]));
+    expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Step 1, person 1" }));
+    expect(screen.getByTestId("builder-step-0").textContent).toContain("Send a direct message");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Choose a person.")).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Step 1, person 1" }).getAttribute("aria-invalid")).toBe("true");
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, person 1" }), "ana@dohc.test");
+    await user.click(screen.getByRole("button", { name: "Add person" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Step 1, person 2" })));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, person 2" }), "Formula");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const formula = screen.getByRole("textbox", { name: "Step 1, person 2, formula" });
+    expect(document.getElementById(formula.getAttribute("aria-describedby")!)?.textContent).toBe("Write a formula.");
+    await user.type(formula, "person.id");
+    // A formula's person gets the message only through a conversation they already have.
+    expect(screen.getByText("dohc sends it only to a person you already have a direct message with.")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Step 1, message" }), "Done");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual([
+      { kind: "direct-message", text: "Done", to: [literal("user-ana"), { kind: "formula", expression: "person.id" }] },
+    ]);
+  }, 30_000);
+
+  it("notifies people and you, and keeps a saved person it cannot reach or find with why", async () => {
+    const { bridge, written } = makeBridge(read([summary({ ...stamp, do: [
+      { kind: "notify", text: "Done", to: [literal("user-ana"), literal("user-gone")] },
+    ] })]));
+    bridge.listAutomationPeople.mockResolvedValue({ status: "listed", people: PEOPLE });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const step = screen.getByTestId("builder-step-0");
+    expect(await within(step).findByText("ana@dohc.test cannot view Tasks.")).toBeTruthy();
+    expect(step.textContent).toContain("Notify");
+    expect(options("Step 1, person 1")).toEqual([
+      ["You", false], ["ana@dohc.test (ana@dohc.test cannot view Tasks.)", false], ["bob@dohc.test", false], ["Formula", false],
+    ]);
+    expect(chosen("Step 1, person 2")).toBe("Someone not listed");
+    expect(within(step).getByText("dohc cannot find this person among the people this workspace is shared with. Choose someone else.")).toBeTruthy();
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, person 2" }), "You");
+    await user.click(screen.getByRole("button", { name: "Remove person 1 from step 1" }));
+    // Focus moves to the row that took its place.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove person 1 from step 1" })));
+    expect(screen.getByTestId("builder-step-0").textContent).toContain("Notify you");
+    await user.click(screen.getByRole("button", { name: "Remove person 1 from step 1" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add person" })));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Add a person.")).toBeTruthy();
+    expect(written).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Add person" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, person 1" }), "You");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual([{ kind: "notify", text: "Done", to: [literal("user-owner")] }]);
+  }, 30_000);
+
+  it("reads people again when a share changes while editing, and reports a failed read once", async () => {
+    const onError = vi.fn();
+    const { bridge } = makeBridge(read([summary({ ...stamp, do: [{ kind: "direct-message", text: "Done", to: [literal("user-ana")] }] })]));
+    const holdListeners: Array<(event: { workspaceId: string }) => void> = [];
+    bridge.onAutomationHoldsChanged.mockImplementation((listener: (event: { workspaceId: string }) => void) => {
+      holdListeners.push(listener);
+      return () => undefined;
+    });
+    bridge.listAutomationPeople.mockResolvedValue({ status: "listed", people: PEOPLE });
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await waitFor(() => expect(chosen("Step 1, person 1")).toBe("ana@dohc.test"));
+    const stopped = "bob@dohc.test cannot post in your direct message with ana@dohc.test.";
+    expect(screen.queryByText(stopped)).toBeNull();
+
+    // Bob gets Edit on Tasks, so a run could no longer post in the direct message.
+    bridge.listAutomationPeople.mockResolvedValue({ status: "listed", people: PEOPLE.map((person) =>
+      person.userId === "user-ana" ? { ...person, dmStopped: stopped } : person) });
+    // A reply for another workspace reads nothing.
+    act(() => holdListeners.forEach((listener) => listener({ workspaceId: "ws-2" })));
+    const before = bridge.listAutomationPeople.mock.calls.length;
+    act(() => holdListeners.forEach((listener) => listener({ workspaceId: "ws-1" })));
+    expect(await within(screen.getByTestId("builder-step-0")).findByText(stopped)).toBeTruthy();
+    expect(bridge.listAutomationPeople.mock.calls.length).toBeGreaterThan(before);
+    // The saved person stays chosen, with why.
+    expect(chosen("Step 1, person 1")).toBe(`ana@dohc.test (${stopped})`);
+
+    bridge.listAutomationPeople.mockRejectedValue(new Error("offline"));
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listAutomationPeople.mock.calls.length).toBeGreaterThanOrEqual(before + 3));
+    expect(onError.mock.calls.filter(([message]) => message === "dohc could not list the people an automation can message.")).toHaveLength(1);
+    // What it last read stays on screen.
+    expect(chosen("Step 1, person 1")).toBe(`ana@dohc.test (${stopped})`);
+  }, 30_000);
+
+  it("says why people are not listed in a shared view, while dohc waits for the roster, or after a failed first read", async () => {
+    // A person not chosen yet, and a saved one dohc cannot name without the list.
+    const saved = read([summary({ ...stamp, do: [{ kind: "direct-message", text: "Done", to: [literal(""), literal("user-ana")] }] })]);
+    const { bridge } = makeBridge(saved);
+    bridge.listAutomationPeople.mockResolvedValueOnce({ status: "unavailable" });
+    const user = userEvent.setup();
+    const first = render(<Panel />);
+    await openBuilder(user);
+    expect(await screen.findByText("People are unavailable in a shared view.")).toBeTruthy();
+    expect(options("Step 1, person 1")[0]).toEqual(["People are unavailable here", true]);
+    expect(chosen("Step 1, person 2")).toBe("A saved person");
+    first.unmount();
+
+    bridge.listAutomationPeople.mockResolvedValueOnce({ status: "waiting", reason: "dohc cannot check who can edit Tasks yet." });
+    const second = render(<Panel />);
+    await openBuilder(user);
+    expect(await screen.findByText("dohc cannot check who can edit Tasks yet.")).toBeTruthy();
+    expect(options("Step 1, person 1")[0]).toEqual(["Waiting for the list of people", true]);
+    expect(chosen("Step 1, person 2")).toBe("A saved person");
+    second.unmount();
+
+    bridge.listAutomationPeople.mockRejectedValueOnce(new Error("offline"));
+    render(<Panel />);
+    await openBuilder(user);
+    expect(await screen.findByText("dohc could not list the people this workspace is shared with.")).toBeTruthy();
+    expect(options("Step 1, person 1")[0]).toEqual(["People could not be listed", true]);
+    expect(chosen("Step 1, person 2")).toBe("A saved person");
+  }, 30_000);
+
+  it("reads nothing from a Try again once no step names people, and reports the next failure with its own", async () => {
+    const onError = vi.fn();
+    const { bridge } = makeBridge(read([summary({ ...stamp, do: [{ kind: "direct-message", text: "Done", to: [literal("user-ana")] }] })]));
+    bridge.listAutomationPeople.mockRejectedValueOnce(new Error("offline"));
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not list the people an automation can message.", expect.any(Error), expect.any(Function)));
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    const calls = bridge.listAutomationPeople.mock.calls.length;
+    const retry = onError.mock.calls[0]![2] as () => void;
+    act(() => retry());
+    expect(bridge.listAutomationPeople.mock.calls.length).toBe(calls);
+
+    // A new step that names people reads again, and a failure then is reported with a Try again that reads.
+    bridge.listAutomationPeople.mockRejectedValueOnce(new Error("offline"));
+    await user.click(screen.getByRole("button", { name: "Send a direct message" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    const again = bridge.listAutomationPeople.mock.calls.length;
+    act(() => (onError.mock.calls[1]![2] as () => void)());
+    expect(bridge.listAutomationPeople.mock.calls.length).toBe(again + 1);
+  }, 30_000);
+
+  it("keeps another person's agent step as theirs with its verdict, and edits your own", async () => {
+    const actsAsAna = "This step acts as ana@dohc.test, and you can also edit Tasks.";
+    const wakes: Automation = { ...stamp, do: [
+      { kind: "wake-agent", text: "Plan the trip", person: "user-ana" },
+      { kind: "wake-agent", text: "Plan mine", person: "user-owner" },
+      // Someone main does not list, who could be you by an account this computer does not know.
+      { kind: "wake-agent", text: "Plan theirs", person: "user-unknown" },
+    ] };
+    const { bridge, written } = makeBridge(read([summary(wakes, { reach: { kind: "checked", steps: [
+      { verdict: "stopped", reason: actsAsAna }, { verdict: "allowed" }, { verdict: "allowed" },
+    ] } })]));
+    bridge.listAutomationPeople.mockResolvedValue({ status: "listed", people: PEOPLE });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const theirs = screen.getByTestId("builder-step-0");
+    const whose = "This step wakes ana@dohc.test's agent and acts as them, so you cannot change its message here.";
+    expect(await within(theirs).findByText(whose)).toBeTruthy();
+    expect(theirs.textContent).toContain("Wake an agent");
+    expect(theirs.textContent).toContain("Plan the trip");
+    expect(within(theirs).getByText(actsAsAna)).toBeTruthy();
+    expect(within(theirs).getByLabelText("Someone else's step")).toBeTruthy();
+    expect(within(theirs).queryByRole("textbox")).toBeNull();
+    // Your own, named by your account, edits as in a workspace never shared.
+    expect(screen.getByTestId("builder-step-1").textContent).toContain("Wake your agent");
+    // A new one is offered only where steps can name you without an account.
+    expect(screen.queryByRole("button", { name: "Wake your agent" })).toBeNull();
+    const unknown = screen.getByTestId("builder-step-2");
+    expect(within(unknown).getByText("dohc cannot tell whose agent this step wakes, so you cannot change its message here.")).toBeTruthy();
+    // The icon says so too, for a screen reader.
+    expect(within(unknown).getByLabelText("dohc cannot tell whose step this is")).toBeTruthy();
+    expect(within(unknown).queryByLabelText("Someone else's step")).toBeNull();
+    expect(within(unknown).queryByRole("textbox")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Move step 1 down" }));
+    // Moved, it keeps its verdict and stays theirs.
+    const moved = screen.getByTestId("builder-step-1");
+    expect(within(moved).getByText(actsAsAna)).toBeTruthy();
+    expect(within(moved).getByText(whose)).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Step 1, message" }), " today");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual([{ ...wakes.do[1], text: "Plan mine today" }, wakes.do[0], wakes.do[2]]);
+  }, 30_000);
+
+  it("offers only you in a workspace never shared, signed out, and never shows how steps name you", async () => {
+    const { bridge, written } = makeBridge({ status: "missing", you: "install-here" });
+    bridge.listAutomationPeople.mockResolvedValue({ status: "listed", people: [
+      { userId: "install-here", name: "you", you: true, dmStopped: TO_YOU, noticeStopped: null },
+    ] });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Changes to" }), "Done");
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    expect(screen.queryByRole("button", { name: "Notify" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Notify you" }));
+    await waitFor(() => expect(options("Step 1, person 1")).toEqual([["You", false], ["Formula", false]]));
+    await user.click(screen.getByRole("button", { name: "Send a direct message" }));
+    await waitFor(() => expect(options("Step 2, person 1")).toEqual([["Choose a person", true], [`You (${TO_YOU})`, true], ["Formula", false]]));
+    expect(within(screen.getByTestId("builder-step-1")).getByText("No other people are listed for this workspace.")).toBeTruthy();
+    expect(document.body.innerHTML).not.toContain("install-here");
+    await user.click(screen.getByRole("button", { name: "Remove step 2" }));
+    await user.type(screen.getByRole("textbox", { name: "Step 1, message" }), "Task done");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual([{ kind: "notify", text: "Task done", to: [literal("install-here")] }]);
   }, 30_000);
 });
 

@@ -43,6 +43,7 @@ import {
   datasetSubscriptionFor,
   definitionDigest,
   definitionHash,
+  directMessageReach,
   fieldWritesOf,
   fieldsNamedBy,
   parseCollectionAutomationId,
@@ -449,6 +450,28 @@ export interface CollectionAutomationGroup {
   readStopped: string | null;
   postStopped: string | null;
 }
+
+/**
+ * A person a Direct message or a Notify step can name, as the owner already
+ * sees them: `userId` is what the step writes, `name` how the owner knows
+ * them, and `you` marks this computer's person. Each reason is why a step
+ * cannot reach them, or null when it can.
+ */
+export interface CollectionAutomationPerson {
+  userId: string;
+  name: string;
+  you: boolean;
+  dmStopped: string | null;
+  noticeStopped: string | null;
+}
+
+/** The people a builder can offer, or why dohc cannot list them yet. */
+export type CollectionAutomationPeople =
+  | { status: "listed"; people: CollectionAutomationPerson[] }
+  | { status: "waiting"; reason: string };
+
+/** Why a direct message cannot go to this computer's own person. */
+export const DIRECT_MESSAGE_TO_YOU = "A direct message goes to another person. To reach yourself, use Notify.";
 
 /**
  * A step whose reach changed, for its notice: one that waits for a current
@@ -1719,6 +1742,53 @@ export class CollectionAutomations {
         postStopped: found?.readOnly ? GROUP_READ_ONLY : post && !post.allowed ? post.reason : null,
       };
     });
+  }
+
+  /**
+   * The people a Direct message or a Notify step in this Collection can
+   * name: this computer's person, and each person who accepted one of the
+   * workspace's shares, as the roster already lists them. Each comes with
+   * the reason a saved step's run would give when it cannot reach them.
+   * Names and reasons only; it reads no message.
+   */
+  async peopleFor(collectionPath: string): Promise<CollectionAutomationPeople> {
+    await this.ready();
+    const roster = await this.options.cachedRoster();
+    const collection = collectionNamed(collectionPath);
+    if (roster.kind === "unknown") {
+      // Every step waits for the same reason without a roster.
+      const [waiting] = checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "notify", person: { userId: "", name: "" } }] });
+      return { status: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" };
+    }
+    // A shared view lists nobody: its automations run on the owner's computer.
+    if (roster.kind !== "owner") return { status: "listed", people: [] };
+    // The owner by this computer's own id in a workspace proved never shared, as steps name them there; else by their account.
+    const you = roster.localPersonId ?? roster.ownerUserId;
+    const others = roster.grants.flatMap((grant) =>
+      grant.recipientUserId !== null && grant.recipientUserId !== roster.ownerUserId && grant.recipientUserId !== you ? [grant.recipientUserId] : []);
+    const ids = [...new Set([...(you === null ? [] : [you]), ...others])];
+    if (ids.length === 0) return { status: "listed", people: [] };
+    // The directory reads a direct message only for the people it is asked about.
+    const chat = await this.options.chat.directory(roster, { groups: new Set(), people: new Set(ids) });
+    // A run waits for the engine then too.
+    if (chat === null) return { status: "waiting", reason: "dohc could not read this workspace's chats." };
+    const people = ids.map((userId) => {
+      const name = chat.person(userId);
+      const dm = userId === you ? { problem: DIRECT_MESSAGE_TO_YOU } : chat.directMessage(userId);
+      const recipient = chat.noticeRecipient(userId);
+      const [sent, noticed] = checkAutomationReach(roster, {
+        id: "", collection, codeFiles: [], steps: [directMessageReach(chat, userId), { kind: "notify", person: { userId, name } }],
+      });
+      return {
+        userId,
+        name,
+        you: userId === you,
+        dmStopped: "problem" in dm ? dm.problem : sent && !sent.allowed ? sent.reason : null,
+        noticeStopped: "problem" in recipient ? recipient.problem : noticed && !noticed.allowed ? noticed.reason : null,
+      };
+    });
+    // You first, then everyone else by name.
+    return { status: "listed", people: people.sort((a, b) => Number(b.you) - Number(a.you) || a.name.localeCompare(b.name)) };
   }
 
   /**

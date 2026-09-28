@@ -27,6 +27,9 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const draftCannotRun = vi.fn(async (_path: string, _automation: Automation): Promise<string | null> => "Budget has no approved operation named gone.");
   const missingCodeFiles = vi.fn(async (_path: string, _automation: Automation): Promise<string[]> => []);
   const groupsFor = vi.fn(async (_path: string) => [{ name: "Trip", slug: "trip", ref: "Trip", readStopped: null, postStopped: "ana@dohc.test cannot post in Trip." }]);
+  const peopleFor = vi.fn(async (_path: string) => ({ status: "listed" as const, people: [
+    { userId: "user-ana", name: "ana@dohc.test", you: false, dmStopped: null, noticeStopped: "ana@dohc.test cannot view Tasks." },
+  ] }));
   const stop = {
     automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: "0", seq: 3,
     collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "ana@dohc.test",
@@ -38,7 +41,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const runs = vi.fn(async () => ({ runs: [], next: null }));
   const listedRun = vi.fn(async (_automationId: string, claimId: string) => (claimId === oldRun.claimId ? oldRun : null));
   const executor = {
-    runs, listedRun, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+    runs, listedRun, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -64,7 +67,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const marks = (collectionPath: string) =>
     handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
   const check = (payload: Record<string, unknown>) => call(CHANNELS.checkCollectionAutomation, payload);
-  return { write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, dismissStops, shareImpact, check, createFile, writeText, reindexed };
+  return { write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, dismissStops, shareImpact, check, createFile, writeText, reindexed };
 }
 
 describe("steps a share stops", () => {
@@ -236,6 +239,24 @@ describe("listing the Groups the builder offers", () => {
     expect(shared.groupsFor).not.toHaveBeenCalled();
     // A path outside the workspace is refused before anything is read.
     await expect(f.call(CHANNELS.listAutomationGroups, { collectionPath: "../Other" })).rejects.toThrow();
+  });
+});
+
+describe("listing the people the builder offers", () => {
+  it("names each person with why a step cannot reach them, and nobody in a shared view", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listAutomationPeople, { collectionPath: "Tasks" })).resolves.toEqual({
+      status: "listed",
+      people: [{ userId: "user-ana", name: "ana@dohc.test", you: false, dmStopped: null, noticeStopped: "ana@dohc.test cannot view Tasks." }],
+    });
+    expect(f.peopleFor).toHaveBeenCalledWith("Tasks");
+    const shared = fixture({ sharedView: true });
+    await expect(shared.call(CHANNELS.listAutomationPeople, { collectionPath: "Tasks" })).resolves.toEqual({ status: "unavailable" });
+    expect(shared.peopleFor).not.toHaveBeenCalled();
+    // A path outside the workspace, or no path, is refused before anything is read.
+    await expect(f.call(CHANNELS.listAutomationPeople, { collectionPath: "../Other" })).rejects.toThrow();
+    await expect(f.call(CHANNELS.listAutomationPeople, {})).rejects.toThrow();
+    expect(f.peopleFor).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -24,6 +24,7 @@ import type {
   CollectionAutomationStop,
   CollectionFieldMark,
   CollectionAutomationGroup,
+  CollectionAutomationPeople,
   CollectionAutomationTarget,
   CollectionAutomationUndo,
   PressSettled,
@@ -4597,6 +4598,17 @@ export const ListAutomationGroupsPayload = z.object({
 export type ListAutomationGroupsPayload = z.infer<typeof ListAutomationGroupsPayload>;
 export type ListAutomationGroupsResult = { groups: CollectionAutomationGroup[] } | { status: "unavailable" };
 
+// The builder's people pickers, for Direct message and Notify steps: this
+// computer's person and each person who accepted a share, by the name the
+// owner knows them by, with why a step cannot reach one, or null. A shared
+// view gets nobody: its automations run on the owner's computer.
+export const ListAutomationPeoplePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListAutomationPeoplePayload = z.infer<typeof ListAutomationPeoplePayload>;
+export type ListAutomationPeopleResult = CollectionAutomationPeople | { status: "unavailable" };
+
 // The builder checks a draft the way saving would: what the file contract
 // refuses, the syntax error of each formula and message in it, at its JSON
 // Pointer from the automation, why dohc would not run it in its
@@ -6127,6 +6139,7 @@ export interface DohcDesktopBridge
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
   listAutomationGroups(payload: ListAutomationGroupsPayload): Promise<ListAutomationGroupsResult>;
+  listAutomationPeople(payload: ListAutomationPeoplePayload): Promise<ListAutomationPeopleResult>;
   checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
   stopAndRestore(payload: StopAndRestorePayload): Promise<StopAndRestoreResult>;
   undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;
