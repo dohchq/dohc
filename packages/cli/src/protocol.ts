@@ -581,6 +581,18 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     grantId: z.string().min(1),
   }).strict(),
   z.object({
+    kind: z.literal("named"),
+    userId: z.string().min(1),
+    grantId: z.string().min(1),
+    grantGeneration: z.number().int().positive(),
+  }).strict(),
+  z.object({
+    kind: z.literal("link"),
+    grantId: z.string().min(1),
+    grantGeneration: z.number().int().positive(),
+    principalId: z.string().min(1),
+  }).strict(),
+  z.object({
     kind: z.literal("automation"),
     automationId: z.string().min(1),
     onBehalfOf: z.string().min(1).optional(),

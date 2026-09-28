@@ -16,7 +16,11 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
   return `${SHARE_MEMBER_ORIGIN_PREFIX}${sha256Hex(JSON.stringify([shareId, userId, originId]))}`;
 }
 
-// Only the relay mints public and named authors, under these origins.
+// A client's moment names no author, or its own agent or automation. Only
+// the relay mints the others (public, named, and link), under these origins,
+// so an author kind a client may not stamp is refused whatever it is.
+const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation"]);
+
 export function assertClientLogProvenance(originId: string, rawOps: unknown[]): void {
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");
@@ -32,8 +36,9 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[]): 
     const op = raw as Record<string, unknown>;
     if (op.opKind !== "moment.append") continue;
     const payload = op.payload as Record<string, unknown> | null;
-    const author = payload?.author as Record<string, unknown> | null;
-    if (author?.kind === "public" || author?.kind === "named") throw relayError("authorship_mismatch");
+    const author = payload?.author as Record<string, unknown> | null | undefined;
+    if (author == null) continue;
+    if (!CLIENT_MOMENT_AUTHOR_KINDS.has(author.kind)) throw relayError("authorship_mismatch");
   }
 }
 

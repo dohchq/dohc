@@ -32,29 +32,67 @@ const MAX_COLLECTION_SCHEMA_BYTES = 65_536;
 const MAX_COLLECTION_RECORD_BYTES = 1024 * 1024;
 const PERSONAL_STEP = "wake-agent";
 
+const COLLECTION_WRITE_AUTHORS_MIGRATION = "collection-write-authors-v1";
+
 // The relay's record of every direct write, by grant and the client's
 // submit id. It answers a retried submit, and the owner's stop-and-restore
-// reads it, so it outlives the grant.
+// reads it, so it outlives the grant. Its author is the named recipient's
+// user or the Edit link's principal, never both and never a stand-in.
+const COLLECTION_WRITES_TABLE = `
+  CREATE TABLE sync_relay_collection_writes (
+    grant_id TEXT NOT NULL,
+    submit_id TEXT NOT NULL CHECK (length(submit_id) BETWEEN 1 AND 128),
+    workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+    share_id TEXT NOT NULL,
+    grant_generation INTEGER NOT NULL CHECK (grant_generation BETWEEN 1 AND 9007199254740991),
+    author_kind TEXT NOT NULL CHECK (author_kind IN ('named', 'link')),
+    user_id TEXT CHECK (length(user_id) >= 1),
+    principal_id TEXT CHECK (length(principal_id) >= 1),
+    payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+    origin_id TEXT NOT NULL,
+    first_origin_seq INTEGER NOT NULL CHECK (first_origin_seq >= 0),
+    last_origin_seq INTEGER NOT NULL CHECK (last_origin_seq >= first_origin_seq),
+    paths_json TEXT NOT NULL CHECK (json_valid(paths_json)),
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
+    storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
+    PRIMARY KEY (grant_id, submit_id),
+    CHECK ((author_kind = 'named') = (user_id IS NOT NULL)),
+    CHECK ((author_kind = 'link') = (principal_id IS NOT NULL))
+  ) STRICT;
+`;
+
+// Runs inside the relay's schema transaction. An earlier build kept only a
+// user id for each write, so its rows are named recipients' and move over
+// unchanged, with the bytes they already count against the quota.
 export function initializeCollectionWriteSchema(db: SqliteDb): void {
+  const migrated = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+    .get(COLLECTION_WRITE_AUTHORS_MIGRATION) !== undefined;
+  if (!migrated) {
+    const earlier = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_collection_writes'")
+      .get() !== undefined;
+    if (earlier) db.exec("ALTER TABLE sync_relay_collection_writes RENAME TO sync_relay_collection_writes_named");
+    db.exec(COLLECTION_WRITES_TABLE);
+    if (earlier) {
+      // Dropping the earlier table drops its usage triggers before its rows,
+      // and the new table has none yet, so the copy moves no quota.
+      db.exec(`
+        INSERT INTO sync_relay_collection_writes (
+          grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, principal_id,
+          payload_sha256, origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms,
+          storage_bytes
+        )
+        SELECT grant_id, submit_id, workspace_id, share_id, grant_generation, 'named', user_id, NULL,
+          payload_sha256, origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms,
+          storage_bytes
+        FROM sync_relay_collection_writes_named;
+        DROP TABLE sync_relay_collection_writes_named;
+      `);
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+      .run(COLLECTION_WRITE_AUTHORS_MIGRATION, Date.now());
+  }
   db.exec(`
-    CREATE TABLE IF NOT EXISTS sync_relay_collection_writes (
-      grant_id TEXT NOT NULL,
-      submit_id TEXT NOT NULL CHECK (length(submit_id) BETWEEN 1 AND 128),
-      workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
-      share_id TEXT NOT NULL,
-      grant_generation INTEGER NOT NULL CHECK (grant_generation BETWEEN 1 AND 9007199254740991),
-      user_id TEXT NOT NULL,
-      payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
-      origin_id TEXT NOT NULL,
-      first_origin_seq INTEGER NOT NULL CHECK (first_origin_seq >= 0),
-      last_origin_seq INTEGER NOT NULL CHECK (last_origin_seq >= first_origin_seq),
-      paths_json TEXT NOT NULL CHECK (json_valid(paths_json)),
-      receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
-      created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
-      storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
-      PRIMARY KEY (grant_id, submit_id)
-    ) STRICT;
-    DROP INDEX IF EXISTS idx_sync_relay_collection_writes_grant;
     CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_grant_seq
       ON sync_relay_collection_writes(grant_id, first_origin_seq);
     CREATE TRIGGER IF NOT EXISTS sync_relay_collection_writes_usage_insert
@@ -162,9 +200,9 @@ export function commitCollectionWrite(
     // The ledger row goes first, so the append's quota check counts it.
     storage.db.prepare(
       `INSERT INTO sync_relay_collection_writes (
-         grant_id, submit_id, workspace_id, share_id, grant_generation, user_id, payload_sha256,
+         grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, payload_sha256,
          origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms, storage_bytes
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, 'named', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.grantId, input.submitId, workspaceId, input.shareId, input.grantGeneration, input.userId,
       payloadSha256, originId, firstOriginSeq, firstOriginSeq + ops.length - 1, pathsJson, receiptJson,
@@ -200,11 +238,11 @@ function replayed(
   payloadSha256: string,
 ): CollectionWriteReceipt | null {
   const row = storage.db.prepare(
-    `SELECT user_id, payload_sha256, receipt_json FROM sync_relay_collection_writes
+    `SELECT author_kind, user_id, payload_sha256, receipt_json FROM sync_relay_collection_writes
      WHERE grant_id = ? AND submit_id = ?`,
   ).get(input.grantId, input.submitId);
   if (!row) return null;
-  if (row.user_id !== input.userId || row.payload_sha256 !== payloadSha256) {
+  if (row.author_kind !== "named" || row.user_id !== input.userId || row.payload_sha256 !== payloadSha256) {
     throw relayError("conflict", "this submitId already names another write");
   }
   return JSON.parse(String(row.receipt_json)) as CollectionWriteReceipt;
