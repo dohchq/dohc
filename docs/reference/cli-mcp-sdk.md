@@ -345,7 +345,7 @@ Returns `{ ok: true, recordPath } | { ok: false, reason }`.
 
 ### `dohc_create_record`
 
-Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.
+Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. The kept map reports current values of seed fields preserved after someone edited them. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -354,7 +354,7 @@ Changes the workspace, so a shared view does not offer it.
 - `recordId`: `string`
 - `fields`: `{ [key: string]: any JSON }`
 
-Returns `{ ok: true, recordId, recordPath } | { ok: false, reason, partial?: { kind: "partial", created, failedStage, reason, retry } }`.
+Returns `{ ok: true, recordId, recordPath, kept? } | { ok: false, reason, partial?: { kind: "partial", created, failedStage, reason, retry } }`.
 
 ### `dohc_list_automation_runs`
 

@@ -410,8 +410,9 @@ it("preserves partial record facts and accepts the returned retry identity", asy
     const request = vi.fn().mockResolvedValue({ ok: false, reason: "not indexed", partial });
     const ctx = { ...base, request };
     expect(await createRecord(ctx, { collectionPath: "tasks", name: "retry" })).toEqual({ ok: false, reason: "not indexed", partial });
-    request.mockResolvedValue({ ok: true, recordId: record.id, recordPath: "tasks/retry.md" });
-    await createRecord(ctx, { collectionPath: "tasks", name: "retry", recordId: partial.retry.recordId });
+    const completed = { ok: true, recordId: record.id, recordPath: "tasks/retry.md", kept: { status: "done" } };
+    request.mockResolvedValue(completed);
+    expect(await createRecord(ctx, { collectionPath: "tasks", name: "retry", recordId: partial.retry.recordId })).toEqual(completed);
     expect(request.mock.calls[1]![0].args.recordId).toBe(partial.retry.recordId);
   });
 });

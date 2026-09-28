@@ -182,7 +182,7 @@ export interface CliCollectionWriteSeam {
     recordId?: string;
     fields?: Record<string, unknown>;
     author: ChangeAuthor;
-  }): Promise<{ path: string; recordId: string } | import("@dohc/cli/creation").CreationPartial>;
+  }): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
 }
 
 // Engine-backed collection access for the CLI verbs. Reads go to the engine
@@ -2257,6 +2257,7 @@ async function dispatch(
           ok: true as const,
           recordId: outcome.recordId,
           recordPath: outcome.path,
+          ...(outcome.kept ? { kept: outcome.kept } : {}),
         };
       } catch (error) {
         return mcpFailure(

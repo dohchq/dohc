@@ -15,6 +15,7 @@ import {
   type CollectionRecordEditContext,
 } from "./collectionRecordEdits";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 
 import type { WorkspaceEngineYDocProviderSession } from "./workspaceEngineCapture";
 
@@ -45,6 +46,7 @@ interface FakeSessionLog {
 }
 
 function fakeSession(options: {
+  journaledKeys?: Map<string, string>;
   settleError?: Error;
   onSettle?: () => Promise<void>;
   /** Runs just before each update's turn on the session chain, as a remote update would land. */
@@ -57,7 +59,7 @@ function fakeSession(options: {
   const log: FakeSessionLog = { doc, order: [], journaled: [], updates: [] };
   // The engine's rule (durable.rs): a key already journaled with other
   // update bytes refuses, so a re-run that reuses a key with a new update fails.
-  const journaledKeys = new Map<string, string>();
+  const journaledKeys = options.journaledKeys ?? new Map<string, string>();
   // Local updates take turns on one chain, as the real session's do.
   let chain: Promise<unknown> = Promise.resolve();
   const session = {
@@ -93,7 +95,8 @@ function fakeSession(options: {
       const bytes = Buffer.from(update).toString("base64");
       if (key !== undefined && journaledKeys.has(key)) {
         if (journaledKeys.get(key) !== bytes) {
-          throw new Error("idempotency-key-reuse-mismatch");
+          onArmed?.();
+          throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "idempotency-key-reuse-mismatch", retry: "no" }, undefined);
         }
         return;
       }
@@ -532,6 +535,18 @@ describe("setCollectionRecordFields", () => {
     });
     expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual(["claim-7/hash/0/rec_one/Due"]);
     expect(frontmatter.toJSON()).toEqual({ Count: 3, Owner: "ana", Due: "2026-09-30" });
+  });
+
+  it("still rejects reused keys for ordinary field edits", async () => {
+    const root = await createTestScratch("dohc-record-key-reuse-");
+    const { session, log } = fakeSession();
+    const context = contextFor(root, session);
+    const input = { recordPath: "tasks/one.md", fields: { status: "open" }, author: AGENT, idempotencyKeyPrefix: "edit" };
+    await setCollectionRecordFields(context, input);
+    log.doc.getMap("frontmatter").delete("status");
+    await expect(setCollectionRecordFields(context, input)).rejects.toThrow("idempotency-key-reuse-mismatch");
+    expect(log.doc.getMap("frontmatter").has("status")).toBe(false);
+    expect(log.journaled).toHaveLength(1);
   });
 
   it("compares each field when it is written, so a change that lands after the session opens is kept", async () => {
@@ -982,6 +997,51 @@ describe("createCollectionRecord", () => {
 });
 
 describe("partial record retry", () => {
+  it("does not treat an untyped key error as a completed seed", async () => {
+    const root = await createTestScratch("dohc-record-untyped-refusal-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    vi.spyOn(session, "applyDecidedLocalUpdate").mockRejectedValueOnce(new Error("idempotency-key-reuse-mismatch"));
+    const first = createCollectionRecord(context, {
+      collectionPath: "tasks", name: "retry", fields: { status: "open" }, author: AGENT,
+    });
+    await engine.listening();
+    await engine.adopt(root, "tasks/retry.md");
+    engine.announce(["tasks/retry.md"]);
+    expect(await first).toMatchObject({ kind: "partial", failedStage: "fields" });
+  });
+
+  it.each(["delete", "null"])("preserves a cleared seed after settlement fails (%s)", async clear => {
+    const root = await createTestScratch("dohc-record-cleared-seed-");
+    const journaledKeys = new Map<string, string>();
+    const { session, log } = fakeSession({ journaledKeys });
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const input = { collectionPath: "tasks", name: "retry", fields: { status: "open" }, author: AGENT };
+    vi.spyOn(session, "settleNow").mockRejectedValueOnce(new Error("settle refused"));
+    const first = createCollectionRecord(context, input);
+    await engine.listening();
+    const recordId = await engine.adopt(root, "tasks/retry.md");
+    engine.announce(["tasks/retry.md"]);
+    expect(await first).toMatchObject({ kind: "partial", failedStage: "settle" });
+    expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+
+    const resumed = fakeSession({ journaledKeys });
+    Y.applyUpdate(resumed.log.doc, Y.encodeStateAsUpdate(log.doc));
+    const fields = resumed.log.doc.getMap("frontmatter");
+    if (clear === "delete") fields.delete("status");
+    else fields.set("status", null);
+    await expect(createCollectionRecord(contextFor(root, resumed.session, engine.overrides), {
+      ...input, recordId,
+    })).resolves.toEqual({ path: "tasks/retry.md", recordId, kept: { status: null } });
+    expect(fields.get("status")).toBe(clear === "delete" ? undefined : null);
+    expect(resumed.log.journaled).toEqual([]);
+    expect(resumed.log.order).toEqual(["settle", "close"]);
+    expect(journaledKeys.size).toBe(1);
+    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+  });
+
   it("preserves a person's later edit after seeding lands but settlement fails", async () => {
     const root = await createTestScratch("dohc-record-later-edit-");
     const { session, log } = fakeSession();
@@ -1004,7 +1064,7 @@ describe("partial record retry", () => {
     resumed.log.doc.getMap("frontmatter").set("status", "done");
     await expect(createCollectionRecord(contextFor(root, resumed.session, engine.overrides), {
       ...input, recordId: partial.retry.recordId,
-    })).resolves.toEqual({ path: "tasks/retry.md", recordId });
+    })).resolves.toEqual({ path: "tasks/retry.md", recordId, kept: { status: "done" } });
     expect(resumed.log.doc.getMap("frontmatter").get("status")).toBe("done");
     expect(resumed.log.journaled).toEqual([]);
     expect(log.journaled[0]?.idempotencyKey).toBe(`create-record/${recordId}/status`);
@@ -1024,7 +1084,7 @@ describe("partial record retry", () => {
     engine.announce(["tasks/retry.md"]);
     expect(await first).toMatchObject({ kind: "partial", failedStage: "bind" });
     log.doc.getMap("frontmatter").set("status", "done");
-    await expect(createCollectionRecord(context, { ...input, recordId })).resolves.toEqual({ path: "tasks/retry.md", recordId });
+    await expect(createCollectionRecord(context, { ...input, recordId })).resolves.toEqual({ path: "tasks/retry.md", recordId, kept: { status: "done" } });
     expect(log.doc.getMap("frontmatter").toJSON()).toEqual({ status: "done", priority: "high" });
     expect(log.journaled.map(entry => entry.idempotencyKey)).toEqual([`create-record/${recordId}/priority`]);
   });

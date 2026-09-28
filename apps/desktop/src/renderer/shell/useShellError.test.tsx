@@ -14,6 +14,35 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it.each([true, false])("keeps separate partial creations and replaces only the retried creation (record: %s)", record => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const firstRetry = vi.fn();
+    const secondRetry = vi.fn();
+    const updatedRetry = vi.fn();
+    const partial = (name: string, failedStage: "settle" | "close" = "settle") => new CreationPartialError({
+      kind: "partial", created: [record ? `tasks/${name}.md` : `${name}/frontend.js`],
+      failedStage, reason: `${name}: ${failedStage} failed`,
+      retry: { mode: "resume", instruction: "Try again.",
+        ...(record ? { recordId: `rec_${name.repeat(26)}` } : {}),
+      },
+    });
+    act(() => {
+      result.current.reportShellError("Creation failed.", partial("a"), firstRetry);
+      result.current.reportShellError("Creation failed.", partial("b"), secondRetry);
+    });
+    expect(result.current.shellErrors).toHaveLength(2);
+    act(() => result.current.reportShellError("Creation failed.", partial("a", "close"), updatedRetry));
+    expect(result.current.shellErrors).toHaveLength(2);
+    const [second, updated] = result.current.shellErrors;
+    expect(errorDetails(second!.details!)).toContain("Reason: b: settle failed");
+    expect(errorDetails(updated!.details!)).toContain("Reason: a: close failed");
+    act(() => result.current.retryShellError(second!.id));
+    act(() => result.current.retryShellError(updated!.id));
+    expect(secondRetry).toHaveBeenCalledOnce();
+    expect(updatedRetry).toHaveBeenCalledOnce();
+    expect(firstRetry).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])("keeps partial creation facts in copy details and offers the human retry (record: %s)", record => {
     const retry = vi.fn();
     const partial = { kind: "partial" as const, created: [record ? "tasks/retry.md" : "form/frontend.js"],

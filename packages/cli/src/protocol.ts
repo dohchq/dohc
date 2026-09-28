@@ -823,6 +823,7 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
       ok: z.literal(true),
       recordId: z.string().min(1),
       recordPath: z.string().min(1),
+      kept: z.record(z.string(), z.json()).optional(),
     })
     .strict(),
   rawFailureSchema.extend({ partial: CreationPartial.optional() }),

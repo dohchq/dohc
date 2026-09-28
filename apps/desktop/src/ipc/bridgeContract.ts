@@ -5791,7 +5791,7 @@ export interface DohcDesktopBridge
   listWorkspaceFiles(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListWorkspaceFilesResult>;
-  createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string } | import("@dohc/cli/creation").CreationPartial>;
+  createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
   createWorkspaceFile(
     payload: CreateWorkspaceFilePayload,
   ): Promise<CreateWorkspaceFileResult>;

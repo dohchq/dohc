@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from "node:util";
 import { errorMessage } from "./workspaceError";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import { isIdempotencyKeyReuseRefusal } from "@dohc/workspace-engine-client";
 import type { CollectionRecordWrites } from "@dohc/automation-executor/collection-automation-run";
 import {
   RECORD_ID_FRONTMATTER_KEY,
@@ -85,6 +86,8 @@ export interface CollectionRecordEditContext {
 }
 
 export interface SetCollectionRecordFieldsInput {
+  /** A creation key already recorded by the engine must not seed the field again. */
+  preserveCompletedSeeds?: boolean;
   /** Creation reports the stage that could not finish. */
   onStage?(stage: CreationStage): void;
   /** Finish a prior journaled update even when its values already match. */
@@ -298,8 +301,11 @@ export async function setCollectionRecordFields(
     // chain, against the canonical doc as it stands then, so a change that
     // arrived after the session opened is compared, not overwritten.
     input.onStage?.("fields");
-    const journaled = await Promise.all(entries.map(([field, value]) =>
-      session.applyDecidedLocalUpdate(
+    const journaled = await Promise.all(entries.map(([field, value]) => {
+      const idempotencyKey = input.idempotencyKeyPrefix === undefined
+        ? undefined : `${input.idempotencyKeyPrefix}/${field}`;
+      let fieldArmed = false;
+      return session.applyDecidedLocalUpdate(
         (doc) => {
           const current = doc.getMap(FRONTMATTER_FIELD).get(field);
           const currentValue =
@@ -320,15 +326,26 @@ export async function setCollectionRecordFields(
         },
         () => {
           armed += 1;
+          fieldArmed = true;
         },
         {
           ...(actorOriginId === undefined ? {} : { actorOriginId }),
           attribution: attributionFor(input.author),
-          ...(input.idempotencyKeyPrefix === undefined
-            ? {}
-            : { idempotencyKey: `${input.idempotencyKeyPrefix}/${field}` }),
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         },
-      )));
+      ).catch(async error => {
+        if (!input.preserveCompletedSeeds || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
+        // This typed refusal proves the creation key already landed. The session
+        // restores canonical state before rejecting; no new seed was recorded.
+        if (fieldArmed) armed -= 1;
+        delete replaced[field];
+        return session.applyDecidedLocalUpdate(doc => {
+          const current = doc.getMap(FRONTMATTER_FIELD).get(field);
+          kept[field] = (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;
+          return null;
+        });
+      });
+    }));
     const updates = journaled.filter(Boolean).length;
     // Every field already held its value, or someone else's: nothing to settle.
     if (updates === 0 && !input.settleUnchanged) return { path: input.recordPath, replaced, kept };
@@ -376,7 +393,7 @@ export async function setCollectionRecordFields(
 export async function createCollectionRecord(
   context: CollectionRecordEditContext,
   input: CreateCollectionRecordInput,
-): Promise<{ path: string; recordId: string } | CreationPartial> {
+): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | CreationPartial> {
   const name = input.name;
   if (
     name.length === 0 ||
@@ -418,22 +435,23 @@ export async function createCollectionRecord(
       failedStage = "index";
       ({ path, recordId } = await waitForRecord(context, input.collectionPath, path, stage => { failedStage = stage; }));
     }
+    let kept: Record<string, unknown> = {};
     if (entries.length > 0) {
-      await setCollectionRecordFields(context, {
+      ({ kept } = await setCollectionRecordFields(context, {
         recordPath: path,
         fields: Object.fromEntries(entries),
         author: input.author,
-        // The file persists the retry identity. Its seed fields start absent,
-        // so retries need no process-local state to preserve later edits.
+        // Creation keys stay completed even after someone clears a seeded field.
+        preserveCompletedSeeds: true,
         idempotencyKeyPrefix: input.idempotencyKeyPrefix ?? `create-record/${recordId}`,
         expectedBefore: Object.fromEntries(entries.map(([field]) => [field,
           input.expectedBefore && Object.hasOwn(input.expectedBefore, field) ? input.expectedBefore[field] : null,
         ])),
         settleUnchanged: true,
         onStage: stage => { failedStage = stage; },
-      });
+      }));
     }
-    return { path, recordId };
+    return { path, recordId, ...(Object.keys(kept).length > 0 ? { kept } : {}) };
   } catch (error) {
     // A transport or lease can fail after the write landed.
     const diskId = await fileRecordId(context, path).catch(() => null);
