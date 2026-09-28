@@ -53,6 +53,8 @@ import type {
   ListFileChatsResult,
   ListMyShareChangesResult,
   ListShareProposalsResult,
+  FindAutomationCollectionPayload,
+  FindAutomationCollectionResult,
   GetCollectionResult,
   ListCollectionsPayload,
   ListCollectionsResult,
@@ -682,8 +684,9 @@ function makeBaseBridge(
     listCollectionAutomations: vi.fn(
       async (): Promise<ListCollectionAutomationsResult> => ({ status: "missing" }),
     ),
+    findAutomationCollection: vi.fn(async (_payload: FindAutomationCollectionPayload): Promise<FindAutomationCollectionResult> => ({ status: "missing" })),
     listCollectionAutomationRuns: vi.fn(
-      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [] }),
+      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [], next: null }),
     ),
     retryCollectionAutomation: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
@@ -743,6 +746,7 @@ function makeBridge(
     }),
     getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
       path: "tasks",
+      objectId: "object-test",
       status: "valid",
       reasons: [],
       schema: { name: null, description: null, fields: [], views: [] },
@@ -750,7 +754,7 @@ function makeBridge(
     })),
     queryCollectionRecords: vi.fn(
       async (): Promise<QueryCollectionRecordsResult> => ({
-        collection: { path: "tasks", status: "valid", reasons: [] },
+        collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
         records: [],
         groups: null,
         nextCursor: null,
@@ -1454,7 +1458,7 @@ describe("collection folders", () => {
       folders: ["tasks"],
     }));
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }],
     }));
     renderShell(bridge);
     const user = userEvent.setup();
@@ -1508,10 +1512,11 @@ describe("collection folders", () => {
       folders: ["tasks"],
     }));
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }],
     }));
     bridge.getCollection = vi.fn(async () => ({
       path: "tasks",
+      objectId: "object-test",
       status: "valid" as const,
       reasons: [],
       schema: {
@@ -1545,7 +1550,7 @@ describe("collection folders", () => {
       ],
     });
     bridge.queryCollectionRecords = vi.fn(async () => ({
-      collection: { path: "tasks", status: "valid" as const, reasons: [] },
+      collection: { path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] },
       records: [
         taskRecord("rec-1", "One", "tasks/one.md"),
         taskRecord("rec-2", "Two", "tasks/two.md"),
@@ -8746,13 +8751,15 @@ describe("notices sent to you", () => {
   });
   function withRuns(bridge: ReturnType<typeof makeBridge>) {
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }],
     }));
+    // Main finds each automation's Collection by its id.
+    bridge.findAutomationCollection.mockResolvedValue({ status: "found", collectionPath: "tasks" });
     bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
       claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
       error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
-      trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, chainStopped: false, undone: false,
-    }] }));
+      trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+    }], next: null }));
     return bridge;
   }
 

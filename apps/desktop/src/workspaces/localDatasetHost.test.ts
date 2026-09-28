@@ -59,7 +59,7 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, ...extra});
+  const host = await createLocalDatasetHost({workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", ...extra});
   hosts.push(host); return {host, workspaceRoot};
 }
 async function activate(host: LocalDatasetHost, fixture = sources()) {
@@ -461,16 +461,16 @@ describe("local dataset owner adapter", () => {
   });
 
   it("writes as an automation only through a context the host made, names it, and wakes the executor", async () => {
-    let wakes = 0;
-    const {host} = await open({onAutomationClaims: () => { wakes += 1; }}), approved = await activate(host);
+    const wakes: boolean[] = [];
+    const {host} = await open({onAutomationClaims: failed => { wakes.push(failed); }}), approved = await activate(host);
     const [own, other] = ["collection:items#welcome", "collection:items#tally"];
     for (const automationId of [own, other]) host.automations.subscribe(id(1), {automationId, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: digest(automationId)});
     expect(host.automations.datasets()).toEqual({definitions: [approved.revision.definition], failures: []});
-    const context = host.automations.context({automationId: own, claimId: "claim", depth: 1});
+    const context = host.automations.context({automationId: own, claimId: "claim", depth: 1, person: null});
     const step = call(approved, id(6), "step", {name: "Pens"});
     expect(await host.automations.invoke(context, step)).toMatchObject({replayed: false});
     // The commit's claims are made and its wake has run by the time the step returns.
-    expect(wakes).toBe(1);
+    expect(wakes).toEqual([false]);
     // Its own automation claims nothing; the other claims at the depth the write declared.
     const claimed = host.automations.next();
     expect(claimed).toMatchObject({automationId: other, depth: 1, actor: {kind: "automation", automationId: own, depth: 1}});
@@ -486,9 +486,13 @@ describe("local dataset owner adapter", () => {
     expect(await host.automations.invoke(context, step)).toMatchObject({replayed: true});
     expect(await host.action(step)).toMatchObject({replayed: false});
     // An object shaped like a context is not one, and a chain past depth 4 writes nothing.
-    await expect(host.automations.invoke({automationId: own, claimId: "claim", depth: 1}, {...step, idempotencyKey: "forged"})).rejects.toThrow(/not permitted/);
-    await expect(host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 5}), {...step, idempotencyKey: "deep"})).rejects.toThrow("You do not have access to this Collection.");
+    await expect(host.automations.invoke({automationId: own, claimId: "claim", depth: 1, person: null}, {...step, idempotencyKey: "forged"})).rejects.toThrow(/not permitted/);
+    await expect(host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 5, person: null}), {...step, idempotencyKey: "deep"})).rejects.toThrow("You do not have access to this Collection.");
     expect(host.history({datasetId: id(1)}).entries).toHaveLength(2);
+    // A write at depth 4 commits, and its wake says the claims it made are failed chain stops.
+    await host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 4, person: null}), {...step, idempotencyKey: "stop"});
+    expect(wakes).toEqual([false, false, true]);
+    expect(host.automations.failures()).toEqual([expect.objectContaining({automationId: other, neverStarted: true, chainStopped: true})]);
   });
 
   it("claims an agent's change at its run's depth and a person's at 0, with the owner's authority", async () => {
@@ -496,12 +500,16 @@ describe("local dataset owner adapter", () => {
     const watcher = "collection:items#tally";
     host.automations.subscribe(id(1), {automationId: watcher, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: digest(watcher)});
     // An agent run woken by an automation's message at depth 2 writes at depth 3.
-    expect(await host.action({...call(approved, id(6), "agent", {name: "Pens"}), agentDepth: 3})).toMatchObject({replayed: false});
+    expect(await host.action({...call(approved, id(6), "agent", {name: "Pens"}), agent: {depth: 3}})).toMatchObject({replayed: false});
     expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 3, actor: {kind: "agent", depth: 3}});
+    // An agent outside a chain is still named, at depth 0.
+    expect(await host.action({...call(approved, id(6), "unchained", {name: "Tape"}), agent: {depth: 0}})).toMatchObject({replayed: false});
+    expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 0, actor: {kind: "agent", depth: 0}});
     expect(await host.action(call(approved, id(6), "person", {name: "Ink"}))).toMatchObject({replayed: false});
     expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 0, actor: {kind: "owner"}});
     // The agent retries under the owner's identity, so its retry replays.
-    expect(await host.action({...call(approved, id(6), "person", {name: "Ink"}), agentDepth: 3})).toMatchObject({replayed: true});
+    expect(await host.action({...call(approved, id(6), "person", {name: "Ink"}), agent: {depth: 3}})).toMatchObject({replayed: true});
+    expect(host.automations.next()).toBeNull();
   });
 
   it("tells the executor after each change to a dataset's approved rules or lifecycle", async () => {

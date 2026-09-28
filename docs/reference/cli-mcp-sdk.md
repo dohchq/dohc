@@ -355,14 +355,15 @@ Returns `{ ok: true, recordId, recordPath } | { ok: false, reason }`.
 
 ### `dohc_list_automation_runs`
 
-List an automation's 20 newest runs on this computer, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. Each computer keeps the runs of the automations it ran.
+List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.
 
 A shared view keeps no automation runs, so it does not offer this tool.
 
 - `collectionPath`: `string`. Required.
 - `automation`: `string`. Required.
+- `page`: `string`
 
-Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, changes }[] } | { ok: false, reason }`.
+Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[], next } | { ok: false, reason }`.
 
 ### `dohc_read_automation_run`
 
@@ -374,7 +375,7 @@ A shared view keeps no automation runs, so it does not offer this tool.
 - `automation`: `string`. Required.
 - `run`: `string`. Required.
 
-Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, steps, failedStep, startsOver } } | { ok: false, reason }`.
+Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, steps, failedStep, startsOver } } | { ok: false, reason }`.
 
 ### `dohc_retry_automation_run`
 
@@ -387,7 +388,7 @@ Changes the workspace, so a shared view does not offer it.
 - `run`: `string`. Required.
 - `startOver`: `boolean`
 
-Returns `{ ok: true, status: "queued" } | { ok: false, status, repeatsMessages, reason } | { ok: false, reason, notice?: { title, body } }`.
+Returns `{ ok: true, status: "queued" } | { ok: false, status: "definition-changed", repeatsMessages, reason } | { ok: false, reason, notice?: { title, body } }`.
 
 ### `dohc_press_button`
 
@@ -1227,9 +1228,11 @@ dohc automation runs <collection> <automation> [options]
 
 List an automation's runs on this computer, newest first.
 
-Lists the 20 newest runs, as the Automations panel does. Each line starts with the run's ID.
+Lists 20 runs at a time, newest first, as the Automations panel does. Each line starts with the run's ID. When older runs remain, the last line gives the --page value that lists them.
 
-With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, changes }[] }`.
+- `--page <page>`: List the older runs the last line of an earlier listing names.
+
+With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[], next }`.
 
 #### `dohc automation run`
 
@@ -1241,7 +1244,7 @@ Show one run: what started it, what each step changed, and why it failed.
 
 Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
 
-With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, steps, failedStep, startsOver } }`.
+With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, steps, failedStep, startsOver } }`.
 
 #### `dohc automation retry`
 

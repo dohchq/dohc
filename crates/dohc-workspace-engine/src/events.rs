@@ -247,9 +247,11 @@ mod tests {
                     origin_seq: 41,
                 },
                 record_id: Some("rec_a".to_owned()),
-                collection_path: "tasks".to_owned(),
+                collection_path: Some("tasks".to_owned()),
                 depth: 1,
                 change: dohc_engine_domain::AutomationChange {
+                    shared_author: None,
+                    live_cursor: None,
                     kind: dohc_engine_domain::AutomationChangeKind::Changed,
                     author_origin_id: Some("agent-editor".to_owned()),
                     actor_kind: Some(dohc_engine_domain::ChangeActorKind::Agent),
@@ -267,9 +269,11 @@ mod tests {
                 automation_id: "collection:tasks#janitor".to_owned(),
                 trigger: dohc_engine_domain::AutomationTrigger::History { history_id: 7 },
                 record_id: Some("rec_a".to_owned()),
-                collection_path: "tasks".to_owned(),
+                collection_path: Some("tasks".to_owned()),
                 depth: 0,
                 change: dohc_engine_domain::AutomationChange {
+                    shared_author: None,
+                    live_cursor: None,
                     kind: dohc_engine_domain::AutomationChangeKind::Added,
                     author_origin_id: None,
                     actor_kind: None,
@@ -311,6 +315,8 @@ mod tests {
                     "authorOriginId": "agent-editor",
                     "actorKind": "agent",
                     "onBehalfOf": "user:ice",
+                    "sharedAuthor": null,
+                    "liveCursor": null,
                 },
                 "state": "pending",
                 "attempts": 0,
@@ -332,6 +338,8 @@ mod tests {
                 "authorOriginId": null,
                 "actorKind": null,
                 "onBehalfOf": null,
+                "sharedAuthor": null,
+                "liveCursor": null,
             }),
             "an undeclared actor travels as nulls"
         );
@@ -346,6 +354,8 @@ mod tests {
             "x".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_BYTES)
         );
         let facts = dohc_engine_domain::CollectionRecordApplyFacts {
+            shared_author: None,
+            live_cursor: None,
             collection_path: "tasks".to_owned(),
             record_id: "rec_a".to_owned(),
             created: true,

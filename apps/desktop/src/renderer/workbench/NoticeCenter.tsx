@@ -158,25 +158,13 @@ const NOTICE_ROW = "[data-notice-row]";
 const ROW_CLASS =
   "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 focus-visible:-outline-offset-2";
 
-// A Collection automation's engine id is "collection:<collection path>#<id>".
-// Its definition lives in the Collection's automations.yaml.
-export function collectionAutomationOf(
-  automationId: string,
-): { collection: string; id: string } | null {
-  if (!automationId.startsWith("collection:")) return null;
-  const rest = automationId.slice("collection:".length);
-  const hash = rest.lastIndexOf("#");
-  return hash > 0 ? { collection: rest.slice(0, hash), id: rest.slice(hash + 1) } : null;
-}
-
 // The one notice for every step a narrower share stopped. It names each
 // automation it will dismiss, with its file, and who cannot reach what.
 function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: string; body: string } {
   const automations = new Map<string, { name: string; file: string; reasons: Set<string> }>();
   for (const stop of stops) {
-    const collection = collectionAutomationOf(stop.automationId)?.collection ?? stop.collection;
     const entry = automations.get(stop.automationId) ??
-      { name: stop.automationName, file: `${collection}/automations.yaml`, reasons: new Set<string>() };
+      { name: stop.automationName, file: `${stop.collectionPath}/automations.yaml`, reasons: new Set<string>() };
     const who = stop.stoppedFor ?? "Someone you shared with";
     entry.reasons.add(`${who} cannot ${automationReachCopy(stop, true)}.`);
     automations.set(stop.automationId, entry);

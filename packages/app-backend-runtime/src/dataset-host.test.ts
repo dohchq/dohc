@@ -879,3 +879,76 @@ it("runs an automation's custom action without link read approval", async () => 
   await expect(f.host.invoke("helper", { ...request, access: { kind: "app", appId: "form" } })).rejects.toThrow("access");
   expect((await f.host.invoke("helper", request)).result).toEqual({ kind: "automation", automationId: "collection:orders#notify" });
 });
+
+it("attributes an owner's write to its agent at any depth from 0, through an app too, and grants the agent nothing", async () => {
+  let agent: { depth: number } | undefined, named = false;
+  const f = await fixture({ resolveAuthority: (_context, request) => ({ principalKey: "owner", ...(request.access.kind === "app" ? { appId: "form" } : {}),
+    caller: named ? { kind: "named", userId: "helper", grantId: "member", access: "view", helper: false } : { kind: "owner", userId: "owner" },
+    ...(agent ? { agent } : {}) }) });
+  await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  f.host.automationClaims.subscribe(scope, { automationId: "watch", tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: "a".repeat(64) });
+  const invoke = (idempotencyKey: string, appId?: string) => f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256,
+    operationId: id(6), input: { value: idempotencyKey }, idempotencyKey, ...(appId ? { access: { kind: "app" as const, appId } } : {}) });
+  agent = { depth: 0 };
+  await invoke("direct");
+  expect(f.host.automationClaims.next(scope.workspaceId)).toMatchObject({ depth: 0, actor: { kind: "agent", depth: 0 } });
+  agent = { depth: 2 };
+  await invoke("app", "form");
+  expect(f.host.automationClaims.next(scope.workspaceId)).toMatchObject({ depth: 2, actor: { kind: "agent", depth: 2, appId: "form" } });
+  // Owner administration refuses an agent at any depth.
+  agent = { depth: 0 };
+  expect(() => f.host.archiveDataset("owner", scope)).toThrow("You do not have access to this Collection.");
+  for (const refused of [{ depth: -1 }, { depth: 65 }, { depth: 0.5 }]) {
+    agent = refused;
+    await expect(invoke("refused")).rejects.toThrow("You do not have access to this Collection.");
+  }
+  // Only the owner's agent exists.
+  agent = { depth: 0 }; named = true;
+  await expect(invoke("named", "form")).rejects.toThrow("You do not have access to this Collection.");
+  expect(f.host.automationClaims.next(scope.workspaceId)).toBeNull();
+});
+
+it("names the person a commit is made for from the host's context, never the owner key, and none for a link", async () => {
+  type Caller = "owner" | "named" | "link" | "automation";
+  let caller: Caller = "owner", person: string | undefined, agent: { depth: number } | undefined;
+  const callers = {
+    owner: { kind: "owner", userId: "owner-key" },
+    named: { kind: "named", userId: "user-ana", grantId: "member", access: "edit", helper: false },
+    link: { kind: "link", principalId: "visitor", grantId: "link" },
+    automation: { kind: "automation", automationId: "collection:orders#stamp" },
+  } as const;
+  const f = await fixture({ resolveAuthority: (_context, request) => ({ principalKey: caller, caller: callers[caller],
+    ...(request.access.kind === "app" ? { appId: "form" } : {}),
+    ...(caller === "automation" ? { chainDepth: 1 } : {}), ...(agent ? { agent } : {}), ...(person === undefined ? {} : { person }) }) });
+  await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  f.host.automationClaims.subscribe(scope, { automationId: "watch", tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: "a".repeat(64) });
+  // A named person or a link writes through the app the owner shared.
+  const commit = async (idempotencyKey: string) => {
+    const app = caller === "named" || caller === "link" ? { access: { kind: "app" as const, appId: "form" } } : {};
+    await f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256, operationId: id(6), input: { value: idempotencyKey }, idempotencyKey, ...app });
+    return f.host.automationClaims.next(scope.workspaceId)?.actor;
+  };
+  // The owner's own commit and its agent's name the person main gave, not the owner key.
+  person = "user-ice";
+  expect(await commit("owner")).toEqual({ kind: "owner", userId: "user-ice" });
+  agent = { depth: 0 };
+  expect(await commit("agent")).toEqual({ kind: "agent", depth: 0, userId: "user-ice" });
+  agent = undefined;
+  // An automation's commit names the person whose change started its run.
+  caller = "automation";
+  expect(await commit("automation")).toEqual({ kind: "automation", automationId: "collection:orders#stamp", depth: 1, userId: "user-ice" });
+  // With no person known, the owner's commit names nobody.
+  caller = "owner"; person = undefined;
+  expect(await commit("nobody")).toEqual({ kind: "owner" });
+  // A named person is their own person, and a link names nobody: neither may name another.
+  caller = "named";
+  expect(await commit("named")).toEqual({ kind: "named", userId: "user-ana", appId: "form" });
+  caller = "link";
+  expect(await commit("link")).toEqual({ kind: "link", appId: "form" });
+  for (const refused of ["named", "link"] as const) {
+    caller = refused; person = "user-ice";
+    await expect(commit(`claimed-${refused}`)).rejects.toThrow("You do not have access to this Collection.");
+  }
+});

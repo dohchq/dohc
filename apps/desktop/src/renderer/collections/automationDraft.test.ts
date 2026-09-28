@@ -29,6 +29,8 @@ describe("Only if as rows", () => {
 
   it("keeps any other expression a formula", () => {
     expect(conditionRows('record.Points > 3')).toBeNull();
+    // A JavaScript escape JSON cannot read stays a formula rather than failing.
+    expect(conditionRows(String.raw`record.Title == "\x41"`)).toBeNull();
     expect(conditionRows('record.Status == "Done" || record.Status == "Shipped"')).toBeNull();
     expect(conditionRows('record.Status == "Done" && ')).toBeNull();
     expect(conditionRows("")).toEqual([]);
@@ -116,6 +118,14 @@ it("counts an agent wake before a record edit", () => {
     { kind: "wake-agent", text: "Hi", person: "owner" },
     { kind: "set", values: [], records: null, operation: null },
   ])).toEqual([[0], [1]]);
+});
+
+it("counts a code step's view of its Collection before a record edit", () => {
+  expect(reachPlaces([
+    { kind: "run", code: "return {}", as: null },
+    { kind: "if", if: "true", do: [{ kind: "run-file", file: "scripts/a.js", as: null }], otherwise: [] },
+    { kind: "set", values: [], records: null, operation: null },
+  ])).toEqual([[0], [1], [2]]);
 });
 
 it("leaves the Group trigger verdict before its step verdicts", () => {

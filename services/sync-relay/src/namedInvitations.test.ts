@@ -60,5 +60,5 @@ it("omits browser invitations from revoked, dependent, damaged, chat, and public
     {...row, share: {...row.share, selectorJson: "{}"}},
     {...row, share: {...row.share, selectorJson: JSON.stringify({kind: "chat", channelWireId: "channel"})}, grant: {...row.grant, access: "read-write"}},
   ];
-  for (const item of excluded) expect(await grantedShareSummary(item)).not.toHaveProperty("browserInvitationUrl");
+  for (const item of excluded) expect(await grantedShareSummary({ ...item, automationsGeneration: null })).not.toHaveProperty("browserInvitationUrl");
 });

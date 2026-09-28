@@ -13,7 +13,6 @@ import {
   AUTOMATION_PRESS_PRUNE_BATCH,
   AUTOMATION_PRESSES_PER_GRANT,
   AUTOMATION_PRESSES_UNSETTLED_PER_GRANT,
-  automationPressCollection,
 } from "./storage/automationPresses";
 import {
   claimWorkspace,
@@ -40,7 +39,7 @@ afterEach(closeTestStorages);
 const OWNER = "owner";
 const RECIPIENT = "recipient";
 const WORKSPACE = "workspace-a";
-const AUTOMATION = "collection:trip/packing#mark-packed";
+const AUTOMATION = "collection:object-packing#mark-packed";
 const HASH = "0123456789abcdef";
 let clock = 10_000;
 
@@ -66,7 +65,7 @@ async function relay(options: { paths?: string[]; access?: "view" | "comment" | 
 
 async function press(r: Relay, body: Record<string, unknown> = {}, as = RECIPIENT): Promise<Response> {
   return r.h(request(as, `/sync/shares/${r.shareId}/automation-presses`, jsonBody({
-    pressId: "press-1", automationId: AUTOMATION, definitionHash: HASH, recordId: "rec-12", ...body,
+    pressId: "press-1", automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH, recordId: "rec-12", ...body,
   })));
 }
 
@@ -93,8 +92,8 @@ function seed(r: Relay, rows: number, options: { state: "settled" | "accepted"; 
   db.exec("BEGIN");
   const insert = db.prepare(
     `INSERT INTO sync_relay_automation_presses (host_press_id, workspace_id, share_id, grant_id, grant_generation, press_id, user_id,
-       automation_id, definition_hash, record_id, state, accepted_by, outcome, error, created_at_ms, updated_at_ms)
-     VALUES (?, ?, ?, ?, 1, ?, ?, ?, '${HASH}', 'rec-12', ?, ?, ?, NULL, ?, ?)`,
+       automation_id, collection_path, definition_hash, record_id, state, accepted_by, outcome, error, created_at_ms, updated_at_ms)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, 'trip/packing', '${HASH}', 'rec-12', ?, ?, ?, NULL, ?, ?)`,
   );
   for (let index = 0; index < rows; index += 1) {
     insert.run(`seeded-${options.state}-${index}`, WORKSPACE, r.shareId, options.grantId ?? r.grantId, `seeded-${options.state}-${index}`, RECIPIENT, AUTOMATION,
@@ -120,7 +119,7 @@ describe("relayed Button presses", () => {
     expect(accepted.status, await accepted.clone().text()).toBe(200);
     expect(await accepted.json()).toEqual({ ok: true, pressId: "press-1", state: "pending", outcome: null, createdAtMs: 10_000 });
     const presses = await list(r);
-    expect(presses).toEqual([{ hostPressId: "relay-id-1", definitionHash: HASH, state: "pending", automationId: AUTOMATION, recordId: "rec-12", pressedBy: RECIPIENT, createdAtMs: 10_000 }]);
+    expect(presses).toEqual([{ hostPressId: "relay-id-1", definitionHash: HASH, state: "pending", automationId: AUTOMATION, collectionPath: "trip/packing", recordId: "rec-12", pressedBy: RECIPIENT, createdAtMs: 10_000 }]);
 
     // The host's engine takes it. The list still names it until it settles,
     // so a host that restarts before pressing it finds it again.
@@ -178,10 +177,26 @@ describe("relayed Button presses", () => {
 
   it("refuses an automation id that names no Collection", async () => {
     const r = await relay();
-    for (const automationId of ["plugin:x/y", "collection:#id", "collection:trip/packing#", "collection:trip/packing"]) {
+    for (const automationId of ["plugin:x/y", "collection:#id", "collection:object-packing#", "collection:object-packing", "collection:trip/packing#mark-packed"]) {
       await expectCode(await press(r, { automationId }), 403, "share_op_rejected");
     }
-    expect(automationPressCollection(AUTOMATION)).toBe("trip/packing");
+  });
+
+  it.each([
+    "trip/../private",
+    "trip/%2e%2e/private",
+    "trip/.dohc/engine",
+    "/trip/packing",
+    "trip//packing",
+    "trip/./packing",
+    "trip/packing/",
+    "trip/packing\\nested",
+    "trip/packing%2fnested",
+  ])("refuses an invalid or non-normalized Collection path: %s", async (collectionPath) => {
+    const r = await relay();
+    await host(r);
+    await expectCode(await press(r, { collectionPath }), 403, "share_op_rejected");
+    expect(await list(r)).toEqual([]);
   });
 
   it("settles a waiting press as failed when its grant ends, so the host never runs it", async () => {
@@ -236,7 +251,7 @@ describe("relayed Button presses", () => {
     for (let index = 0; index < AUTOMATION_PRESSES_UNSETTLED_PER_GRANT; index += 1) {
       s.storage.recordAutomationPress({
         shareId: s.shareId, grantId: s.grantId, grantGeneration: 1, userId: RECIPIENT, pressId: `p-${index}`,
-        automationId: AUTOMATION, definitionHash: HASH, recordId: "rec-12", nowMs: clock, newId: () => `seed-${index}`,
+        automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH, recordId: "rec-12", nowMs: clock, newId: () => `seed-${index}`,
       });
     }
     await expectCode(await press(s, { pressId: "one-more" }), 429, "automation_press_rate_limited");

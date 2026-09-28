@@ -1121,6 +1121,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
   };
   const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID };
   const ipc = createEngineYDocSessionIpc({
+    localPersonId: () => "person-local",
     sessionFor: () => ({ workspaceId: WORKSPACE_ID, generation: 1, isCurrent: () => true }),
     acquireWorkspace: () => ({ workspace, assertCurrent: () => undefined, release: () => undefined }),
     captureFor: () => capture,

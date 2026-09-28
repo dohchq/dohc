@@ -22,7 +22,7 @@ const HOUR = 60 * MINUTE;
 const NINE = Date.UTC(2026, 8, 25, 9);
 
 function scheduled(trigger: AutomationScheduleTrigger, automationId = "collection:Tasks#report"): ScheduledAutomation {
-  return { automationId, name: "Report", trigger, scheduleHash: scheduleHash(trigger), enabledSince: null };
+  return { automationId, collectionPath: "Tasks", name: "Report", trigger, scheduleHash: scheduleHash(trigger), enabledSince: null };
 }
 
 const hourly = scheduled({ kind: "schedule", every: "hour", at: ":00", timezone: "UTC" }, "collection:Tasks#hourly");

@@ -5,6 +5,7 @@ import {
   type RelayAutomationPress,
   type RelayAutomationPressReceipt,
 } from "@dohc/workspace-contracts/relay";
+import { validateUserWritePath } from "@dohc/workspace-core";
 import { currentCollectionEditGrant, grantEditsCollection } from "../collectionEditGrant";
 import { notFound, RelayError, relayError } from "../errors";
 import type { StorageContext } from "./context";
@@ -45,6 +46,7 @@ export function initializeAutomationPressSchema(db: SqliteDb): void {
       press_id TEXT NOT NULL CHECK (length(press_id) BETWEEN 1 AND 128),
       user_id TEXT NOT NULL,
       automation_id TEXT NOT NULL CHECK (length(automation_id) BETWEEN 1 AND 4096),
+      collection_path TEXT NOT NULL CHECK (length(collection_path) BETWEEN 1 AND 4096),
       definition_hash TEXT NOT NULL CHECK (length(definition_hash) = 16),
       record_id TEXT NOT NULL CHECK (length(record_id) BETWEEN 1 AND 1024),
       state TEXT NOT NULL CHECK (state IN ('pending', 'accepted', 'settled')),
@@ -64,14 +66,9 @@ export function initializeAutomationPressSchema(db: SqliteDb): void {
   `);
 }
 
-/** The Collection a Collection automation belongs to: "collection:<path>#<id>". */
-export function automationPressCollection(automationId: string): string | null {
-  if (!automationId.startsWith("collection:")) return null;
-  const rest = automationId.slice("collection:".length);
-  const hash = rest.lastIndexOf("#");
-  if (hash <= 0 || hash === rest.length - 1) return null;
-  return rest.slice(0, hash);
-}
+// A Collection automation's id: "collection:<collection id>#<automation id>".
+// The Collection id is an object id or a dataset id, never a path.
+const COLLECTION_AUTOMATION_ID = /^collection:[A-Za-z0-9_-]+#.+$/su;
 
 // The one expiry rule: a press created before this is gone, whatever its state.
 const oldestKept = (nowMs: number) => nowMs - AUTOMATION_PRESS_RETENTION_MS;
@@ -85,6 +82,9 @@ export interface RecordAutomationPressInput {
   userId: string;
   pressId: string;
   automationId: string;
+  // Where the recipient saw the Collection. The grant must edit it, and the
+  // host runs the press only while the automation's Collection is still there.
+  collectionPath: string;
   // The automation as the recipient saw it; the host refuses a press whose automation changed.
   definitionHash: string;
   recordId: string;
@@ -101,6 +101,7 @@ interface PressRow {
   press_id: string;
   user_id: string;
   automation_id: string;
+  collection_path: string;
   definition_hash: string;
   record_id: string;
   state: AutomationPressState;
@@ -130,11 +131,12 @@ function count(storage: StorageContext, sql: string, ...params: Array<string | n
  * button or record is refused.
  */
 export function recordAutomationPress(storage: StorageContext, input: RecordAutomationPressInput): RelayAutomationPressReceipt {
-  const collectionPath = automationPressCollection(input.automationId);
-  if (collectionPath === null) throw relayError("share_op_rejected");
+  if (!COLLECTION_AUTOMATION_ID.test(input.automationId)) throw relayError("share_op_rejected");
+  const path = validateUserWritePath(input.collectionPath);
+  if (!path.ok || path.normalized !== input.collectionPath) throw relayError("share_op_rejected");
   return storage.tx(() => {
     const authorized = currentCollectionEditGrant(storage, input);
-    if (!grantEditsCollection(storage, authorized, collectionPath)) throw relayError("share_read_only");
+    if (!grantEditsCollection(storage, authorized, input.collectionPath)) throw relayError("share_read_only");
     const workspaceId = authorized.share.workspaceId;
     pruneExpired(storage, input.nowMs, workspaceId);
     const existing = storage.db.prepare(
@@ -142,7 +144,7 @@ export function recordAutomationPress(storage: StorageContext, input: RecordAuto
     ).get(input.grantId, input.pressId);
     if (existing) {
       const row = pressRow(existing);
-      if (row.automation_id !== input.automationId || row.definition_hash !== input.definitionHash ||
+      if (row.automation_id !== input.automationId || row.collection_path !== input.collectionPath || row.definition_hash !== input.definitionHash ||
         row.record_id !== input.recordId || row.user_id !== input.userId) {
         throw relayError("conflict");
       }
@@ -158,11 +160,11 @@ export function recordAutomationPress(storage: StorageContext, input: RecordAuto
     storage.db.prepare(
       `INSERT INTO sync_relay_automation_presses (
          host_press_id, workspace_id, share_id, grant_id, grant_generation, press_id, user_id,
-         automation_id, definition_hash, record_id, state, accepted_by, outcome, error, created_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?)`,
+         automation_id, collection_path, definition_hash, record_id, state, accepted_by, outcome, error, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?)`,
     ).run(
       input.newId(), workspaceId, input.shareId, input.grantId, input.grantGeneration, input.pressId, input.userId,
-      input.automationId, input.definitionHash, input.recordId, input.nowMs, input.nowMs,
+      input.automationId, input.collectionPath, input.definitionHash, input.recordId, input.nowMs, input.nowMs,
     );
     return { pressId: input.pressId, state: "pending", outcome: null, createdAtMs: input.nowMs };
   });
@@ -208,13 +210,12 @@ function isRunningHost(storage: StorageContext, scope: HostScope & { generation?
 // recorded settles as failed, so the host never runs it. Only those two
 // answers mean that; any other error is the relay's own and goes up.
 function stillAllowed(storage: StorageContext, row: PressRow, nowMs: number): boolean {
-  const collectionPath = automationPressCollection(row.automation_id);
   let allowed: boolean;
   try {
     const authorized = currentCollectionEditGrant(storage, {
       shareId: row.share_id, grantId: row.grant_id, grantGeneration: row.grant_generation, userId: row.user_id,
     });
-    allowed = collectionPath !== null && grantEditsCollection(storage, authorized, collectionPath);
+    allowed = grantEditsCollection(storage, authorized, row.collection_path);
   } catch (error) {
     if (!(error instanceof RelayError) || (error.code !== "not_found" && error.code !== "share_read_only")) throw error;
     allowed = false;
@@ -274,6 +275,7 @@ export function listAutomationPresses(storage: StorageContext, scope: HostScope 
       definitionHash: row.definition_hash,
       state: row.state === "accepted" ? "accepted" as const : "pending" as const,
       automationId: row.automation_id,
+      collectionPath: row.collection_path,
       recordId: row.record_id,
       pressedBy: row.user_id,
       createdAtMs: row.created_at_ms,

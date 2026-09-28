@@ -10,7 +10,20 @@ import { desktopRoot } from "./desktopApp";
 export const sharedDatasetViewerOrigin = "https://viewer.example.com";
 
 /** Real HTTPS with a test-only certificate and browser-local DNS; no host settings change. */
-export async function startSharedDatasetBrowser(input: { relayUrl: string; exchangeKey: string }) {
+// Edit share links need the release and the live editor's limits; these are small test bounds.
+const editLinkOptions = {
+  publicEditRelease: { version: 1 as const },
+  linkLive: {
+    publicOrigin: sharedDatasetViewerOrigin,
+    requests: { maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 1000 },
+    editor: { provider: { frames: { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384 },
+      maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384 },
+      maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4 },
+      maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10 },
+  },
+};
+
+export async function startSharedDatasetBrowser(input: { relayUrl: string; exchangeKey: string; editLinks?: boolean }) {
   const viewerAssetsDir = join(desktopRoot, "../../services/share-web/viewer/dist");
   if (!existsSync(join(viewerAssetsDir, "index.html"))) {
     throw new Error(`Missing share-web viewer build at ${viewerAssetsDir}. Run pnpm --filter @dohc/share-web build (or pnpm qa:prepare) before desktop e2e tests.`);
@@ -31,7 +44,8 @@ $cert.Dispose();$rsa.Dispose()`;
   const application = createShareWebApplication({ relayUrl: input.relayUrl, publicRelayUrl: input.relayUrl,
     relayExchangeKey: input.exchangeKey, publicHosts: new Set(["viewer.example.com"]),
     viewerAssetsDir,
-    appLaunch: { viewerOrigin: sharedDatasetViewerOrigin, appDomain: "example.net" } });
+    appLaunch: { viewerOrigin: sharedDatasetViewerOrigin, appDomain: "example.net" },
+    ...(input.editLinks ? editLinkOptions : {}) });
   const server = https.createServer({ pfx: Buffer.from(pfxText!, "base64"), passphrase: "" }, async (request, response) => {
     try {
       const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -50,6 +64,6 @@ $cert.Dispose();$rsa.Dispose()`;
   try {
     const browser = await chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${spki}`,
       `--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port}`, "--no-proxy-server"] });
-    return { browser, failures, async close() { try { await browser.close(); } finally { await closeServer(); } } };
+    return { browser, failures, handle: application.handle, async close() { try { await browser.close(); } finally { await closeServer(); } } };
   } catch (error) { await closeServer(); throw error; }
 }

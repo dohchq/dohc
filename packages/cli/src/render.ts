@@ -166,29 +166,33 @@ function triggerText(trigger: AutomationRunLine["trigger"]): string {
     trigger.kind === null ? "unknown change" : TRIGGER_KINDS[trigger.kind],
     ...(trigger.recordId === null ? [] : [`record ${trigger.recordId}`]),
     ...(trigger.by === null ? [] : [`by ${trigger.by}`]),
+    ...(trigger.sharedAuthor === null
+      ? []
+      : trigger.sharedAuthor.kind === "link"
+        ? [`through Edit link ${trigger.sharedAuthor.grantId}`]
+        : [`by shared user ${trigger.sharedAuthor.userId}`]),
     ...(trigger.depth > 0 ? [`depth ${trigger.depth}`] : []),
   ].join(" · ");
 }
 
 function runStateText(run: Omit<AutomationRunLine, "changes">): string {
   return [
-    run.chainStopped ? "chain stopped" : run.state,
+    run.chainStopped ? "chain stopped" : run.neverStarted ? "never started" : run.state,
     ...(run.undone ? ["undone"] : []),
     ...(run.definitionChanged ? ["automation changed since"] : []),
   ].join(", ");
 }
 
 function renderAutomationRuns(result: AutomationRunsResult): string {
-  return result.runs
-    .map((run) => [
-      run.run,
-      dateTime(run.createdAtMs),
-      runStateText(run),
-      triggerText(run.trigger),
-      countLabel(run.changes, "change"),
-      ...(run.error === null ? [] : [lineSafe(run.error)]),
-    ].join(" · "))
-    .join("\n");
+  const lines = result.runs.map((run) => [
+    run.run,
+    dateTime(run.createdAtMs),
+    runStateText(run),
+    triggerText(run.trigger),
+    countLabel(run.changes, "change"),
+    ...(run.error === null ? [] : [lineSafe(run.error)]),
+  ].join(" · "));
+  return [...lines, ...(result.next === null ? [] : [`Older runs: --page ${lineSafe(result.next)}`])].join("\n");
 }
 
 function json(value: unknown): string {

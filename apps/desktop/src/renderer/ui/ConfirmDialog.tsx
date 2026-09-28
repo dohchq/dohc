@@ -11,6 +11,8 @@ type ConfirmDialogProps = {
   testId: string;
   cancelTestId: string;
   confirmTestId: string;
+  /** Confirm waits for a choice the dialog asks for. */
+  confirmDisabled?: boolean;
 };
 
 // The card alone. ConfirmDialog puts it in an Overlay; the states page
@@ -33,7 +35,7 @@ export function ConfirmDialogCard(props: ConfirmDialogProps) {
         <SecondaryButton data-testid={props.cancelTestId} onClick={props.onCancel} className="h-8 py-0">
           Cancel
         </SecondaryButton>
-        <PrimaryButton data-testid={props.confirmTestId} onClick={props.onConfirm} className="h-8 py-0 text-xs">
+        <PrimaryButton data-testid={props.confirmTestId} disabled={props.confirmDisabled} onClick={props.onConfirm} className="h-8 py-0 text-xs">
           {props.confirmLabel}
         </PrimaryButton>
       </div>
