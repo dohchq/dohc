@@ -161,7 +161,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     check();
   });
   const settledChecks = async () => { while (checking.size > 0) await Promise.all([...checking]); };
-  const host = await createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
     onAutomationClaims: (failed) => { executor?.notifyClaimed(); if (failed) executor?.failuresChanged(); wake(); },
     onDatasetsChanged: () => executor?.datasetsChanged() });
   hosts.push(host);
@@ -532,6 +532,28 @@ describe("Collection automations on a dataset", () => {
       startsOver: false,
       steps: [{ step: 1, writes: [expect.objectContaining({ kind: "dataset-edit", recordId: invoice })] }],
     });
+    await f.executor.dispose();
+  });
+
+  it("gives a change's run the person who made it, never the dataset's owner key, and carries them on", async () => {
+    const f = await world();
+    // Paid starts a run that names its person in Notes; that write starts a run that names its person in Status.
+    await f.writeAutomations(`${closePaid("      - set:\n          Notes: '=person.name'\n        operation: invoices.edit\n")}  - id: status-by
+    name: Status by
+    when:
+      field-changed: Notes
+    do:
+      - set:
+          Status: '=person == null ? "nobody" : person.name'
+        operation: invoices.status
+`);
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [PAID]: false, [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done" || f.claims()[0]?.state === "failed");
+    await f.until(async () => (await f.record(invoice))?.values[STATUS] === "Person person-local");
+    expect((await f.record(invoice))?.values[NOTES]).toBe("Person person-local");
+    expect(f.claims()[0]?.actor).toEqual({ kind: "owner", userId: "person-local" });
     await f.executor.dispose();
   });
 
