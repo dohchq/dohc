@@ -11,6 +11,8 @@ import {
   closeTab,
   closeEditorGroup,
   collectionTabPath,
+  transactionalCollectionTabPath,
+  parseTransactionalCollectionTabPath,
   isCollectionTabPath,
   parseCollectionTabPath,
   createEditorGroupRight,
@@ -1474,4 +1476,13 @@ describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
     expect(allTabs(empty)).toEqual([]);
     expect(activeTabPath(empty)).toBeNull();
   });
+});
+
+
+it("uses the dataset.json address for Collection tabs and rejects old ID-only addresses", () => {
+  const tableId = "00000000-0000-4000-8000-000000000002";
+  const datasetPath = "旅行/Equipment list/dataset.json";
+  expect(parseTransactionalCollectionTabPath(transactionalCollectionTabPath(datasetPath, tableId))).toEqual({ datasetPath, tableId });
+  expect(parseTransactionalCollectionTabPath(transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", tableId))).toBeNull();
+  expect(parseTransactionalCollectionTabPath(transactionalCollectionTabPath("../dataset.json", tableId))).toBeNull();
 });

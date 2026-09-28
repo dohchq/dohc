@@ -11,9 +11,11 @@ import { approveLocalDatasetMigration, createLocalDatasetMigrations, type LocalD
 import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryRestore";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
+import { DatasetAddressUnavailableError, addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, type ResolvedDatasetRequest } from "../workspaces/datasetAddress";
+
 
 type Workspace = { workspaceId: string; shareView?: unknown };
-type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
+type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "workspace">;
 type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; scope?: string; assertCurrent(): void };
 
 /** The desktop and owner CLI enter the same workspace authority before using data. */
@@ -25,7 +27,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   currentCredentialGeneration?(): number;
   namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file">>;
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
-  exportArchive?(workspace: W, request: Extract<import("@dohc/cli/dataset").DatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
+  exportArchive?(workspace: W, request: Extract<ResolvedDatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
   /** Reconciles disk edits before capturing immutable source for review. */
   flushSourceCapture(workspace: W, signal: AbortSignal): Promise<void>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
@@ -43,10 +45,43 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; credentialGeneration?: number; review: LocalDatasetMigrationPreparation; clear(): void }>();
   let preparingMigrations = 0;
   return async (caller: Caller, raw: unknown) => {
-    const input = DatasetRequest.parse(raw);
-    return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
+    const request = DatasetRequest.parse(raw);
+    return dependencies.withWorkspaceOperation(caller, request.workspaceId, async operation => {
       const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
       current();
+      let input: ResolvedDatasetRequest;
+      if ("datasetPath" in request) {
+        if (request.action === "prepareMigration") {
+          await dependencies.flushSourceCapture(operation.workspace, operation.signal);
+          current();
+          invalidateDatasetAddresses({ workspaceId: request.workspaceId });
+        }
+        const resolve = () => dependencies.withAdapter(operation.workspace, adapter => resolveDatasetAddress(adapter, request.workspaceId, request.datasetPath, operation.signal));
+        const datasetId = await resolve().catch(async error => {
+          current();
+          if (!(error instanceof DatasetAddressUnavailableError) || request.action === "prepareMigration" || shareViewIsPresent(operation.workspace.shareView)) throw error;
+          await dependencies.flushSourceCapture(operation.workspace, operation.signal);
+          current();
+          invalidateDatasetAddresses({ workspaceId: request.workspaceId });
+          return resolve();
+        }).catch(error => {
+          current();
+          if (shareViewIsPresent(operation.workspace.shareView) && error instanceof DatasetAddressUnavailableError) {
+            throw new Error(`Collection source unavailable: ${request.datasetPath}. Ask the owner to include its dataset.json file in this share.`);
+          }
+          throw error;
+        });
+        current();
+        if (request.expectedDatasetId && request.expectedDatasetId !== datasetId) throw new Error("This Collection moved. Reopen it.");
+        const { datasetPath: _, expectedDatasetId: _expected, ...fields } = request;
+        input = { ...fields, datasetId };
+      } else input = request;
+      const addressPage = async (page: { datasets: import("@dohc/security-contract/dataset").DatasetDescription[]; nextCursor: string | null }) => {
+        const datasets = await dependencies.withAdapter(operation.workspace, adapter => addressDatasets(adapter, request.workspaceId, page.datasets, operation.signal));
+        current();
+        return { ...page, datasets };
+      };
+      const addressed = <T extends { dataset: import("@dohc/security-contract/dataset").DatasetDescription }>(result: T) => ({ ...result, dataset: { ...result.dataset, datasetPath: "datasetPath" in request ? request.datasetPath : null } });
       if (input.action === "export") {
         if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
         if (!dependencies.exportArchive) throw new Error("Collection recovery export is unavailable. Restart dohc and try again.");
@@ -58,8 +93,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         if (!dependencies.namedDataForWorkspace || !["list", "describe", "invoke", "upload", "file"].includes(input.action)) throw new Error("Open the original workspace to manage this Collection.");
         const data = await dependencies.namedDataForWorkspace(operation.workspace, operation.signal);
         current();
-        if (input.action === "list") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const page = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...page }; }
-        if (input.action === "describe") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const result = data.inspect ? await data.inspect(input.datasetId) : { dataset: await data.describe(input.datasetId) }; current(); return { kind: "description" as const, ...result }; }
+        if (input.action === "list") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const page = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...await addressPage(page) }; }
+        if (input.action === "describe") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const result = data.inspect ? await data.inspect(input.datasetId) : { dataset: await data.describe(input.datasetId) }; current(); return { kind: "description" as const, ...addressed(result) }; }
         if (input.action === "upload") { const result = await data.upload(input); current(); return { kind: "uploaded" as const, ...result }; }
         if (input.action === "file") { const result = await data.file(input); current(); return { kind: "file" as const, ...result }; }
         if (input.action === "invoke") {
@@ -78,10 +113,40 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "recovery-prepared" as const, recovery };
       }
       if (input.action === "claimRecovery") {
-        if(input.sourceCursor.workspaceId!==input.workspaceId || input.sourceCursor.datasetId!==input.datasetId) throw new Error("This recovery belongs to another Collection.");
+        if(input.sourceCursor.workspaceId!==input.workspaceId) throw new Error("This recovery belongs to another Collection.");
         const receipt = await host.claimRecovery(input); current();
         if (!receipt.targetCursor) throw new Error("Recovery has not activated this Collection. Retry recovery.");
-        return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor};
+        let datasetPath: string | null = null;
+        let sourceError: string | undefined;
+        try {
+          await dependencies.flushSourceCapture(operation.workspace, operation.signal); current();
+          invalidateDatasetAddresses({ workspaceId: input.workspaceId });
+          const approved = await host.approvedArtifacts(receipt.targetCursor.datasetId); current();
+          const description = { datasetId: approved.revision.datasetId, name: approved.revision.definition.name,
+            revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, tables: [], operations: [] };
+          datasetPath = await dependencies.withAdapter(operation.workspace, async adapter => {
+            const [address] = await addressDatasets(adapter, input.workspaceId, [description], operation.signal);
+            current();
+            return address?.datasetPath ?? null;
+          });
+          current();
+          if (!datasetPath) {
+            const definition = approved.revision.definition;
+            datasetPath = definition.schemaPath.slice(0, definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json";
+            const files = { [definition.schemaPath]: approved.schemaSql, [definition.operationsPath]: approved.operationSource,
+              [datasetPath]: JSON.stringify(definition, null, 2) + "\n" };
+            const existing = await dependencies.withAdapter(operation.workspace, adapter => adapter.listTextFileMetadata({ workspaceId: input.workspaceId, versionId: "main" }));
+            current();
+            if (existing.some(file => file.path === datasetPath)) throw new Error(`Collection restored, but ${datasetPath} conflicts with its source. Move that file, then retry recovery.`);
+            const missing = Object.fromEntries(Object.entries(files).filter(([path]) => !existing.some(file => file.path === path)));
+            await dependencies.createSources(operation.workspace, missing, operation.signal); current();
+          }
+        } catch (error) {
+          current();
+          datasetPath = null;
+          sourceError = error instanceof Error ? error.message.slice(0, 1024) : "Restore its dataset.json source file to open the Collection.";
+        }
+        return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor,datasetPath,...(sourceError ? { sourceError } : {})};
       }
       if (input.action === "discardRecovery") { await host.discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
       const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "historyRevision", "prepareHistoryRestore", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareRelationChoices", "prepareMigration", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
@@ -134,7 +199,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         preparingMigrations++;
         const review = createLocalDatasetMigrations(migrationAuthority);
         try {
-          await dependencies.flushSourceCapture(operation.workspace, operation.signal); current();
+          if (request.action !== "prepareMigration") { await dependencies.flushSourceCapture(operation.workspace, operation.signal); current(); }
           const prepared = await dependencies.withAdapter(operation.workspace, adapter => review.prepareMigration({ ...selection, adapter, signal: operation.signal }));
           migrationAuthority.assertCurrent();
           const { signal } = operation;
@@ -213,10 +278,10 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         if (!("setGrant" in data) || !data.setGrant) throw new Error("Publish this Collection before managing shared access.");
         await data.setGrant(input); current(); return { kind: "grant-updated" as const };
       }
-      if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current(); return { kind: "list" as const, ...result }; }
+      if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current(); return { kind: "list" as const, ...await addressPage(result) }; }
       if (input.action === "describe") {
         const result = "inspect" in data && data.inspect ? await data.inspect(input.datasetId, { includeArchived: input.includeArchived }) : { dataset: await data.describe(input.datasetId, { includeArchived: input.includeArchived }) };
-        current(); return { kind: "description" as const, ...result };
+        current(); return { kind: "description" as const, ...addressed(result) };
       }
       if (input.action === "upload") {
         const description = await data.describe(input.datasetId);
@@ -238,7 +303,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         if (!approved.active || approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) {
           throw new Error("Collection rules changed. Reload the Collection before creating a form.");
         }
-        const generated = generateDatasetFormSources({ ...input, approvedRevision: approved.revision });
+        const generated = generateDatasetFormSources({ ...input, datasetPath: "datasetPath" in request ? request.datasetPath : "", approvedRevision: approved.revision });
         const files = Object.fromEntries(Object.entries(generated.files).map(([path, source]) => [`${input.appRoot}/${path}`, source]));
         await dependencies.createSources(operation.workspace, files, operation.signal);
         current();
@@ -272,7 +337,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
       }
       if (input.action === "prepareMigration") {
-        const prepared = await prepareMigration(input);
+        if (request.action !== "prepareMigration") throw new Error("This Collection review changed. Prepare it again.");
+        const prepared = await prepareMigration({ ...input, descriptorPath: request.datasetPath });
         current();
         return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
       }

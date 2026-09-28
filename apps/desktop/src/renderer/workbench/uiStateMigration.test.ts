@@ -9,12 +9,20 @@ async function fixture(version: 2 | 3) {
   return JSON.parse(await readFile(new URL(`./fixtures/ui-state-v${version}.json`, import.meta.url), "utf8"));
 }
 
+async function migratedFixture() {
+  const current = await fixture(3);
+  current.editorGroups[0].tabs = current.editorGroups[0].tabs.filter((path: string) => !path.startsWith("tab://data-collection/"));
+  return current;
+}
+
 describe("UI-state v2 to v3", () => {
   it("migrates every current tab kind and active reference while preserving the other state", async () => {
     const old = await fixture(2);
     const before = structuredClone(old);
-    expect(serializeUiState(parseUiState(old))).toEqual(await fixture(3));
+    expect(serializeUiState(parseUiState(old))).toEqual(await migratedFixture());
     expect(old).toEqual(before);
+    expect(old.editorGroups[0].tabs).toContain("dohc://data-collection/123e4567-e89b-42d3-a456-426614174001/123e4567-e89b-42d3-a456-426614174002");
+    expect(allTabs(parseUiState(old)).some(tab => tab.path.includes("data-collection"))).toBe(false);
   });
 
   it("reads a v2 file through the IPC schema, writes v3, and round-trips through disk and the renderer", async () => {
@@ -22,7 +30,7 @@ describe("UI-state v2 to v3", () => {
     await writeUiStateFile(root, await fixture(2));
     const restored = parseUiState(GetWorkspaceUiStateResult.parse(await readUiStateFile(root)));
     const v3 = WorkspaceUiState.parse(serializeUiState(restored));
-    expect(v3).toEqual(await fixture(3));
+    expect(v3).toEqual(await migratedFixture());
     await writeUiStateFile(root, v3);
     const read = GetWorkspaceUiStateResult.parse(await readUiStateFile(root));
     expect(read).toEqual(v3);

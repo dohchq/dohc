@@ -21,17 +21,31 @@ function setup() {
 }
 it("claims the reviewed archive and selects its first table only after confirmation", async () => {
   const value = recovery();
-  backend.dataset.mockImplementation(async input => input.action === "prepareRecovery" ? { kind: "recovery-prepared", recovery: value } : {
-    kind: "recovery-claimed", transferId: value.transferId, manifestSha256: value.manifestSha256, sourceCursor: value.sourceCursor, targetCursor: { ...value.sourceCursor, hostEpoch: "new" } });
+  backend.dataset.mockImplementation(async input => input.action === "list" ? { kind: "list", datasets: [{ datasetId: id(1), datasetPath: "data/dataset.json" }], nextCursor: null } : input.action === "prepareRecovery" ? { kind: "recovery-prepared", recovery: value } : {
+    kind: "recovery-claimed", datasetPath: "data/dataset.json", transferId: value.transferId, manifestSha256: value.manifestSha256, sourceCursor: value.sourceCursor, targetCursor: { ...value.sourceCursor, hostEpoch: "new" } });
   const { props } = setup();
   fireEvent.click(screen.getByRole("button", { name: "Choose recovery file" }));
   await screen.findByText("Registrations");
   expect(props.onRestored).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("checkbox")); fireEvent.click(screen.getByRole("button", { name: "Restore Collection" }));
-  await waitFor(() => expect(props.onRestored).toHaveBeenCalledWith(id(1), id(2)));
-  expect(backend.dataset).toHaveBeenCalledWith({ action: "claimRecovery", workspaceId: "w", datasetId: id(1), transferId: value.transferId, manifestSha256: value.manifestSha256, sourceCursor: value.sourceCursor, oldHostStopped: true });
+  await waitFor(() => expect(props.onRestored).toHaveBeenCalledWith("data/dataset.json", id(2)));
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "claimRecovery", workspaceId: "w", transferId: value.transferId, manifestSha256: value.manifestSha256, sourceCursor: value.sourceCursor, oldHostStopped: true });
   expect(props.onClose).toHaveBeenCalledOnce(); expect(props.onError).not.toHaveBeenCalled();
 });
+it("reports restored data separately when its source could not be written", async () => {
+  const value = recovery();
+  backend.dataset.mockImplementation(async input => input.action === "prepareRecovery" ? { kind: "recovery-prepared", recovery: value } : {
+    kind: "recovery-claimed", datasetPath: null, sourceError: "Source folder is read-only", transferId: value.transferId,
+    manifestSha256: value.manifestSha256, sourceCursor: value.sourceCursor, targetCursor: { ...value.sourceCursor, hostEpoch: "new" } });
+  const { props } = setup();
+  fireEvent.click(screen.getByRole("button", { name: "Choose recovery file" }));
+  await screen.findByText("Registrations");
+  fireEvent.click(screen.getByRole("checkbox")); fireEvent.click(screen.getByRole("button", { name: "Restore Collection" }));
+  await waitFor(() => expect(props.onClose).toHaveBeenCalledOnce());
+  expect(props.onRestored).not.toHaveBeenCalled();
+  expect(props.onError).toHaveBeenCalledWith("Collection restored. Its source needs attention.", expect.objectContaining({ message: "Source folder is read-only" }), null);
+});
+
 it("discards a recovery from another workspace before allowing a claim", async () => {
   backend.dataset.mockImplementation(async input => input.action === "prepareRecovery" ? { kind: "recovery-prepared", recovery: recovery("other") } : { kind: "recovery-discarded" });
   const { props } = setup(); fireEvent.click(screen.getByRole("button", { name: "Choose recovery file" }));
@@ -50,8 +64,8 @@ it("discards a late native file selection in its original workspace", async () =
 });
 it("does not announce a claim receipt for another workspace", async () => {
   const value = recovery();
-  backend.dataset.mockImplementation(async input => input.action === "prepareRecovery" ? { kind: "recovery-prepared", recovery: value } : {
-    kind: "recovery-claimed", transferId: value.transferId, manifestSha256: value.manifestSha256, sourceCursor: value.sourceCursor, targetCursor: { ...value.sourceCursor, workspaceId: "other" } });
+  backend.dataset.mockImplementation(async input => input.action === "list" ? { kind: "list", datasets: [{ datasetId: id(1), datasetPath: "data/dataset.json" }], nextCursor: null } : input.action === "prepareRecovery" ? { kind: "recovery-prepared", recovery: value } : {
+    kind: "recovery-claimed", datasetPath: "data/dataset.json", transferId: value.transferId, manifestSha256: value.manifestSha256, sourceCursor: value.sourceCursor, targetCursor: { ...value.sourceCursor, workspaceId: "other" } });
   const { props } = setup(); fireEvent.click(screen.getByRole("button", { name: "Choose recovery file" })); await screen.findByText("Registrations");
   fireEvent.click(screen.getByRole("checkbox")); fireEvent.click(screen.getByRole("button", { name: "Restore Collection" }));
   await waitFor(() => expect(props.onError).toHaveBeenCalledOnce()); expect(props.onRestored).not.toHaveBeenCalled();

@@ -1,5 +1,6 @@
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
 import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh} from "./workspaces/ownerShareLabels";
+import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
@@ -756,6 +757,7 @@ const workspaceFileListings = new WorkspaceFileListingCache();
 function notifyRenderer(scope?: WorkspaceActivityScope): void {
   const activityEvent = workspaceActivityPayload(scope);
   workspaceFileListings.invalidate(activityEvent);
+  invalidateDatasetAddresses(activityEvent);
   invalidateWorkspaceGraphIndexes(activityEvent);
   broadcastWorkspaceActivity({
     windows: BrowserWindow.getAllWindows(),
@@ -4007,7 +4009,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
           return await work(operation);
         }),
         describeDataset: async (datasetId) => {
-          const described = await describe({ action: "describe", workspaceId: workspace.workspaceId, datasetId });
+          const described = await describe({ action: "describe", workspaceId: workspace.workspaceId,
+            datasetPath: `${input.collectionPath}/dataset.json`, expectedDatasetId: datasetId });
           if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
           return described.dataset;
         },
@@ -5489,11 +5492,16 @@ function registerIpcHandlers(): void {
       if (details === null) throw new Error("The workspace engine is not running.");
       return details.schema.fields.flatMap((field) => (field.type === "button" ? [field.name] : []));
     },
-    describeDataset: async (sender, workspaceId, datasetId) => {
-      const described = await datasetHandler(sender, { action: "describe", workspaceId, datasetId });
-      if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
-      return described.dataset;
-    },
+    describeDataset: (sender, workspaceId, datasetId) => withRendererWorkspaceOperation(sender, workspaceId,
+      "Collection changes stopped because this window changed workspaces.", async operation => {
+        const data = shareViewIsPresent(operation.workspace.shareView)
+          ? await datasetDependencies.namedDataForWorkspace(operation.workspace, operation.signal)
+          : await datasetDependencies.dataForWorkspace(operation.workspace, operation.signal);
+        operation.assertCurrent(); operation.signal.throwIfAborted();
+        const described = await data.describe(datasetId);
+        operation.assertCurrent(); operation.signal.throwIfAborted();
+        return described;
+      }),
     pressedBy: pressingPerson,
     // A shared view's press goes to the relay it came from, for this
     // person's own grant; the relay checks the grant again.

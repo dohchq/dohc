@@ -12,13 +12,13 @@ export type { DatasetMigrationPreparation } from "@dohc/cli/dataset";
 export interface CollectionMigrationReviewDialogProps {
   workspaceId: string;
   datasetId: string;
-  descriptorPath?: string;
+  datasetPath?: string;
   migrationPath?: string;
   initialPreparation?: DatasetMigrationPreparation;
   /** Native field controls prepare generated changes without asking for source paths. */
   generatedChange?: boolean;
   onClose(): void;
-  onPrepare(input: { workspaceId: string; datasetId: string; descriptorPath: string; migrationPath: string }, signal: AbortSignal): Promise<DatasetMigrationPreparation>;
+  onPrepare(input: { workspaceId: string; datasetId: string; datasetPath: string; migrationPath: string }, signal: AbortSignal): Promise<DatasetMigrationPreparation>;
   onApprove(input: { workspaceId: string; preparationId: string; revisionSha256: string; approvalDigest: string }, signal: AbortSignal): Promise<void>;
   onDiscard(input: { workspaceId: string; preparationId: string }, signal: AbortSignal): Promise<void>;
   onLoadPreview: MigrationDataPreviewProps["onLoad"];
@@ -83,7 +83,7 @@ export function CollectionMigrationReviewDialog(props: CollectionMigrationReview
   return <ScopedMigrationReview key={JSON.stringify([props.workspaceId, props.datasetId])} {...props} />;
 }
 function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
-  const [descriptorPath, setDescriptorPath] = useState(props.descriptorPath ?? "dataset.json");
+  const [datasetPath, setDatasetPath] = useState(props.datasetPath ?? "dataset.json");
   const [migrationPath, setMigrationPath] = useState(props.migrationPath ?? "");
   const [preparation, setPreparation] = useState<DatasetMigrationPreparation | null>(props.initialPreparation ?? null);
   const [invalid, setInvalid] = useState<string | null>(null), [busy, setBusy] = useState(false);
@@ -98,14 +98,14 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
   async function run(kind: "prepare" | "approve"): Promise<void> {
     if (!alive.current || locked.current) return;
     if (kind === "prepare" && !props.generatedChange) {
-      if (!validPath(descriptorPath.trim()) || !validPath(migrationPath.trim()) || descriptorPath.trim() === migrationPath.trim() || descriptorPath.trim().endsWith("/dataset.json") === false && descriptorPath.trim() !== "dataset.json") { setInvalid("Choose separate Collection source files in this workspace."); return; }
+      if (!validPath(datasetPath.trim()) || !validPath(migrationPath.trim()) || datasetPath.trim() === migrationPath.trim() || datasetPath.trim().endsWith("/dataset.json") === false && datasetPath.trim() !== "dataset.json") { setInvalid("Choose separate Collection source files in this workspace."); return; }
     }
     if (kind === "approve" && (!preparation || (!confirmed && !namesOnly) || !candidateMatches)) return;
     if (kind === "approve" && Math.min(preparation!.expiresAtMs, preparation!.candidate.expiresAtMs) <= Date.now()) { setPreparation(null); setConfirmed(false); setInvalid("This review expired. Prepare the change again."); return; }
     locked.current = true; setBusy(true); setInvalid(null); active.current?.abort(); const abort = new AbortController(); active.current = abort;
     try {
       if (kind === "prepare") {
-        const captured = await props.onPrepare({ workspaceId: props.workspaceId, datasetId: props.datasetId, descriptorPath: descriptorPath.trim(), migrationPath: migrationPath.trim() }, abort.signal);
+        const captured = await props.onPrepare({ workspaceId: props.workspaceId, datasetId: props.datasetId, datasetPath: datasetPath.trim(), migrationPath: migrationPath.trim() }, abort.signal);
         if (!alive.current || abort.signal.aborted) return;
         if (captured.previousRevision.datasetId !== props.datasetId || captured.revision.datasetId !== props.datasetId || captured.expected.workspaceId !== props.workspaceId || captured.expected.datasetId !== props.datasetId
           || !matchingCandidate(captured, props.workspaceId, props.datasetId)) throw new Error("The captured change belongs to another Collection or preview. Prepare it again.");
@@ -131,7 +131,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
   return <Overlay onClose={busy ? undefined : () => void discard()}><div role="dialog" aria-modal="true" aria-labelledby="collection-migration-title" className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(720px,calc(100vw-32px))] max-w-[calc(100vw-32px)] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
     <div><h2 id="collection-migration-title" className="m-0 text-sm font-semibold text-ink">Review Collection change</h2><p className="m-0 text-[12px] text-muted">{props.generatedChange ? "Review the fields before applying this change." : "Review the captured source before applying it. dohc will not edit the authored operations for you."}</p></div>
     {!preparation ? <form onSubmit={event => { event.preventDefault(); void run("prepare"); }} className="flex flex-col gap-3">
-      {!props.generatedChange ? <><label className="text-[12px] text-muted">Collection definition<input aria-label="Collection definition" value={descriptorPath} disabled={busy} className={`${inputClass} mt-1 font-mono`} onChange={event => setDescriptorPath(event.target.value)} /></label>
+      {!props.generatedChange ? <><label className="text-[12px] text-muted">Collection definition<input aria-label="Collection definition" value={datasetPath} disabled={busy} className={`${inputClass} mt-1 font-mono`} onChange={event => setDatasetPath(event.target.value)} /></label>
       <label className="text-[12px] text-muted">Migration file<input aria-label="Migration file" value={migrationPath} disabled={busy} className={`${inputClass} mt-1 font-mono`} onChange={event => setMigrationPath(event.target.value)} /></label></> : <p className="m-0 text-[12px] text-muted">Prepare a fresh review before applying these field changes.</p>}
       {invalid ? <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p> : null}<div className="flex justify-end gap-2"><SecondaryButton type="button" disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={busy}>{busy ? "Preparing…" : "Review change"}</PrimaryButton></div>
     </form> : <>
