@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Archive, CalendarDays, CheckSquare, ChevronLeft, ChevronRight, Download, Expand, FileInput, FileSpreadsheet, History, Inbox, LayoutList, MoreHorizontal, PanelsTopLeft, Plus, RefreshCw, Search, Shield, Square, Table2, Trash2, Undo2 } from "lucide-react";
+import { Archive, CalendarDays, CheckSquare, ChevronLeft, ChevronRight, Download, Expand, FileInput, FileSpreadsheet, History, Inbox, LayoutList, MoreHorizontal, PanelsTopLeft, Plus, RefreshCw, Search, Shield, SlidersHorizontal, Square, Table2, Trash2, Undo2 } from "lucide-react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
@@ -57,6 +57,7 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   onHistory?(): void;
   onPendingResponses?(): void;
   onReviewSchema?(): void;
+  onCustomize?(): void;
   onManageAccess?(): void;
   onExportRecovery?(): void;
   onArchive?(): void;
@@ -269,7 +270,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   const canCreateForm = props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly);
   const savedPages = props.copy && "coverage" in props.copy && props.copy.coverage === "saved-pages";
-  const hasManagement = props.onReviewSchema || props.onManageAccess || props.onExportRecovery || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
+  const hasManagement = props.onCustomize || props.onReviewSchema || props.onManageAccess || props.onExportRecovery || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
     <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 min-w-0 truncate text-sm font-semibold text-ink">{table.name}</h2>
       <div className="flex shrink-0 items-center gap-2">{props.automationsButton}
@@ -305,6 +306,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
           {props.onTransferCsv ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onTransferCsv}><FileSpreadsheet size={14} strokeWidth={1.9} aria-hidden />Import or export CSV</SecondaryButton> : null}
           {props.onHistory ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onHistory}><History size={14} strokeWidth={1.9} aria-hidden />History</SecondaryButton> : null}
           {props.onPendingResponses ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onPendingResponses}><Inbox size={14} strokeWidth={1.9} aria-hidden />Pending responses</SecondaryButton> : null}
+          {props.onCustomize ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onCustomize}><SlidersHorizontal size={14} strokeWidth={1.9} aria-hidden />Customize…</SecondaryButton> : null}
           {props.onArchive ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onArchive}><Archive size={14} strokeWidth={1.9} aria-hidden />Archive</SecondaryButton> : null}
         </div>
       </details> : null}

@@ -46,10 +46,20 @@ export function MentionComposer(props: {
   // textarea is always mounted so its pinned test id and drivers keep working.
   authorName?: string;
   authorKind?: "human" | "agent";
+  // Takes focus when it mounts, with the caret after its text.
+  autoFocus?: boolean;
 }) {
   const [focused, setFocused] = useState(false);
   const expanded = props.surface !== "post" || focused || props.value.length > 0;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const node = textareaRef.current;
+    if (!props.autoFocus || !node) return;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+    // Only on mount: a later render must not pull focus back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [caret, setCaret] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);

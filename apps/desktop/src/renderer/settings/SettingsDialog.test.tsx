@@ -17,6 +17,7 @@ import { Overlay } from "../Overlay";
 import type { ScheduleHostResult } from "../../ipc/bridgeContract";
 import { SettingsDialog } from "./SettingsDialog";
 import { applyLookSettings } from "../theme";
+import { CUSTOMIZE_TARGETS } from "./customize";
 import { deferred } from "../../testing/deferred";
 
 const config = {
@@ -1555,6 +1556,79 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(
       "dohc could not open /state/dohc-settings.json. No application is associated with this file.",
     ));
+  });
+
+  it("marks and focuses the part a Customize… command opened Settings for", async () => {
+    const user = userEvent.setup();
+    const ask = vi.fn();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection={CUSTOMIZE_TARGETS.sidebar.section}
+        focus={CUSTOMIZE_TARGETS.sidebar}
+        askAgent={{ ready: true, ask, setUp: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-sidebar");
+    expect(row.dataset.highlighted).toBe("true");
+    expect(document.activeElement).toBe(row);
+    expect(screen.getByRole("group", { name: "Sidebar" })).toBe(row);
+    expect(screen.getByTestId("settings-row-theme").dataset.highlighted).toBeUndefined();
+    await user.click(within(row).getByRole("button", { name: "Ask my agent" }));
+    expect(ask).toHaveBeenCalledExactlyOnceWith({ kind: "settings", target: CUSTOMIZE_TARGETS.sidebar });
+  });
+
+  it("marks the editor's row, and not the settings file's, for the editor", async () => {
+    const user = userEvent.setup();
+    const ask = vi.fn();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection={CUSTOMIZE_TARGETS.editor.section}
+        focus={CUSTOMIZE_TARGETS.editor}
+        askAgent={{ ready: true, ask, setUp: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-editor-font");
+    expect(row.dataset.highlighted).toBe("true");
+    expect(document.activeElement).toBe(row);
+    expect(screen.getByTestId("settings-dialog").dataset.activeSection).toBe("appearance");
+    await user.click(within(row).getByRole("button", { name: "Ask my agent" }));
+    expect(ask).toHaveBeenCalledExactlyOnceWith({ kind: "settings", target: CUSTOMIZE_TARGETS.editor });
+  });
+
+  it("offers the settings file to the agent, or the way to set one up", async () => {
+    const user = userEvent.setup();
+    const setUp = vi.fn();
+    const { rerender } = render(
+      <SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="advanced" onClose={() => {}} />,
+    );
+    const row = await screen.findByTestId("settings-row-settings-file");
+    expect(row.dataset.highlighted).toBeUndefined();
+    expect(within(row).queryByTestId("ask-agent")).toBeNull();
+
+    rerender(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        askAgent={{ ready: false, ask: vi.fn(), setUp }}
+        onClose={() => {}}
+      />,
+    );
+    expect(within(row).getByText("You have no agent set up.")).toBeTruthy();
+    // A search that hides the Agents section must not hold the dialog back.
+    await user.type(screen.getByTestId("settings-search"), "json");
+    await user.click(within(row).getByRole("button", { name: "Set up an agent" }));
+    expect(screen.getByTestId("settings-dialog").dataset.activeSection).toBe("agents");
+    expect((screen.getByTestId("settings-search") as HTMLInputElement).value).toBe("");
+    expect(setUp).not.toHaveBeenCalled();
   });
 
   it("hands every workspace settings answer to the shell", async () => {

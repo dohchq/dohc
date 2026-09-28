@@ -64,7 +64,16 @@ type CliCommandBody =
   | { verb: "moment"; id: string; side: "before" | "after" }
   | { verb: "automationRuns"; collectionPath: string; automation: string }
   | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
-  | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean };
+  | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
+  | {
+      verb: "automationPress";
+      collectionPath: string;
+      field: string;
+      record: string;
+      table?: string;
+      confirm: string[];
+      requestId?: string;
+    };
 
 export type ParsedCliCommand = ParsedCliBase & CliCommandBody;
 
@@ -500,6 +509,41 @@ const AUTOMATION_VERBS = {
       return { verb: "automationRetry", collectionPath, automation, run, startOver: input.flags.has("--start-over") };
     },
   },
+  press: {
+    summary: "Press a Button field on one record, as a person clicks it in dohc.",
+    operands: "<collection> <button> <record>",
+    flags: [
+      { name: "--table", value: "table", text: "Name the table when the button is in more than one table of a dataset Collection." },
+      {
+        name: "--confirm",
+        value: "action",
+        text: "Run this action, which dohc cannot undo. The press names each action it would run. Repeat for more actions.",
+      },
+      { name: "--request-id", value: "id", text: "Send the same id again, after a timeout for example, to get the same press instead of a second one." },
+    ],
+    notes: [
+      "Name the record by its id, or a dataset record by its primary key as JSON.",
+      "The press prints the id of the run it started. Follow it with automation run.",
+      "With --as-agent, the press is recorded as the agent's, for you. A press from an agent run that an automation started is the agent's too, and counts in that chain of automations, which stops after 4 steps.",
+      "In a shared view, a press goes to the owner's computer, which runs it, as in dohc.",
+    ],
+    parse: (input) => {
+      const [collectionPath, field, record, ...extra] = input.operands;
+      if (!collectionPath || !field || !record) fail("automation press requires a Collection, a button, and a record");
+      noExtraArgs(extra, "automation press");
+      const table = lastValue(input, "--table");
+      const requestId = lastValue(input, "--request-id");
+      return {
+        verb: "automationPress",
+        collectionPath,
+        field,
+        record,
+        ...(table ? { table } : {}),
+        confirm: allValues(input, "--confirm"),
+        ...(requestId ? { requestId } : {}),
+      };
+    },
+  },
 } satisfies Record<string, CliVerbSpec>;
 
 interface JsonVerbHelp {
@@ -798,7 +842,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: HISTORY_VERBS,
   },
   automation: {
-    summary: "Read an automation's runs and try a failed run again.",
+    summary: "Press Button fields, read an automation's runs, and try a failed run again.",
     notes: [
       "Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml.",
       "Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.",

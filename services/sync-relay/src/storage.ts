@@ -544,7 +544,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return noticeStorage.pendingShareNotices(this, recipientUserId);
   }
 
-  readAutomationHost(input: {workspaceId: string; ownerUserId: string}) {
+  readAutomationHost(input: automationHostStorage.AutomationHostReadInput) {
     return automationHostStorage.readAutomationHost(this, input);
   }
 

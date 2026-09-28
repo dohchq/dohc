@@ -74,8 +74,11 @@ export interface AutomationHostsDependencies {
   /** The copy kept across restarts: absent before any read, null when the relay recorded no host. */
   stored(workspaceId: string): unknown;
   store(workspaceId: string, host: RelayAutomationHost | null): void;
-  /** This computer became the host, starting after `startAfterMs` or at now when null. */
-  startedHere(workspaceId: string, startAfterMs: number | null): void;
+  /**
+   * This computer became the host, starting after `startAfterMs`, or at now
+   * when null but never at or before `floorMs`, the host's recorded progress.
+   */
+  startedHere(workspaceId: string, startAfterMs: number | null, floorMs: number | null): void;
   /**
    * Whether this computer runs the workspace's automations may have
    * changed: its copy of the host changed, or a handover ended.
@@ -166,12 +169,15 @@ export function computersOfAnswer(answer: { status: number; body: unknown }): Re
   if (!Array.isArray(computers)) return undefined;
   const valid = computers.every((computer: unknown) => {
     if (!computer || typeof computer !== "object") return false;
-    const { installId, label, lastSeenMs } = computer as Record<string, unknown>;
+    const { installId, kind, label, lastSeenMs } = computer as Record<string, unknown>;
     return isNoticeLine(installId, AUTOMATION_INSTALL_ID_MAX_CHARS) &&
+      (kind === "computer" || kind === "server") &&
       isNoticeLine(label, AUTOMATION_COMPUTER_LABEL_MAX_CHARS) &&
       typeof lastSeenMs === "number" && Number.isSafeInteger(lastSeenMs) && lastSeenMs >= 0;
   });
-  return valid ? (computers as RelayAutomationComputer[]).map(({ installId, label, lastSeenMs }) => ({ installId, label, lastSeenMs })) : undefined;
+  return valid
+    ? (computers as RelayAutomationComputer[]).map(({ installId, kind, label, lastSeenMs }) => ({ installId, kind, label, lastSeenMs }))
+    : undefined;
 }
 
 /** A computer name the relay takes: printable, trimmed, and bounded. */
@@ -230,7 +236,7 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     if (runsOn(host) && !runsOn(before)) {
       // A release since this computer's last copy says where the last host stopped.
       const released = host?.releasedThroughMs ?? null;
-      dependencies.startedHere(workspaceId, released !== (before?.releasedThroughMs ?? null) ? released : null);
+      dependencies.startedHere(workspaceId, released !== (before?.releasedThroughMs ?? null) ? released : null, released);
     }
     if (host !== null && host.handoverFrom === dependencies.installId()) void handOver(workspaceId, state, host);
     if (changed) dependencies.hostChanged(workspaceId);

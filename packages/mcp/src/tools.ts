@@ -2634,6 +2634,24 @@ export async function retryAutomationRun(
   });
 }
 
+// A press of a Button field, through the desktop's press path. A press
+// changes records, so the path must clear the write rules.
+export async function pressButton(
+  ctx: ToolContext,
+  args: { collectionPath: string; button: string; recordId: string; table?: string; confirm?: string[]; requestId?: string },
+) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "automationPress", {
+    collectionPath: resolved.normalized,
+    field: args.button,
+    record: args.recordId,
+    ...(args.table === undefined ? {} : { table: args.table }),
+    confirm: args.confirm ?? [],
+    ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
+  });
+}
+
 // Live documents change through the desktop, which applies an edit to the
 // session an open editor holds. The path is checked here and again there.
 export async function readDocument(ctx: ToolContext, args: { path: string }) {

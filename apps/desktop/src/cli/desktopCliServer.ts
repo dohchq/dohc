@@ -14,6 +14,7 @@ import type {
 import {
   CLI_REQUEST_DEADLINE_MS,
   type CliAutomationsPort,
+  type CliButtonsPort,
   type CliRegistryWorkspace,
   type CliRunMessageLink,
   type CliServerHandle,
@@ -65,6 +66,8 @@ interface DesktopCliServerDependencies<State> {
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   /** The executor calls the Automations panel makes, for one workspace. */
   automations(workspace: RegistryEntry): CliAutomationsPort;
+  /** A window's press path, for one workspace. */
+  buttons(workspace: RegistryEntry): CliButtonsPort;
   findWorkspace(workspaceId: string): RegistryEntry | null;
   listWorkspaces(): RegistryEntry[];
   openWorkspaceActivity(workspace: RegistryEntry): Promise<unknown>;
@@ -198,6 +201,7 @@ export function createDesktopCliServer<State>(
         }) } : {}),
       rootPath: workspace.rootPath,
       automations: dependencies.automations(workspace),
+      buttons: dependencies.buttons(workspace),
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),

@@ -15184,6 +15184,72 @@ describe("settings entry points", () => {
   });
 });
 
+describe("customize", () => {
+  it("opens the sidebar's settings from its menu, and Add an app here… opens Apps", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByRole("button", { name: "Sidebar actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Customize…" }));
+    const row = await screen.findByTestId("settings-row-sidebar");
+    expect(row.dataset.highlighted).toBe("true");
+    await waitFor(() => expect(document.activeElement).toBe(row));
+    await user.click(screen.getByLabelText("Close settings"));
+
+    await user.click(screen.getByRole("button", { name: "Sidebar actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Add an app here…" }));
+    // The rail marks Apps at once; its view loads on its own clock.
+    expect(screen.getByTestId("activity-sites").getAttribute("aria-current")).toBe("page");
+  });
+
+  it("hands a Chats setting to the person's agent in the agent's chat", async () => {
+    const agentChannel: ChatChannelRecord = {
+      id: "channel-agent", name: "Agent", slug: "agent", kind: "agent",
+      createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0,
+    };
+    // Share answers unlock the channel's composer; without them it fails closed.
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      listChatChannelShares: vi.fn(async () => ({
+        joined: [], sessionKey: null,
+        relay: { state: "answered" as const, granted: [], received: [] },
+      })),
+    });
+    bridge.listChatChannels = vi.fn(async () => ({ channels: [agentChannel], fileThreads: [] }));
+    const user = userEvent.setup();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<DesktopWorkspaceShell
+      workspace={WORKSPACE}
+      workspaces={[WORKSPACE]}
+      {...shellBootstrapProps(bridge)}
+      userSettings={{ source: "stored", settings: {
+        ...DEFAULT_USER_SETTINGS,
+        profile: { agentName: "Nova" },
+        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled: true, command: "node agent.mjs" },
+      } }}
+      onSwitchWorkspace={() => {}}
+    />);
+
+    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
+    await user.click(await screen.findByRole("button", { name: "Chats actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Customize…" }));
+    const row = await screen.findByTestId("settings-row-your-color");
+    expect(row.dataset.highlighted).toBe("true");
+    await user.click(await within(row).findByRole("button", { name: "Ask my agent" }));
+
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    expect(await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(agentChannel.id)}`)).toBeTruthy();
+    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-new-thread-composer");
+    await waitFor(() => expect(composer.value).toBe([
+      'Change my dohc chat colors settings. They are the "appearance.yourColor" and "appearance.yourAgentColor" keys in my dohc settings file, /state/dohc-settings.json.',
+      "dohc applies the file when it is saved.",
+      "What I want: ",
+    ].join("\n")));
+    expect(document.activeElement).toBe(composer);
+    expect(composer.selectionStart).toBe(composer.value.length);
+  });
+});
+
 describe("owner live documents", () => {
   const LIVE_ROW = {
     path: "notes/today.md",
