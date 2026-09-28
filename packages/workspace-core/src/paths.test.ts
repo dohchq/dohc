@@ -196,7 +196,7 @@ describe("Check A — reserved-path (security core, every surface, every platfor
   });
 
   it("rejects `shared-with-me` 8.3 aliases on write but allows them on read", () => {
-    for (const candidate of ["SHARED~1/alex/brief.md", "share~10/x.md", "SHARED~2"]) {
+    for (const candidate of ["SHARED~1/alex/brief.md", "share~10/x.md", "SHARED~2", "shar~100"]) {
       // Write reservation (like shared-with-me itself).
       expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
       expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
@@ -212,9 +212,9 @@ describe("Check A — reserved-path (security core, every surface, every platfor
     for (const candidate of [
       "report~1.pdf",
       "draft~2.md",
+      "shar~1", // too short to alias shared-with-me with one digit
       "DOHC~1.md", // has an extension → aliases a long .md name, not `.dohc`
       "DOHCXY~1", // prefix past the stem → a real user file
-      "shar~1", // too short to be the shared-with-me stem
       "LONGDI~1/notes.md",
     ]) {
       expect(isReservedPath(candidate)).toBe(false);
@@ -454,17 +454,29 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
 });
 
 describe("hasEngineIgnoredSegment (Rust capture floor parity)", () => {
-  it("uses exact names and prefixes at any depth on POSIX", () => {
+  it.each(["linux", "darwin", "win32"] as const)("folds reserved names on %s", (platform) => {
+    for (const name of [".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"]) {
+      const path = `notes/${name}/engine/store`;
+      expect(hasEngineIgnoredSegment(path, platform), path).toBe(true);
+      expect(validateUserWritePath(path), path).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserMaterializePath(path, { platform }), path).toEqual({ ok: false, reason: "reserved" });
+    }
+    for (const name of ["dohc", ".dohc-notes", "my-dohc", "my-node_modules"]) {
+      expect(hasEngineIgnoredSegment(`${name}/notes.md`, platform)).toBe(false);
+      expect(validateUserWritePath(`${name}/notes.md`).ok).toBe(true);
+    }
+  });
+  it("folds names and prefixes at any depth on POSIX", () => {
     expect(hasEngineIgnoredSegment(".dohc/history/index.json", "linux")).toBe(true);
     expect(hasEngineIgnoredSegment("sub/.git/config", "linux")).toBe(true);
     expect(hasEngineIgnoredSegment("pkg/node_modules/x.js", "linux")).toBe(true);
     expect(hasEngineIgnoredSegment("sub/.dohc-write-123.tmp", "linux")).toBe(true);
 
-    expect(hasEngineIgnoredSegment(".DOHC/history/index.json", "linux")).toBe(false);
-    expect(hasEngineIgnoredSegment("sub/.GIT/config", "linux")).toBe(false);
-    expect(hasEngineIgnoredSegment("pkg/NODE_MODULES/x.js", "linux")).toBe(false);
+    expect(hasEngineIgnoredSegment(".DOHC/history/index.json", "linux")).toBe(true);
+    expect(hasEngineIgnoredSegment("sub/.GIT/config", "linux")).toBe(true);
+    expect(hasEngineIgnoredSegment("pkg/NODE_MODULES/x.js", "linux")).toBe(true);
     expect(hasEngineIgnoredSegment(".dohc./history/index.json", "linux")).toBe(false);
-    expect(hasEngineIgnoredSegment(".DOHC-WRITE-123.tmp", "linux")).toBe(false);
+    expect(hasEngineIgnoredSegment(".DOHC-WRITE-123.tmp", "linux")).toBe(true);
   });
 
   it("normalizes case and trailing aliases on Windows", () => {

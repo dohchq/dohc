@@ -1,13 +1,7 @@
 //! Cross-platform engine path policy: tracked, ignored, or secret.
 //!
-//! This is deliberately distinct from [`crate::floor`]. The scan floor asks
-//! whether a real on-disk entry participates in a local scan and therefore
-//! applies case/trailing-alias folding only on Windows. This module ports the
-//! relay-facing TypeScript security contract (`enginePathFloor.ts` plus Check A
-//! in `paths.ts`): every platform strips Win32 trailing aliases and folds case
-//! for reserved comparisons. That intentional non-parity makes classification
-//! stable across peers, so a POSIX relay and a Windows desktop cannot disagree
-//! about which path contains secret material.
+//! Reserved names share the capture floor's Unicode folding. Peer paths also
+//! strip Win32 trailing aliases on every platform so peers agree.
 //!
 //! Only Check A lives here: absolute/traversal/NUL rejection, stable percent
 //! decoding, ignored/reserved segments, and reserved 8.3 aliases. NTFS ADS,
@@ -27,8 +21,7 @@ pub enum PathClassification {
     Secret,
 }
 
-const DOHC_SHORT_NAME_STEM: &str = "DOHC";
-const SHARED_WITH_ME_SHORT_NAME_STEM: &str = "SHARED";
+use crate::floor::is_reserved_83_alias;
 
 /// Maximum UTF-8 byte length of one canonical workspace-relative path.
 pub const MAX_CANONICAL_WORKSPACE_PATH_BYTES: usize = 1_024;
@@ -197,40 +190,18 @@ fn strip_windows_alias_suffix(segment: &str) -> &str {
     segment.trim_end_matches(['.', ' '])
 }
 
-fn is_reserved_83_alias(segment: &str, stem: &str) -> bool {
-    let Some((base, digits)) = segment.rsplit_once('~') else {
-        return false;
-    };
-    if base.is_empty()
-        || base.len() > 8
-        || !base.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        || digits.is_empty()
-        || !digits.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return false;
-    }
-    let Some(width) = 7usize.checked_sub(digits.len()) else {
-        return false;
-    };
-    let base_len = stem.len().min(width);
-    base_len >= 1 && base.eq_ignore_ascii_case(&stem[..base_len])
-}
-
 fn normalized_segments(path: &str) -> impl Iterator<Item = String> + '_ {
-    path.split(['/', '\\'])
-        .map(strip_windows_alias_suffix)
-        .map(str::to_lowercase)
+    path.split(['/', '\\']).map(crate::floor::reserved_key)
 }
 
 fn is_dohc_metadata_path(path: &str) -> bool {
     normalized_segments(path)
-        .any(|segment| segment == ".dohc" || is_reserved_83_alias(&segment, DOHC_SHORT_NAME_STEM))
+        .any(|segment| segment == ".dohc" || is_reserved_83_alias(&segment, ".dohc"))
 }
 
-fn is_shared_with_me_path(path: &str) -> bool {
+pub(crate) fn is_shared_with_me_path(path: &str) -> bool {
     normalized_segments(path).next().is_some_and(|segment| {
-        segment == "shared-with-me"
-            || is_reserved_83_alias(&segment, SHARED_WITH_ME_SHORT_NAME_STEM)
+        segment == "shared-with-me" || is_reserved_83_alias(&segment, "shared-with-me")
     })
 }
 
@@ -239,10 +210,7 @@ fn is_reserved_path(path: &str) -> bool {
 }
 
 fn has_ignored_segment(path: &str) -> bool {
-    normalized_segments(path).any(|segment| {
-        matches!(segment.as_str(), ".dohc" | ".git" | "node_modules")
-            || segment.starts_with(".dohc-write-")
-    })
+    normalized_segments(path).any(|segment| crate::floor::segment_is_ignored(&segment))
 }
 
 /// The secret-path rule. `path` must already be normalized: relative,

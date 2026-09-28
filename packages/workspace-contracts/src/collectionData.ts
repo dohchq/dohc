@@ -1,5 +1,6 @@
 import { parseDatasetPath } from "./datasetPath";
 import type { CollectionValue } from "./collection";
+import { isIgnoredPathSegment } from "./pathFloor";
 
 type DocumentCollectionRef = { kind: "document"; path: string };
 type TransactionalCollectionRef = { kind: "transactional"; datasetPath: string; tableId: string };
@@ -109,7 +110,7 @@ function ref(input: unknown): CollectionRef {
   if (kind === "document") {
     const row = exact(input, ["kind", "path"]);
     const path = text(row.path, 4096);
-    if (/[\\:%]/u.test(path) || path.split("/").some(part => !part || part === "." || part === ".." || part.toLowerCase() === ".dohc")) fail();
+    if (/[\\:%]/u.test(path) || path.split("/").some(part => !part || part === "." || part === ".." || isIgnoredPathSegment(part))) fail();
     return { kind, path };
   }
   if (kind === "transactional") {

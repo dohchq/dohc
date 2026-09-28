@@ -109,6 +109,7 @@ export function CopyDetailsButton(props: {
         data-testid={props["data-testid"]}
         aria-label={label}
         onClick={() => void copy(details())}
+        className="inline-flex items-center gap-1"
       >
         {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
         {copied ? "Copied" : label}
