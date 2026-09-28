@@ -67,6 +67,12 @@ const workspaceContractsRequire = createRequire(
 const { CORE_SCHEMA, load } = workspaceContractsRequire("js-yaml");
 
 const schemas = [
+  ...[1, 2, 0, -1, 1.5, null, true, "1"].map(version => ({
+    name: `schema-version-${JSON.stringify(version)}`,
+    yaml: `version: ${JSON.stringify(version)}\nname: Tasks\nfields:\n  Done:\n    type: checkbox\n`,
+  })),
+  { name: "schema-version-float-current", yaml: "version: 1.0\nname: Tasks\n" },
+  { name: "schema-version-float-newer", yaml: "version: 2.0\nname: Tasks\n" },
   {
     name: "valid-comment-only-schema",
     yaml: "# collection schema to be filled in later\n",

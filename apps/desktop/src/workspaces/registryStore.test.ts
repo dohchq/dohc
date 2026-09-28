@@ -82,6 +82,31 @@ function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
   }
 }
 
+// A relay listing applied to the received-share records: the reconcile runs
+// on the record as the file holds it, the result is persisted, and the caller
+// learns whether anything changed.
+describe("received share reconciliation", () => {
+  it("persists the reconciled entry and reports whether it changed", () => {
+    store.register({
+      ...personal,
+      sharedChannels: [{
+        shareId: "gone", channelWireId: "wire", access: "read-only", granterEmail: null,
+        relayUrl: "https://relay.test", recipientUserId: "me", ended: true,
+      }],
+    });
+    expect(store.reconcileRecipientShares("ws-1", () => null)).toBe(false);
+    expect(store.reconcileRecipientShares("ws-1", (entry) => ({
+      ...entry,
+      sharedChannels: entry.sharedChannels!.map(({ ended: _ended, ...row }) => row),
+      confirmedRemovedShares: [{ shareId: "other", removedAtMs: 5 }],
+    }))).toBe(true);
+    const reread = createRegistryStore(registryPath).find("ws-1");
+    expect(reread?.sharedChannels?.[0]?.ended).toBeUndefined();
+    expect(reread?.confirmedRemovedShares).toEqual([{ shareId: "other", removedAtMs: 5 }]);
+    expect(() => store.reconcileRecipientShares("missing", () => null)).toThrow("Unknown workspace");
+  });
+});
+
 describe("share roster", () => {
   const grant = (grantId: string) => ({
     grantId,

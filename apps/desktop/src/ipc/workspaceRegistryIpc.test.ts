@@ -227,6 +227,8 @@ describe("forget and reveal", () => {
     h.summaries.push({ workspaceId: "ws-1", rootPath: "/w/one", kind: "personal", mode: "local-first" });
     await h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-1" });
     expect(h.reveal).toHaveBeenCalledWith("/w/one");
+    await h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-1", recoveryCopies: true });
+    expect(h.reveal).toHaveBeenLastCalledWith(join("/w/one", ".dohc", "engine", "displaced"));
     await expect(h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-9" })).rejects.toThrow("not in the registry");
   });
 });

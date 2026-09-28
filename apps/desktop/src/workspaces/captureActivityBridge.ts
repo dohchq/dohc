@@ -4,6 +4,29 @@ import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 
 /** Emitted by the daemon once per settled capture batch / reconcile pass. */
 export const CAPTURE_MOMENT_RECORDED_EVENT = "capture.momentRecorded";
+export const CAPTURE_NO_ATOMIC_PLACEMENT_EVENT = "capture.noAtomicPlacement";
+
+/**
+ * Calls `note` with the workspace an engine names in its
+ * `capture.noAtomicPlacement` event. Returns the unsubscribe.
+ */
+export function bridgeNoAtomicPlacement(
+  daemon: { onEvent(handler: (event: Event) => void): () => void },
+  note: (workspaceId: string) => void,
+): () => void {
+  return daemon.onEvent((event) => {
+    if (event.name !== CAPTURE_NO_ATOMIC_PLACEMENT_EVENT) return;
+    const payload = event.payload;
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      !Array.isArray(payload) &&
+      typeof payload.workspaceId === "string"
+    ) {
+      note(payload.workspaceId);
+    }
+  });
+}
 
 const DEFAULT_DEBOUNCE_MS = 100;
 

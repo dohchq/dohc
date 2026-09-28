@@ -1,5 +1,38 @@
 use super::*;
 
+#[test]
+fn unsupported_collection_keeps_record_bytes_and_ids_untouched() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    write_file(
+        scratch.path(),
+        "tasks/collection.yaml",
+        b"version: 2\nname: Tasks\n",
+    );
+    let original = b"---\nTitle: Leave alone\n---\nBody\n";
+    write_file(scratch.path(), "tasks/new.md", original);
+    ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+    ingest(&mut sink, "tasks/new.md").expect("capture record");
+    let moments = moment_count(&db, "tasks/new.md");
+    let updates = ydoc_update_count(&db, "tasks/new.md");
+    sink.reconcile_collections().expect("unsupported schema");
+    assert!(collection_record(&db, "tasks/new.md").is_none());
+    assert_eq!(
+        std::fs::read(scratch.path().join("tasks/new.md")).expect("disk bytes"),
+        original
+    );
+    assert_eq!(
+        snapshot(&db, "tasks/new.md")
+            .expect("captured bytes")
+            .text
+            .as_bytes(),
+        original
+    );
+    assert_eq!(moment_count(&db, "tasks/new.md"), moments);
+    assert_eq!(ydoc_update_count(&db, "tasks/new.md"), updates);
+}
+
 fn set_richdoc_frontmatter_and_settle(
     sink: &StoreCaptureSink,
     path: &str,

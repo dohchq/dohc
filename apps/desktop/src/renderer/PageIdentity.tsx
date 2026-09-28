@@ -1,3 +1,4 @@
+import { useFocusReturn } from "./ui/focusReturn";
 import {
   frontmatterEditsRefused,
   markdownFrontmatterEditsRefused,
@@ -180,6 +181,7 @@ export function PageIdentity(props: PageIdentityProps) {
   // never render at once, so one ref safely tracks "the trigger" across an
   // icon being set/cleared while the picker is open.
   const iconTriggerRef = useRef<HTMLButtonElement | null>(null);
+  useFocusReturn(pickerOpen, pickerRef, () => iconTriggerRef.current);
 
   // role="dialog" implies focus moves inside on open and is constrained
   // (trapped) to the picker while it's open, then returns to the trigger on
@@ -208,7 +210,6 @@ export function PageIdentity(props: PageIdentityProps) {
     return () => {
       document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
-      iconTriggerRef.current?.focus();
     };
   }, [pickerOpen]);
 

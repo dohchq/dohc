@@ -84,6 +84,8 @@ export function EditorGroupLayout(props: {
             <section
               data-testid={`editor-group-${group.id}`}
               data-editor-group-id={group.id}
+              data-focus-surface="editor"
+              tabIndex={-1}
               data-active={group.id === props.activeGroupId || undefined}
               role="region"
               aria-label={`Editor group ${index + 1}`}

@@ -6,7 +6,7 @@ import { initializeServiceHostEnrollmentSchema } from "./serviceHostEnrollment";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
 import { initializeNoticeSchema, initializeShareNoticeDeliverySchema } from "./noticeSchema";
 import { initializeAutomationHostSchema } from "./automationHostSchema";
-import { initializeAutomationGroupHandoverSchema } from "./automationHosts";
+import { initializeAutomationGroupHandoverSchema, initializeAutomationHostPlacementSchema } from "./automationHosts";
 import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
@@ -79,6 +79,22 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
   CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_grants_active_dependent
     ON sync_relay_share_grants(parent_grant_id, principal_user_id)
     WHERE status = 'active' AND parent_grant_id IS NOT NULL;
+
+  CREATE TABLE IF NOT EXISTS sync_relay_share_removals (
+    undo_id TEXT PRIMARY KEY,
+    share_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    grants_json TEXT NOT NULL,
+    credentials_json TEXT NOT NULL,
+    proposals_json TEXT NOT NULL,
+    removed_grant_id TEXT,
+    undone INTEGER NOT NULL DEFAULT 0 CHECK (undone IN (0, 1)),
+    voided INTEGER NOT NULL DEFAULT 0 CHECK (voided IN (0, 1)),
+    FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_removals_expiry ON sync_relay_share_removals(expires_at_ms);
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_removals_share ON sync_relay_share_removals(share_id, removed_grant_id, expires_at_ms);
 
   CREATE TABLE IF NOT EXISTS sync_relay_link_credentials (
     credential_id TEXT PRIMARY KEY,
@@ -1196,6 +1212,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);
     initializeAutomationGroupHandoverSchema(db);
+    initializeAutomationHostPlacementSchema(db);
     initializeCurrentFileKeySchema(db);
     initializeCollectionWriteSchema(db);
     initializeAutomationPressSchema(db);

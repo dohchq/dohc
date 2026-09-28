@@ -2,6 +2,8 @@
   "schemaReasonCodes": [
     "invalid-yaml",
     "root-not-mapping",
+    "unsupported-version",
+    "invalid-version",
     "root-collection-unsupported",
     "unknown-property",
     "expected-text",

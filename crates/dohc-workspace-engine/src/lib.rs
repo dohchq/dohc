@@ -17,6 +17,7 @@ pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 pub use events::AUTOMATION_CLAIMED_EVENT;
 pub use events::CAPTURE_INITIAL_SETTLED_EVENT;
 pub use events::CAPTURE_MOMENT_RECORDED_EVENT;
+pub use events::CAPTURE_NO_ATOMIC_PLACEMENT_EVENT;
 pub use events::EngineEventNotice;
 pub use events::EngineEvents;
 pub use events::RECORD_CREATED_EVENT;

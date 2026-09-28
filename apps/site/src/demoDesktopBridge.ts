@@ -628,7 +628,7 @@ const demoBridge = {
     return {
       joined: answerDemoJoinedLane(payload.channelWireIds),
       sessionKey: null,
-      relay: { state: "answered" as const, granted: [], received: [] },
+      relay: { state: "answered" as const, granted: [], received: [], removed: [] },
     };
   },
   async listJoinedSharedChannels(payload: { channelWireIds: readonly string[] }) {
@@ -742,7 +742,9 @@ const demoBridge = {
     };
   },
   async leaveSharedChannel() {},
-  async revokeRelayShare() {},
+  async revokeRelayShare() {
+    return {undo: {undoId: "demo-undo", expiresAtMs: Date.now() + 600_000}};
+  },
   async startDm() {
     throw new Error("Direct messages are unavailable in the demo");
   },

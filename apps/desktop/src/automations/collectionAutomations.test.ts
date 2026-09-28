@@ -324,7 +324,7 @@ async function world(options: {
     },
     // The engine's press rules: a remembered press id answers its claim; the
     // same person's press joins a pending or running claim; anyone else's is busy.
-    pressAutomation: async ({ pressId, automationId, recordId, pressedBy }) => {
+    pressAutomation: async ({ pressId, automationId, recordId, pressedBy, by }) => {
       const summary = (claim: AutomationClaim) => {
         const { fields: _fields, fieldsOmitted: _omitted, ...change } = claim.change;
         return { ...claim, change };
@@ -339,8 +339,10 @@ async function world(options: {
         const record = records.get(recordId)!;
         const created: AutomationClaim = {
           claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `press:${pressId}` },
-          recordId, collectionPath: record.collection, depth: 0,
-          change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: pressedBy, fields: [], fieldsOmitted: 0 },
+          recordId, collectionPath: record.collection, depth: by.kind === "agent" ? by.depth : 0,
+          change: {
+            kind: "button", authorOriginId: by.kind === "agent" ? by.originId : null, actorKind: by.kind, onBehalfOf: pressedBy, fields: [], fieldsOmitted: 0,
+          },
           state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 2, 0), updatedAtMs: 0,
         };
         claims.set(created.claimId, created);
@@ -877,7 +879,7 @@ describe("Collection automations", () => {
       { field: "Archive", state: { kind: "no-automation", reason: "No automation uses this button." } },
     ]);
     const watched: string[] = [];
-    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, (claimId) => watched.push(claimId));
+    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, (claimId) => watched.push(claimId));
     if (pressed.busy) throw new Error("Expected a claim");
     expect(pressed.settled).toBeNull();
     const claim = w.claims.get(pressed.claimId)!;
@@ -889,6 +891,18 @@ describe("Collection automations", () => {
     });
     await w.until(() => w.pressEvents.length > 0);
     expect(w.pressEvents).toEqual([{ settled: { claimId: claim.claimId, outcome: "done", error: null } }]);
+    // An agent's press for Ice reaches the engine as the agent's, at its run's depth, and its run writes one step deeper.
+    const other = w.addRecord("Tasks", "other", { Status: "Sent" });
+    const byAgent = await w.executor.press(
+      { collectionPath: "Tasks", field: "Mark paid", recordId: other.id, pressId: "press-agent", pressedBy: "user-ice", by: { kind: "agent", originId: "dohc-mcp", depth: 2 } },
+      () => undefined);
+    if (byAgent.busy) throw new Error("Expected a claim");
+    const agentClaim = w.claims.get(byAgent.claimId)!;
+    expect(agentClaim).toMatchObject({ depth: 2, change: { actorKind: "agent", authorOriginId: "dohc-mcp", onBehalfOf: "user-ice" } });
+    await w.settledClaim(agentClaim);
+    const agentRunWrites = w.journaled.filter((write) => write.path === other.path);
+    expect(agentRunWrites.length).toBeGreaterThan(0);
+    expect(agentRunWrites.every((write) => write.attribution?.depth === 3)).toBe(true);
     // The same press sent again after a lost reply answers the same claim
     // and how it ended, even after the automation is switched off.
     await w.writeAutomations("Tasks", [
@@ -898,23 +912,23 @@ describe("Collection automations", () => {
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     await w.until(() => w.idleDrains() > idle);
     await expect(w.executor.buttons("Tasks", ["Mark paid"])).resolves.toMatchObject([{ state: { kind: "disabled" } }]);
-    const again = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, (claimId) => watched.push(claimId));
+    const again = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, (claimId) => watched.push(claimId));
     expect(again).toEqual({ busy: false, claimId: claim.claimId, settled: { outcome: "done", error: null } });
     // A run that already ended has no settle left to hear.
     expect(watched).toEqual([claim.claimId]);
     // The id names this press, so another person, field, or record is refused.
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana" }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana", by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("This press id already names another press.");
     // After a restart the engine still has the press, so the switched-off
     // button answers it, and still refuses it to anyone else.
     const restarted = w.makeExecutor();
     await restarted.open();
-    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, () => undefined))
+    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined))
       .resolves.toEqual({ busy: false, claimId: claim.claimId, settled: { outcome: "done", error: null } });
-    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana" }, () => undefined))
+    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana", by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("This press id already names another press.");
     // A new press on the switched-off button is still refused.
-    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ice" }, () => undefined))
+    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("Mark paid is off. Turn it on in Automations.");
     await restarted.dispose();
   });
@@ -923,7 +937,7 @@ describe("Collection automations", () => {
     const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" } });
     const invoice = w.addRecord("Tasks", "invoice", {});
     await w.executor.open();
-    const input = { collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" };
+    const input = { collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" as const } };
     // The record leaves before the run reads it, so the run changes nothing.
     w.records.delete(invoice.id);
     await expect(w.executor.press(input, () => undefined)).rejects.toThrow("This record is no longer in Tasks.");
@@ -945,16 +959,16 @@ describe("Collection automations", () => {
     const invoice = w.addRecord("Tasks", "invoice", {});
     w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
     await w.executor.open();
-    const first = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, () => undefined);
+    const first = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined);
     if (first.busy) throw new Error("Expected a claim");
     // Who can edit is unknown, so the run waits and its window hears why.
     await w.until(() => w.pressEvents.length > 0);
     expect(w.pressEvents).toEqual([{ waiting: { claimId: first.claimId, reason: "roster" } }]);
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ana" }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ana", by: { kind: "human" } }, () => undefined))
       .resolves.toEqual({ busy: true });
     // A second window of the same person joins the run and learns why it waits.
     const joined: Array<[string, string | null]> = [];
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-3", pressedBy: "user-ice" },
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-3", pressedBy: "user-ice", by: { kind: "human" } },
       (claimId, waiting) => joined.push([claimId, waiting])))
       .resolves.toEqual({ busy: false, claimId: first.claimId, settled: null });
     expect(joined).toEqual([[first.claimId, "roster"]]);
@@ -1041,7 +1055,7 @@ describe("Collection automations", () => {
     const paid = await hashOf(executor, "Tasks", "paid");
     // The owner's own press holds nothing.
     const own = w.addRecord("Tasks", "own", {});
-    const pressed = await executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: own.id, pressId: "press-1", pressedBy: "user-ice" }, () => undefined);
+    const pressed = await executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: own.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined);
     if (pressed.busy) throw new Error("Expected a claim");
     await w.settledClaim(w.claims.get(pressed.claimId)!);
     const invoice = w.addRecord("Tasks", "invoice", {});
@@ -1145,9 +1159,9 @@ describe("Collection automations", () => {
       { kind: "disabled", reason: "ana@example.com cannot edit Other." },
       { kind: "disabled", reason: "The automation for Broken has a problem. Fix it in Automations." },
     ]);
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Resend", recordId: task.id, pressId: "press-1", pressedBy: "user-owner" }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Resend", recordId: task.id, pressId: "press-1", pressedBy: "user-owner", by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("Resend is off. Turn it on in Automations.");
-    await expect(w.executor.press({ collectionPath: "Other", field: "Twice", recordId: task.id, pressId: "press-2", pressedBy: "user-owner" }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Other", field: "Twice", recordId: task.id, pressId: "press-2", pressedBy: "user-owner", by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("No automation uses this button.");
     expect(w.claims.size).toBe(0);
   });
@@ -1159,7 +1173,7 @@ describe("Collection automations", () => {
     await expect(w.executor.buttons("Tasks", ["Mark paid"])).resolves.toEqual([
       { field: "Mark paid", state: { kind: "disabled", reason: "Absent is not a field in Tasks." } },
     ]);
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("Absent is not a field in Tasks.");
     expect(w.claims.size).toBe(0);
   });
@@ -1167,7 +1181,7 @@ describe("Collection automations", () => {
   it("refuses a press on a record that left the Collection, and claims nothing", async () => {
     const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" } });
     await w.executor.open();
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: "rec_gone", pressId: "press-1", pressedBy: "user-ice" }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: "rec_gone", pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("This record is no longer in Tasks.");
     expect(w.claims.size).toBe(0);
   });
@@ -1179,7 +1193,7 @@ describe("Collection automations", () => {
     });
     const invoice = w.addRecord("Tasks", "invoice", {});
     await w.executor.open();
-    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana" }, () => undefined);
+    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana", by: { kind: "human" } }, () => undefined);
     if (pressed.busy) throw new Error("Expected a claim");
     const claim = await w.settledClaim(w.claims.get(pressed.claimId)!);
     expect(claim.state).toBe("failed");
@@ -2181,6 +2195,17 @@ describe("Collection automations", () => {
     w.executor.notifyClaimed();
     await w.settledClaim(claim);
     expect(w.fieldsOf(task)["Done on"]).toBe(localIsoTime(claim.createdAtMs).slice(0, 10));
+  });
+
+  it("keeps an automation off when its Collection uses a newer version", async () => {
+    const w = await world({ automations: { Tasks: "  - id: done\n    name: Done\n    when: {field-changed: Status}\n    do: [{set: {Status: Done}}]\n" } });
+    await writeFile(join(w.root, "Tasks", "collection.yaml"), `version: 2\n${SCHEMA}`);
+    await w.executor.open();
+    const listed = await w.executor.automationsIn("Tasks");
+    expect(listed.status === "read" && listed.automations[0]).toMatchObject({
+      cannotRun: "Tasks/collection.yaml uses a newer version. Update dohc to read this file.",
+    });
+    expect(w.subscriptions.has("collection:Tasks#done")).toBe(false);
   });
 
   it("checks fields against a schema with one bad key, and keeps an automation off while its schema is not YAML", async () => {
@@ -3469,6 +3494,56 @@ describe("Collection automations that a Group message starts", () => {
 
     expect(claim.state).toBe("done");
     expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
+  });
+
+  it("finds the record a message names with a formula, and changes it", async () => {
+    const done = [
+      "  - id: task",
+      "    name: Finish a task",
+      "    when: {group-message: Trip, starts-with: /done}",
+      "    do:",
+      "      - find: record.Title == message.body.slice(6)",
+      "        as: named",
+      "      - set: {Status: Done}",
+      "        records: named",
+    ].join("\n");
+    const w = await world({ channels: [TRIP], automations: { Tasks: done } });
+    const tickets = w.addRecord("Tasks", "tickets", { Title: "Buy tickets", Status: "Open" });
+    const bags = w.addRecord("Tasks", "bags", { Title: "Pack the bags", Status: "Open" });
+    const claim = messageClaim(w, { body: "/done Buy tickets" });
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(tickets)).toMatchObject({ Status: "Done" });
+    expect(w.fieldsOf(bags)).toMatchObject({ Status: "Open" });
+  });
+
+  it("fails on a Find's formula only when the Find's branch runs", async () => {
+    const parsed = [
+      "  - id: task",
+      "    name: Finish a task",
+      "    when: {group-message: Trip}",
+      "    do:",
+      "      - if: 'message.body.startsWith(\"/done \")'",
+      "        do:",
+      "          - find: record.Title == JSON.parse(message.body.slice(6)).title",
+      "            as: named",
+      "          - set: {Status: Done}",
+      "            records: named",
+      "        otherwise:",
+      "          - add-record: {Title: '=message.body'}",
+    ].join("\n");
+    const w = await world({ channels: [TRIP], automations: { Tasks: parsed } });
+    const hello = messageClaim(w, { body: "/hello" });
+    await w.executor.open();
+    await w.settledClaim(hello);
+    expect(hello.state).toBe("done");
+    expect(added(w)).toEqual([{ Title: "/hello" }]);
+    const broken = messageClaim(w, { id: "m2", body: "/done not json" });
+    broken.trigger = { key: "message:m2" };
+    await w.settledClaim(broken);
+    expect(broken).toMatchObject({ state: "failed", error: expect.stringMatching(/^The Find in step 2 failed\./) });
   });
 
   it("reads a body its claim carried truncated", async () => {

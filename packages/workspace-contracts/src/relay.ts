@@ -621,7 +621,10 @@ export interface NoticeMarksResponse {
 // AUTOMATION_HOST_MAX_BODY_BYTES, and each owner's changes are rate limited. The relay records one host per workspace. Only the
 // owner's computers read or change it, so a collaborator's computer never
 // runs these automations. A computer runs them while the last state it read
-// names it as `host.installId` and `host.handoverFrom` is null.
+// names it as `host.installId` and `host.handoverFrom` is null. While the
+// server runs automations, it is the host a first claim records, and a
+// computer the relay placed there itself hands over to it at its next
+// check-in. A computer the owner chose stays.
 //
 // An install id names one computer's dohc install. It is the computer's own
 // claim and grants nothing: every route acts only for the workspace owner.
@@ -631,6 +634,14 @@ export const AUTOMATION_COMPUTER_LABEL_MAX_CHARS = 64;
 // Past this, a new computer's check-in forgets the owner's computer seen
 // longest ago, unless it is the host or handing over.
 export const AUTOMATION_COMPUTERS_PER_WORKSPACE = 32;
+// The install id that names the dohc server itself as a workspace's host.
+// It is not a computer: the relay lists it only while the server runs
+// automations, and refuses it in a computer's check-in, release, or press
+// answer.
+export const AUTOMATION_SERVER_INSTALL_ID = "server";
+// The most workspaces one server runs automations for. Past it, a workspace's
+// host stays one of the owner's computers.
+export const AUTOMATION_SERVER_MAX_WORKSPACES = 64;
 export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
 // A release carries, as `groups`, what the next host needs so each Group
 // message starts its automations exactly once across the handover: the
@@ -667,12 +678,17 @@ export interface RelayAutomationHost {
   handoverFrom: string | null;
   // The latest time a computer that handed over reported when it stopped:
   // every due time at or before it ran on an earlier host. It stays through
-  // later handovers and never goes back. Null until a first release.
+  // later handovers and never goes back. Null until a first release. When the
+  // server stopped running automations without a release, the relay records
+  // its own clock at the next host's start: the server ran nothing after it.
   releasedThroughMs: number | null;
 }
 
 export interface RelayAutomationComputer {
   installId: string;
+  // "server" for the dohc server itself, listed first while it runs
+  // automations. Its `lastSeenMs` is the time of the answer.
+  kind: "computer" | "server";
   label: string;
   lastSeenMs: number;
 }

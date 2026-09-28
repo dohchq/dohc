@@ -24,6 +24,7 @@ import {
   createWorkspaceDirectory,
   listAutomationRuns,
   listGroups,
+  pressButton,
   queryCollection,
   readAutomationRun,
   retryAutomationRun,
@@ -579,6 +580,23 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { ...automationInput, run: z.string().min(1).max(256), startOver: z.boolean().optional() },
     },
     async (args) => text(await retryAutomationRun(ctx, args)),
+  );
+
+  registerWrite(
+    "dohc_press_button",
+    {
+      description:
+        "Press a Button field on one record, as a person clicks it in dohc, and get the id of the run it started; follow it with dohc_read_automation_run. Name the record by its id, or a dataset record by its primary key as JSON. A press that would run actions dohc cannot undo is refused with each action's name; press again with those names in confirm to run them. Send the same requestId again, after a timeout for example, to get the same press instead of a second one. The press is recorded as the agent's, for the person; from an agent run that an automation started, it counts in that chain of automations, which stops after 4 steps.",
+      inputSchema: {
+        collectionPath: z.string().min(1).max(4096),
+        button: z.string().min(1).max(256),
+        recordId: z.string().min(1).max(1024),
+        table: z.string().min(1).max(256).optional(),
+        confirm: z.array(z.string().min(1).max(256)).max(64).optional(),
+        requestId: requestIdSchema.optional(),
+      },
+    },
+    async (args) => text(await pressButton(ctx, args)),
   );
 
   return server;

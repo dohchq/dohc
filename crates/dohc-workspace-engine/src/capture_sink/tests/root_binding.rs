@@ -614,6 +614,7 @@ fn queued_materialized_retire_refuses_replacement_root_before_db_changes() {
                 allow_ydoc_origin: true,
             },
             command_root,
+            false,
             command_self_writes,
             command_leases,
             Arc::new(NoFaults),

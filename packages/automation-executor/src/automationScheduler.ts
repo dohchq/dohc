@@ -245,16 +245,19 @@ export class AutomationScheduler {
    * released through `startAfterMs`, due times after it run here, less
    * what this computer did not live through. When this computer's clock
    * is behind, nothing runs until it passes the release. With no release,
-   * the schedules start at now.
+   * the schedules start at now, or after `floorMs` when that is later:
+   * the latest progress an earlier host reported, which a computer whose
+   * clock runs behind must not run again.
    */
-  startedHere(workspaceId: string, startAfterMs: number | null): void {
+  startedHere(workspaceId: string, startAfterMs: number | null, floorMs: number | null): void {
     const workspace = this.workspaces.get(workspaceId);
     if (!workspace) return;
     const now = this.options.clock.now();
-    workspace.coveredFrom = startAfterMs === null ? now : Math.max(workspace.coveredFrom, startAfterMs);
+    const from = startAfterMs ?? Math.max(now, floorMs ?? now);
+    workspace.coveredFrom = startAfterMs === null ? from : Math.max(workspace.coveredFrom, startAfterMs);
     workspace.unmarkedFrom = startAfterMs === null ? null : workspace.coveredFrom;
     // Without a release, another computer may have run anything before now.
-    workspace.reportFrom = Math.max(workspace.reportFrom, startAfterMs ?? now);
+    workspace.reportFrom = Math.max(workspace.reportFrom, from);
     this.wake();
   }
 

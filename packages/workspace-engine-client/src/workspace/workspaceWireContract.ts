@@ -272,8 +272,18 @@ export type AutomationPressParams = WorkspaceJsonObject & {
    * it from its own checked identity, never from a renderer.
    */
   pressedBy: string;
+  by: AutomationPressActor;
   nowMs?: number;
 };
+
+/**
+ * Who made a press for the person who pressed: the person, or an agent
+ * acting for them, by its origin id, from a run at `depth`. The press claims
+ * at that depth, and stops at once at the chain cap.
+ */
+export type AutomationPressActor =
+  | { kind: "human" }
+  | { kind: "agent"; originId: string; depth: number };
 
 /** Mirrors AutomationRunNowParams in crates/dohc-workspace-engine. */
 export type AutomationRunNowParams = WorkspaceJsonObject & {
@@ -1134,6 +1144,12 @@ const WorkspaceResultSchemas = {
       Schema.Literal("ready"),
       Schema.Literal("degraded"),
     ]),
+    // A write in this workspace found a filesystem with no rename that
+    // refuses to replace (FAT, exFAT, some SMB and FUSE mounts). Writes still
+    // happen, but a file another program changes at that moment can be lost.
+    noAtomicPlacement: Schema.Boolean,
+    recoveryUnavailable: Schema.Boolean,
+    keptFiles: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
   }),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,

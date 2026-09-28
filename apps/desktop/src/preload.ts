@@ -261,6 +261,7 @@ const bridge: DohcDesktopBridge = {
   getRelayReceivedShare: (payload) =>
     ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
   revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
+  undoRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.undoRelayShare, payload),
   createRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
   addRelayShareLink: (payload) =>
@@ -512,6 +513,7 @@ const bridge: DohcDesktopBridge = {
   presenceCancel: (payload) => ipcRenderer.invoke(CHANNELS.presenceCancel, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
   retryOwnerLiveDelivery: (payload) => ipcRenderer.invoke(CHANNELS.retryOwnerLiveDelivery, payload),
+  retryFileRecovery: (payload) => ipcRenderer.invoke(CHANNELS.retryFileRecovery, payload),
   retryCloudSync: (payload) => ipcRenderer.invoke(CHANNELS.retryCloudSync, payload),
   rebuildEngineStore: (payload) =>
     ipcRenderer.invoke(CHANNELS.rebuildEngineStore, payload),

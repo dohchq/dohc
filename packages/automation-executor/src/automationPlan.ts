@@ -47,6 +47,7 @@ type AutomationValue = Extract<AutomationStep, { kind: "set" }>["values"][number
 export const COLLECTION_AUTOMATION_PREFIX = "collection:";
 const MAX_FINDS = 5;
 export const MAX_FOUND_RECORDS = 50;
+export const FIND_OVERFLOW_ERROR = `A Find matched more than ${MAX_FOUND_RECORDS} records. Narrow its condition, then try again.`;
 // The field changes one run may plan. Every one is saved before and after it
 // lands, so a run stays small enough to resume and to undo.
 export const MAX_RUN_FIELD_WRITES = 200;
@@ -184,15 +185,20 @@ function isOneExpression(source: string): boolean {
   }
 }
 
+/**
+ * What a Find compares a field with: a literal, a field of the trigger
+ * record, or a formula that does not read the record the Find checks, such
+ * as `message.body.slice(6)`. A formula runs once, before the Find reads.
+ */
+export type FindValue =
+  | { kind: "literal"; value: JsonValue }
+  | { kind: "trigger-field"; field: string }
+  | { kind: "formula"; expression: string };
+
 /** A Find condition as the one filter `collections.query` takes. */
 type FindQuery =
   | { match: "all" }
-  | {
-      match: "field";
-      field: string;
-      operator: "equals" | "contains";
-      value: { kind: "literal"; value: JsonValue } | { kind: "trigger-field"; field: string };
-    };
+  | { match: "field"; field: string; operator: "equals" | "contains"; value: FindValue };
 
 const FIND_SHAPE =
   'A Find can check one field, such as record.Status == "Doing" or contains(record.Tags, "urgent").';
@@ -211,7 +217,59 @@ const candidateField = (node: Expression) => propertyName(node, isName("record")
 const triggerField = (node: Expression) =>
   propertyName(node, (inner) => propertyName(inner, isName("trigger")) === "record");
 
-function findValue(node: Expression): Extract<FindQuery, { match: "field" }>["value"] | null {
+type AnyNode = { type: string; computed?: boolean; name?: unknown };
+const isNode = (value: unknown): value is AnyNode & Record<string, unknown> =>
+  typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string";
+
+/** The names an expression reads as variables, not as property names. */
+function namesRead(node: unknown, names = new Set<string>()): Set<string> {
+  if (Array.isArray(node)) {
+    for (const item of node) namesRead(item, names);
+  } else if (isNode(node)) {
+    if (node.type === "Identifier" && typeof node.name === "string") names.add(node.name);
+    for (const [key, child] of Object.entries(node)) {
+      const propertyName = !node.computed && ((node.type === "MemberExpression" && key === "property") || (node.type === "Property" && key === "key"));
+      if (!propertyName) namesRead(child, names);
+    }
+  }
+  return names;
+}
+
+/** The text a string literal or a template with no substitutions spells, or null. */
+function constantText(node: AnyNode & Record<string, unknown>): string | null {
+  if (node.type === "Literal") return typeof node.value === "string" ? node.value : null;
+  const [quasi] = Array.isArray(node.quasis) ? node.quasis : [];
+  const cooked = isNode(quasi) && typeof quasi.value === "object" && quasi.value !== null && "cooked" in quasi.value ? quasi.value.cooked : null;
+  return node.type === "TemplateLiteral" && Array.isArray(node.expressions) && node.expressions.length === 0 && typeof cooked === "string" ? cooked : null;
+}
+
+/**
+ * Whether a formula reads the trigger record, as `trigger.record` or
+ * `trigger["record"]`. It reads the spelling, so a formula that reaches the
+ * record another way, or that is not a formula at all, fails when it runs
+ * instead.
+ */
+function readsTriggerRecord(expression: string): boolean {
+  const visit = (node: unknown): boolean => {
+    if (Array.isArray(node)) return node.some(visit);
+    if (!isNode(node)) return false;
+    const { object, property } = node;
+    if (node.type === "MemberExpression" && isNode(object) && object.type === "Identifier" && object.name === "trigger" && isNode(property) &&
+      (node.computed ? constantText(property) === "record" : property.type === "Identifier" && property.name === "record")) {
+      return true;
+    }
+    return Object.values(node).some(visit);
+  };
+  if (!isOneExpression(expression)) return false;
+  return visit(parseExpressionAt(expression, 0, { ecmaVersion: "latest" }));
+}
+
+/** The names one formula reads as variables. */
+function namesIn(expression: string): Set<string> {
+  return namesRead(parseExpressionAt(expression, 0, { ecmaVersion: "latest" }));
+}
+
+function findValue(node: Expression, condition: string): FindValue | null {
   if (node.type === "Literal") {
     const { value } = node;
     return value === null || typeof value === "string" || typeof value === "boolean" ||
@@ -224,14 +282,18 @@ function findValue(node: Expression): Extract<FindQuery, { match: "field" }>["va
     return { kind: "literal", value: -node.argument.value };
   }
   const field = triggerField(node);
-  return field === null ? null : { kind: "trigger-field", field };
+  if (field !== null) return { kind: "trigger-field", field };
+  // Anything else that does not read the record the Find checks is a
+  // formula, such as a number the message names.
+  return namesRead(node).has("record") ? null : { kind: "formula", expression: condition.slice(node.start, node.end) };
 }
 
 /**
  * Reads a Find condition as a query: `true`, `record.F == value`, or
- * `contains(record.F, value)`, where the value is a literal or a field of
- * the trigger record (`trigger.record.F`). Anything else is a problem the
- * person has to fix, because `collections.query` takes one filter.
+ * `contains(record.F, value)`, where the value is a literal, a field of the
+ * trigger record (`trigger.record.F`), or a formula that does not read
+ * `record`. Anything else is a problem the person has to fix, because
+ * `collections.query` takes one filter.
  */
 export function findQueryOf(condition: string): FindQuery | { problem: string } {
   if (!isOneExpression(condition)) return { problem: FIND_SHAPE };
@@ -242,7 +304,7 @@ export function findQueryOf(condition: string): FindQuery | { problem: string } 
     node.left.type !== "PrivateIdentifier") {
     for (const [side, other] of [[node.left, node.right], [node.right, node.left]] as const) {
       const field = candidateField(side);
-      const value = field === null ? null : findValue(other);
+      const value = field === null ? null : findValue(other, condition);
       if (field !== null && value !== null) return { match: "field", field, operator: "equals", value };
     }
   }
@@ -250,22 +312,23 @@ export function findQueryOf(condition: string): FindQuery | { problem: string } 
     node.callee.name === "contains" && node.arguments.length === 2) {
     const [target, search] = node.arguments;
     const field = target && target.type !== "SpreadElement" ? candidateField(target) : null;
-    const value = field !== null && search && search.type !== "SpreadElement" ? findValue(search) : null;
+    const value = field !== null && search && search.type !== "SpreadElement" ? findValue(search, condition) : null;
     if (field !== null && value !== null) return { match: "field", field, operator: "contains", value };
   }
   return { problem: FIND_SHAPE };
 }
 
 /** A Find condition on a dataset as a read's equality filters: every field it checks, with its value. */
-export type DatasetFindFilter = { field: string; value: Extract<FindQuery, { match: "field" }>["value"] };
+export type DatasetFindFilter = { field: string; value: FindValue };
 
 const DATASET_FIND_SHAPE =
   'This Collection needs a Find that checks fields with ==. Use a condition such as record.Status == "Doing" && record.Paid == false.';
 
 /**
  * Reads a Find condition on a dataset: `true`, or `record.F == value` terms
- * joined by &&, where each value is a literal or a trigger record field.
- * A dataset's read compares whole values, so it offers no "contains".
+ * joined by &&, where each value is a literal, a trigger record field, or a
+ * formula that does not read `record`. A dataset's read compares whole
+ * values, so it offers no "contains".
  */
 export function datasetFindOf(condition: string): DatasetFindFilter[] | { problem: string } {
   if (!isOneExpression(condition)) return { problem: DATASET_FIND_SHAPE };
@@ -276,7 +339,7 @@ export function datasetFindOf(condition: string): DatasetFindFilter[] | { proble
     if (node.type !== "BinaryExpression" || (node.operator !== "==" && node.operator !== "===") || node.left.type === "PrivateIdentifier") return false;
     for (const [side, other] of [[node.left, node.right], [node.right, node.left]] as const) {
       const field = candidateField(side);
-      const value = field === null ? null : findValue(other);
+      const value = field === null ? null : findValue(other, condition);
       if (field !== null && value !== null) {
         filters.push({ field, value });
         return true;
@@ -301,9 +364,6 @@ export function operationsOf(automation: Automation): string[] {
   return [...names];
 }
 
-const DATASET_GROUP_TRIGGER_UNSUPPORTED = "This Collection's automations cannot start from Group messages. Choose a record change as the trigger.";
-const DATASET_SCHEDULE_UNSUPPORTED = "This Collection's automations cannot start on a schedule yet. Choose a record change or a button as the trigger.";
-
 /**
  * Why this executor cannot run an automation yet, or null when it can. The
  * executor subscribes only automations it can run; the ⚡ panel shows the
@@ -318,17 +378,34 @@ export function unsupportedReason(automation: Automation): string | null {
   }
   return shapeProblem(automation, (condition) => {
     const query = findQueryOf(condition);
-    return "problem" in query ? query.problem : null;
+    if ("problem" in query) return query;
+    return query.match === "all" ? [] : [query.value];
   });
 }
 
 /**
- * Why no executor can run an automation of this shape yet, whatever its
- * Collection keeps: its trigger, its steps, and its limits. `findProblem`
- * reads a Find condition the way the Collection's records can be queried.
+ * Why a Find cannot compare with the trigger record: a schedule or a Group
+ * message starts the automation, and neither has one. Null for a trigger
+ * that has a record.
  */
-export function shapeProblem(automation: Automation, findProblem: (condition: string) => string | null): string | null {
-  const scheduled = automation.when.kind === "schedule";
+function noTriggerRecord(trigger: AutomationTrigger): string | null {
+  const starter = trigger.kind === "schedule" ? "A schedule" : trigger.kind === "group-message" ? "A Group message" : null;
+  return starter === null
+    ? null
+    : `${starter} starts this automation, so a Find cannot compare with trigger.record. Compare with a value instead.`;
+}
+
+/**
+ * Why no executor can run an automation of this shape yet, whatever its
+ * Collection keeps: its trigger, its steps, and its limits. `findValues`
+ * reads a Find condition the way the Collection's records can be queried,
+ * and gives each value the Find compares a field with.
+ */
+export function shapeProblem(
+  automation: Automation,
+  findValues: (condition: string) => readonly FindValue[] | { problem: string },
+): string | null {
+  const recordless = noTriggerRecord(automation.when);
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   let finds = 0;
@@ -348,19 +425,29 @@ export function shapeProblem(automation: Automation, findProblem: (condition: st
       case "run":
       case "run-file":
         return "dohc cannot run code steps yet.";
-      case "invoke":
-        formulas += step.input.filter((entry) => isFormula(entry.value)).length;
+      case "invoke": {
+        const inputs = step.input.flatMap((entry) => (isFormula(entry.value) ? [entry.value.expression] : []));
+        formulas += inputs.length;
+        if (recordless !== null && inputs.some(readsTriggerRecord)) {
+          return `${automation.when.kind === "schedule" ? "A schedule" : "A Group message"} starts this automation, so an action's input cannot use trigger.record. Use a value instead.`;
+        }
         break;
+      }
       case "find": {
         finds += 1;
         formulas += 1;
-        const problem = findProblem(step.condition);
-        if (problem !== null) return problem;
-        if (scheduled) {
-          const query = findQueryOf(step.condition);
-          if (!("problem" in query) && query.match === "field" && query.value.kind === "trigger-field") {
-            return "A scheduled automation has no trigger record, so a Find cannot compare with trigger.record.";
-          }
+        const values = findValues(step.condition);
+        if ("problem" in values) return values.problem;
+        if (recordless !== null && values.some((value) => value.kind === "trigger-field" ||
+          (value.kind === "formula" && readsTriggerRecord(value.expression)))) {
+          return recordless;
+        }
+        for (const value of values) {
+          if (value.kind !== "formula") continue;
+          formulas += 1;
+          // It runs before the Find reads, so no step's results exist yet.
+          const bound = [...namesIn(value.expression)].find((name) => bindings.has(name));
+          if (bound !== undefined) return `A Find cannot compare with ${bound}, another step's result. Compare with a value, the message, or a formula.`;
         }
         break;
       }
@@ -446,16 +533,16 @@ export function subscriptionFor(trigger: AutomationTrigger): { kinds: Automation
 /**
  * The dataset ledger subscription a dataset Collection's automation needs:
  * its table, and its watched fields as field ids of the approved rules. Null
- * for a button, whose presses claim instead. Or why the automation cannot
- * run on the dataset.
+ * for a button, whose presses claim instead, and for a schedule or a Group
+ * message, which the engine claims. Or why the automation cannot run on the
+ * dataset.
  */
 export function datasetSubscriptionFor(
   automation: Automation,
   definition: DatasetDefinition,
 ): { tableId: string; kinds: AutomationChangeKind[]; fieldIds: string[] | null } | { problem: string } | null {
   const trigger = automation.when;
-  if (trigger.kind === "group-message") return { problem: DATASET_GROUP_TRIGGER_UNSUPPORTED };
-  if (!("table" in trigger)) return { problem: DATASET_SCHEDULE_UNSUPPORTED };
+  if (trigger.kind === "schedule" || trigger.kind === "group-message") return null;
   const table = trigger.table === null
     ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
     : definition.tables.find((candidate) => candidate.name === trigger.table);
@@ -692,8 +779,12 @@ export interface RunInputs {
   /** Null when the trigger record was removed. */
   record: RunRecord | null;
   found: ReadonlyMap<number, readonly RunRecord[]>;
-  /** Finds whose page has more matches. Their partial records must not enter the scope. */
-  truncatedFinds?: ReadonlySet<number>;
+  /**
+   * Finds the run could not read, with why: a page with more matches, or a
+   * formula for a value that failed. The run fails only when one of their
+   * branches runs. A partial page must not enter the scope.
+   */
+  unreadFinds?: ReadonlyMap<number, { error: string; timedOut: boolean }>;
   /** The Group message that started the run, with its whole body; null for a record change. */
   message: JsonObject | null;
   /** Where posts and direct messages go; null when the automation sends none. */
@@ -794,7 +885,7 @@ function recordBefore(record: RunRecord, claim: RunClaim): JsonObject {
 
 /** One evaluator request for every formula in the run. `nowMs` is when the change was claimed, or a schedule's due time. */
 export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationRequest {
-  const { automation, claim, record, found, person } = inputs;
+  const { automation, claim, record, found } = inputs;
   const formulas: AutomationFormula[] = [];
   const slots: Slot[] = [];
   const findGuards: NonNullable<AutomationFormula["when"]> = [];
@@ -828,8 +919,8 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   const addSteps = (entries: readonly OrderedStep[], when: NonNullable<AutomationFormula["when"]>) => {
     for (const entry of entries) {
       const { ordinal, step } = entry;
-      if (step.kind === "find" && inputs.truncatedFinds?.has(ordinal)) {
-        // An inactive Find returns null. Only an active overflow stops later formulas.
+      if (step.kind === "find" && inputs.unreadFinds?.has(ordinal)) {
+        // An inactive Find returns null. Only an active unread Find stops later formulas.
         const index = add({ kind: "find", ordinal }, "true", when);
         findGuards.push({ index, truthy: false });
       }
@@ -866,20 +957,26 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   addSteps(steps, conditions);
   const bound: JsonObject = {};
   for (const [name, binding] of bindings) {
-    if (binding.kind === "find" && inputs.truncatedFinds?.has(binding.ordinal)) continue;
+    if (binding.kind === "find" && inputs.unreadFinds?.has(binding.ordinal)) continue;
     bound[name] = binding.kind === "find" ? (found.get(binding.ordinal) ?? []).map(recordScope) : null;
   }
   if (trigger.kind === "starts-matching" && claim.change.kind === "changed" && record) {
     bound[BEFORE_BINDING] = recordBefore(record, claim);
   }
+  return { scope: runScope(inputs, nowMs, bound), formulas, slots };
+}
+
+/** What every formula in a run sees, with `bindings` for the steps' results. */
+function runScope(inputs: FindValueInputs, nowMs: number, bindings: JsonObject): AutomationScope {
+  const { automation, claim, record, message, person } = inputs;
+  const trigger = automation.when;
   const triggerRecord = record ? recordScope(record) : null;
-  const { message } = inputs;
   const author = message && typeof message.authorUserId === "string" && typeof message.authorDisplayName === "string"
     ? { id: message.authorUserId, name: message.authorDisplayName }
     : null;
   const dueAt = scheduleDueAt(claim);
   const skippedFrom = runNowSkippedFrom(claim);
-  const scope: AutomationScope = {
+  return {
     ...(triggerRecord ? { record: triggerRecord } : {}),
     ...(message ? { message } : {}),
     previous: previousValues(claim),
@@ -900,11 +997,51 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
         },
     // A press or Group message names the person who started it.
     person: person ?? author,
-    bindings: bound,
+    bindings,
     now: localIsoTime(nowMs),
     ...(inputs.recordKeys ? { recordKeys: inputs.recordKeys } : {}),
   };
+}
+
+/** What the formulas a Find compares with see: everything a run reads before its Finds. */
+export type FindValueInputs = Pick<RunInputs, "automation" | "claim" | "record" | "message" | "person" | "recordKeys">;
+
+/** The key of the value a formula gives the filter at `index` of the Find at `ordinal`. */
+export function findValueKey(ordinal: number, index: number): string {
+  return `${ordinal}:${index}`;
+}
+
+/**
+ * One evaluator request for the values Finds compare with that formulas
+ * give, made before any Find reads. The formulas see the trigger record,
+ * the message, the person, and `now`, and no step's results. `slots`
+ * names each formula's Find and filter.
+ */
+export function findValuesRequest(
+  inputs: FindValueInputs,
+  finds: ReadonlyArray<{ ordinal: number; values: readonly FindValue[] }>,
+  nowMs: number,
+): { scope: AutomationScope; formulas: AutomationFormula[]; slots: Array<{ ordinal: number; index: number }> } {
+  const formulas: AutomationFormula[] = [];
+  const slots: Array<{ ordinal: number; index: number }> = [];
+  for (const { ordinal, values } of finds) {
+    values.forEach((value, index) => {
+      if (value.kind !== "formula") return;
+      formulas.push({ kind: "expression", source: value.expression });
+      slots.push({ ordinal, index });
+    });
+  }
+  // `record` means the record a Find checks, which no value can read, so
+  // these formulas reach the trigger record only as `trigger.record`.
+  const { record: _checked, ...scope } = runScope(inputs, nowMs, {});
   return { scope, formulas, slots };
+}
+
+/** The value a Find's filter compares with, once its formulas have answered. */
+export function filterValue(value: FindValue, record: RunRecord | null, computed: ReadonlyMap<string, JsonValue>, key: string): JsonValue {
+  if (value.kind === "literal") return value.value;
+  if (value.kind === "trigger-field") return record?.values[value.field] ?? null;
+  return computed.get(key) ?? null;
 }
 
 export interface PlannedField {
@@ -1093,7 +1230,8 @@ export function planRun(
       };
     }
     if (slot.kind === "find" && result.value) {
-      return { kind: "failed", error: `A Find matched more than ${MAX_FOUND_RECORDS} records. Narrow its condition, then try again.`, timedOut: false };
+      const unread = inputs.unreadFinds?.get(slot.ordinal);
+      return { kind: "failed", error: unread?.error ?? FIND_OVERFLOW_ERROR, timedOut: unread?.timedOut ?? false };
     }
     answers.set(slotKey(slot), result.value);
   }

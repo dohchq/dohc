@@ -392,6 +392,21 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, status: "queued" } | { ok: false, status, repeatsMessages, reason } | { ok: false, reason, notice?: { title, body } }`.
 
+### `dohc_press_button`
+
+Press a Button field on one record, as a person clicks it in dohc, and get the id of the run it started; follow it with dohc_read_automation_run. Name the record by its id, or a dataset record by its primary key as JSON. A press that would run actions dohc cannot undo is refused with each action's name; press again with those names in confirm to run them. Send the same requestId again, after a timeout for example, to get the same press instead of a second one. The press is recorded as the agent's, for the person; from an agent run that an automation started, it counts in that chain of automations, which stops after 4 steps.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `collectionPath`: `string`. Required.
+- `button`: `string`. Required.
+- `recordId`: `string`. Required.
+- `table`: `string`
+- `confirm`: `string[]`
+- `requestId`: `string`
+
+Returns `{ ok: true, run, outcome, error, waiting } | { ok: true, relayed: true } | { ok: false, reason, confirm: { name, label }[] } | { ok: false, reason }`.
+
 ## CLI
 
 ```sh
@@ -1203,7 +1218,7 @@ With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, so
 
 ### `dohc automation`
 
-Read an automation's runs and try a failed run again.
+Press Button fields, read an automation's runs, and try a failed run again.
 
 Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml. Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.
 
@@ -1244,6 +1259,22 @@ Only the computer that ran it can try a run again. Anywhere else, the command na
 - `--start-over`: Run it from the first step when the automation changed since the run failed. This can repeat changes the run already made.
 
 With `--json`, prints `{ schemaVersion, ok: true, status: "queued" }`.
+
+#### `dohc automation press`
+
+```sh
+dohc automation press <collection> <button> <record> [options]
+```
+
+Press a Button field on one record, as a person clicks it in dohc.
+
+Name the record by its id, or a dataset record by its primary key as JSON. The press prints the id of the run it started. Follow it with automation run. With --as-agent, the press is recorded as the agent's, for you. A press from an agent run that an automation started is the agent's too, and counts in that chain of automations, which stops after 4 steps. In a shared view, a press goes to the owner's computer, which runs it, as in dohc.
+
+- `--table <table>`: Name the table when the button is in more than one table of a dataset Collection.
+- `--confirm <action>`: Run this action, which dohc cannot undo. The press names each action it would run. Repeat for more actions.
+- `--request-id <id>`: Send the same id again, after a timeout for example, to get the same press instead of a second one.
+
+With `--json`, prints `{ schemaVersion, ok: true, run, outcome, error, waiting }` or `{ schemaVersion, ok: true, relayed: true }`.
 
 ## App channel
 

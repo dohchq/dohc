@@ -5,8 +5,6 @@ export {
 export {
   AGENT_CHANNEL_WIRE_ID,
   GENERAL_CHANNEL_WIRE_ID,
-  channelSlugForName,
-  groupFolderForName,
 } from "./chatWireIds";
 export {
   MAX_SHARE_VERSION_ID_CHARS,

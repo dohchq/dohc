@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DocumentMenu, FEEDBACK_MS } from "./DocumentMenu";
+import { CustomizeContext } from "./settings/customize";
 // The HTML/PDF actions load ./editor/documentExport lazily, on demand — a
 // Tiptap + ProseMirror + KaTeX graph the app deliberately keeps off its open
 // path. Import it here so vitest transforms and executes that graph while
@@ -107,6 +108,25 @@ describe("DocumentMenu", () => {
     expect(screen.getByText("Export as Markdown…")).toBeTruthy();
     expect(screen.getByText("Export as HTML…")).toBeTruthy();
     expect(screen.getByText("Export as PDF…")).toBeTruthy();
+  });
+
+  it("offers Customize… for the editor inside a workspace shell only", async () => {
+    const user = userEvent.setup();
+    const customize = vi.fn();
+    const { unmount } = renderMenu();
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    expect(screen.queryByText("Customize…")).toBeNull();
+    unmount();
+
+    render(
+      <CustomizeContext.Provider value={{ customize }}>
+        <DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} />
+      </CustomizeContext.Provider>,
+    );
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.keyboard("{ArrowUp}{Enter}");
+    expect(customize).toHaveBeenCalledExactlyOnceWith("editor");
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
   it("closes on Escape", async () => {

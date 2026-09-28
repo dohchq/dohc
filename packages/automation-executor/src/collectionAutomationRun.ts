@@ -13,7 +13,11 @@ import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   definitionHash,
   evaluationRequest,
+  filterValue,
+  FIND_OVERFLOW_ERROR,
   findsOf,
+  findValueKey,
+  findValuesRequest,
   formulaPeople,
   MAX_FOUND_RECORDS,
   planRun,
@@ -25,6 +29,8 @@ import {
   type PlannedEffect,
   type PlannedField,
   type PlannedStep,
+  type FindValue,
+  type FindValueInputs,
   type RunInputs,
   type RunRecord,
 } from "./automationPlan";
@@ -51,16 +57,28 @@ export const GROUP_CHANGED_ERROR =
   "The Group this automation watches changed after this message arrived, so the run stopped before sending anything more.";
 
 /**
- * Why a message claim's Group is not the one the automation watches now,
- * or null when it is.
+ * How a Group message's run ends before it reads anything, or null when the
+ * automation still watches the Group the message came from, on every
+ * attempt: reach reads the Group the file names now, and a saved plan
+ * carries the message it was made from. A run with no plan yet skips; one
+ * with a plan fails, since it may have sent part of it.
  */
-function boundGroup(automation: Automation, claim: AutomationClaim, chat: ChatDirectory | null): string | null {
+export function groupChangedOutcome(
+  automation: Automation,
+  claim: AutomationClaim,
+  chat: ChatDirectory | null,
+  planned: boolean,
+): CollectionAutomationRunOutcome | null {
+  if (claim.change.kind !== "message") return null;
   const trigger = automation.when;
-  const message = claim.change.kind === "message" ? claim.change.message : null;
-  if (trigger.kind !== "group-message" || !message) return "not-a-group-message";
-  const group = chat?.group(trigger.group);
-  if (!group || "problem" in group) return "no-group";
-  return group.channelId === message.groupId ? null : "another-group";
+  const group = trigger.kind === "group-message" ? chat?.group(trigger.group) : undefined;
+  if (group && !("problem" in group) && group.channelId === claim.change.message.groupId) return null;
+  return planned ? failed(GROUP_CHANGED_ERROR) : { kind: "skipped" };
+}
+
+/** Whether a run loads the chat directory: it sends something, or a Group message starts it. */
+export function readsChats(automation: Automation): boolean {
+  return sendsMessages(automation) || automation.when.kind === "group-message";
 }
 // How run history and holds name a wake's destination.
 const WAKE_TARGET_NAME = "your agent";
@@ -298,6 +316,7 @@ export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">,
     replans: [],
     undoRequests: [],
     readableFields: null,
+    datasetId: null,
     superseded: false,
     undo: null,
     settled: false,
@@ -319,18 +338,12 @@ export async function runCollectionAutomation(
   // Where the automation's messages go, found once for the reach check and
   // the plan.
   let chat: ChatDirectory | null = null;
-  if (sendsMessages(automation) || automation.when.kind === "group-message") {
+  if (readsChats(automation)) {
     chat = await dependencies.chat.directory(roster, chatNeedsOf([automation]));
     if (chat === null) return { kind: "wait", reason: "engine" };
   }
-  // A Group message runs only while the automation's Group is still the
-  // one the message came from, on every attempt: the reach check below reads
-  // the Group the file names now, and a saved plan carries the message it
-  // was made from.
-  if (claim.change.kind === "message") {
-    const bound = boundGroup(automation, claim, chat);
-    if (bound !== null) return current?.plan ? failed(GROUP_CHANGED_ERROR) : { kind: "skipped" };
-  }
+  const groupChanged = groupChangedOutcome(automation, claim, chat, Boolean(current?.plan));
+  if (groupChanged !== null) return groupChanged;
   // Reach (ADR 0012), before anything is read. The targets are in the file,
   // so the check needs only the roster.
   const steps = reachStepsOf(automation, collection, (path) => ({ path, name: path.split("/").at(-1) ?? path }), chat);
@@ -439,6 +452,41 @@ export async function checkPlannedMessages(
   return sendChat === null ? { outcome: { kind: "wait", reason: "engine" } } : { chat: sendChat };
 }
 
+/**
+ * The values Finds compare with that formulas give, by findValueKey, and
+ * the Finds whose formula failed, which read nothing: the run fails only if
+ * one of their branches runs. Waits while the evaluator is busy. Only a run
+ * whose Finds use formulas asks the evaluator.
+ */
+export async function evaluateFindValues(
+  evaluator: AutomationFormulaEvaluator,
+  inputs: FindValueInputs,
+  finds: ReadonlyArray<{ ordinal: number; values: readonly FindValue[] }>,
+  nowMs: number,
+): Promise<{ values: Map<string, JsonValue>; failed: Map<number, { error: string; timedOut: boolean }> } | { outcome: CollectionAutomationRunOutcome }> {
+  const request = findValuesRequest(inputs, finds, nowMs);
+  const values = new Map<string, JsonValue>();
+  const failedFinds = new Map<number, { error: string; timedOut: boolean }>();
+  if (request.formulas.length === 0) return { values, failed: failedFinds };
+  const results = await evaluator.evaluate(inputs.claim.automationId, request.scope, request.formulas);
+  if (results === "busy") return { outcome: { kind: "wait", reason: "busy" } };
+  for (const [position, { ordinal, index }] of request.slots.entries()) {
+    const result = results[position];
+    if (!result) return { outcome: failed("The evaluator did not answer every formula.") };
+    if (result.ok) {
+      values.set(findValueKey(ordinal, index), result.value);
+      continue;
+    }
+    // A timeout counts toward switching the automation off, so another
+    // formula's failure in the same Find never hides one.
+    const timedOut = result.error.code === "timeout";
+    if (failedFinds.get(ordinal)?.timedOut !== true && (timedOut || !failedFinds.has(ordinal))) {
+      failedFinds.set(ordinal, { error: `The Find in step ${ordinal + 1} failed. ${result.error.message}`, timedOut });
+    }
+  }
+  return { values, failed: failedFinds };
+}
+
 async function plan(
   dependencies: CollectionAutomationRunDependencies,
   input: CollectionAutomationRunInput,
@@ -447,6 +495,17 @@ async function plan(
 ): Promise<{ kind: "plan"; steps: PlannedStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
   const { claim, automation } = input;
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
+  let message: RunInputs["message"] = null;
+  if (claim.change.kind === "message") {
+    const got = await groupMessage(dependencies, claim, automation, chat);
+    if ("outcome" in got) return stop(got.outcome);
+    message = got.message;
+  }
+  const pressedBy = claim.change.kind === "button" ? claim.change.onBehalfOf : null;
+  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
+  // Formulas read `now` as the time of the change, or a schedule's due
+  // time, so every attempt plans the same values.
+  const nowMs = scheduleDueAt(claim) ?? claim.createdAtMs;
   const read = await dependencies.withReads(async (reads) => {
     let record: RunRecord | null = null;
     // A claim with no record (a message or a schedule) reads none.
@@ -465,14 +524,19 @@ async function plan(
         throw error;
       }
     }
+    const finds = findsOf(automation);
+    const computed = await evaluateFindValues(dependencies.evaluator, { automation, claim, record, message, person },
+      finds.map(({ ordinal, query }) => ({ ordinal, values: query.match === "all" ? [] : [query.value] })), nowMs);
+    if ("outcome" in computed) return { removed: false, stopped: computed.outcome } as const;
     const found = new Map<number, RunRecord[]>();
-    const truncatedFinds = new Set<number>();
-    for (const find of findsOf(automation)) {
+    const unreadFinds = new Map(computed.failed);
+    for (const find of finds) {
+      if (unreadFinds.has(find.ordinal)) continue;
       const { query } = find;
       const filter = query.match === "all" ? undefined : {
         field: query.field,
         operator: query.operator,
-        value: query.value.kind === "literal" ? query.value.value : (record?.values[query.value.field] ?? null),
+        value: filterValue(query.value, record, computed.values, findValueKey(find.ordinal, 0)),
       };
       const result = await reads.queryCollectionRecords({
         collectionPath: find.collection ?? claim.collectionPath,
@@ -481,28 +545,19 @@ async function plan(
       });
       if (result.nextCursor !== null) {
         // The planner refuses this Find only if its branch runs. Never bind a partial page.
-        truncatedFinds.add(find.ordinal);
+        unreadFinds.set(find.ordinal, { error: FIND_OVERFLOW_ERROR, timedOut: false });
       } else {
         found.set(find.ordinal, result.records.map(runRecordOf));
       }
     }
-    return { removed: false, record, found, truncatedFinds } as const;
+    return { removed: false, stopped: null, record, found, unreadFinds } as const;
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.removed) return stop({ kind: "skipped" });
-  let message: RunInputs["message"] = null;
-  if (claim.change.kind === "message") {
-    const read = await groupMessage(dependencies, input, chat);
-    if ("outcome" in read) return stop(read.outcome);
-    message = read.message;
-  }
-  const pressedBy = claim.change.kind === "button" ? claim.change.onBehalfOf : null;
-  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
-  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds, message, chat, person };
+  if (read.stopped !== null) return stop(read.stopped);
+  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, unreadFinds: read.unreadFinds, message, chat, person };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
-  // Formulas read `now` as the time of the change, or a schedule's due
-  // time, so every attempt plans the same values.
-  const request = evaluationRequest(inputs, scheduleDueAt(claim) ?? claim.createdAtMs);
+  const request = evaluationRequest(inputs, nowMs);
   const results = request.formulas.length === 0
     ? []
     : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
@@ -526,12 +581,12 @@ async function plan(
  * watches that Group for such a message. The automation's file may have
  * changed since the engine claimed the message.
  */
-async function groupMessage(
-  dependencies: CollectionAutomationRunDependencies,
-  input: CollectionAutomationRunInput,
+export async function groupMessage(
+  dependencies: Pick<CollectionAutomationRunDependencies, "readMessageBody">,
+  claim: AutomationClaim,
+  automation: Automation,
   chat: ChatDirectory | null,
 ): Promise<{ message: JsonObject } | { outcome: CollectionAutomationRunOutcome }> {
-  const { claim, automation } = input;
   const trigger = automation.when;
   const claimed = claim.change.kind === "message" ? claim.change.message : null;
   if (trigger.kind !== "group-message") return { outcome: { kind: "skipped" } };

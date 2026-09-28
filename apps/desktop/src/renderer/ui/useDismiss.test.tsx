@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { useDismiss } from "./useDismiss";
@@ -18,7 +18,7 @@ function Menu() {
         </button>
         {open ? (
           <div role="menu">
-            <button type="button">Item</button>
+            <button type="button" onClick={() => setOpen(false)}>Item</button>
             <span>Label</span>
           </div>
         ) : null}
@@ -68,7 +68,7 @@ describe("useDismiss", () => {
     expect(document.documentElement.dataset.menuOpen).toBeUndefined();
   });
 
-  it("takes Escape only while focus is inside, and returns focus to the trigger", () => {
+  it("takes Escape only while focus is inside, and returns focus to the trigger", async () => {
     render(<Menu />);
     const escape = fireEvent.keyDown(document.body, { key: "Escape" });
     expect(escape).toBe(true);
@@ -78,6 +78,21 @@ describe("useDismiss", () => {
     item.focus();
     fireEvent.keyDown(item, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Trigger" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Trigger" })));
   });
+});
+
+it("returns focus after selecting a menu item", async () => {
+  render(<Menu />);
+  const item = screen.getByText("Item");
+  item.focus();
+  fireEvent.click(item);
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByText("Trigger")));
+});
+it("keeps an intentional outside focus destination", async () => {
+  render(<Menu />);
+  screen.getByText("Item").focus();
+  screen.getByText("Elsewhere").focus();
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  expect(document.activeElement).toBe(screen.getByText("Elsewhere"));
 });
