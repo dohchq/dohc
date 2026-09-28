@@ -424,7 +424,10 @@ export interface CollectionFieldMark {
 export interface CollectionAutomationTarget {
   path: string;
   name: string;
+  /** Why a step cannot change its records, or null. */
   stopped: string | null;
+  /** Why a Find cannot read its records, or null. */
+  findStopped: string | null;
 }
 
 /**
@@ -1625,10 +1628,15 @@ export class CollectionAutomations {
     const collection = collectionNamed(collectionPath);
     return [...this.collections.keys()].sort().map((path) => {
       const target = collectionNamed(path);
-      const [reach] = checkAutomationReach(roster, {
-        id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection: target }],
+      const [change, find] = checkAutomationReach(roster, {
+        id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection: target }, { kind: "find-records", collection: target }],
       });
-      return { path, name: target.name, stopped: reach && !reach.allowed ? reach.reason : null };
+      return {
+        path,
+        name: target.name,
+        stopped: change && !change.allowed ? change.reason : null,
+        findStopped: find && !find.allowed ? find.reason : null,
+      };
     });
   }
 

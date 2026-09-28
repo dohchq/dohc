@@ -77,8 +77,11 @@ export function useDatasetAutomations(props: {
   const described = dataset?.tables.find((candidate) => candidate.tableId === tableId);
   const table = useMemo((): AutomationTable | undefined => described && {
     name: described.name,
-    operations: new Set(dataset?.operations.flatMap((operation) => (operation.tableId === tableId ? [operation.name] : []))),
-    tables: new Map(dataset?.tables.map((candidate) => [candidate.name, builderFields(candidate.fields)])),
+    tables: new Map(dataset?.tables.map((candidate) => [candidate.name, {
+      fields: builderFields(candidate.fields),
+      operations: dataset.operations.flatMap((operation) =>
+        (operation.tableId === candidate.tableId ? [{ name: operation.name, kind: operation.kind }] : [])),
+    }])),
     actions: (dataset?.operations ?? []).flatMap((operation) => operation.kind === "action"
       ? [{ name: operation.name, label: operation.label, table: dataset?.tables.find((candidate) => candidate.tableId === operation.tableId)?.name ?? "", reversible: operation.reversedBy !== undefined }]
       : []),
