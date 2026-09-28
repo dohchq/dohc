@@ -1038,6 +1038,66 @@ pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), Colla
     validate_replay_parity_contained(base, candidate, None, None, None).map(drop)
 }
 
+/// Validate and apply each update in order, reusing the batch's replay gate.
+/// Rejected updates leave the document unchanged and do not stop later updates.
+pub fn apply_replay_validated_batch(
+    base_bytes: &[u8],
+    updates: &[Vec<u8>],
+) -> Result<ReplayBatch, CollabError> {
+    let mut doc = Ydoc::wire();
+    doc.apply(base_bytes)?;
+    let mut frontier: Option<IntegratedFrontier> = None;
+    let mut scratch = None;
+    let mut accepted: Vec<&[u8]> = Vec::new();
+    let mut outcomes = Vec::with_capacity(updates.len());
+    for bytes in updates {
+        let mut mutated = false;
+        match validate_replay_parity_for_cached_gate(
+            &doc,
+            frontier.as_ref(),
+            scratch.as_ref(),
+            &mut mutated,
+            bytes,
+        ) {
+            Ok(mut validation) => {
+                if let Err(error) = doc.apply(bytes) {
+                    scratch = None;
+                    frontier = None;
+                    doc = Ydoc::wire();
+                    doc.apply(base_bytes)?;
+                    for bytes in &accepted {
+                        doc.apply(bytes)?;
+                    }
+                    outcomes.push(Err(error));
+                    continue;
+                }
+                if frontier.is_none() {
+                    frontier = validation.rebuilt_frontier.take();
+                }
+                frontier
+                    .as_mut()
+                    .expect("cold batch gate builds a frontier")
+                    .fold(validation.candidate);
+                if validation.rebuilt_scratch.is_some() {
+                    scratch = validation.rebuilt_scratch;
+                }
+                accepted.push(bytes.as_slice());
+                outcomes.push(Ok(()));
+            }
+            Err(error) => {
+                scratch = None;
+                outcomes.push(Err(error));
+            }
+        }
+    }
+    Ok(ReplayBatch { doc, outcomes })
+}
+
+pub struct ReplayBatch {
+    pub doc: Ydoc,
+    pub outcomes: Vec<Result<(), CollabError>>,
+}
+
 /// [`validate_replay_parity`] plus the isolated post-candidate document the
 /// gate already builds for its integration checks. Callers may use this doc
 /// for the same envelope's projection. It is a full-state fork of `base`, not

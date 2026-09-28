@@ -1359,7 +1359,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut completed = Vec::new();
         let mut deferred_origins = durable_origins.clone();
         for op in &ordered {
-            let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
+            if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
+                crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+                    .map_err(local)?;
+            }
+            let routed = crate::router::apply_replication_envelope_in_batch(
+                store, cache, op, faults, leases, true,
+            );
             match routed {
                 Err(SyncError::RetryableState { reason }) => {
                     if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
@@ -1396,7 +1402,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let mut still_deferred_origins = durable_origins.clone();
             let mut made_progress = false;
             for op in retryable {
-                let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
+                if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
+                    crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+                        .map_err(local)?;
+                }
+                let routed = crate::router::apply_replication_envelope_in_batch(
+                    store, cache, op, faults, leases, true,
+                );
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
                         if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
@@ -1446,6 +1458,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             retryable = still_retryable;
         }
+        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+            .map_err(local)?;
         let mut settlements = match crate::moment_apply::pending::drain_and_claim(
             store,
             workspace_id,
@@ -1481,8 +1495,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // Direct-RPC retry rows retain their sentinel. Cursor commit clears only
         // the claimed token; a later drain remains unowned, while a newer pull
         // retags relay rows so a stale cursor cannot destroy an unread refusal.
-        let (pending_refusals, refusal_report_id) =
-            crate::apply::claim_pending_refusals(store, workspace_id, faults).map_err(local)?;
+        let pending_refusals =
+            crate::apply::read_pending_refusals(store, workspace_id).map_err(local)?;
         for refusal in pending_refusals {
             push_refusal_once(&mut refusals, refusal);
         }
@@ -1523,7 +1537,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 || (!has_more && !crate::deferred::has_unapplied(store, workspace_id)?),
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
-            refusal_report_id,
             settlement_report_id: settlements.report_id,
         };
         if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
@@ -5139,6 +5152,9 @@ mod conflict_resolve_blob_ref_tests {
                 predecessor_claim_id: dohc_engine_storage::hex_sha256(b"predecessor"),
                 predecessor_state_vector_sha256: dohc_engine_storage::hex_sha256(
                     b"predecessor state vector",
+                ),
+                predecessor_delete_set_sha256: dohc_engine_storage::hex_sha256(
+                    b"predecessor full state",
                 ),
                 artifact_preimage_sha256: text_sha.clone(),
                 successor: Some(SuccessorV1 {

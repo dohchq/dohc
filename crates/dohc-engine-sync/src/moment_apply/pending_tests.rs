@@ -88,7 +88,6 @@ fn commit_report(store: &mut EngineStore, report_id: Option<String>) {
             cursor: 65,
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
-            refusal_report_id: None,
             settlement_report_id: report_id,
         },
         &NoFaults,

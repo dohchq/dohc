@@ -1039,6 +1039,60 @@ pub(crate) fn apply_conflict_parent_shadow_in_tx(
     )
 }
 
+/// Adopt a reviewed text result after its parent validated the head and lineage.
+pub(crate) fn adopt_conflict_parent_text_result_in_tx(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    shadow: &serde_json::Value,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<Vec<MomentMaterializationChange>, SyncError> {
+    let (payload, _) = parse_tagged_shadow(
+        shadow,
+        "conflict.resolve write is malformed",
+        "conflict.resolve write has no owner",
+    )?;
+    if payload.operation != "write"
+        || ContentKind::from_wire(payload.payload_after_content_kind.as_deref())
+            != ContentKind::Text
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "reviewed lineage result must be a text write",
+        });
+    }
+    let text = require_blob_text(tx, &payload.payload_after_blob_sha256)?;
+    upsert_snapshot(
+        tx,
+        &envelope.workspace_id,
+        &payload,
+        ContentKind::Text,
+        text.len() as i64,
+    )?;
+    tx.execute(
+        "UPDATE moments SET sync_record_only=NULL WHERE workspace_id=?1 AND moment_id=?2",
+        params![envelope.workspace_id, payload.moment_id],
+    )
+    .map_err(SyncError::persist)?;
+    upsert_search_row(
+        tx,
+        &envelope.workspace_id,
+        &payload,
+        ContentKind::Text,
+        &text,
+        search_policy,
+    )?;
+    Ok(
+        is_active_version(tx, &envelope.workspace_id, &payload.version_id)?
+            .then_some(MomentMaterializationChange {
+                version_id: payload.version_id,
+                path: payload.payload_after_path,
+                operation: "write",
+                content_kind: "text",
+            })
+            .into_iter()
+            .collect(),
+    )
+}
+
 pub(crate) fn record_conflict_parent_shadow_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,

@@ -1734,6 +1734,17 @@ pub fn replace_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
 ) -> Result<SuccessorInstallOutcome, CollabError> {
+    replace_reviewed_lineage_with_successor_in_tx(tx, replacement, None)
+}
+
+/// Install a reviewed successor while guarding the receiver's alternate lineage.
+/// The successor retains its author's causal parent. The caller must establish
+/// that the alternate lineage belongs to the same review and its visible edits are preserved.
+pub fn replace_reviewed_lineage_with_successor_in_tx(
+    tx: &Transaction<'_>,
+    replacement: SuccessorReplacement<'_>,
+    reviewed_local_predecessor: Option<(&str, &str)>,
+) -> Result<SuccessorInstallOutcome, CollabError> {
     crate::live_update_application::require_restore_open(tx, replacement.key)?;
     let SuccessorReplacement {
         key,
@@ -1793,25 +1804,59 @@ pub fn replace_lineage_with_successor_in_tx(
             successor_claim_id: successor.lineage_claim_id.clone(),
         });
     }
-    let (marker, predecessor, predecessor_state_vector) = load_exact_active_lineage(
-        tx,
-        key,
+    let (local_claim, local_vector) = reviewed_local_predecessor.unwrap_or((
         expected_predecessor_claim_id,
         expected_predecessor_state_vector_sha256,
-    )?;
-
-    let predecessor_full_state_sha = put_binary_blob(tx, &predecessor.encode_full_state())?;
+    ));
+    let (marker, predecessor, predecessor_state_vector) = if reviewed_local_predecessor.is_some() {
+        let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+        if marker.lineage_claim_id.as_deref() != Some(local_claim) {
+            return Err(CollabError::LineagePredecessorMismatch {
+                expected: local_claim.to_owned(),
+                observed: marker.lineage_claim_id,
+            });
+        }
+        let doc = load_doc_in(tx, key)?;
+        let vector = doc.encode_state_vector();
+        if crate::hex_sha256(&vector) != local_vector {
+            return Err(CollabError::LineageStateVectorMismatch {
+                expected: local_vector.to_owned(),
+                observed: crate::hex_sha256(&vector),
+            });
+        }
+        (marker, doc, vector)
+    } else {
+        load_exact_active_lineage(tx, key, local_claim, local_vector)?
+    };
+    let mut retained = vec![predecessor.encode_full_state()];
+    if predecessor.has_pending_dependencies() {
+        let mut statement = tx.prepare("SELECT b.bytes FROM ydoc_updates u JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 \
+        WHERE u.workspace_id=?1 AND u.version_id=?2 AND u.object_id=?3 ORDER BY u.seq").map_err(map_sql)?;
+        retained.extend(
+            statement
+                .query_map(
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .map_err(map_sql)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(map_sql)?,
+        );
+    }
+    let predecessor_full_state_sha = put_binary_blob(tx, &crate::merge_updates(&retained)?)?;
     let predecessor_state_vector_sha = put_binary_blob(tx, &predecessor_state_vector)?;
     tx.execute(
         "INSERT INTO ydoc_inactive_lineages (workspace_id, version_id, object_id, \
          lineage_claim_id, parent_claim_id, disposition, content_kind, path, epoch_tag, \
-         full_state_blob_sha256, state_vector_blob_sha256, recorded_at_ms, updated_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'superseded-predecessor', ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+         full_state_blob_sha256, state_vector_blob_sha256, recorded_at_ms, updated_at_ms,last_surfaced_projection_sha256) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'superseded-predecessor', ?6, ?7, ?8, ?9, ?10, ?11, ?11, \
+         (SELECT b.sha256 FROM blobs b JOIN ydoc_docs d ON d.last_settled_sha=b.sha256 \
+          WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3))",
         rusqlite::params![
             key.workspace_id,
             key.version_id,
             key.object_id,
-            expected_predecessor_claim_id,
+            local_claim,
             marker.lineage_parent_claim_id,
             marker.content_kind.as_str(),
             marker.path,

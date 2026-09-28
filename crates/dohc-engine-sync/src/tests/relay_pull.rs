@@ -2267,21 +2267,21 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
 }
 
 #[test]
-fn join_pull_recovers_offline_edits_after_the_operation_limit() {
-    assert_join_pull_recovers_offline_edits(false, false);
+fn join_pull_conflicts_offline_edits_after_the_operation_limit() {
+    assert_join_pull_conflicts_offline_edits(false, false);
 }
 
 #[test]
-fn join_pull_recovers_offline_edits_after_the_page_limit() {
-    assert_join_pull_recovers_offline_edits(true, false);
+fn join_pull_conflicts_offline_edits_after_the_page_limit() {
+    assert_join_pull_conflicts_offline_edits(true, false);
 }
 
 #[test]
 fn join_pull_journals_received_document_edits_without_originating_offline_bases() {
-    assert_join_pull_recovers_offline_edits(false, true);
+    assert_join_pull_conflicts_offline_edits(false, true);
 }
 
-fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: bool) {
+fn assert_join_pull_conflicts_offline_edits(sparse: bool, edit_between_batches: bool) {
     let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
@@ -2539,14 +2539,24 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: b
                 .collect::<Result<Vec<_>, _>>()
         })
         .expect("materialized content");
-    assert_eq!(texts.len(), 2);
-    assert!(texts[0].0.starts_with("joining (recovered "));
-    assert!(texts[0].0.ends_with(".md"));
-    assert_eq!(texts[0].1, "offline edit");
     assert_eq!(
-        texts[1],
-        ("joining.md".to_owned(), "remote edit".to_owned())
+        texts,
+        [("joining.md".to_owned(), "offline edit".to_owned())]
     );
+    let (current, incoming, recoveries): (String, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT c.text,i.text,(SELECT COUNT(*) FROM ydoc_recovery_decisions)
+            FROM conflicts f JOIN blobs c ON c.sha256=f.current_blob_sha256
+            JOIN blobs i ON i.sha256=f.incoming_blob_sha256 WHERE f.status='open'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("offline edits are visible in a version conflict");
+    assert_eq!(current, "offline edit");
+    assert_eq!(incoming, "remote edit");
+    assert_eq!(recoveries, 0);
 }
 
 #[test]
@@ -3486,7 +3496,6 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
         cursor,
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
-        refusal_report_id: None,
         settlement_report_id: None,
     };
     assert!(matches!(
@@ -3948,7 +3957,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
 }
 
 #[test]
-fn committed_pull_cursor_clears_persisted_refusals() {
+fn committed_pull_cursor_retains_persisted_refusals() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
@@ -4014,8 +4023,8 @@ fn committed_pull_cursor_clears_persisted_refusals() {
         .expect("commit cursor");
     assert_eq!(
         persisted(&engine),
-        0,
-        "cursor commit must sweep persisted refusal reports"
+        1,
+        "cursor commit retains unresolved refusals"
     );
 }
 
@@ -4096,10 +4105,6 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         panic!("first pull must complete: {first:?}");
     };
     assert_eq!(first_refusals.len(), 1);
-    assert!(
-        first_cursor.refusal_report_id.is_some(),
-        "a surfaced refusal must be owned by this pending cursor"
-    );
 
     // This models open/resync/close draining after pull returns. Its structured
     // result is deliberately dropped by those runtime calls, so persistence is
@@ -4165,8 +4170,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         })
         .expect("surviving refusals");
     assert_eq!(
-        survivors,
-        vec![("post-pull-drain-peer".to_owned(), None)],
+        survivors, pending_before_commit,
         "a workspace-wide cursor sweep destroys this unread drain refusal"
     );
 
@@ -4208,7 +4212,10 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         panic!("second pull must complete: {second:?}");
     };
     assert_eq!(
-        refusals,
+        refusals
+            .into_iter()
+            .filter(|row| row.origin_id == "post-pull-drain-peer")
+            .collect::<Vec<_>>(),
         vec![ReplicationRefusal {
             workspace_id: "ws".to_owned(),
             origin_id: "post-pull-drain-peer".to_owned(),
@@ -4240,8 +4247,8 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         })
         .expect("remaining refusals");
     assert_eq!(
-        remaining, 0,
-        "a refusal clears only after the cursor that actually surfaced it commits"
+        remaining, 2,
+        "cursor commit retains both unresolved refusals"
     );
 }
 
@@ -4260,10 +4267,10 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
     retain_refusal_for_direct_retry(&mut engine, &direct, &NoFaults)
         .expect("protect direct refusal");
 
-    let (claimed, report_id) = crate::apply::claim_pending_refusals(&mut engine, "ws", &NoFaults)
-        .expect("unrelated relay claim");
+    let claimed =
+        crate::apply::read_pending_refusals(&engine, "ws").expect("unrelated relay claim");
     assert!(
-        claimed.is_empty() && report_id.is_none(),
+        claimed.is_empty(),
         "claiming every workspace row steals the direct RPC retry disposition"
     );
     let cursor = RelayCursor {
@@ -4271,7 +4278,6 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         cursor: 0,
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
-        refusal_report_id: report_id,
         settlement_report_id: None,
     };
     commit_relay_cursor(
@@ -4302,7 +4308,6 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
         cursor: 42,
         replication_epoch: "epoch-1".to_owned(),
         stream_identity: "stream-1".to_owned(),
-        refusal_report_id: None,
         settlement_report_id: None,
     };
     assert!(matches!(
