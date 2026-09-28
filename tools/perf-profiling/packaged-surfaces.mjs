@@ -236,7 +236,7 @@ export function recordId(seed) {
 
 const STATUSES = ['Todo', 'Doing', 'Done'];
 export function collectionFixtureFiles(count, folder = 'records') {
-  const files = [{ path: `${folder}/collection.yaml`, content: 'name: Records\nfields:\n  Name:\n    type: text\n  Status:\n    type: select\n    options: [Todo, Doing, Done]\n  Priority:\n    type: number\n  Done:\n    type: checkbox\n  Due:\n    type: date\nviews:\n  - name: Table\n    kind: table\n' }];
+  const files = [{ path: `${folder}/collection.yaml`, content: 'version: 1\nname: Records\nfields:\n  Name:\n    type: text\n  Status:\n    type: select\n    options: [Todo, Doing, Done]\n  Priority:\n    type: number\n  Done:\n    type: checkbox\n  Due:\n    type: date\nviews:\n  - name: Table\n    kind: table\n' }];
   for (let n = 1; n <= count; n++) {
     const due = `2026-${String(1 + (n % 12)).padStart(2, '0')}-${String(1 + (n % 28)).padStart(2, '0')}`;
     files.push({ path: `${folder}/record-${String(n).padStart(6, '0')}.md`,

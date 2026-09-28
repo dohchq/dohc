@@ -316,6 +316,14 @@ function renderPage(
 }
 
 describe("CollectionPage", () => {
+  it("names a newer Collection file and asks to update dohc", async () => {
+    const bridge = makeBridge([]);
+    bridge.getCollection.mockResolvedValue({ path: "tasks", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }],
+      schema: { name: null, description: null, fields: [], views: [] }, recordCount: 0 });
+    renderPage(bridge);
+    expect(await screen.findByText("tasks/collection.yaml uses a newer version. Update dohc to read this file.")).toBeDefined();
+    expect(screen.queryByTestId("collection-page")).toBeNull();
+  });
   it("binds the store executor to the query bridge call and renders records", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")]);
     renderPage(bridge);

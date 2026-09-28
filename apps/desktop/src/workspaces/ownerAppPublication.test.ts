@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { compileClosedApp } from "./closedAppCompiler";
-import { prepareOwnerAppPublication } from "./ownerAppPublication";
+import { parseAppPublicationDeclaration, prepareOwnerAppPublication } from "./ownerAppPublication";
 import { type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 
@@ -33,11 +33,27 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
 
 it("refuses retired app-owned backend declarations before compilation", async () => {
   const h = harness();
-  await expect(h.prepare()).rejects.toThrow("app/app.publish.json must hold entryPath, inputs, and packageMap, and at most one of collection or dataset.");
+  await expect(h.prepare()).rejects.toThrow("app/app.publish.json has an unknown key: backend. Remove it or correct its name.");
   expect(h.compile).not.toHaveBeenCalled();
 });
 
 describe("app.publish.json paths", () => {
+  it.each([undefined, 1])("reads version %s", (version) => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {} }));
+    expect(parseAppPublicationDeclaration(bytes, "app").entryPath).toBe("app/main.ts");
+  });
+
+  it.each([[undefined, "colection"], [1, "colection"], [1, ""]] as const)("rejects unknown keys before publishing version %s: %s", async (version, key) => {
+    const h = harness();
+    h.setDeclaration({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, [key]: {} });
+    await expect(h.prepare()).rejects.toThrow(`app/app.publish.json has an unknown key: ${key}.`);
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("refuses a newer version before interpreting fields", () => {
+    expect(() => parseAppPublicationDeclaration(new TextEncoder().encode('{"version":2}'), "app"))
+      .toThrow("app/app.publish.json uses a newer version. Update dohc to read this file.");
+  });
   const manifest = { entryPath: "main.ts", inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"], packageMap: { greeting: "deps/greeting.js" } };
   const place = (h: ReturnType<typeof harness>, root: string, parent: string, value: unknown = manifest) => {
     h.sources.clear();

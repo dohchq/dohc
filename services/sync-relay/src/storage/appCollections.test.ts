@@ -60,6 +60,16 @@ function fixture() {
   return {directory,path,owner,input,write,get storage(){return storage;},get raw(){return (storage as StorageContext).db;},restart(){storage.close();storage=openSyncRelayStorage(path);},accept(patch:Partial<AcceptAppCollectionInput>={},maxCreatesPerGrant=100){return storage.acceptAppCollection({...input,...patch},{maxCreatesPerGrant});}};
 }
 
+it("names the sync service when collection approval needs a newer reader",()=>{
+  const f=fixture();
+  const newer="version: 2\n"+schemaText;
+  f.write("responses/collection.yaml",newer);
+  const newerCapability={...capability,schemaSha256:hash(newer)};
+  const publication=f.storage.publishAppPublication({workspaceId:"w",shareId:"s",grantId:"g",generation:1,ownerUserId:"owner",candidate:{...candidate(),capabilities:[newerCapability]},blobs:[{sha256:hash(script),bytes:script}],limits,nowMs:30});
+  expect(()=>f.storage.approveAppCollection({...f.owner,publicationId:publication.publicationId,expectedAuthorityRevision:1,capability:newerCapability}))
+    .toThrow("responses/collection.yaml uses a newer version. Update the sync service to read this file.");
+});
+
 it("accepts one durable workspace moment and payload-bound receipt across retries and restart",()=>{
   const f=fixture(), receipt=f.accept();
   expect(receipt.kind).toBe("accepted");expect(receipt.path).toMatch(/^responses\/accepted_/);expect(receipt).not.toHaveProperty("recordId");

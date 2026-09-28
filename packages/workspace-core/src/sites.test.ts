@@ -436,6 +436,23 @@ describe("discoverSites", () => {
 });
 
 describe("parseDohcSiteConfig", () => {
+  it.each(["1", 0, -1, 1.5, null])("identifies invalid version %s", (version) => {
+    const parsed = parseDohcSiteConfig(JSON.stringify({ version, title: "Unused" }), "trip/dohc.json");
+    expect(parsed.config).toBeUndefined();
+    expect(parsed.diagnostics).toEqual([{ path: "trip/dohc.json", severity: "error", code: "invalid-version",
+      message: "trip/dohc.json has an invalid version. Set version to 1." }]);
+  });
+  it.each([undefined, 1])("reads version %s", (version) => {
+    expect(parseDohcSiteConfig(JSON.stringify({ version, type: "site", title: "Trip" })))
+      .toMatchObject({ config: { type: "site", title: "Trip" }, diagnostics: [] });
+  });
+
+  it("refuses a newer version before applying configuration", () => {
+    const parsed = parseDohcSiteConfig('{"version":2,"preview":{"command":"run-new-format"}}', "trip/dohc.json");
+    expect(parsed.config).toBeUndefined();
+    expect(parsed.diagnostics).toEqual([{ path: "trip/dohc.json", severity: "error", code: "unsupported-version",
+      message: "trip/dohc.json uses a newer version. Update dohc to read this file." }]);
+  });
   it("parses optional site metadata and commands", () => {
     expect(
       parseDohcSiteConfig(

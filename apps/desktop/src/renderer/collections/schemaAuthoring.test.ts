@@ -54,6 +54,7 @@ const FULL: CollectionSchema = {
 
 describe("serializeCollectionSchema", () => {
   it("round-trips every field type and view shape as a valid schema", () => {
+    expect(serializeCollectionSchema(FULL)).toMatch(/^version: 1\n/);
     const parsed = parseCollectionSchema(serializeCollectionSchema(FULL));
     expect(parsed.status).toBe("valid");
     expect(parsed.reasons).toEqual([]);

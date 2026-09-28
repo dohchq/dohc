@@ -16,6 +16,7 @@ import {
   type CliShowMessage,
 } from "@dohc/cli/protocol";
 import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
+import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { collectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
 import type {
@@ -2167,6 +2168,8 @@ async function dispatch(
             ? { cursor: decodedCollectionCursor(args.cursor) }
             : {}),
         });
+        const versionError = collectionVersionError(result.collection.reasons, `${validated.normalized}/collection.yaml`);
+        if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
           collection: result.collection,
@@ -2207,6 +2210,8 @@ async function dispatch(
             ? { beforeHistoryId: request.args.beforeHistoryId }
             : {}),
         });
+        const versionError = collectionVersionError(result.collection.reasons, `${validated.normalized}/collection.yaml`);
+        if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
           collection: result.collection,
@@ -2230,6 +2235,15 @@ async function dispatch(
           })),
         };
       } catch (error) {
+        // Unsupported schemas have no record bindings, so getRecord can fail
+        // before returning the collection diagnostic.
+        try {
+          const result = await collections.query({ collectionPath: validated.normalized, limit: 1 });
+          const versionError = collectionVersionError(result.collection.reasons, `${validated.normalized}/collection.yaml`);
+          if (versionError) return { ok: false as const, reason: versionError };
+        } catch {
+          // Preserve the original read failure if the schema is unavailable too.
+        }
         return mcpFailure(
           error,
           `failed to read record: ${request.args.recordId}`,
