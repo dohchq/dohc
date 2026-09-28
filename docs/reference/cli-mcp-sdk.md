@@ -136,7 +136,7 @@ Returns `{ ok: true, path } | { ok: false, reason }`.
 
 ### `dohc_write_file`
 
-Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.
+Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. Requires dohc open. History records the write under your agent name. Refuses secret or excluded paths and content over 10 MiB.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -146,7 +146,7 @@ Changes the workspace, so a shared view does not offer it.
 - `expectedSha256`: `string`
 - `summary`: `string`
 
-Returns `{ ok: true, path, bytes, sha256, recordedBy }`.
+Returns `{ ok: true, path, bytes, sha256 }`. Uses the desktop `fileWrite` verb. On failure: `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists published files in a partial batch.
 
 ### `dohc_create_directory`
 
@@ -157,11 +157,11 @@ Changes the workspace, so a shared view does not offer it.
 - `path`: `string`. Required.
 - `summary`: `string`
 
-Returns `{ ok: true, path, recordedBy }`, or `{ ok: true, path, unchanged: true }` when the folder exists.
+Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the folder exists.
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file/folder. The desktop watcher captures the change as engine moments while the app is open.
+Move or rename a visible workspace file/folder. History records this change without your agent name.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -170,18 +170,18 @@ Changes the workspace, so a shared view does not offer it.
 - `overwrite`: `boolean`
 - `summary`: `string`
 
-Returns `{ ok: true, fromPath, toPath, recordedBy }`.
+Returns `{ ok: true, fromPath, toPath }`.
 
 ### `dohc_delete_path`
 
-Delete a visible workspace file/folder by moving it to dohc's recoverable trash. The desktop watcher captures the delete as an engine moment while the app is open.
+Delete a visible workspace file/folder by moving it to dohc's recoverable trash. History records this delete without your agent name.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `path`: `string`. Required.
 - `summary`: `string`
 
-Returns `{ ok: true, path, trashed: true, recordedBy }`.
+Returns `{ ok: true, path, trashed: true }`.
 
 ### `dohc_detect_apps`
 
@@ -194,7 +194,7 @@ Returns `{ ok: true, apps: { root, title, kind, confidence, entry?, packageManag
 
 ### `dohc_create_app`
 
-Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Records history; does not create hidden app folders.
+Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -202,7 +202,7 @@ Changes the workspace, so a shared view does not offer it.
 - `title`: `string`
 - `withDohcJson`: `boolean`
 
-Returns `{ ok: true, appRoot, files, recordedBy }`.
+Returns `{ ok: true, appRoot, files }`, or `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists files published before the first failure.
 
 ### `dohc_test_app`
 
@@ -214,7 +214,7 @@ Returns `{ ok, app, checks: { name, ok, message?, path? }[] }`. `ok` is true whe
 
 ### `dohc_import_data`
 
-Import a CSV/JSON/JSONL/Markdown source into a new visible .sqlite database.
+Import a CSV/JSON/JSONL/Markdown source into a new visible .sqlite database. Requires dohc open and records the write under your agent name.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -222,7 +222,7 @@ Changes the workspace, so a shared view does not offer it.
 - `databasePath`: `string`. Required.
 - `tableName`: `string`. Required.
 
-Returns `{ ok: true, path, tableName, rowCount, recordedBy }`.
+Returns `{ ok: true, path, tableName, rowCount }`.
 
 ### `dohc_query_database`
 

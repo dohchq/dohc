@@ -228,7 +228,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   // The client names itself in the MCP handshake. A name the document door
-  // accepts becomes the author of this agent's edits; no name is invented.
+  // accepts becomes the author of this agent's edits. The desktop labels unnamed agents "Agent".
   const agentName = (): string | undefined => {
     const named = documentAgentNameSchema.safeParse(server.server.getClientVersion()?.name);
     return named.success ? named.data : undefined;
@@ -266,7 +266,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_write_file",
     {
       description:
-        "Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.",
+        "Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. Requires dohc open. History records the write under your agent name. Refuses secret or excluded paths and content over 10 MiB.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),
@@ -275,7 +275,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         summary: z.string().max(500).optional(),
       },
     },
-    async (args) => text(await writeWorkspaceFile(ctx, args)),
+    async (args) => text(await writeWorkspaceFile(ctx, args, agentName())),
   );
 
   registerWrite(
@@ -295,7 +295,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file/folder. The desktop watcher captures the change as engine moments while the app is open.",
+        "Move or rename a visible workspace file/folder. History records this change without your agent name.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -310,7 +310,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_delete_path",
     {
       description:
-        "Delete a visible workspace file/folder by moving it to dohc's recoverable trash. The desktop watcher captures the delete as an engine moment while the app is open.",
+        "Delete a visible workspace file/folder by moving it to dohc's recoverable trash. History records this delete without your agent name.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),
@@ -336,14 +336,14 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_app",
     {
       description:
-        "Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Records history; does not create hidden app folders.",
+        "Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
       inputSchema: {
         appRoot: z.string().min(1).max(4096),
         title: z.string().max(200).optional(),
         withDohcJson: z.boolean().optional(),
       },
     },
-    async (args) => text(await createApp(ctx, args)),
+    async (args) => text(await createApp(ctx, args, agentName())),
   );
 
   server.registerTool(
@@ -361,14 +361,14 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_import_data",
     {
-      description: "Import a CSV/JSON/JSONL/Markdown source into a new visible .sqlite database.",
+      description: "Import a CSV/JSON/JSONL/Markdown source into a new visible .sqlite database. Requires dohc open and records the write under your agent name.",
       inputSchema: {
         sourcePath: z.string().min(1).max(4096),
         databasePath: z.string().min(1).max(4096),
         tableName: z.string().min(1).max(256),
       },
     },
-    async (args) => text(await importData(ctx, args)),
+    async (args) => text(await importData(ctx, args, agentName())),
   );
 
   server.registerTool(

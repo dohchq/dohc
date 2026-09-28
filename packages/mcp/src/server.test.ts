@@ -336,3 +336,18 @@ it.each([
   expect(content[0]?.type).toBe("text");
   expect(JSON.parse(content[0]!.text)).toEqual(response);
 });
+
+
+describe("file write handshake attribution", () => {
+  it.each(["Codex", "invalid/name"])("forwards the validated name from %s", async name => {
+    const root = await workspaceRoot();
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({ root, home: root, request: async request => {
+      requests.push(request);
+      return { ok: true, written: ["note.txt"] };
+    } }, name);
+    await client.callTool({ name: "dohc_write_file", arguments: { path: "note.txt", content: "new" } });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ verb: "fileWrite", args: { actor: "agent", agent: name === "Codex" ? name : undefined } });
+  });
+});

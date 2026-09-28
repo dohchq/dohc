@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -154,6 +155,20 @@ function refusalReason(result: { ok: true } | { ok: false; reason: string }): st
 }
 
 const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (request) => {
+  if (request.verb === "fileWrite") {
+    const written: string[] = [];
+    for (const file of request.args.files) {
+      const target = join(request.args.cwd, file.path);
+      const previous = await readFile(target).catch(() => null);
+      const currentSha256 = createHash("sha256").update(previous ?? Buffer.alloc(0)).digest("hex");
+      if (file.expectedSha256 !== undefined && file.expectedSha256 !== currentSha256) return { ok: false, reason: "expectedSha256 does not match current file", written, currentSha256 };
+      if (file.createOnly && previous) return { ok: false, reason: "File already exists", written };
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, Buffer.from(file.contentBase64, "base64"));
+      written.push(file.path);
+    }
+    return { ok: true, written };
+  }
   if (request.verb === "moments") {
     return {
       changes: [],
@@ -1072,7 +1087,7 @@ describe("mcp tools operate on allowed paths", () => {
 
       // The write carried no legacy change set (the engine
       // is the recorder).
-      expect(written).toMatchObject({ recordedBy: "workspace-engine" });
+      expect(written).not.toHaveProperty("recordedBy");
     });
   });
 
@@ -1083,13 +1098,12 @@ describe("mcp tools operate on allowed paths", () => {
         // capture path has no such platform gate, so mutations proceed.
         await expect(
           writeWorkspaceFile(ctx, { path: "notes/nested/plan.txt", content: "draft\n" }),
-        ).resolves.toMatchObject({ ok: true, recordedBy: "workspace-engine" });
+        ).resolves.toMatchObject({ ok: true });
         await expect(readFile(join(ctx.root, "notes/nested/plan.txt"), "utf8")).resolves.toBe(
           "draft\n",
         );
         await expect(createWorkspaceDirectory(ctx, { path: "new-folder" })).resolves.toMatchObject({
           ok: true,
-          recordedBy: "workspace-engine",
         });
         await expect(readdir(join(ctx.root, "new-folder"))).resolves.toEqual([]);
       });
@@ -1263,7 +1277,7 @@ describe("mcp tools operate on allowed paths", () => {
       // A new MCP write records nothing legacy (Phase C).
       await expect(
         writeWorkspaceFile(ctx, { path: "notes/plan.txt", content: "draft\n" }),
-      ).resolves.toMatchObject({ ok: true, recordedBy: "workspace-engine" });
+      ).resolves.toMatchObject({ ok: true });
 
       // Desktop main is the sole history authority. Its injected empty result
       // does not surface the relic, and an unknown id is honestly not found.
@@ -1372,8 +1386,8 @@ describe("mcp tools operate on allowed paths", () => {
       expect(trash.some((name) => name.endsWith("-todo.txt"))).toBe(true);
 
       // None of the mutations wrote a legacy change set.
-      expect(moved).toMatchObject({ recordedBy: "workspace-engine" });
-      expect(deleted).toMatchObject({ recordedBy: "workspace-engine" });
+      expect(moved).not.toHaveProperty("recordedBy");
+      expect(deleted).not.toHaveProperty("recordedBy");
     });
   });
 
