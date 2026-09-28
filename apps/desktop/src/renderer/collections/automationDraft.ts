@@ -9,6 +9,8 @@ import type { Automation, AutomationStep, AutomationValue } from "./automationSe
 // Mirrors of the file contract, which the renderer never loads.
 const MAX_ID_LENGTH = 64;
 export const MAX_NAME_LENGTH = 120;
+// Steps in one automation, counting each If and the steps inside it.
+export const MAX_STEPS = 25;
 
 export type ConditionOperator = "is" | "is-not" | "contains";
 

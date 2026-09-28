@@ -1295,6 +1295,12 @@ function splitTemplate(template: string): AutomationTextPart[] | TemplateProblem
   return parts;
 }
 
+/** Why a message template cannot be read, as the file contract's code, or null when it can. */
+export function automationTextProblem(template: string): TemplateProblem | null {
+  const split = splitTemplate(template);
+  return typeof split === "string" ? split : null;
+}
+
 /**
  * Splits a message template into text and expressions, or returns null when
  * a brace is unmatched or an expression does not parse.

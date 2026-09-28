@@ -17,7 +17,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
-import { expressionProblem } from "@dohc/automation-executor/automation-plan";
+import { formulaProblems } from "@dohc/automation-executor/automation-plan";
 import { automationCount, AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import type { AutomationTable } from "./automationDraft";
@@ -119,11 +119,11 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       schema: { name: null, description: null, views: [], fields: collectionPath === "Log" ? [{ name: "Entry", type: "text" }] : [] },
     })),
     // Main's check, for real: the file contract's writer and the formula parser.
-    checkCollectionAutomation: vi.fn(async ({ automation, formulas }: { automation: Automation; formulas: string[] }) => {
+    checkCollectionAutomation: vi.fn(async ({ automation }: { automation: Automation }) => {
       const written = writeAutomationsFile([{ status: "valid", automation }]);
       return {
         diagnostics: written.status === "refused" ? written.diagnostics : [],
-        formulaProblems: formulas.map(expressionProblem),
+        formulaProblems: formulaProblems(automation),
       };
     }),
     onAutomationRunsChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
@@ -536,6 +536,22 @@ describe("a dataset table's ⚡ panel", () => {
     await user.click(screen.getByRole("button", { name: "Run an action" }));
     expect(screen.getByRole("combobox", { name: "Step 2, action" })).toBeTruthy();
     expect(screen.queryByText(/can't be undone/)).toBeNull();
+  });
+
+  it("says beside a step that wakes an agent that other people's changes can start it", async () => {
+    const wakes: Automation = { ...onInvoices, do: [{ kind: "wake-agent", text: "Look at {record.Status}", person: "owner" }] };
+    const line = "Changes other people make can start this step, and their text reaches your agent as data.";
+    makeBridge(read([summary(wakes)]));
+    const user = userEvent.setup();
+    const { unmount } = render(<Panel table={INVOICES} />);
+    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    expect(within(screen.getByTestId("builder-step-0")).getByText(line)).toBeTruthy();
+    unmount();
+
+    // Only a dataset Collection shows it.
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    expect(screen.queryByText(line)).toBeNull();
   });
 
   it("offers no action step on a table without actions", async () => {
@@ -1100,10 +1116,10 @@ describe("the builder", () => {
     expect(written).toEqual([]);
 
     await user.type(screen.getByRole("textbox", { name: "Condition formula" }), " 3");
-    // Every formula in the draft is checked together, the step's today() too.
-    await waitFor(() => expect(bridge.checkCollectionAutomation).toHaveBeenLastCalledWith(expect.objectContaining({
-      workspaceId: "ws-1", formulas: ["record.Points == 3", "today()"],
-    })), SLOW);
+    // Main checks the whole draft.
+    await waitFor(() => expect(bridge.checkCollectionAutomation).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", automation: expect.objectContaining({ if: "record.Points == 3" }),
+    }), SLOW);
     await waitFor(() => expect(screen.queryByText(/syntax error/)).toBeNull(), SLOW);
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1));
@@ -1120,7 +1136,7 @@ describe("the builder", () => {
     const user = userEvent.setup();
     render(<Panel />);
     await openBuilder(user, "Settle");
-    await waitFor(() => expect(bridge.checkCollectionAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ formulas: ["record.id +"] })), SLOW);
+    await waitFor(() => expect(bridge.checkCollectionAutomation).toHaveBeenCalled(), SLOW);
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText(/^The formula for id has a syntax error\./u, undefined, SLOW)).toBeTruthy();
     expect(written).toEqual([]);
@@ -1306,6 +1322,167 @@ describe("the builder", () => {
     await user.click(screen.getByRole("button", { name: "Set fields" }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Step 2, field 1" })));
   });
+
+  // Steps 1 to 15 in reading order: an If whose Do holds steps 2 to 4 and
+  // whose Otherwise holds 5 and 6, then every other kind of step.
+  const title = (value: string) => [{ field: "Title", value: { kind: "literal" as const, value } }];
+  const everyKind: Automation = { ...stamp, id: "every", name: "Every kind", do: [
+    { kind: "if", if: "record.Points > 1", do: [
+      { kind: "set", values: title("A"), records: null, operation: null },
+      { kind: "find", condition: 'record.Status == "Doing"', collection: null, as: "open", operation: null },
+      { kind: "set", values: title("B"), records: "open", operation: null },
+    ], otherwise: [
+      { kind: "set", values: title("C"), records: null, operation: null },
+      { kind: "invoke", operation: "tasks.close", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] },
+    ] },
+    { kind: "notify", text: "Done: {record.Title}", to: [{ kind: "literal", value: "ana" }] },
+    { kind: "post", text: "Done", group: "Trip" },
+    { kind: "direct-message", text: "Done", to: [{ kind: "literal", value: "ana" }] },
+    { kind: "wake-agent", text: "Look", person: "owner" },
+    { kind: "run", code: "return 1;", as: "one" },
+    { kind: "run-file", file: "scripts/two.js", as: null },
+    { kind: "add-record", values: [{ field: "Entry", value: { kind: "literal", value: "x" } }], collection: "Log", as: "added", operation: null },
+    { kind: "find", condition: "true", collection: null, as: "all", operation: null },
+    // A number field's text the file wrote stays text until someone edits it.
+    { kind: "set", values: [{ field: "Points", value: { kind: "literal", value: "001" } }], records: null, operation: null },
+  ] };
+  const otherwise = (automation: Automation) => (automation.do[0] as Extract<Automation["do"][number], { kind: "if" }>).otherwise;
+
+  it("saves every kind of step as the file wrote it, and shows each nested step's own reach", async () => {
+    // Reach places run depth first: 2, 3, 4, and 5 inside the If, then notify to ana, post, message to ana, wake, add, find.
+    const places = ["allowed", "allowed", "allowed", "stopped", "allowed", "allowed", "allowed", "allowed", "allowed", "allowed"] as const;
+    const { written } = makeBridge(read([summary(everyKind, { reach: { kind: "checked", steps: places.map((verdict) =>
+      verdict === "stopped" ? { verdict, reason: "ana@dohc.test cannot edit Tasks." } : { verdict }) } })]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user, "Every kind");
+    expect(screen.getByTestId("builder-step-4").textContent).toContain("ana@dohc.test cannot edit Tasks.");
+    expect(screen.getByTestId("builder-step-1").textContent).not.toContain("cannot edit");
+    expect(screen.getByRole("group", { name: "Step 1, Otherwise" })).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual(everyKind.do);
+  }, 30_000);
+
+  it("edits a step inside an If and keeps the steps around it", async () => {
+    const { written } = makeBridge(read([summary(everyKind)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user, "Every kind");
+    const value = screen.getByRole("textbox", { name: "Step 5, Title" });
+    await user.clear(value);
+    await user.type(value, "D");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    const saved = written[0]!.automations[0]!;
+    expect(otherwise(saved)).toEqual([{ ...otherwise(everyKind)[0], values: title("D") }, otherwise(everyKind)[1]]);
+    expect({ ...saved, name: everyKind.name, do: saved.do.slice(1) }).toEqual({ ...everyKind, do: everyKind.do.slice(1) });
+  }, 30_000);
+
+  it("does not save a step moved above the Find it changes, says so on the step, and focuses it", async () => {
+    const { written } = makeBridge(read([summary(everyKind)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user, "Every kind");
+    await user.click(screen.getByRole("button", { name: "Move step 4 up" }));
+    await user.click(screen.getByRole("button", { name: "Move step 3 up" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const moved = screen.getByTestId("builder-step-1");
+    expect((await within(moved).findByText(/^No step before this one in its list names that result\./u, undefined, SLOW))).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(within(moved).getByRole("button", { name: "Move step 2 down" })));
+    expect(written).toEqual([]);
+  }, 30_000);
+
+  it("shows main's findings on the nested step and control they name, and focuses the first", async () => {
+    const { bridge, written } = makeBridge(read([summary(everyKind)]));
+    bridge.checkCollectionAutomation.mockResolvedValue({
+      diagnostics: [{ code: "duplicate-value", path: "/automations/0/do/0/do/1/as" }],
+      formulaProblems: [{ path: "/do/0/otherwise/0/set/Title", problem: "Unexpected token." }],
+    });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user, "Every kind");
+    // A syntax error shows as it happens, beside its control.
+    const value = screen.getByRole("textbox", { name: "Step 5, Title" });
+    await waitFor(() => expect(value.getAttribute("aria-invalid")).toBe("true"), SLOW);
+    expect(document.getElementById(value.getAttribute("aria-describedby")!)?.textContent).toBe("This formula has a syntax error. Unexpected token.");
+    expect(within(screen.getByTestId("builder-step-2")).queryByText("Another step already uses this name.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const find = screen.getByTestId("builder-step-2");
+    expect(await within(find).findByText("Another step already uses this name.")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(within(find).getByRole("button", { name: "Move step 3 up" })));
+    // One announcement for the Save, not one per problem.
+    expect(screen.getByText("2 problems. The first is focused.").getAttribute("role")).toBe("status");
+    expect(screen.queryAllByRole("alert")).toEqual([]);
+    // Another refusal with the same count is announced again.
+    const said = screen.getByRole("status").textContent;
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).not.toBe(said));
+    expect(written).toEqual([]);
+  }, 30_000);
+
+  it("moves focus within a branch as its steps go, and asks for a step in an empty Do", async () => {
+    const { written } = makeBridge(read([summary(everyKind)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user, "Every kind");
+    const second = screen.getByTestId("builder-step-1");
+    await user.click(within(second).getByRole("button", { name: "Remove Title from step 2" }));
+    await user.click(within(second).getByRole("button", { name: "Add field" }));
+    await waitFor(() => expect(document.activeElement).toBe(within(second).getByRole("combobox", { name: "Step 2, field 1" })));
+    await user.click(screen.getByRole("button", { name: "Remove step 5" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove step 5" })));
+    await user.click(screen.getByRole("button", { name: "Remove step 5" }));
+    const otherwiseGroup = screen.getByRole("group", { name: "Step 1, Otherwise" });
+    await waitFor(() => expect(document.activeElement).toBe(within(otherwiseGroup).getByRole("button", { name: "Set fields" })));
+    for (let removed = 0; removed < 3; removed += 1) await user.click(screen.getByRole("button", { name: "Remove step 2" }));
+    const doGroup = screen.getByRole("group", { name: "Step 1, Do" });
+    const add = within(doGroup).getByRole("button", { name: "Set fields" });
+    await waitFor(() => expect(document.activeElement).toBe(add));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await within(doGroup).findByText("Add a step.")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(add));
+    expect(written).toEqual([]);
+
+    await user.click(add);
+    await waitFor(() => expect(document.activeElement).toBe(within(doGroup).getByRole("combobox", { name: "Step 2, field 1" })));
+    await user.selectOptions(document.activeElement!, "Title");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do[0]).toEqual({ ...everyKind.do[0], do: [{ kind: "set", values: title(""), records: null, operation: null }], otherwise: [] });
+  }, 30_000);
+
+  it("shows a problem with an action input's name beside the name", async () => {
+    const settle: Automation = { ...stamp, id: "settle", name: "Settle", do: [{ kind: "invoke", operation: "invoices.settle", input: [
+      { key: "__proto__", value: { kind: "literal", value: "x" } },
+    ] }] };
+    makeBridge(read([summary(settle)]));
+    const user = userEvent.setup();
+    render(<Panel table={{ name: "Tasks", operations: new Set(), tables: new Set(["Tasks"]), actions: [] }} />);
+    await openBuilder(user, "Settle");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const name = screen.getByRole("textbox", { name: "Step 1, input 1 name" });
+    await waitFor(() => expect(document.activeElement).toBe(name), SLOW);
+    expect(document.getElementById(name.getAttribute("aria-describedby")!)?.textContent)
+      .toBe("__proto__, prototype, and constructor cannot name an input.");
+    expect(screen.getByRole("textbox", { name: "Step 1, __proto__" }).getAttribute("aria-invalid")).toBeNull();
+  }, 30_000);
+
+  it("adds no step past 25, says why, and keeps the steps it has editable", async () => {
+    const full: Automation = { ...stamp, do: Array.from({ length: 25 }, () => ({ kind: "set" as const, values: title("x"), records: null, operation: null })) };
+    makeBridge(read([summary(full)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    expect((screen.getByRole("button", { name: "Set fields" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("An automation holds at most 25 steps. Remove a step to add another.")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Step 25, Title" }), "y");
+    expect((screen.getByRole("textbox", { name: "Step 25, Title" }) as HTMLInputElement).value).toBe("xy");
+    await user.click(screen.getByRole("button", { name: "Remove step 25" }));
+    expect((screen.getByRole("button", { name: "Set fields" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/at most 25 steps/u)).toBeNull();
+  }, 30_000);
 
   it("keeps a multi-select field's value a list", async () => {
     const { written } = makeBridge(read([summary(stamp)]));

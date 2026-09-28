@@ -188,12 +188,12 @@ describe("writing automations.yaml from the panel", () => {
 
   it("checks a draft the way a save would, and each formula's syntax without running it", async () => {
     const f = fixture();
-    await expect(f.check({ automation: stamp, formulas: ["today()", "record.Status =="] })).resolves.toEqual({
+    await expect(f.check({ automation: { ...stamp, if: "record.Status ==" } })).resolves.toEqual({
       diagnostics: [],
-      formulaProblems: [null, "Unexpected token."],
+      formulaProblems: [{ path: "/if", problem: "Unexpected token." }],
     });
     const removed = { ...stamp, when: { kind: "record-removed", table: null } };
-    await expect(f.check({ automation: removed, formulas: [] }))
+    await expect(f.check({ automation: removed }))
       .resolves.toMatchObject({ diagnostics: [{ code: "step-needs-record" }] });
     expect(f.createFile).not.toHaveBeenCalled();
   });
