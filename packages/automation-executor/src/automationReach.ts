@@ -101,11 +101,11 @@ export type ReachStep =
   // operations. File Edit on a dataset grants no record access: every other
   // editor must hold a current data grant that lists the operation, and an
   // operation only the owner can use needs the owner to be the only editor.
-  | { kind: "dataset-operation"; collection: ReachCollection; operation: ReachDatasetOperation; grants: ReachDatasetGrants }
+  | { kind: "dataset-operation"; collection: ReachCollection; datasetId: string; operation: ReachDatasetOperation; grants: ReachDatasetGrants }
   // A dataset field an automation's formulas may see: only while every other
   // editor holds a data grant on a read that shows it. A stopped field is
   // hidden from formulas; it does not stop the run.
-  | { kind: "dataset-field"; collection: ReachCollection; field: { fieldId: string; name: string }; reads: readonly ReachDatasetOperation[]; grants: ReachDatasetGrants }
+  | { kind: "dataset-field"; collection: ReachCollection; datasetId: string; tableId: string; field: { fieldId: string; name: string }; reads: readonly ReachDatasetOperation[]; grants: ReachDatasetGrants }
   // `channelWireId` is null for a Group that has not synced yet.
   | { kind: "post"; group: { channelWireId: string | null; name: string } }
   // A Group whose messages start the automation: every editor must be able
@@ -386,19 +386,23 @@ function checkOwnerStep(
 /**
  * What a step's verdict and its confirmation are keyed by. A document step
  * is its place in the automation, which only an edit of the automation can
- * move. A dataset step is its operation's name or its field's id, so a
- * schema change that adds or removes fields cannot move a hold onto another
- * field's verdict.
+ * move. Dataset operations and fields include their destination identity,
+ * so matching names in different Collections cannot share a verdict.
  */
 export function reachStepId(step: ReachStep, index: number): string {
   switch (step.kind) {
     case "dataset-operation":
-      return `operation:${step.operation.name}`;
+      return JSON.stringify(["operation", step.datasetId, step.operation.operationId]);
     case "dataset-field":
-      return `field:${step.field.fieldId}`;
+      return JSON.stringify(["field", step.datasetId, step.tableId, step.field.fieldId]);
     default:
       return String(index);
   }
+}
+
+/** A formula-visible field belongs to one dataset and table. */
+export function datasetFieldKey(datasetId: string, tableId: string, fieldId: string): string {
+  return JSON.stringify([datasetId, tableId, fieldId]);
 }
 
 export const PERSONAL_NEEDS_ACCOUNT =

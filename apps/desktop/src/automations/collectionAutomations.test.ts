@@ -14,6 +14,9 @@ import { collectionRecordWrites, type CollectionRecordEditContext } from "../wor
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
+import { generateDatasetSources } from "../workspaces/datasetGenerator";
+import { createLocalDatasetHost } from "../workspaces/localDatasetHost";
+import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { definitionHash, localIsoTime, stepKey } from "@dohc/automation-executor/automation-plan";
 import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
@@ -1496,24 +1499,45 @@ describe("Collection automations", () => {
     await reopened.dispose();
   });
 
-  it("refuses a step that would change a dataset's records through the document write path", async () => {
+  it.each([false, true])("refuses an approved dataset through the document write path (code: %s)", async (code) => {
     const w = await world({ automations: { Tasks: [
       "  - id: donate",
       "    name: Donate",
       "    when: {field-changed: Status}",
-      "    do: [{add-record: {Amount: 5}, collection: Donations}]",
+      code ? "    do: [{run: \"return { records: [{ action: 'add', collection: 'Donations', fields: { Amount: 5 } }] };\"}]"
+        : "    do: [{add-record: {Amount: 5}, collection: Donations}]",
     ].join("\n") } });
-    await mkdir(join(w.root, "Donations"), { recursive: true });
-    await writeFile(join(w.root, "Donations", "dataset.json"), "{}\n");
-    const task = w.addRecord("Tasks", "one", { Status: "Done" });
-    const claim = w.claim("collection:Tasks#donate", task);
-    await w.executor.open();
-    await w.settledClaim(claim);
-    expect(claim).toMatchObject({
-      state: "failed",
-      error: "Automations cannot use Donations yet, because its records change only through its Collection actions.",
+    const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    const { files } = generateDatasetSources({
+      formatVersion: 1, datasetId: id(1), name: "Donations", schemaPath: "Donations/schema.sql", operationsPath: "Donations/operations.js",
+      tables: [{ tableId: id(2), name: "Donations", sqlName: "donations", primaryKey: "id", fields: [
+        { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+        { fieldId: id(4), name: "Amount", sqlColumn: "amount", type: "number", required: false, unique: false },
+      ] }],
+      operations: [{ operationId: id(5), name: "donations.create", label: "Create", tableId: id(2), kind: "create", access: "owner", readOnly: false, fieldIds: [id(4)] }],
     });
-    expect(w.authored).toEqual([]);
+    for (const [path, text] of Object.entries(files)) {
+      await mkdir(dirname(join(w.root, path)), { recursive: true });
+      await writeFile(join(w.root, path), text);
+    }
+    const host = await createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: w.root, capacityBytes: 1024 * 1024 });
+    const executor = w.makeExecutor({ withDatasetHost: async (work) => await work(host.automations) });
+    try {
+      const prepared = await host.prepare({ descriptorPath: "Donations/dataset.json", adapter: sourceCaptureAdapter(new Map(Object.entries(files)), { workspaceId: "workspace" }) });
+      await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
+      const task = w.addRecord("Tasks", "one", { Status: "Done" });
+      const claim = w.claim("collection:Tasks#donate", task);
+      await executor.open();
+      await w.settledClaim(claim);
+      expect(claim).toMatchObject({
+        state: "failed",
+        error: `${code ? "The code in step 1 changes records in Donations. " : ""}Automations cannot use Donations yet, because its records change only through its Collection actions.`,
+      });
+      expect(w.authored).toEqual([]);
+    } finally {
+      await executor.dispose();
+      await host.close();
+    }
   });
 
   it("leaves a claim waiting while the roster is unknown, and runs it after the next listing", async () => {

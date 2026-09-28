@@ -4,6 +4,7 @@ import type { DatasetInvocation } from "./datasetAutomationRun";
 import { AppBackendRuntimeError, type JsonValue } from "@dohc/app-backend-runtime";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { RunWrite, StoredRun } from "./automationRunStore";
+import { datasetFieldKey } from "./automationReach";
 import { datasetUndoRulesChanged, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
@@ -24,7 +25,7 @@ const definition: DatasetDefinition = {
 const rules = { datasetId: definition.datasetId, revision: 2, revisionSha256: "r".repeat(64) };
 const revision = { ...rules, definitionSha256: "", schemaSha256: "", operationsSha256: "", definition } satisfies DatasetRevision;
 const run = (operationId: string): StoredRun => ({
-  version: 5, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
+  version: 6, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
   steps: [], created: [], replans: [], undoRequests: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, settled: true, outcome: { state: "done" },
   applied: [{ ordinal: 0, writes: [
     { kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId: "a", version: 2,
@@ -196,14 +197,15 @@ describe("undo of a dataset run", () => {
   it("leaves a field of an edit that may not have landed when its run could not read it, or no approved read can check it", async () => {
     const closing = { kind: "dataset-edit" as const, rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 2 },
       fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }] };
-    const stopped = (readableFields: string[]): StoredRun => ({ ...runOf("h-1", 1, []), applied: [], outcome: null, readableFields, steps: [{ ordinal: 0, effects: [closing] }] });
+    const readableOf = (fieldIds: string[]) => fieldIds.map((fieldId) => datasetFieldKey(rules.datasetId, TABLE, fieldId));
+    const stopped = (readableFields: string[]): StoredRun => ({ ...runOf("h-1", 1, []), applied: [], outcome: null, readableFields: readableOf(readableFields), steps: [{ ordinal: 0, effects: [closing] }] });
     // The run could not read Status, so the value it planned as before is not what the record held.
     const hidden = recordsHost({ a: { version: 3, values: { [STATUS]: "Closed" } } });
     expect(await undo(hidden.host, [stopped([NOTE])])).toEqual({ ...none, irreversible: 1 });
     expect(hidden.writes).toEqual([]);
     // Nor does a chain through it: the run cleared Status, then may have written it unread, someone cleared it, and a later run set Paid.
     const statusEdit = (before: JsonValue, after: JsonValue) => ({ ...closing, fields: [{ fieldId: STATUS, field: "Status", before, after }] });
-    const cleared: StoredRun = { ...runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", null as unknown as string, 2)]), outcome: null, readableFields: [NOTE],
+    const cleared: StoredRun = { ...runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", null as unknown as string, 2)]), outcome: null, readableFields: readableOf([NOTE]),
       steps: [{ ordinal: 0, effects: [statusEdit("Open", null)] }, { ordinal: 1, effects: [statusEdit(null, "Closed")] }] };
     const later = runOf("h-2", 2, [edit(EDIT, "a", STATUS, null as unknown as string, "Paid", 4)]);
     const chained = recordsHost({ a: { version: 4, values: { [STATUS]: "Paid" } } });

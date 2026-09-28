@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import {
   checkAutomationReach,
+  datasetFieldKey,
+  reachStepId,
   PERSONAL_NEEDS_ACCOUNT,
   shareImpactOf,
   type ReachAutomation,
@@ -311,7 +313,7 @@ describe("share links as editors", () => {
   it("gives a link no data grant on a dataset", () => {
     const grants = { workspaceId: "w", grants: [{ principalKey: datasetPrincipalKey("w", "g-link", "u-ana"), operationIds: ["op-add"] }] };
     const operation: ReachDatasetOperation = { operationId: "op-add", name: "Add order", access: "link" };
-    expect(check(owner(linkGrant("g-link", ["Trip"])), { kind: "dataset-operation", collection: trip, operation, grants }))
+    expect(check(owner(linkGrant("g-link", ["Trip"])), { kind: "dataset-operation", collection: trip, datasetId: "trip", operation, grants }))
       .toEqual(stopped("Anyone with your share link to Trip has no grant to use Add order in Trip."));
   });
 });
@@ -387,10 +389,27 @@ describe("reach on a dataset Collection", () => {
   const anaKey = datasetPrincipalKey("workspace", anaGrant.grantId, ana.userId);
   const grants = (operationIds: string[]) => ({ workspaceId: "workspace", grants: [{ principalKey: anaKey, operationIds }] });
   const asOperation = (read: { operationId: string }): ReachDatasetOperation => ({ operationId: read.operationId, name: read.operationId, access: "helper" });
-  const field = (fieldId: string, reads: Array<{ operationId: string }>, held = grants([])): ReachStep =>
-    ({ kind: "dataset-field", collection: budget, field: { fieldId, name: fieldId === "f-amount" ? "Amount" : "Status" }, reads: reads.map(asOperation), grants: held });
-  const step = (operation: ReachDatasetOperation, operationIds: string[] = []): ReachStep =>
-    ({ kind: "dataset-operation", collection: budget, operation, grants: grants(operationIds) });
+  const field = (fieldId: string, reads: Array<{ operationId: string }>, held = grants([])): Extract<ReachStep, { kind: "dataset-field" }> =>
+    ({ kind: "dataset-field", collection: budget, datasetId: "budget", tableId: "invoices", field: { fieldId, name: fieldId === "f-amount" ? "Amount" : "Status" }, reads: reads.map(asOperation), grants: held });
+  const step = (operation: ReachDatasetOperation, operationIds: string[] = []): Extract<ReachStep, { kind: "dataset-operation" }> =>
+    ({ kind: "dataset-operation", collection: budget, datasetId: "budget", operation, grants: grants(operationIds) });
+
+  it("keeps duplicate operation names and fields separate by destination and table", () => {
+    const a = step(edit, [edit.operationId]);
+    const b = { ...a, collection: trip, datasetId: "trip" };
+    expect(reachStepId(a, 0)).not.toBe(reachStepId(b, 0));
+    expect(reachStepId(a, 0)).toBe(reachStepId({ ...a, operation: { ...edit, name: "renamed" } }, 0));
+    const visible = field("f-status", [read], grants([read.operationId]));
+    const hidden = { ...visible, datasetId: "trip", collection: trip, grants: grants([]) };
+    const verdicts = checkAutomationReach(owner(anaGrant), { id: "a", collection: budget, codeFiles: [], steps: [visible, hidden] });
+    expect(verdicts.map((verdict) => verdict.allowed)).toEqual([true, false]);
+    expect(reachStepId(visible, 0)).not.toBe(reachStepId(hidden, 0));
+    expect(new Set([
+      datasetFieldKey("budget", "invoices", "f-status"),
+      datasetFieldKey("trip", "invoices", "f-status"),
+      datasetFieldKey("budget", "refunds", "f-status"),
+    ]).size).toBe(3);
+  });
 
   it("allows any operation when the owner is the only editor", () => {
     expect(check(owner(), step(ownerOnly), budget)).toEqual(allowed);

@@ -57,6 +57,40 @@ function automation(steps: string, when = "field-changed: Status"): Automation {
 }
 
 describe("dataset automation steps", () => {
+  it("treats an explicit self destination like an omitted destination", () => {
+    const omitted = automation("      - add-record:\n          Status: Open\n        operation: invoices.create\n      - find: 'record.Status == \"Open\"'\n        as: found\n        operation: invoices.list\n");
+    const explicit: Automation = { ...omitted, do: omitted.do.map((step) => step.kind === "add-record" || step.kind === "find" ? { ...step, collection: "Budget" } : step) };
+    expect(datasetStepsOf(explicit, generated)).toEqual(datasetStepsOf(omitted, generated));
+    const elsewhere: Automation = { ...explicit, do: explicit.do.map((step) => step.kind === "add-record" ? { ...step, collection: "Elsewhere" } : step) };
+    expect(datasetAutomationProblem(elsewhere, generated)).toContain("only its own records");
+    expect(datasetAutomationProblem(explicit, authored)).toContain("written or changed outside dohc");
+  });
+
+  it("does not borrow a read from another table with the same field ID", () => {
+    const other = { ...twoTables, tables: twoTables.tables.map((table) => table.tableId === REFUNDS
+      ? { ...table, fields: table.fields.map((field) => field.fieldId === REFUND_STATUS ? { ...field, fieldId: STATUS } : field) }
+      : table), operations: twoTables.operations.map((operation) => operation.tableId === REFUNDS ? { ...operation, fieldIds: [STATUS] } : operation) };
+    const add = automation("      - add-record:\n          Status: Open\n        operation: refunds.create\n", "field-changed: Status\n      table: Invoices");
+    const steps = datasetReachSteps(add, { path: "Budget", name: "Budget" }, { definition: other, generated: true }, { workspaceId: "workspace", grants: [] }, null)!;
+    expect(steps.find((step) => step.kind === "dataset-field" && step.tableId === REFUNDS && step.field.fieldId === STATUS)).toMatchObject({ reads: [] });
+  });
+
+  it.each(["Acme Inc.", "Aux", "Notes: Q1", "Trailing "])("allows omitted and exact self destinations in %s", (path) => {
+    const rules = { ...generated, definition: { ...definition, schemaPath: `${path}/schema.sql` } };
+    const omitted = automation("      - add-record: {Status: Open}\n        operation: invoices.create\n      - find: 'true'\n        as: found\n        operation: invoices.list\n");
+    expect(datasetAutomationProblem(omitted, rules)).toBeNull();
+    const explicit = { ...omitted, do: omitted.do.map((step) => step.kind === "add-record" || step.kind === "find" ? { ...step, collection: path } : step) };
+    expect(datasetAutomationProblem(explicit, rules)).toBeNull();
+  });
+
+  it.each(["budget", "Budget/"])("rejects a differently spelled self destination %s", (path) => {
+    for (const step of ["add-record: {Status: Open}\n        operation: invoices.create", "find: 'true'\n        as: found\n        operation: invoices.list"]) {
+      const base = automation(`      - ${step}\n`);
+      const plan = { ...base, do: base.do.map((entry) => entry.kind === "add-record" || entry.kind === "find" ? { ...entry, collection: path } : entry) };
+      expect(datasetAutomationProblem(plan, generated)).toContain("only its own records");
+    }
+  });
+
   // Each chat step alone, then inside an If, then in its otherwise branch.
   const everywhere = (chat: Automation["do"], base: Automation["do"]) => [chat, [{ kind: "if" as const, if: "true", do: chat, otherwise: [] }],
     [{ kind: "if" as const, if: "false", do: base, otherwise: chat }]];

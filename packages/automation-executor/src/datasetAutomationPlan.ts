@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import { chatReachStepsOf, datasetFindOf, operationsOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
 import type { ChatDirectory } from "./automationChat";
-import type { ReachCollection, ReachDatasetGrants, ReachStep } from "./automationReach";
+import { datasetFieldKey, type ReachCollection, type ReachDatasetGrants, type ReachStep } from "./automationReach";
 
 // How a dataset Collection's automation maps onto the dataset's approved
 // operations. A dataset changes only through them, so each step names one:
@@ -199,7 +200,7 @@ function resolve(
   const pinned = new Map<number, string>();
   // One step's operation, or why it has none. A step no operation fits keeps what it names.
   const resolveStep = (ordinal: number, step: RecordStep): string | null => {
-    if (step.kind !== "set" && step.collection !== null) {
+    if (step.kind !== "set" && step.collection !== null && step.collection !== posix.dirname(definition.schemaPath)) {
       return `Automations on ${definition.name} can use only its own records for now.`;
     }
     const kind = KIND_OF[step.kind];
@@ -460,10 +461,10 @@ export function datasetReachSteps(
   const reads = definition.operations.filter((operation) => operation.kind === "read");
   return [
     ...chatReachStepsOf(automation, chat),
-    ...invokedOperations(automation, rules, resolved.steps).map((operation): ReachStep => ({ kind: "dataset-operation", collection, grants, operation: reach(operation) })),
+    ...invokedOperations(automation, rules, resolved.steps).map((operation): ReachStep => ({ kind: "dataset-operation", collection, datasetId: definition.datasetId, grants, operation: reach(operation) })),
     ...[...tables.values()].flatMap((own) => own.fields.flatMap((field): ReachStep[] => field.type === "button" ? [] : [{
-      kind: "dataset-field", collection, grants, field: { fieldId: field.fieldId, name: field.name },
-      reads: reads.filter((read) => read.fieldIds.includes(field.fieldId)).map(reach),
+      kind: "dataset-field", collection, datasetId: definition.datasetId, tableId: own.tableId, grants, field: { fieldId: field.fieldId, name: field.name },
+      reads: reads.filter((read) => read.tableId === own.tableId && read.fieldIds.includes(field.fieldId)).map(reach),
     }])),
   ];
 }
@@ -509,7 +510,7 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
   for (const change of fact.kind === "button" ? [] : fact.fields) {
     const field = table.fields.find((candidate) => candidate.fieldId === change.fieldId);
     // A claim carries each watched field; formulas see only the readable ones.
-    if (field === undefined || !readable.has(field.fieldId)) continue;
+    if (field === undefined || !readable.has(datasetFieldKey(claim.datasetId, table.tableId, field.fieldId))) continue;
     const truncated = change.truncated === true;
     fields.push({
       field: field.name,

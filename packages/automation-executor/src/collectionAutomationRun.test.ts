@@ -19,6 +19,8 @@ import {
   type CollectionRecordWrites,
 } from "./collectionAutomationRun";
 import { createTestScratch, testMetadataDir } from "./testScratch";
+import { createAutomationTargets } from "./automationTargets";
+import { MAX_FOUND_RECORDS } from "./automationPlan";
 
 // A document Collection's run against an in-memory engine: each step reads
 // what the steps before it wrote, and a run that stops at any durable point
@@ -49,6 +51,7 @@ type Fault = { at: number; when: "before" | "mid" | "after" };
  */
 function workspace(docs: readonly Doc[], fault: Fault | null = null, files = new Map<string, string>()) {
   const records = new Map(docs.map((doc) => [doc.id, structuredClone(doc)]));
+  const metadataReads: string[] = [];
   // Each idempotency key the engine took, with what it wrote.
   const keys = new Map<string, JsonValue>();
   let events = 0;
@@ -144,6 +147,7 @@ function workspace(docs: readonly Doc[], fault: Fault | null = null, files = new
     records,
     keys,
     files,
+    metadataReads,
     hooks,
     events: () => events,
     restart: () => { dead = false; },
@@ -160,12 +164,15 @@ function workspace(docs: readonly Doc[], fault: Fault | null = null, files = new
     dependencies: (store: AutomationRunStore): CollectionAutomationRunDependencies => ({
       withReads: async (work) => await work(reads),
       withRecordWrites: async (_signal, work) => await work(writes),
-      isCollection: (path) => path === "Tasks" || path === "Log",
       // Each Collection's id is its name here; none moves unless a test moves it.
       collectionIdOf: (path) => (path === "Tasks" || path === "Log" ? path : null),
       collectionPathOf: (collectionId) => (collectionId === "Tasks" || collectionId === "Log" ? collectionId : null),
-      isDatasetCollection: async () => false,
-      collectionFields: async () => null,
+      targets: createAutomationTargets({
+        isCollection: (path) => path === "Tasks" || path === "Log",
+        readText: async (path) => { metadataReads.push(path); return null; },
+        readSchemaFields: async (path) => { metadataReads.push(`${path}/collection.yaml`); return null; },
+        withHost: async () => null,
+      }),
       readCode: async (path) => (files.has(path) ? { text: files.get(path)!, truncated: false } : null),
       personName: () => "Ice",
       evaluator: shared.forWorkspace("workspace"),
@@ -229,6 +236,56 @@ const valuesOf = (space: ReturnType<typeof workspace>) =>
   Object.fromEntries([...space.records.values()].map((doc) => [doc.collection === "Log" ? "log" : doc.id, doc.values]));
 
 describe("a stepwise run", () => {
+  it("resolves each destination once while ten later steps reread a full Find", async () => {
+    const space = workspace([task("rec_t", {}), ...Array.from({ length: MAX_FOUND_RECORDS }, (_, index) => ({
+      id: `log_${index}`, path: `Log/${index}.md`, collection: "Log", values: { Count: index },
+    }))]);
+    const plan = automation("id: chain\nname: Chain\nwhen: record-added\ndo:\n  - find: 'true'\n    collection: Log\n    as: found\n" +
+      Array.from({ length: 10 }, () => "  - run: 'return { output: ctx.found.length };'").join("\n"));
+    await expect(runToEnd(space, plan)).resolves.toEqual({ kind: "done" });
+    expect(space.metadataReads.sort()).toEqual(["Log/collection.yaml", "Log/dataset.json", "Tasks/collection.yaml", "Tasks/dataset.json"]);
+  });
+
+  it("rechecks a destination at effect time after caching its planning resolution", async () => {
+    const space = workspace([task("rec_t", { Count: 1 })]);
+    const store = createAutomationRunStore(await createTestScratch("dohc-target-recheck-"), testMetadataDir);
+    const dependencies = space.dependencies(store);
+    let resolutions = 0;
+    const signal = new AbortController().signal;
+    const outcome = await runCollectionAutomation({ ...dependencies, targets: { resolve: async (path) => {
+      resolutions += 1;
+      return resolutions === 1 ? await dependencies.targets.resolve(path)
+        : { kind: "problem", code: "descriptor-mismatch", problem: "The destination was replaced." };
+    } } }, {
+      claim: added(), automation: automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]"),
+      collection: { path: "Tasks", name: "Tasks" }, roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal,
+    });
+    expect(outcome).toMatchObject({ kind: "failed", error: "The destination was replaced." });
+    expect(resolutions).toBe(2);
+    expect(space.records.get("rec_t")!.values.Count).toBe(1);
+  });
+
+  it("still refuses an approved dataset destination before reading records", async () => {
+    const space = workspace([task("rec_t", {})]);
+    const store = createAutomationRunStore(await createTestScratch("dohc-document-target-"), testMetadataDir);
+    const dependencies = space.dependencies(store);
+    const definition = automation("id: donate\nname: Donate\nwhen: record-added\ndo:\n  - add-record: {Amount: 5}\n    collection: Log");
+    const signal = new AbortController().signal;
+    const outcome = await runCollectionAutomation({ ...dependencies,
+      withReads: async () => { throw new Error("Must not read records"); },
+      targets: { resolve: async (path) => path === "Log" ? {
+        kind: "dataset", collection: { path: "Log", name: "Log" }, generated: true, grants: { workspaceId: "workspace", grants: [] },
+        approved: { datasetId: "log", revision: 1, revisionSha256: "a".repeat(64), definitionSha256: "b".repeat(64), schemaSha256: "c".repeat(64), operationsSha256: "d".repeat(64),
+          definition: { formatVersion: 1, datasetId: "log", name: "Log", schemaPath: "Log/schema.sql", operationsPath: "Log/operations.ts", tables: [], operations: [] } },
+      } : await dependencies.targets.resolve(path) },
+    }, {
+      claim: { ...added(), automationId: "collection:Tasks#donate" }, automation: definition, collection: { path: "Tasks", name: "Tasks" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal,
+    });
+    expect(outcome).toMatchObject({ kind: "failed", error: "Automations cannot use Log yet, because its records change only through its Collection actions." });
+    expect(space.keys.size).toBe(0);
+  });
+
   it("gives each step what the steps before it wrote, and a Set on found records their values as it starts", async () => {
     const definition = automation([
       "id: chain", "name: Chain", "when: record-added", "do:",

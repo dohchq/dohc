@@ -4,6 +4,7 @@ import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetUndoRequest, RunWrite, StoredRun } from "./automationRunStore";
+import { datasetFieldKey } from "./automationReach";
 import { unrecordedEffect } from "./automationStepRun";
 import type { CollectionAutomationUndone } from "./collectionAutomationUndo";
 import { readDatasetRecord, send, type DatasetInvocation, type DatasetRunHost } from "./datasetAutomationRun";
@@ -65,8 +66,10 @@ function editsOf(runs: readonly StoredRun[]): Array<{ edit: Edit; sure: boolean;
     const { rules, operationId, tableId, target } = unrecorded;
     const maybe: Edit = { kind: "dataset-edit", rules, operationId, tableId, recordId: target.recordId,
       version: replan?.version ?? target.version, fields: replan?.fields ?? unrecorded.fields };
-    const readable = new Set(run.readableFields ?? maybe.fields.map((field) => field.fieldId));
-    return [...recorded, { edit: maybe, sure: false, hidden: new Set(maybe.fields.map((field) => field.fieldId).filter((fieldId) => !readable.has(fieldId))) }];
+    // Readable fields are named by dataset, table, and field.
+    const readable = run.readableFields === null ? null : new Set(run.readableFields);
+    const hidden = maybe.fields.map((field) => field.fieldId).filter((fieldId) => readable !== null && !readable.has(datasetFieldKey(rules.datasetId, tableId, fieldId)));
+    return [...recorded, { edit: maybe, sure: false, hidden: new Set(hidden) }];
   });
 }
 
