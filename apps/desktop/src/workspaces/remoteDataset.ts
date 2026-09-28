@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage, DatasetHistoryPage, DatasetHistoryRevision, DatasetLifecyclePage, DatasetLifecycleState, DatasetPendingAttemptsPage, DatasetMigrationCandidate, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
-import type { DatasetRequest } from "@dohc/cli/dataset";
+import type { ResolvedDatasetRequest as DatasetRequest } from "./datasetAddress";
 import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import type { AppBackendFile } from "@dohc/security-contract/app-backend";
@@ -15,6 +15,11 @@ import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatas
 import type { createDatasetHost } from "@dohc/app-backend-runtime/dataset-host";
 
 type RuntimeDatasetHost = ReturnType<typeof createDatasetHost>;
+
+export const DatasetCatalogPage = z.object({
+  datasets: z.array(z.unknown().transform(value => parseDatasetDescription(value))).max(100),
+  nextCursor: z.string().uuid().nullable(),
+}).strict();
 
 export interface OwnerDatasetData {
   prepareMigrationCandidate?(input: Parameters<RuntimeDatasetHost["prepareMigration"]>[1]): Promise<DatasetMigrationCandidate>;
@@ -142,8 +147,8 @@ export function createRemoteDatasetData(input: {
       if (page.after) query.set("after", identity.parse(page.after));
       if (page.limit !== undefined) query.set("limit", String(z.number().int().min(1).max(100).parse(page.limit)));
       const raw = await request(`${base}${query.size ? `?${query}` : ""}`);
-      const result = DatasetResult.parse({ ...(raw as object), kind: "list" });
-      if (result.kind !== "list" || result.datasets.some((row, index) => row.datasetId <= (index ? result.datasets[index - 1]!.datasetId : page.after ?? "")) ||
+      const result = DatasetCatalogPage.parse(raw);
+      if (result.datasets.some((row, index) => row.datasetId <= (index ? result.datasets[index - 1]!.datasetId : page.after ?? "")) ||
         (result.nextCursor !== null && result.nextCursor !== result.datasets.at(-1)?.datasetId)) throw new Error("The Collection list changed. Reload it.");
       return { datasets: result.datasets, nextCursor: result.nextCursor };
     },

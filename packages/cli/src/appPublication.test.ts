@@ -10,7 +10,7 @@ const prepared = { kind: "prepared", approvalId: "00000000-0000-4000-8000-000000
 
 describe("owner publication review contract", () => {
   it("retains independent dataset binding metadata in preparation and local listings", () => {
-    const datasetCapability = { kind: "dataset", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
+    const datasetCapability = { kind: "dataset", name: "Orders", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
       operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link", readOnly: false }] };
     expect(OwnerAppPublicationResult.parse({ ...prepared, capabilities: [datasetCapability] })).toMatchObject({ capabilities: [datasetCapability] });
     const publication = { publicationId: "b".repeat(64), authorityRevision: 1, appRoot: "app", sourceRevision: "c".repeat(64), active: true, datasetCapability };

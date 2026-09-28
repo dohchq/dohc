@@ -1,9 +1,10 @@
+import { resolveDatasetAddress } from "./datasetAddress";
 import { isPortableNamePath } from "@dohc/workspace-contracts/names";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_METADATA_BYTES, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { isShareablePath, isShareablePathList, isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import { parseDatasetBindingReference, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { parseAppDatasetReference, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { posix } from "node:path";
 import { fileVersionError } from "@dohc/workspace-contracts/file-version";
@@ -22,7 +23,7 @@ const staticAppExcluded = (path: string) => /(?:^|\/)(?:package\.json|dohc\.json
   path.split("/").some(part => part === "node_modules" || part.startsWith("."));
 export interface OwnerPublicationSelection { workspaceId: string; appRoot: string; shareId: string; grantId: string }
 export interface OwnerPublicationGrant { shareId: string; grantId: string; generation: number; status: "active" | "revoked"; revokedAtMs: number | null; selector: { paths: string[]; versionId: string | null } | null }
-type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata">;
+type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "workspace">;
 export interface AppPublicationPreparationDependencies {
   adapter: SourceAdapter;
   signal: AbortSignal;
@@ -33,7 +34,7 @@ export interface AppPublicationPreparationDependencies {
 }
 /**
  * Reads app.publish.json. Its paths are relative to the app folder, so the folder can move;
- * "../" reaches files beside it. Each refusal names the manifest, the path, and the reason.
+ * "../" reaches files beside it. Dataset references use workspace-relative dataset.json paths.
  */
 export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: string) {
   const manifestPath = `${appRoot}/app.publish.json`;
@@ -80,7 +81,7 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
     const declared = row.collection as Record<string, unknown>;
     collection = parseAppCollectionCapability({ ...declared, collectionPath: resolve(declared.collectionPath, "collectionPath"), schemaSha256: "0".repeat(64) });
   }
-  const dataset = Object.hasOwn(row, "dataset") ? parseDatasetBindingReference(row.dataset) : undefined;
+  const dataset = Object.hasOwn(row, "dataset") ? parseAppDatasetReference(row.dataset) : undefined;
   return { entryPath, inputs, packageMap: Object.fromEntries(entries) as Record<string, string>, collection, dataset };
 }
 
@@ -157,9 +158,13 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
   const capabilities: AppPublicationCandidate["capabilities"] = [];
   if (declared.dataset) {
     if (!dependencies.resolveDatasetRevision) throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
-    const approved = await dependencies.resolveDatasetRevision(declared.dataset);
+    const { datasetPath, ...reference } = declared.dataset;
+    const datasetId = await resolveDatasetAddress(adapter, input.workspaceId, datasetPath, signal, versionId);
     assertCurrent(); signal.throwIfAborted();
-    const { linkReads: _requestedReads, ...binding } = declared.dataset;
+    const resolved = { ...reference, datasetId };
+    const approved = await dependencies.resolveDatasetRevision(resolved);
+    assertCurrent(); signal.throwIfAborted();
+    const { linkReads: _requestedReads, ...binding } = resolved;
     capabilities.push(resolveAppDatasetCapability(binding, approved));
   }
   if (declared.collection && schemaPath) {

@@ -539,7 +539,7 @@ describe("CLI socket server", () => {
 
   it("routes dataset actions through the same owner workspace attachment for humans and agents", async () => {
     context.dataset = vi.fn(async () => ({kind:"invoked" as const,result:{accepted:true},revision:1,replayed:false}));
-    const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetId:"00000000-0000-4000-8000-000000000001",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};
+    const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetPath:"data/dataset.json",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};
     for (const actor of ["human","agent"] as const) expect(await invoke("dataset",{cwd:workspaceRoot,actor,request})).toEqual({kind:"invoked",result:{accepted:true},revision:1,replayed:false});
     await expect(invoke("dataset",{cwd:workspaceRoot,actor:"agent",request:{...request,workspaceId:"elsewhere"}})).rejects.toThrow("owning workspace");
     context.readOnly = true;

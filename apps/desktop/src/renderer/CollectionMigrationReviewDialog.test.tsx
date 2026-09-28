@@ -33,7 +33,7 @@ describe("CollectionMigrationReviewDialog", () => {
   });
   it("captures two source paths, shows before/after fields and approves the exact review", async () => {
     const { onPrepare, onApprove, onClose } = setup(); fireEvent.change(screen.getByLabelText("Migration file"), { target: { value: "migrations/002.sql" } }); fireEvent.click(screen.getByRole("button", { name: "Review change" }));
-    await screen.findByText("Registrations · Receipt"); expect(onPrepare.mock.calls[0]![0]).toMatchObject({ workspaceId: "workspace-a", datasetId: id(1), descriptorPath: "dataset.json", migrationPath: "migrations/002.sql" });
+    await screen.findByText("Registrations · Receipt"); expect(onPrepare.mock.calls[0]![0]).toMatchObject({ workspaceId: "workspace-a", datasetId: id(1), datasetPath: "dataset.json", migrationPath: "migrations/002.sql" });
     expect(screen.getByText("Added")).toBeTruthy(); expect(screen.getByText("ALTER TABLE registrations ADD receipt TEXT;")).toBeTruthy();
     fireEvent.click(screen.getByRole("checkbox", { name: /reviewed this change/i })); fireEvent.click(screen.getByRole("button", { name: "Approve change" })); await waitFor(() => expect(onApprove).toHaveBeenCalledOnce());
     expect(onApprove.mock.calls[0]![0]).toEqual({ workspaceId: "workspace-a", preparationId: id(10), revisionSha256: "2".repeat(64), approvalDigest: "1".repeat(64) }); expect(onClose).toHaveBeenCalledOnce();

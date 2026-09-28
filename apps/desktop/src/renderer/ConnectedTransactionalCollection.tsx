@@ -33,7 +33,7 @@ import { display, parsePage, type TransactionalRow } from "./transactionalCollec
 export interface ConnectedTransactionalCollectionProps {
   owner?: boolean;
   workspaceId: string;
-  datasetId: string;
+  datasetPath: string;
   tableId: string;
   onError(fallback: string, error: unknown, retry?: (() => void) | null): void;
   onFormCreated(appRoot: string): void;
@@ -46,10 +46,16 @@ export interface ConnectedTransactionalCollectionProps {
   onNotice?(message: string, undo?: () => void): void;
 }
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
-  return <ScopedCollection key={`${props.workspaceId}:${props.datasetId}:${props.tableId}`} {...props} />;
+  return <ScopedCollection key={`${props.workspaceId}:${props.datasetPath}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
+  const datasetId = dataset?.datasetId ?? "";
+  const addressInput = <T extends { datasetId: string },>(input: T) => {
+    const { datasetId: expectedDatasetId, ...fields } = input;
+    return { ...fields, datasetPath, expectedDatasetId };
+  };
+  const describedId = useRef<string | undefined>(undefined);
   const [activeView, setActiveView] = useState<CollectionTableView | null>(null);
   const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
   const [loading, setLoading] = useState(true);
@@ -78,9 +84,10 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     const sequence = ++request.current;
     setLoading(true);
     try {
-      const result = await bridge().dataset({ workspaceId, datasetId, action: "describe", ...(owner ? { includeArchived: true } : {}) });
+      const result = await bridge().dataset({ workspaceId, datasetPath, expectedDatasetId: describedId.current, action: "describe", ...(owner ? { includeArchived: true } : {}) });
       if (sequence !== request.current) return;
       if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
+      describedId.current = result.dataset.datasetId;
       setDataset(result.dataset);
       setCopy(result.copy);
       setRecordsVersion(value => value + 1);
@@ -89,7 +96,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       setRecordsVersion(value => value + 1);
       onError("Could not open this Collection.", error, () => { void refresh(); });
     } finally { if (sequence === request.current) setLoading(false); }
-  }, [workspaceId, datasetId, onError, owner]);
+  }, [workspaceId, datasetPath, onError, owner]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
   const loadMigrationPreview: MigrationDataPreviewProps["onLoad"] = async (input, signal) => {
     signal.throwIfAborted();
@@ -102,7 +109,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const invoke = async (input: TransactionalInvoke, signal: AbortSignal) => {
     const sequence = request.current;
     signal.throwIfAborted();
-    const result = await bridge().dataset({ ...input, action: "invoke" });
+    const result = await bridge().dataset({ ...addressInput(input), action: "invoke" });
     signal.throwIfAborted();
     if (result.kind === "refused") throw Object.assign(new Error(result.message), { code: "operation_refused", refusal: { code: result.code, message: result.message } });
     if (result.kind !== "invoked") throw Error("dohc could not confirm the Collection action. Try again.");
@@ -146,7 +153,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     onNotice: (message, undo) => onNotice?.(message, undo), onOpenFile, onOpenScheduleSettings });
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
-    const result = await bridge().dataset({ action: "export", workspaceId, datasetId });
+    const result = await bridge().dataset({ action: "export", workspaceId, datasetPath, expectedDatasetId: datasetId });
     signal.throwIfAborted();
     if (result.kind !== "exported") throw Error("dohc could not save this recovery file. Try again.");
     return result.savedPath;
@@ -160,7 +167,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     if (restoreLock.current || !owner || copy?.offline) return;
     restoreLock.current = true; const sequence = request.current; setRestoring(true);
     try {
-      const result = await bridge().dataset({ workspaceId, datasetId, action: "restore" });
+      const result = await bridge().dataset({ workspaceId, datasetPath, expectedDatasetId: datasetId, action: "restore" });
       if (sequence !== request.current) return;
       if (result.kind !== "lifecycle-updated" || result.archived) throw Error("dohc could not confirm the restore. Refresh the Collection.");
       setRestoring(false); onLifecycleChanged?.(); await refresh();
@@ -179,19 +186,19 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     onDeleted={() => { request.current++; setDeletingCollection(false); setDeleted(true); onLifecycleChanged?.(); onNotice?.("Collection deleted"); }}
     onLoad={async (input, signal) => {
       signal.throwIfAborted();
-      const result = await bridge().dataset({ ...input, action: "deletePreview" });
+      const result = await bridge().dataset({ ...addressInput(input), action: "deletePreview" });
       signal.throwIfAborted();
       if (result.kind !== "delete-preview") throw Error("dohc could not read the deletion preview. Try again.");
       return result;
     }} onDelete={async (input, signal) => {
       signal.throwIfAborted();
-      const result = await bridge().dataset({ ...input, action: "delete" });
+      const result = await bridge().dataset({ ...addressInput(input), action: "delete" });
       signal.throwIfAborted();
       if (result.kind !== "deleted") throw Error("dohc could not confirm deletion. Refresh the Collection.");
       return result;
     }} />}</>;
   // The ⚡ panel docks at the right of the table.
-  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="min-h-0 min-w-0 flex-1"><TransactionalCollectionPage recordsVersion={recordsVersion} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onNotice={onNotice}
+  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><button type="button" className="truncate px-3 py-1 text-left font-mono text-[12px] text-muted hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button><TransactionalCollectionPage recordsVersion={recordsVersion} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onNotice={onNotice}
     buttons={buttonColumns}
     automationsButton={automations.button}
     fieldMarks={automations.fieldMarks}
@@ -216,14 +223,14 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       signal.throwIfAborted();
       let binary = "";
       for (let offset = 0; offset < bytes.length; offset += 16_384) binary += String.fromCharCode(...bytes.subarray(offset, offset + 16_384));
-      const result = await bridge().dataset({ ...input, action: "upload", name: file.name, contentType: file.type, bytesBase64: btoa(binary) });
+      const result = await bridge().dataset({ ...addressInput(input), action: "upload", name: file.name, contentType: file.type, bytesBase64: btoa(binary) });
       signal.throwIfAborted();
       if (result.kind !== "uploaded") throw Error("dohc could not confirm the file upload. Try again.");
       return result.file;
     }}
     readFile={async (input, signal) => {
       signal.throwIfAborted();
-      const result = await bridge().dataset({ ...input, action: "file" });
+      const result = await bridge().dataset({ ...addressInput(input), action: "file" });
       signal.throwIfAborted();
       if (result.kind !== "file") throw Error("dohc could not read the file. Try again.");
       return result;
@@ -235,7 +242,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       const target = dataset.tables.find(table => table.tableId === relation.tableId);
       const read = dataset.operations.find(operation => operation.tableId === relation.tableId && operation.kind === "read" && operation.readOnly && operation.fieldIds.includes(relation.fieldId));
       if (!target || !read) throw Error("This related Collection has no permitted read action.");
-      const response = await bridge().dataset({ action: "invoke", workspaceId, datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256,
+      const response = await bridge().dataset({ action: "invoke", workspaceId, datasetPath, expectedDatasetId: datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256,
         operationId: read.operationId, input: { limit: 20, search: input.search }, idempotencyKey: crypto.randomUUID() });
       signal.throwIfAborted();
       if (response.kind !== "invoked") throw Error("dohc could not read related records. Try again.");
@@ -251,27 +258,27 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {viewingPending && owner && !copy?.offline && <CollectionPendingResponsesDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setViewingPending(false)} onLoad={async (input, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "pendingAttempts" });
+        const result = await bridge().dataset({ ...addressInput(input), action: "pendingAttempts" });
         signal.throwIfAborted();
         if (result.kind !== "pending-attempts") throw Error("dohc could not read pending responses. Try again.");
         const { kind: _, ...page } = result;
         return page;
       }} onReconcile={async (input, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "reconcileAttempt" });
+        const result = await bridge().dataset({ ...addressInput(input), action: "reconcileAttempt" });
         signal.throwIfAborted();
         if (result.kind !== "attempt-reconciled") throw Error("dohc could not confirm the cleared retry. Refresh pending responses.");
         onNotice?.("Cleared the saved response's retry");
         return result;
       }} onCancel={async (input, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "cancelAttempt" });
+        const result = await bridge().dataset({ ...addressInput(input), action: "cancelAttempt" });
         signal.throwIfAborted();
         if (result.kind !== "attempt-cancelled") throw Error("dohc could not confirm cancellation. Refresh pending responses.");
         onNotice?.("Cancelled the pending response");
         return result;
       }} />}
-    {archiving && <CollectionArchiveDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
+    {archiving && <CollectionArchiveDialog datasetPath={datasetPath} workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setArchiving(false)} onChanged={() => { onLifecycleChanged?.(); void refresh(); }} />}
     {viewingHistory && owner && !copy?.offline && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onOpenSource={path => { setViewingHistory(false); onOpenFile(path); }}
@@ -279,14 +286,14 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       onReviewSource={() => { setViewingHistory(false); setHistoryRestore(undefined); setReviewingSchema(true); }}
       onLoadRevision={async (revisionSha256, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetId, revisionSha256 });
+        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetPath, expectedDatasetId: datasetId, revisionSha256 });
         signal.throwIfAborted();
         if (result.kind !== "history-revision") throw Error("The saved Collection rules are unavailable.");
         return result;
       }}
       onRestoreRevision={async (targetRevisionSha256, changedRevisionSha256, signal) => {
         signal.throwIfAborted(); const sequence = request.current;
-        const result = await bridge().dataset({ action: "prepareHistoryRestore", workspaceId, datasetId,
+        const result = await bridge().dataset({ action: "prepareHistoryRestore", workspaceId, datasetPath, expectedDatasetId: datasetId,
           revision: dataset.revision, revisionSha256: dataset.revisionSha256, targetRevisionSha256, changedRevisionSha256 });
         signal.throwIfAborted(); if (sequence !== request.current) return;
         if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this reversal. Refresh History.");
@@ -295,7 +302,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       onUndo={input => { void historyUndo.run(input); }} pendingUndo={historyUndo.pending} undoBusy={historyUndo.busy} refreshVersion={recordsVersion}
       onClose={() => setViewingHistory(false)} onLoad={async (input, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "history" });
+        const result = await bridge().dataset({ ...addressInput(input), action: "history" });
         signal.throwIfAborted();
         if (result.kind !== "history") throw Error("dohc could not read this Collection's history. Try again.");
         const { kind: _, ...page } = result;
@@ -316,7 +323,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         if (sequence !== request.current) throw Error("The workspace changed while saving this file.");
         return result;
       }} />}
-    {managingAccess && <CollectionPermissionsDialog workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} />}
+    {managingAccess && <CollectionPermissionsDialog datasetPath={datasetPath} workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} />}
     {exportingRecovery && owner && !copy?.offline && <CollectionRecoveryExportDialog collectionName={dataset.name} onClose={() => setExportingRecovery(false)} onError={onError}
       onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
       onExport={exportRecovery} />}
@@ -332,7 +339,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       onClose={() => setEditingFields(false)} onReviewSource={() => { setEditingFields(false); setReviewingSchema(true); }}
       onPrepare={async (change, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ action: "prepareSchemaChange", workspaceId, datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, change });
+        const result = await bridge().dataset({ action: "prepareSchemaChange", workspaceId, datasetPath, expectedDatasetId: datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, change });
         signal.throwIfAborted();
         if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this field change. Try again.");
         return result;
@@ -352,12 +359,12 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         signal.throwIfAborted();
         if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
       }} />}
-    {reviewingSchema && <CollectionMigrationReviewDialog initialPreparation={historyRestore} workspaceId={workspaceId} datasetId={datasetId} onError={onError}
+    {reviewingSchema && <CollectionMigrationReviewDialog initialPreparation={historyRestore} workspaceId={workspaceId} datasetId={datasetId} datasetPath={datasetPath} onError={onError}
       onLoadPreview={loadMigrationPreview}
       onClose={() => { setReviewingSchema(false); setHistoryRestore(undefined); }}
       onPrepare={async (input, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "prepareMigration" });
+        const result = await bridge().dataset({ ...addressInput(input), datasetPath: input.datasetPath, action: "prepareMigration" });
         signal.throwIfAborted();
         if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this change. Try again.");
         return result;
@@ -386,7 +393,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       onLoadSource={async signal => {
         signal.throwIfAborted();
         const sequence = request.current;
-        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetId, revisionSha256: dataset.revisionSha256 });
+        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetPath, expectedDatasetId: datasetId, revisionSha256: dataset.revisionSha256 });
         signal.throwIfAborted();
         if (sequence !== request.current) throw Error("The Collection changed. Review its current rules again.");
         if (result.kind !== "history-revision") throw Error("The saved Collection rules are unavailable.");
@@ -395,7 +402,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       onPrepareChoices={async (input, signal) => {
         signal.throwIfAborted();
         const sequence = request.current;
-        const result = await bridge().dataset({ ...input, action: "prepareRelationChoices", workspaceId, datasetId,
+        const result = await bridge().dataset({ ...input, action: "prepareRelationChoices", workspaceId, datasetPath, expectedDatasetId: datasetId,
           revision: dataset.revision, revisionSha256: dataset.revisionSha256, tableId });
         signal.throwIfAborted();
         if (sequence !== request.current) throw Error("The Collection changed. Prepare the choices again.");
@@ -421,7 +428,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       onCreate={async (input, signal) => {
         signal.throwIfAborted();
         const sequence = request.current;
-        const result = await bridge().dataset({ ...input, action: "createForm", workspaceId });
+        const result = await bridge().dataset({ ...addressInput(input), action: "createForm", workspaceId });
         signal.throwIfAborted();
         if (sequence !== request.current) return;
         if (result.kind === "partial") throw new CreationPartialError(result);

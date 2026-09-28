@@ -135,7 +135,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await form.getByRole("button", { name: "Submit", exact: true }).click();
     await expect(form.getByRole("status")).toHaveText("Response received.");
     await guest.screenshot({ path: info.outputPath("shared-generated-form.png") });
-    const path = `dohc://data-collection/${dataset.datasetId}/${table.tableId}`;
+    const path = `tab://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
     await page.getByTestId(`tab-${path}`).click();
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
     const names = collection.getByRole("button", { name: /^Edit Name for record / });
@@ -178,7 +178,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await page.screenshot({ path: info.outputPath("renamed-collection-custom-rule.png") });
     expect(shared.failures).toEqual([]);
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
-    await info.attach("scope", { body: JSON.stringify({ workspaceId, datasetId: dataset.datasetId,
+    await info.attach("scope", { body: JSON.stringify({ workspaceId, datasetPath: dataset.datasetPath!,
       identity: "Test identity seeded into isolated profile; account onboarding is outside this proof.",
       transport: "Real relay HTTP, real share-web handler over temporary TLS, browser-local DNS and certificate trust.",
       browserDispatch: "Only Electron shell.openExternal is intercepted; the local URL returned by production launch opens in a real browser.",
@@ -229,9 +229,9 @@ test("@dataset-completion history reverses an authored rule against current reco
     await review.getByRole("checkbox", { name: "I reviewed this change and its effect on existing data" }).check();
     await review.getByRole("button", { name: "Approve change", exact: true }).click();
     await expect(review).toBeHidden();
-    const described = await page.evaluate(async input => window.dohcDesktop!.dataset({ action: "describe", ...input }), { workspaceId, datasetId: definition.datasetId });
+    const described = await page.evaluate(async input => window.dohcDesktop!.dataset({ action: "describe", ...input }), { workspaceId, datasetPath: definition.schemaPath.slice(0, definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json" });
     if (described.kind !== "description") throw Error("Expected current Collection.");
-    const invoke = { action: "invoke" as const, workspaceId, datasetId: definition.datasetId, revision: described.dataset.revision, revisionSha256: described.dataset.revisionSha256,
+    const invoke = { action: "invoke" as const, workspaceId, datasetPath: definition.schemaPath.slice(0, definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json", revision: described.dataset.revision, revisionSha256: described.dataset.revisionSha256,
       operationId: definition.operations.find(operation => operation.kind === "create")!.operationId, input: { values: { [nameField.fieldId]: "Blocked participant" } }, idempotencyKey: "blocked-before-reversal" };
     const refused = await page.evaluate(async request => window.dohcDesktop!.dataset(request), invoke);
     expect(refused).toMatchObject({ kind: "refused", code: "registration_closed" });
@@ -258,7 +258,7 @@ test("@dataset-completion history reverses an authored rule against current reco
     await review.getByRole("button", { name: "Approve change", exact: true }).click();
     await expect(review).toBeHidden();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Registered after rule change");
-    const current = await page.evaluate(async input => window.dohcDesktop!.dataset({ action: "describe", ...input }), { workspaceId, datasetId: definition.datasetId });
+    const current = await page.evaluate(async input => window.dohcDesktop!.dataset({ action: "describe", ...input }), { workspaceId, datasetPath: definition.schemaPath.slice(0, definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json" });
     if (current.kind !== "description") throw Error("Expected reversed Collection.");
     const accepted = await page.evaluate(async request => window.dohcDesktop!.dataset(request), { ...invoke, revision: current.dataset.revision, revisionSha256: current.dataset.revisionSha256, idempotencyKey: "accepted-after-reversal" });
     expect(accepted).toMatchObject({ kind: "invoked", replayed: false });
@@ -294,7 +294,7 @@ test("@dataset-completion board and calendar page all records and save governed 
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected Tasks Collection.");
     const dataset = listed.datasets[0]!, table = dataset.tables[0]!;
     const field = (name: string) => table.fields.find(field => field.name === name)!.fieldId;
-    const pin = { workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256 };
+    const pin = { workspaceId, datasetPath: dataset.datasetPath!, revision: dataset.revision, revisionSha256: dataset.revisionSha256 };
     const createOperation = dataset.operations.find(operation => operation.kind === "create")!.operationId;
     const readOperation = dataset.operations.find(operation => operation.kind === "read")!.operationId;
     const today = new Date(), date = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-10`;
@@ -366,7 +366,7 @@ test("@dataset-completion board and calendar page all records and save governed 
       const due = data.rows[0]?.values[field("Due")];
       return typeof due === "string" && due !== date;
     }).toBe(true);
-    const history = await page.evaluate(async request => window.dohcDesktop!.dataset(request), { action: "history" as const, workspaceId, datasetId: dataset.datasetId, limit: 5 });
+    const history = await page.evaluate(async request => window.dohcDesktop!.dataset(request), { action: "history" as const, workspaceId, datasetPath: dataset.datasetPath!, limit: 5 });
     if (history.kind !== "history") throw Error("Expected durable governed edits.");
     expect(history.entries.filter(entry => entry.operation === dataset.operations.find(operation => operation.kind === "edit")!.name)).toHaveLength(2);
     await page.screenshot({ path: info.outputPath("transactional-calendar-move.png") });
@@ -386,7 +386,7 @@ test("@dataset-completion generated form saves two files and an explicitly publi
     const definition = orderFormDefinition();
     const approved = await page.evaluate(async input => window.dohcDesktop!.dataset(JSON.parse(input)), JSON.stringify({ action: "create", workspaceId, definition }));
     if (approved.kind !== "approved") throw Error("Expected approved fixture Collection.");
-    const pin = { workspaceId, datasetId: definition.datasetId, revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256 };
+    const pin = { workspaceId, datasetPath: definition.schemaPath.slice(0, definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json", revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256 };
     const products = definition.tables[1]!, orders = definition.tables[0]!;
     const productField = (name: string) => products.fields.find(field => field.name === name)!.fieldId;
     const orderField = (name: string) => orders.fields.find(field => field.name === name)!.fieldId;

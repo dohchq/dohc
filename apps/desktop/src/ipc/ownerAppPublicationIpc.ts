@@ -154,7 +154,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
         if (dataset) {
           const revision = await resolveRemoteDatasetRevision(remoteData, dataset);
-          const { operations: _operations, ...binding } = dataset;
+          const { operations: _operations, name: _name, ...binding } = dataset;
           candidate.capabilities[candidate.capabilities.indexOf(dataset)] = input.linkReads?.length
             ? resolveAppDatasetCapability(binding, revision) : verifyAppDatasetCapability(dataset, revision);
         }

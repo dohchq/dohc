@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "../bridge";
-import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import type { AddressedDatasetDescription as DatasetDescription } from "@dohc/cli/dataset";
 
 // Stable empty set: the Explorer is memoized, so the "no collections"
 // default must not be a fresh identity per render.
