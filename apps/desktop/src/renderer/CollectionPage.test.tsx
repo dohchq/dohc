@@ -2159,6 +2159,7 @@ describe("Button fields", () => {
       checkCollectionAutomation: async () => ({ diagnostics: [], formulaProblems: [] }),
       readScheduleHost: async () => ({ kind: "this-computer" }),
       onScheduleHostChanged: () => () => undefined,
+      onCloudSessionChanged: () => () => undefined,
     });
     vi.stubGlobal("dohcDesktop", bridge);
     render(pageWithHost());

@@ -3,13 +3,14 @@ import { AlertTriangle, ArrowDown, ArrowUp, Clock, Info, Plus, Trash2 } from "lu
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
-import type { AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
+import type { AutomationDiagnostic, AutomationScheduleTrigger, AutomationWeekday } from "@dohc/workspace-contracts/automations";
+import { nextDue, UnknownTimeZoneError } from "@dohc/workspace-contracts/automation-schedule";
 import type { CheckCollectionAutomationResult, ListAutomationTargetsResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
-import { Sentence, StatusLine } from "./AutomationParts";
+import { RUN_TIME, Sentence, StatusLine } from "./AutomationParts";
 import {
   conditionFormula,
   conditionRows,
@@ -43,7 +44,7 @@ import {
 
 // The builder: When, Only if, and Do, with choices instead of formulas, and
 // a formula wherever a person wants one. A trigger watches a record, a
-// button, or, in the file only for now, a schedule or a Group; in a
+// button, or a schedule, or, in the file only for now, a Group; in a
 // dataset it watches one table, whose fields Only if and Set fields offer.
 // An If holds its own Do and
 // Otherwise steps, which edit like the automation's. Steps the builder
@@ -72,8 +73,59 @@ const TRIGGER_LABELS = {
   "record-removed": "A record is removed",
   "starts-matching": "A record starts to match",
   button: "Someone clicks a button",
+  schedule: "On a schedule",
 } as const;
 type BuilderTrigger = keyof typeof TRIGGER_LABELS;
+
+const FREQUENCY_LABELS: Record<AutomationScheduleTrigger["every"], string> = {
+  hour: "Every hour",
+  day: "Every day",
+  weekday: "Every weekday",
+  week: "Every week",
+  month: "Every month",
+};
+const WEEKDAYS: ReadonlyArray<[AutomationWeekday, string]> = [
+  ["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"],
+];
+const MONTH_DAYS = Array.from({ length: 31 }, (_, index) => index + 1);
+const MINUTES = Array.from({ length: 60 }, (_, index) => `:${String(index).padStart(2, "0")}`);
+// Read once: the list does not change while dohc runs. Intl leaves out UTC, which schedules often use.
+let timeZones: readonly string[] | null = null;
+const timeZoneNames = () => (timeZones ??= ["UTC", ...Intl.supportedValuesOf("timeZone")]);
+// The longest delay setTimeout keeps; a longer one fires at once.
+const LONGEST_TIMEOUT_MS = 2 ** 31 - 1;
+
+/**
+ * A schedule of `every`, keeping what `current` holds that still fits: its
+ * minutes, its time zone, and its days for the same frequency. A new one
+ * runs at 9:00 in this computer's time zone.
+ */
+function scheduleFor(every: AutomationScheduleTrigger["every"], current: AutomationTrigger): AutomationScheduleTrigger {
+  const was = current.kind === "schedule" ? current : null;
+  const timezone = was?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const minutes = was === null ? ":00" : was.at.slice(-3);
+  const at = every === "hour" ? minutes : was !== null && was.every !== "hour" ? was.at : `09${minutes}`;
+  if (every === "week") return { kind: "schedule", every, at, timezone, days: was?.every === "week" ? was.days : ["mon"] };
+  if (every === "month") return { kind: "schedule", every, at, timezone, days: was?.every === "month" ? was.days : [1] };
+  return { kind: "schedule", every, at, timezone };
+}
+
+/**
+ * When a schedule runs next, as an instant and in the schedule's own time
+ * zone, which its time is in, or why dohc cannot say. Null while its time is
+ * still being chosen.
+ */
+function nextRunOf(schedule: AutomationScheduleTrigger): { at: number | null; text: string } | null {
+  try {
+    const next = nextDue(schedule, Date.now());
+    return next === null
+      ? { at: null, text: "This schedule has no next run." }
+      : { at: next, text: `Next run ${new Intl.DateTimeFormat(undefined, { ...RUN_TIME, timeZone: schedule.timezone }).format(next)}, ${schedule.timezone}` };
+  } catch (error) {
+    if (error instanceof UnknownTimeZoneError) return { at: null, text: `This computer does not know the time zone ${schedule.timezone}.` };
+    return null;
+  }
+}
 
 const VALUE_KIND_LABELS: Record<ValueKind, string> = {
   any: "Any value",
@@ -434,6 +486,7 @@ function ConditionEditor(props: {
           }));
         }}
         className={selectClass}
+        {...(condition.mode === "formula" ? {} : invalid(problem(props.problemKey)))}
       >
         {only ? <option value="always">Always</option> : null}
         <option value="rows">Fields match</option>
@@ -632,6 +685,7 @@ function placeOf(
   if (head === "when") {
     const keys: Partial<Record<string, string>> = {
       to: "when/to", "field-changed": "when/field", "starts-matching": "when/condition", "record-changed": "when/fields", button: "when/button",
+      at: "when/at", days: "when/days", timezone: "when/timezone",
     };
     return { key: keys[option ?? ""] ?? "when", name: null };
   }
@@ -696,6 +750,8 @@ function triggerFor(
       return current.kind === "button" ? current : { kind, field: buttons[0]?.name ?? "", table };
     case "starts-matching":
       return current.kind === "starts-matching" ? current : { kind, condition: "", table };
+    case "schedule":
+      return current.kind === "schedule" ? current : scheduleFor("day", current);
     default:
       return { kind, table };
   }
@@ -784,6 +840,8 @@ export function AutomationBuilder(props: {
   onOpenFile: (path: string) => void;
   /** Opens the dialog that adds fields, such as a Button field; undefined where this person cannot. */
   onOpenFields?: () => void;
+  /** What stops or delays this workspace's schedules, from the panel; shown under a schedule. */
+  scheduleHost: ReactNode;
   onError: ErrorReport;
 }) {
   const { workspaceId, collectionPath, table, onError } = props;
@@ -888,6 +946,22 @@ export function AutomationBuilder(props: {
     props.onDraftChange({ automation, dirty });
   }, [draftKey, dirty]);
 
+  // A schedule's next run moves on once it comes due, and when the window
+  // gets focus, as after the computer sleeps or changes time zone. A wait
+  // longer than a timer holds fires early, so each tick sets the next one.
+  const [clock, setClock] = useState(0);
+  const nextRunAt = draft.when.kind === "schedule" ? (nextRunOf(draft.when)?.at ?? null) : null;
+  useEffect(() => {
+    if (nextRunAt === null) return;
+    const again = () => setClock((value) => value + 1);
+    const timer = window.setTimeout(again, Math.min(Math.max(nextRunAt - Date.now(), 0) + 1, LONGEST_TIMEOUT_MS));
+    window.addEventListener("focus", again);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", again);
+    };
+  }, [nextRunAt, clock]);
+
   // Leaving with nothing changed needs no question.
   useEffect(() => {
     if (props.leaveRequested && !dirty) props.onLeave();
@@ -989,6 +1063,18 @@ export function AutomationBuilder(props: {
       }
     }
   };
+  const noRecord = automation.when.kind === "schedule" || automation.when.kind === "group-message";
+  if (automation.when.kind === "schedule") {
+    const schedule = automation.when;
+    if (schedule.at === "") problems.set("when/at", "Choose a time.");
+    if (schedule.every === "week" || schedule.every === "month") {
+      if (schedule.days.length === 0) problems.set("when/days", "Choose at least one day.");
+    }
+  }
+  // A schedule has no record, so rows that compare its fields cannot hold.
+  if (noRecord && draft.condition.mode === "rows") {
+    problems.set("if", "This trigger has no record to compare. Choose Always, or write a formula.");
+  }
   conditionProblems(draft.condition, "if");
   if (automation.when.kind === "starts-matching") conditionProblems(draft.matching, "when/condition");
   if (draft.steps.length === 0) problems.set(listProblem("do"), "Add a step.");
@@ -1407,7 +1493,7 @@ export function AutomationBuilder(props: {
               kind: "invoke",
               operation: table.actions.find((candidate) => candidate.table === table.name)!.name,
               // The action reads its record itself, so it takes the record's id.
-              input: draft.when.kind === "record-removed" ? [] : [{ key: "id", value: { kind: "formula", expression: "record.id" } }],
+              input: noRecord || draft.when.kind === "record-removed" ? [] : [{ key: "id", value: { kind: "formula", expression: "record.id" } }],
             })}
           >
             <Plus size={12} aria-hidden />
@@ -1420,6 +1506,7 @@ export function AutomationBuilder(props: {
   );
 
   const trigger = draft.when;
+  const nextRun = trigger.kind === "schedule" ? nextRunOf(trigger) : null;
   const builderTrigger = builderTriggerOf(trigger);
   const reachable = (targets ?? []).filter((target) => target.stopped === null && target.path !== collectionPath);
   const setWhen = (next: AutomationTrigger) => setDraft((current) => ({ ...current, when: next }));
@@ -1562,6 +1649,94 @@ export function AutomationBuilder(props: {
               focusAfter={focusAfter}
               onChange={(change) => setDraft((current) => ({ ...current, matching: change(current.matching) }))}
             />
+          ) : trigger.kind === "schedule" ? (
+            <>
+              <select
+                aria-label="Repeats"
+                value={trigger.every}
+                onChange={(event) => setWhen(scheduleFor(event.target.value as AutomationScheduleTrigger["every"], trigger))}
+                className={selectClass}
+              >
+                {Object.entries(FREQUENCY_LABELS).map(([every, label]) => <option key={every} value={every}>{label}</option>)}
+              </select>
+              {trigger.every === "week" ? (
+                <div role="group" aria-label="Days" className="flex flex-wrap gap-x-2.5 gap-y-1">
+                  {WEEKDAYS.map(([day, label]) => (
+                    <label key={day} className="flex items-center gap-1 text-[13px] text-ink">
+                      <input
+                        type="checkbox"
+                        checked={trigger.days.includes(day)}
+                        onChange={(event) => setWhen({
+                          ...trigger,
+                          days: WEEKDAYS.flatMap(([candidate]) => ((candidate === day ? event.target.checked : trigger.days.includes(candidate)) ? [candidate] : [])),
+                        })}
+                        {...invalid(problem("when/days"))}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              ) : trigger.every === "month" ? (
+                <>
+                  <div role="group" aria-label="Days of the month" className="grid grid-cols-7 gap-1">
+                    {MONTH_DAYS.map((day) => (
+                      <label key={day} className="flex items-center gap-1 font-mono text-[12px] text-ink">
+                        <input
+                          type="checkbox"
+                          checked={trigger.days.includes(day)}
+                          onChange={(event) => setWhen({
+                            ...trigger,
+                            days: MONTH_DAYS.filter((candidate) => (candidate === day ? event.target.checked : trigger.days.includes(candidate))),
+                          })}
+                          {...invalid(problem("when/days"))}
+                        />
+                        {day}
+                      </label>
+                    ))}
+                  </div>
+                  {trigger.days.some((day) => day > 28) ? (
+                    <p className="m-0 text-[12px] text-muted">In a shorter month, a later day runs on the month's last day.</p>
+                  ) : null}
+                </>
+              ) : null}
+              <Problem shown={problem("when/days")} />
+              {trigger.every === "hour" ? (
+                <select
+                  aria-label="Minutes past the hour"
+                  value={trigger.at}
+                  onChange={(event) => setWhen({ ...trigger, at: event.target.value })}
+                  className={`${selectClass} font-mono`}
+                  {...invalid(problem("when/at"))}
+                >
+                  {MINUTES.includes(trigger.at) ? null : <option value={trigger.at}>{trigger.at}</option>}
+                  {MINUTES.map((minute) => <option key={minute} value={minute}>{minute}</option>)}
+                </select>
+              ) : (
+                <input
+                  aria-label="Time"
+                  type="time"
+                  value={trigger.at}
+                  onChange={(event) => setWhen({ ...trigger, at: event.target.value })}
+                  className={inputClass}
+                  {...invalid(problem("when/at"))}
+                />
+              )}
+              <Problem shown={problem("when/at")} />
+              <select
+                aria-label="Time zone"
+                value={trigger.timezone}
+                onChange={(event) => setWhen({ ...trigger, timezone: event.target.value })}
+                className={selectClass}
+                {...invalid(problem("when/timezone"))}
+              >
+                {/* A zone the file names another way, such as Asia/Calcutta, stays as written. */}
+                {timeZoneNames().includes(trigger.timezone) ? null : <option value={trigger.timezone}>{trigger.timezone}</option>}
+                {timeZoneNames().map((zone) => <option key={zone} value={zone}>{zone}</option>)}
+              </select>
+              <Problem shown={problem("when/timezone")} />
+              {nextRun === null ? null : <StatusLine tone="muted" icon={Clock} label="Schedule">{nextRun.text}</StatusLine>}
+              {props.scheduleHost}
+            </>
           ) : trigger.kind === "button" ? (
             <>
               {buttonFields.length > 0 || trigger.field !== "" ? (

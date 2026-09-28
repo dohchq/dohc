@@ -18,7 +18,7 @@ import { useRequestSequence } from "../useRequestSequence";
 import { AutomationBuilder } from "./AutomationBuilder";
 import { AutomationRuns } from "./AutomationRuns";
 import { newAutomation, type AutomationTable } from "./automationDraft";
-import { Sentence, StatusLine } from "./AutomationParts";
+import { RUN_TIME, Sentence, StatusLine } from "./AutomationParts";
 import {
   automationSentence,
   collectionName,
@@ -259,9 +259,6 @@ function LastRun(props: { lastRun: ValidAutomationSummary["lastRun"]; onOpen: ()
 }
 
 // How a next run shows: the person's local time, down to the minute.
-const RUN_TIME: Intl.DateTimeFormatOptions = {
-  weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
-};
 // The longest delay setTimeout keeps; a longer one fires at once.
 const LONGEST_TIMEOUT_MS = 2 ** 31 - 1;
 
@@ -487,11 +484,6 @@ export function AutomationsPanel(props: {
   const { workspaceId, collectionPath, table, onError, onNotice } = props;
   const { file, holdsUnreadable, version, reload: load } = props.automations;
   const nextRuns = useNextRuns(file);
-  const scheduleHost = useScheduleHost(workspaceId, nextRuns.size > 0, onError);
-  const relayHost = scheduleHost.host?.relay ?? null;
-  // Without a computer to run them, schedules have no next run to show.
-  const noHost = relayHost?.hostInstallId === null;
-  const runsOn = otherHostName(relayHost);
   const fileRef = useRef(file);
   fileRef.current = file;
   const [runsOf, setRunsOf] = useState<{ automationId: string; name: string; run?: string | null } | null>(null);
@@ -507,6 +499,12 @@ export function AutomationsPanel(props: {
   // asking, such as on a workspace switch, opens again here.
   const draftKey = JSON.stringify([workspaceId, collectionPath, table?.name ?? null]);
   const [editing, setEditing] = useState<Editing | null>(() => keptDrafts.get(draftKey) ?? null);
+  // The builder shows it under a schedule it edits.
+  const scheduleHost = useScheduleHost(workspaceId, nextRuns.size > 0 || editing !== null, onError);
+  const relayHost = scheduleHost.host?.relay ?? null;
+  // Without a computer to run them, schedules have no next run to show.
+  const noHost = relayHost?.hostInstallId === null;
+  const runsOn = otherHostName(relayHost);
   const editingRef = useRef(editing);
   editingRef.current = editing;
   const latestDraft = useRef<{ automation: Automation; dirty: boolean } | null>(null);
@@ -907,6 +905,13 @@ export function AutomationsPanel(props: {
             onCancel={() => leave(() => setEditing(null))}
             onOpenFile={props.onOpenFile}
             onOpenFields={props.onOpenFields}
+            scheduleHost={
+              <ScheduleHostNote
+                host={scheduleHost.host}
+                onCheckAgain={() => void scheduleHost.read()}
+                onChooseComputer={props.onOpenScheduleSettings}
+              />
+            }
             onError={onError}
           />
         ) : runsOf ? (
