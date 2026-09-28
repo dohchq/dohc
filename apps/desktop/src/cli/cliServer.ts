@@ -1,3 +1,4 @@
+import { creationPartialMessage } from "@dohc/cli/creation";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
@@ -185,9 +186,10 @@ export interface CliCollectionWriteSeam {
   createRecord(input: {
     collectionPath: string;
     name: string;
+    recordId?: string;
     fields?: Record<string, unknown>;
     author: ChangeAuthor;
-  }): Promise<{ path: string; recordId: string }>;
+  }): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
 }
 
 // Engine-backed collection access for the CLI verbs. Reads go to the engine
@@ -2324,13 +2326,16 @@ async function dispatch(
         const outcome = await collections.writes.createRecord({
           collectionPath: collectionValidated.normalized,
           name: request.args.name,
+          recordId: request.args.recordId,
           fields: request.args.fields,
           author: collectionWriteAuthor(request.args.actor, context, options),
         });
+        if ("kind" in outcome) return { ok: false as const, reason: creationPartialMessage(outcome), partial: outcome };
         return {
           ok: true as const,
           recordId: outcome.recordId,
           recordPath: outcome.path,
+          ...(outcome.kept ? { kept: outcome.kept } : {}),
         };
       } catch (error) {
         return mcpFailure(

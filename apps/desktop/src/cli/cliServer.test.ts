@@ -1385,6 +1385,23 @@ describe("CLI socket server", () => {
     expect(retries).toHaveLength(3);
   });
 
+
+  it("returns partial record facts and passes the retry identity to the write seam", async () => {
+    const partial = {
+      kind: "partial" as const, created: ["tasks/retry.md"], failedStage: "settle" as const, reason: "settle failed",
+      retry: { mode: "resume" as const, recordId: "rec_abcdefghijklmnopqrstuvwxyz", instruction: "Try again with this record ID." },
+    };
+    const createRecord = vi.fn<CliCollectionWriteSeam["createRecord"]>()
+      .mockResolvedValueOnce(partial).mockResolvedValue({ path: "tasks/retry.md", recordId: partial.retry.recordId, kept: { status: "done" } });
+    context.collections = { query: vi.fn(), getRecord: vi.fn(), writes: { setFields: vi.fn(), createRecord } };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", name: "retry", fields: { status: "open" } };
+    const result = await invoke("collectionCreateRecord", args);
+    expect(result).toMatchObject({ ok: false, partial });
+    expect(result).toHaveProperty("reason", expect.stringContaining("tasks/retry.md"));
+    await expect(invoke("collectionCreateRecord", { ...args, recordId: partial.retry.recordId })).resolves.toMatchObject({ ok: true, recordId: partial.retry.recordId, kept: { status: "done" } });
+    expect(createRecord.mock.calls[1]![0]).toMatchObject({ recordId: partial.retry.recordId, fields: args.fields });
+  });
+
   it("presses a button through the press path and reports the run, asking before actions dohc cannot undo", async () => {
     const presses: Array<Parameters<NonNullable<CliWorkspaceContext["buttons"]>["press"]>[0]> = [];
     const actions = [{ name: "sendInvoice", label: "Send invoice" }];

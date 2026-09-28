@@ -1,4 +1,6 @@
+import { CreationPartialError, type CreationPartial, type CreationStage } from "@dohc/cli/creation";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
+import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { randomBytes } from "node:crypto";
 import { recordIdFromBytes } from "@dohc/automation-executor/record-ids";
 import { join } from "node:path";
@@ -6,6 +8,7 @@ import { isDeepStrictEqual } from "node:util";
 import { errorMessage } from "./workspaceError";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import { isIdempotencyKeyReuseRefusal } from "@dohc/workspace-engine-client";
 import type { CollectionRecordWrites } from "@dohc/automation-executor/collection-automation-run";
 import {
   RECORD_ID_FRONTMATTER_KEY,
@@ -27,7 +30,7 @@ import {
   withStaleSensitiveWorkspaceOperation,
 } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
-import { createFile } from "./workspaceFiles";
+import { createFile, CreatedFileWriteError } from "./workspaceFiles";
 
 // The one main-side collection write seam. Every agent surface (MCP/CLI) and
 // Collection automations set record fields and create records through these
@@ -83,6 +86,12 @@ export interface CollectionRecordEditContext {
 }
 
 export interface SetCollectionRecordFieldsInput {
+  /** A creation key already recorded by the engine must not seed the field again. */
+  preserveCompletedSeeds?: boolean;
+  /** Creation reports the stage that could not finish. */
+  onStage?(stage: CreationStage): void;
+  /** Finish a prior journaled update even when its values already match. */
+  settleUnchanged?: boolean;
   recordPath: string;
   fields: Record<string, unknown>;
   author: ChangeAuthor;
@@ -128,7 +137,7 @@ export interface CreateCollectionRecordInput {
   /**
    * The id of the record to create, from derivedRecordId, for a caller with
    * a stable step identity. When a record with this id is already in the
-   * Collection, the create returns it (and sets its fields) instead of
+   * Collection, the create returns it (and seeds unchanged fields) instead of
    * adding another. Omitted, the record gets a new random id.
    */
   recordId?: string;
@@ -268,6 +277,7 @@ export async function setCollectionRecordFields(
     );
   }
   throwIfAborted(context.signal);
+  input.onStage?.("bind");
   const session = await context.capture.openYDocSession({
     path: input.recordPath,
     // A record file is a live Markdown document.
@@ -277,6 +287,7 @@ export async function setCollectionRecordFields(
       // doc; this seam holds no second replica to notify.
     },
   });
+  let failed = false;
   try {
     // The caller can end while the session opens (an automation run's
     // deadline); a write must not land after that.
@@ -290,8 +301,12 @@ export async function setCollectionRecordFields(
     // Each field is compared and written at its own turn on the session's
     // chain, against the canonical doc as it stands then, so a change that
     // arrived after the session opened is compared, not overwritten.
-    const journaled = await Promise.all(entries.map(([field, value]) =>
-      session.applyDecidedLocalUpdate(
+    input.onStage?.("fields");
+    const journaled = await Promise.all(entries.map(([field, value]) => {
+      const idempotencyKey = input.idempotencyKeyPrefix === undefined
+        ? undefined : `${input.idempotencyKeyPrefix}/${field}`;
+      let fieldArmed = false;
+      return session.applyDecidedLocalUpdate(
         (doc) => {
           const current = doc.getMap(FRONTMATTER_FIELD).get(field);
           const currentValue =
@@ -312,21 +327,33 @@ export async function setCollectionRecordFields(
         },
         () => {
           armed += 1;
+          fieldArmed = true;
         },
         {
           ...(actorOriginId === undefined ? {} : { actorOriginId }),
           attribution: attributionFor(input.author),
-          ...(input.idempotencyKeyPrefix === undefined
-            ? {}
-            : { idempotencyKey: `${input.idempotencyKeyPrefix}/${field}` }),
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         },
-      )));
+      ).catch(async error => {
+        if (!input.preserveCompletedSeeds || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
+        // This typed refusal proves the creation key already landed. The session
+        // restores canonical state before rejecting; no new seed was recorded.
+        if (fieldArmed) armed -= 1;
+        delete replaced[field];
+        return session.applyDecidedLocalUpdate(doc => {
+          const current = doc.getMap(FRONTMATTER_FIELD).get(field);
+          kept[field] = (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;
+          return null;
+        });
+      });
+    }));
     const updates = journaled.filter(Boolean).length;
     // Every field already held its value, or someone else's: nothing to settle.
-    if (updates === 0) return { path: input.recordPath, replaced, kept };
+    if (updates === 0 && !input.settleUnchanged) return { path: input.recordPath, replaced, kept };
     // settleNow queues on the same session chain as the updates above, so
     // it observes the journaled edits; it throws when the settle cannot
     // commit.
+    input.onStage?.("settle");
     await session.settleNow({
       summary: `Updated ${recordBasename(input.recordPath)}`,
     });
@@ -335,9 +362,16 @@ export async function setCollectionRecordFields(
         `The engine session did not accept the field change for ${input.recordPath}.`,
       );
     }
+    input.onStage?.("close");
     return { path: input.recordPath, replaced, kept };
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    await session.close();
+    try { await session.close(); }
+    catch (error) {
+      if (!failed) { input.onStage?.("close"); throw error; }
+    }
   }
 }
 
@@ -355,12 +389,12 @@ export async function setCollectionRecordFields(
  * unless that file carries this create's record id: then it is an earlier
  * attempt's file, and the create continues with it. With `recordId`, a
  * record in this Collection that already has the id is the one returned,
- * even under another name, and its fields are set to `fields`.
+ * even under another name. Seeding preserves fields changed since creation.
  */
 export async function createCollectionRecord(
   context: CollectionRecordEditContext,
   input: CreateCollectionRecordInput,
-): Promise<{ path: string; recordId: string }> {
+): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | CreationPartial> {
   const name = input.name;
   if (
     name.length === 0 ||
@@ -377,57 +411,102 @@ export async function createCollectionRecord(
       `Record id must be "rec_" followed by 26 lowercase base32 characters: ${input.recordId}`,
     );
   }
+  const validated = validateUserMaterializePath(`${input.collectionPath}/${name}.md`, { platform: process.platform });
+  if (!validated.ok) throw new Error(`Invalid record path: ${validated.reason}`);
   const entries = writableFieldEntries(input.fields ?? {});
   throwIfAborted(context.signal);
   const requestedId = input.recordId ?? recordIdFromBytes(randomBytes(16));
-  const existingPath =
-    input.recordId === undefined
-      ? null
-      : await recordPathFor(context, input.collectionPath, requestedId);
-  const { path, recordId } =
-    existingPath === null
-      ? await waitForRecord(
-          context,
-          input.collectionPath,
-          await createRecordFile(
-            context,
-            `${input.collectionPath}/${name}.md`,
-            requestedId,
-            input.author,
-          ),
-        )
-      : { path: existingPath, recordId: requestedId };
-  if (entries.length > 0) {
-    try {
-      await setCollectionRecordFields(context, {
+  let path = `${input.collectionPath}/${name}.md`;
+  let recordId = requestedId;
+  let durable = false;
+  let failedStage: CreationStage = "index";
+  try {
+    const existingPath = input.recordId === undefined
+      ? null : await recordPathFor(context, input.collectionPath, requestedId);
+    if (existingPath !== null) {
+      if (input.author.kind !== "automation" && existingPath !== validated.normalized) {
+        throw new Error("This record ID belongs to another path. Open that record to edit its fields.");
+      }
+      path = existingPath;
+      durable = true;
+    } else {
+      failedStage = "write";
+      path = await createRecordFile(context, path, requestedId, input.author);
+      durable = true;
+      failedStage = "index";
+      ({ path, recordId } = await waitForRecord(context, input.collectionPath, path, stage => { failedStage = stage; }));
+    }
+    let kept: Record<string, unknown> = {};
+    if (entries.length > 0) {
+      ({ kept } = await setCollectionRecordFields(context, {
         recordPath: path,
         fields: Object.fromEntries(entries),
         author: input.author,
-        ...(input.idempotencyKeyPrefix === undefined
-          ? {}
-          : { idempotencyKeyPrefix: input.idempotencyKeyPrefix }),
-        ...(input.expectedBefore === undefined
-          ? {}
-          : { expectedBefore: input.expectedBefore }),
-      });
-    } catch (error) {
-      // The record exists by now: name it, so the caller reconciles instead
-      // of creating a second one.
-      const detail = errorMessage(error);
-      throw new Error(
-        `The record was created at ${path} (id ${recordId}), but its fields could not be set: ${detail}`,
-        { cause: error },
-      );
+        // Creation keys stay completed even after someone clears a seeded field.
+        preserveCompletedSeeds: true,
+        idempotencyKeyPrefix: input.idempotencyKeyPrefix ?? `create-record/${recordId}`,
+        expectedBefore: Object.fromEntries(entries.map(([field]) => [field,
+          input.expectedBefore && Object.hasOwn(input.expectedBefore, field) ? input.expectedBefore[field] : null,
+        ])),
+        settleUnchanged: true,
+        onStage: stage => { failedStage = stage; },
+      }));
     }
+    return { path, recordId, ...(Object.keys(kept).length > 0 ? { kept } : {}) };
+  } catch (error) {
+    // A transport or lease can fail after the write landed.
+    const diskId = await fileRecordId(context, path).catch(() => null);
+    if (!durable && diskId !== requestedId && !(error instanceof CreatedFileWriteError)) throw error;
+    if (diskId !== null && ["write", "capture", "index"].includes(failedStage)) recordId = diskId;
+    return {
+      kind: "partial", created: [path], failedStage, reason: errorMessage(error),
+      retry: {
+        mode: error instanceof CreatedFileWriteError ? "remove-and-retry" : "resume", recordId,
+        instruction: error instanceof CreatedFileWriteError
+          ? "Review the listed file in Files, then remove it. Create the record again."
+          : "Try again with the same record ID and fields to finish this record without creating another.",
+      },
+    };
   }
-  return { path, recordId };
+}
+
+
+/** Keep durable facts when the authority lease rejects after the work returns. */
+export async function runCollectionRecordCreation(
+  run: <T>(work: (context: CollectionRecordEditContext) => Promise<T>) => Promise<T>,
+  input: CreateCollectionRecordInput,
+): ReturnType<typeof createCollectionRecord> {
+  let result: Awaited<ReturnType<typeof createCollectionRecord>> | undefined;
+  try {
+    return await run(async context => {
+      result = await createCollectionRecord(context, input);
+      return result;
+    });
+  } catch (error) {
+    if (!result) throw error;
+    if ("kind" in result) return result;
+    return {
+      kind: "partial", created: [result.path], failedStage: "scope", reason: errorMessage(error),
+      retry: { mode: "resume", recordId: result.recordId,
+        instruction: "Reopen this workspace. Try again with the same record ID and fields to confirm the saved record." },
+    };
+  }
 }
 
 /** The record writes an automation run makes, in this edit context. */
 export function collectionRecordWrites(context: CollectionRecordEditContext): CollectionRecordWrites {
   return {
     setFields: (input) => setCollectionRecordFields(context, input),
-    create: (input) => createCollectionRecord(context, input),
+    create: async (input) => {
+      const result = await createCollectionRecord(context, input);
+      if ("kind" in result) {
+        if (result.retry.mode === "resume" && result.retry.recordId) {
+          await input.onPartial?.({ path: result.created[0]!, recordId: result.retry.recordId });
+        }
+        throw new CreationPartialError(result);
+      }
+      return result;
+    },
   };
 }
 
@@ -542,6 +621,7 @@ function waitForRecord(
   context: CollectionRecordEditContext,
   collectionPath: string,
   path: string,
+  onStage: (stage: CreationStage) => void,
 ): Promise<{ path: string; recordId: string }> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -587,15 +667,24 @@ function waitForRecord(
     const expire = (): void => {
       finish({
         error: new Error(
-          `The record file was created at ${path}, but the engine did not adopt it as a collection record in time. Look for it in the Collection before you create it again.`,
+          `dohc created ${path}, but the engine did not add it to the Collection in time.`,
           lastError === undefined ? undefined : { cause: lastError },
         ),
       });
     };
     const deadline = setTimeout(expire, ADOPTION_DEADLINE_MS);
-    const unsubscribe = context.onCaptureSettled((paths) => {
-      if (paths === null || paths.includes(path)) void check();
-    });
+    let unsubscribe = () => {};
+    onStage("capture");
+    try {
+      unsubscribe = context.onCaptureSettled((paths) => {
+        if (paths === null || paths.includes(path)) void check();
+      });
+    } catch (error) {
+      clearTimeout(deadline);
+      reject(error);
+      return;
+    }
+    onStage("index");
     context.signal.addEventListener("abort", expire, { once: true });
     if (context.signal.aborted) expire();
     else void check();

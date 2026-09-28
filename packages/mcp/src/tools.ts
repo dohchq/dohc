@@ -2597,7 +2597,7 @@ export async function setRecordFields(
 
 export async function createRecord(
   ctx: ToolContext,
-  args: { collectionPath: string; name: string; fields?: unknown },
+  args: { collectionPath: string; name: string; fields?: unknown; recordId?: string },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
@@ -2611,6 +2611,7 @@ export async function createRecord(
     collectionPath: resolved.normalized,
     name: args.name,
     fields: fields.value,
+    ...(args.recordId ? { recordId: args.recordId } : {}),
   });
 }
 

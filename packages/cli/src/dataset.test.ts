@@ -29,6 +29,17 @@ const requests: unknown[] = [
   {action:"invoke",workspaceId:"workspace",datasetPath:"equipment/dataset.json",operationId:id(4),revision:1,revisionSha256:"a".repeat(64),input:{limit:10},idempotencyKey:"read-1"},
 ];
 describe("dataset CLI", () => {
+  it.each([false, true])("exits nonzero and preserves partial form facts (JSON: %s)", async json => {
+    const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",
+      retry: { mode: "resume", instruction: "Try again with the same form settings and folder." } };
+    const fields = { workspaceId: "workspace", datasetPath: "equipment/dataset.json", revision: 1, revisionSha256: "a".repeat(64),
+      tableId: id(2), createOperationId: id(4), appRoot: "form", fieldIds: [id(3)] };
+    const result = await executeCli({ argv: ["dataset", "createForm", JSON.stringify(fields), ...(json ? ["--json"] : [])],
+      env: {}, request: async () => partial });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject(partial);
+  });
   it("requires a dataset.json address instead of an ID or folder", async () => {
     const send = vi.fn();
     for (const selection of [{ datasetId: id(1) }, { datasetPath: id(1) }, { datasetPath: "equipment" }, { datasetPath: "../equipment/dataset.json" }]) {

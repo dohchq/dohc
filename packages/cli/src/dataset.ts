@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CreationPartial } from "./creation";
 import { APP_BACKEND_UPLOAD_BYTES, parseAppBackendFile, parseAppBackendJson } from "@dohc/security-contract/app-backend";
 import { DATASET_MAX_FIELDS, parseDatasetDefinition, parseDatasetRevision, parseDatasetDescription, parseDatasetBindingReference, parseDatasetPath } from "@dohc/security-contract/dataset";
 
@@ -171,6 +172,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetPermissionsPage.extend({ kind: z.literal("permissions") }).strict(),
   z.object({ kind: z.literal("grant-updated") }).strict(),
   z.object({ kind: z.literal("exported"), savedPath: z.string().min(1).max(4096).nullable() }).strict(),
+  CreationPartial,
   z.object({ kind: z.literal("form-created"), appRoot: z.string().min(1).max(900), paths: z.array(z.string().min(1).max(1024)).min(1).max(4) }).strict(),
   DatasetPreparation.extend({ kind: z.literal("prepared") }).strict(),
   z.object({ kind: z.literal("approved"), revision }).strict(),

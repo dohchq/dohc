@@ -1,3 +1,6 @@
+import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
+import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
+import { SourceCreationConflict, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
 import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetAgent, LocalDatasetHost } from "../workspaces/localDatasetHost";
@@ -18,6 +21,12 @@ type Workspace = { workspaceId: string; shareView?: unknown };
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "workspace">;
 type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; scope?: string; assertCurrent(): void };
 
+class DatasetScopeError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
 /** The desktop and owner CLI enter the same workspace authority before using data. */
 export function createDatasetHandler<Caller, W extends Workspace, O extends Operation<W>>(dependencies: {
   withWorkspaceOperation<T>(caller: Caller, workspaceId: string, work: (operation: O) => Promise<T>): Promise<T>;
@@ -32,7 +41,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   flushSourceCapture(workspace: W, signal: AbortSignal): Promise<void>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
-  createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
+  createSources(workspace: W, files: Record<string, string>, signal: AbortSignal, progress?: SourceCreationProgress): Promise<void>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
   automationName?(workspace: W, automationId: string): Promise<string | null>;
 }) {
@@ -45,8 +54,14 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
    */
   return async (caller: Caller, raw: unknown, agent: LocalDatasetAgent | null = null) => {
     const request = DatasetRequest.parse(raw);
-    return dependencies.withWorkspaceOperation(caller, request.workspaceId, async operation => {
-      const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
+    let formFailure: ((error: unknown) => CreationPartial) | undefined;
+    let formPartial: CreationPartial | undefined;
+    try {
+      return await dependencies.withWorkspaceOperation(caller, request.workspaceId, async operation => {
+      const current = () => {
+        try { operation.signal.throwIfAborted(); operation.assertCurrent(); }
+        catch (error) { throw new DatasetScopeError(error); }
+      };
       current();
       let input: ResolvedDatasetRequest;
       if ("datasetPath" in request) {
@@ -304,14 +319,41 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         }
         const generated = generateDatasetFormSources({ ...input, datasetPath: "datasetPath" in request ? request.datasetPath : "", approvedRevision: approved.revision });
         const files = Object.fromEntries(Object.entries(generated.files).map(([path, source]) => [`${input.appRoot}/${path}`, source]));
-        await dependencies.createSources(operation.workspace, files, operation.signal);
-        current();
-        const latest = await data.approvedArtifacts(input.datasetId);
-        current();
-        if (!latest.active || latest.revision.revisionSha256 !== input.revisionSha256) {
-          throw new Error("Collection rules changed. The form source was saved. Reload the Collection before approving the form.");
+        let created: string[] = [];
+        let failedStage: CreationStage = "write";
+        let rulesChanged = false;
+        formFailure = (error) => {
+          if (created.length === 0) throw error;
+          const remove = rulesChanged || error instanceof SourceCreationConflict || error instanceof CreatedFileWriteError;
+          return formPartial = {
+            kind: "partial", created, failedStage: error instanceof DatasetScopeError ? "scope" : failedStage,
+            reason: error instanceof Error ? error.message : String(error),
+            retry: {
+              mode: remove ? "remove-and-retry" : "resume",
+              instruction: remove
+                ? "Review the listed files in Files, then remove them. Reload the Collection and create the form in an empty folder."
+                : "Try again with the same form settings and folder. dohc keeps matching files and creates only missing files.",
+            },
+          };
+        };
+        try {
+          await dependencies.createSources(operation.workspace, files, operation.signal, (stage, paths) => {
+            failedStage = stage;
+            created = [...paths];
+          });
+          created = Object.keys(files);
+          current();
+          failedStage = "revision";
+          const latest = await data.approvedArtifacts(input.datasetId);
+          current();
+          if (!latest.active || latest.revision.revisionSha256 !== input.revisionSha256) {
+            rulesChanged = true;
+            throw new Error("Collection rules changed.");
+          }
+          return { kind: "form-created" as const, appRoot: input.appRoot, paths: created };
+        } catch (error) {
+          return formFailure(error);
         }
-        return { kind: "form-created" as const, appRoot: input.appRoot, paths: Object.keys(files) };
       }
       if (input.action === "discard") { host.discard(input.preparationId); return { kind: "discarded" as const }; }
       if (input.action === "prepareSchemaChange" || input.action === "prepareRelationChoices") {
@@ -382,6 +424,11 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256, signal: operation.signal });
       current();
       return { kind: "approved" as const, revision };
-    });
+      });
+    } catch (error) {
+      if (formPartial) return formPartial;
+      if (formFailure) return formFailure(new DatasetScopeError(error));
+      throw error;
+    }
   };
 }

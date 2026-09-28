@@ -412,6 +412,23 @@ describe("desktop CLI automation proxy", () => {
   });
 });
 
+it("preserves partial record facts and accepts the returned retry identity", async () => {
+  await withWorkspace(async base => {
+    await mkdir(join(base.root, "tasks"), { recursive: true });
+    const partial = {
+      kind: "partial" as const, created: ["tasks/retry.md"], failedStage: "index" as const, reason: "not indexed",
+      retry: { mode: "resume" as const, recordId: record.id, instruction: "Try again with this record ID." },
+    };
+    const request = vi.fn().mockResolvedValue({ ok: false, reason: "not indexed", partial });
+    const ctx = { ...base, request };
+    expect(await createRecord(ctx, { collectionPath: "tasks", name: "retry" })).toEqual({ ok: false, reason: "not indexed", partial });
+    const completed = { ok: true, recordId: record.id, recordPath: "tasks/retry.md", kept: { status: "done" } };
+    request.mockResolvedValue(completed);
+    expect(await createRecord(ctx, { collectionPath: "tasks", name: "retry", recordId: partial.retry.recordId })).toEqual(completed);
+    expect(request.mock.calls[1]![0].args.recordId).toBe(partial.retry.recordId);
+  });
+});
+
 describe("desktop CLI button proxy", () => {
   it("maps dohc_press_button to the press verb, and refuses a mounted share before any request", async () => {
     await withWorkspace(async (base) => {

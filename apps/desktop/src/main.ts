@@ -46,7 +46,7 @@ import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetRepl
 import { createDatasetHandler } from "./ipc/datasetIpc";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
-import { createFile as createDatasetSourceFile } from "./workspaces/workspaceFiles";
+import { createDatasetSources, type SourceCreationProgress } from "./workspaces/datasetSourceCreation";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
 import { createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
@@ -134,7 +134,9 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
-import { collectionRecordWrites, type CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
+import { createLocalChangeAuthor } from "@dohc/workspace-core";
+import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
+import { runCollectionRecordCreation, collectionRecordWrites, type CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
@@ -5303,31 +5305,34 @@ function registerIpcHandlers(): void {
       if (result === null) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
       return result;
     },
-    createSources: async (workspace: DesktopRendererWorkspaceOperation["workspace"], files: Record<string, string>, signal: AbortSignal) => {
+    createSources: async (workspace: DesktopRendererWorkspaceOperation["workspace"], files: Record<string, string>, signal: AbortSignal, progress?: SourceCreationProgress) => {
       assertWritableWorkspace(workspace);
-      const entries = Object.entries(files).sort(([left], [right]) => Number(left.endsWith("dataset.json")) - Number(right.endsWith("dataset.json")));
-      for (const [path, source] of entries) {
-        signal.throwIfAborted();
-        await createDatasetSourceFile(workspace.rootPath, path, source);
-      }
-      await openWorkspaceActivity(workspace);
-      const captured = await withEngineAdapter(workspace, async adapter => {
-        let capture = await adapter.reconcileCapture();
-        for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
-          signal.throwIfAborted();
-          capture = await adapter.flushCapture();
-        }
-        if (!capture.settled || !capture.running || capture.degraded) throw new Error("Collection files were saved. Reopen the workspace to finish creating the Collection.");
-        const metadata = await adapter.captureSourceMetadata({ workspaceId: workspace.workspaceId, versionId: "main", paths: Object.keys(files),
-          bounds: { maxInputFiles: 64, maxInputBytes: 2 * 1024 * 1024 }, signal });
-        if (metadata.files.length !== entries.length || metadata.files.some(file => !Object.hasOwn(files, file.path) || file.sha256 !== createHash("sha256").update(files[file.path]!).digest("hex"))) {
-          throw new Error("Collection source differs from these fields. Choose another folder or review the saved source.");
-        }
-        return true;
-      });
-      if (!captured) throw new Error("Collection files were saved. Reopen the workspace to finish creating the Collection.");
-      signal.throwIfAborted();
-      notifyRenderer({ workspaceId: workspace.workspaceId });
+      await createDatasetSources(workspace.rootPath, files, signal, {
+        register: () => openWorkspaceActivity(workspace),
+        capture: async () => {
+          const captured = await withEngineAdapter(workspace, async adapter => {
+            let capture = await adapter.reconcileCapture();
+            for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
+              signal.throwIfAborted();
+              capture = await adapter.flushCapture();
+            }
+            if (!capture.settled || !capture.running || capture.degraded) throw new Error("dohc could not capture the saved files.");
+            return true;
+          });
+          if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
+        },
+        verify: async () => {
+          const verified = await withEngineAdapter(workspace, async adapter => {
+            const metadata = await adapter.captureSourceMetadata({ workspaceId: workspace.workspaceId, versionId: "main", paths: Object.keys(files),
+              bounds: { maxInputFiles: 64, maxInputBytes: 2 * 1024 * 1024 }, signal });
+            if (metadata.files.length !== Object.keys(files).length || metadata.files.some(file => !Object.hasOwn(files, file.path) || file.sha256 !== createHash("sha256").update(files[file.path]!).digest("hex"))) {
+              throw new Error("Saved source differs from this request. Keep it and choose another folder.");
+            }
+            return true;
+          });
+          if (!verified) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
+        },
+      }, progress).finally(() => notifyRenderer({ workspaceId: workspace.workspaceId }));
     },
   };
   const exportDatasetArchive = async (workspace: DesktopRendererWorkspaceOperation["workspace"], datasetId: string,
@@ -5365,6 +5370,16 @@ function registerIpcHandlers(): void {
       return exportDatasetArchive(workspace, input.datasetId, chosen.filePath, true, signal, authorize);
     },
     withWorkspaceOperation: (sender, workspaceId, work) => withRendererWorkspaceOperation(sender, workspaceId, "Collection changes stopped because this window changed workspaces.", work),
+  });
+  handleIpc(CHANNELS.createCollectionRecord, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = CreateCollectionRecordPayload.parse(raw);
+    return runCollectionRecordCreation(work =>
+      withRendererWorkspaceOperation(event.sender, input.workspaceId,
+        "Record creation stopped because this window changed workspaces.", async operation =>
+          work(await collectionEditContextFor(operation))),
+      { ...input, author: createLocalChangeAuthor(localUserDisplayName()) });
+
   });
   handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
     assertTrustedSender(event);

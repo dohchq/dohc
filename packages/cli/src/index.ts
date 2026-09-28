@@ -310,7 +310,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
           momentSide: command.verb === "moment" ? command.side : "after",
         });
     return {
-      exitCode: 0,
+      exitCode: "kind" in result && result.kind === "partial" ? 1 : 0,
       // Markdown prints byte for byte so redirection preserves it.
       stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
         ? output

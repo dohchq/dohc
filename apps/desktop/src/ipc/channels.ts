@@ -125,6 +125,7 @@ export const CHANNELS = {
   closeThisWindow: "desktop:close-this-window",
   revealWorkspaceFolder: "desktop:reveal-workspace-folder",
   listWorkspaceFiles: "desktop:list-workspace-files",
+  createCollectionRecord: "desktop:create-collection-record",
   createWorkspaceFile: "desktop:create-workspace-file",
   createWorkspaceFolder: "desktop:create-workspace-folder",
   moveWorkspacePath: "desktop:move-workspace-path",

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
@@ -43,6 +44,7 @@ export interface ShellError {
   action?: { label: string; run: () => void; ends?: boolean };
   onDismiss?: () => void;
   kind?: ShellErrorKind;
+  creationIdentity?: string;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
@@ -68,10 +70,11 @@ export function useShellError(workspaceId: string) {
           ? `${error.message.slice(0, SHELL_ERROR_MAX_CHARS - 1)}…`
           : error.message;
       setShellErrors((current) => {
-        const replaced =
-          error.kind === undefined
-            ? undefined
-            : current.find((existing) => existing.kind === error.kind);
+        const matches = (existing: ShellError) =>
+          error.creationIdentity !== undefined || existing.creationIdentity !== undefined
+            ? error.creationIdentity === existing.creationIdentity
+            : existing.message === message || (error.kind !== undefined && existing.kind === error.kind);
+        const replaced = current.find(matches);
         const next: ShellError = {
           ...error,
           message,
@@ -80,11 +83,7 @@ export function useShellError(workspaceId: string) {
           seen: seen === "keep" ? (replaced?.seen ?? true) : seen,
         };
         return [
-          ...current.filter(
-            (existing) =>
-              existing.message !== next.message &&
-              (next.kind === undefined || existing.kind !== next.kind),
-          ),
+          ...current.filter((existing) => !matches(existing)),
           next,
         ];
       });
@@ -138,9 +137,20 @@ export function useShellError(workspaceId: string) {
       kind?: ShellErrorKind,
     ) => {
       const { cause } = readError(error);
+      const partial = error instanceof CreationPartialError ? error.partial : undefined;
+      const details: ReadonlyArray<ErrorDetailField> = partial ? [
+        ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
+        ["Stage", partial.failedStage],
+        ["Record ID", partial.retry.recordId],
+        ["Reason", partial.reason, partial.reason.length],
+        ["Next", partial.retry.instruction, partial.retry.instruction.length],
+      ] : cause ? [["Cause", cause]] : [];
       push({
-        message: withErrorWords(fallback, error),
-        ...(cause ? { details: [["Cause", cause]] } : {}),
+        message: partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
+        ...(partial ? { creationIdentity: partial.retry.recordId
+          ? `record:${partial.retry.recordId}`
+          : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : {}),
+        ...(details.length ? { details } : {}),
         retry,
         ...(kind ? { kind } : {}),
       });
