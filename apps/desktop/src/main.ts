@@ -1,3 +1,5 @@
+import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
+import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
@@ -751,6 +753,7 @@ const workspaceFileListings = new WorkspaceFileListingCache();
 function notifyRenderer(scope?: WorkspaceActivityScope): void {
   const activityEvent = workspaceActivityPayload(scope);
   workspaceFileListings.invalidate(activityEvent);
+  invalidateDatasetAddresses(activityEvent);
   invalidateWorkspaceGraphIndexes(activityEvent);
   broadcastWorkspaceActivity({
     windows: BrowserWindow.getAllWindows(),
@@ -3848,6 +3851,7 @@ async function stopAllSitePreviews(): Promise<void> {
   );
 }
 
+let describeDatasetForCli: ((workspaceId: string, datasetId: string) => ReturnType<typeof describeAutomationDataset>) | undefined;
 let datasetForCli: ((input: DatasetRequest, agent: LocalDatasetAgent | null) => Promise<DatasetResult>) | undefined;
 // A window's press path; the CLI's presses take it too.
 let pressNamedForCli: ReturnType<typeof registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>>["pressNamed"] | undefined;
@@ -3964,12 +3968,12 @@ const { startDesktopCliServer } = createDesktopCliServer({
     };
   },
   // A press goes through the press path a window's press takes, under this
-  // workspace's own operation. The dataset is described the way the CLI's
-  // dataset verbs describe it, and the executor opens before it is asked.
+  // workspace's own operation. Internal dataset ids use the same authority
+  // as renderer presses, and the executor opens before it is asked.
   buttons: (workspace) => ({
     press: async (input, by) => {
-      if (!pressNamedForCli || !datasetForCli) throw new Error("Buttons are not ready. Try again.");
-      const describe = datasetForCli;
+      if (!pressNamedForCli || !describeDatasetForCli) throw new Error("Buttons are not ready. Try again.");
+      const describe = describeDatasetForCli;
       let waiting: PressWaitReason | null = null;
       const result = await pressNamedForCli({ ...input, workspaceId: workspace.workspaceId }, {
         by,
@@ -3978,11 +3982,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
           if (!shareViewIsPresent(operation.workspace.shareView)) await operation.state.collectionAutomations.open();
           return await work(operation);
         }),
-        describeDataset: async (datasetId) => {
-          const described = await describe({ action: "describe", workspaceId: workspace.workspaceId, datasetId }, null);
-          if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
-          return described.dataset;
-        },
+        describeDataset: (datasetId) => describe(workspace.workspaceId, datasetId),
         // No window hears how the run settles; the caller follows it in run history.
         watch: (_claimId, reason) => { waiting = reason; },
       });
@@ -5309,6 +5309,8 @@ function registerIpcHandlers(): void {
     },
   });
   datasetForCli = async (input, agent) => DatasetResult.parse(await cliDataset(input.workspaceId, input, agent));
+  describeDatasetForCli = (workspaceId, datasetId) => withPhysicalWorkspaceOperation(workspaceId,
+    operation => describeAutomationDataset(operation, datasetId, datasetDependencies));
   const localDatasetLaunches = new WeakMap<LocalDatasetHost, Promise<LocalAppLaunchHost>>();
   const localPublication = createLocalOwnerAppPublicationHandler<DesktopRendererWorkspaceOperation["workspace"],
     { workspace: DesktopRendererWorkspaceOperation["workspace"]; signal: AbortSignal; scope?: string; assertCurrent(): void }>({
@@ -5473,11 +5475,9 @@ function registerIpcHandlers(): void {
       if (details === null) throw new Error("The workspace engine is not running.");
       return details.objectId;
     },
-    describeDataset: async (sender, workspaceId, datasetId) => {
-      const described = await datasetHandler(sender, { action: "describe", workspaceId, datasetId });
-      if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
-      return described.dataset;
-    },
+    describeDataset: (sender, workspaceId, datasetId) => withRendererWorkspaceOperation(sender, workspaceId,
+      "Collection changes stopped because this window changed workspaces.",
+      operation => describeAutomationDataset(operation, datasetId, datasetDependencies)),
     pressedBy: pressingPerson,
     // A shared view's press goes to the relay it came from, for this
     // person's own grant; the relay checks the grant again.

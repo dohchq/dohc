@@ -7,6 +7,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { fixture, limits } from "../../../../services/sync-relay/src/datasetTestFixture";
 import { createSyncRelayHandler } from "../../../../services/sync-relay/src/server";
+import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { createNamedDatasetData } from "./namedDataset";
 import { createNamedDatasetCacheRegistry } from "./namedDatasetCache";
@@ -63,11 +64,12 @@ it("keeps two named recipients' projected pages isolated over real HTTP, through
           relayResponse: (credentials, path, init) => namedDatasetFetch(signal => fetch(`${origin}${path}`, { ...init, signal, headers: { ...init.headers, authorization: `Bearer ${credentials.token}` } }), init.signal),
         } });
       const workspace = { workspaceId: "local", shareView };
+      const adapter = sourceCaptureAdapter(new Map([["app/dataset.json", JSON.stringify(definition)]]), { workspaceId: "local" });
       const ipc = createDatasetHandler({ flushSourceCapture: async () => {},
         async withWorkspaceOperation(_caller: string, workspaceId, work) { if (workspaceId !== "local") throw Error("Wrong workspace"); return work({ workspace, signal: new AbortController().signal, assertCurrent() {} }); },
-        namedDataForWorkspace: async () => data(), hostForWorkspace: vi.fn(), withAdapter: vi.fn(), createSources: vi.fn(),
+        namedDataForWorkspace: async () => data(), hostForWorkspace: vi.fn(), withAdapter: async (_workspace, work) => work(adapter), createSources: vi.fn(),
       });
-      const read = (input = {}) => ipc("renderer", { action: "invoke", workspaceId: "local", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256,
+      const read = (input = {}) => ipc("renderer", { action: "invoke", workspaceId: "local", datasetPath: "app/dataset.json", revision: 1, revisionSha256: revision.revisionSha256,
         operationId: id(6), input, idempotencyKey: "read" });
       return { data, registry, read };
     };

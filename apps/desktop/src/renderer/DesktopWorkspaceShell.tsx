@@ -2387,8 +2387,8 @@ export function DesktopWorkspaceShell(props: {
     };
   }, [workspaceId, reportShellError, showSuccessNotice]);
   const openDataCollection = useCallback(
-    (datasetId: string, tableId: string) => {
-      openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
+    (datasetPath: string, tableId: string) => {
+      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
     },
     [openVirtualTab],
   );
@@ -2415,9 +2415,9 @@ export function DesktopWorkspaceShell(props: {
   });
   const selectedChatsNav = focusedTabPath && isChatsTabPath(focusedTabPath)
     ? chatEditors.get(focusedTabPath).nav : undefined;
-  const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
+  const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, datasetPath: dataset.datasetPath, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
-    ...dataCollections.map(table => [transactionalCollectionTabPath(table.datasetId, table.tableId), table.name] as const),
+    ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
   const openChatsNavigator = useCallback(() => {
     mutateWb((state) => ({ ...state, chatsVisible: true }));
@@ -5370,7 +5370,7 @@ export function DesktopWorkspaceShell(props: {
             ) : groupDataCollection ? (
               <Suspense fallback={<PanelLoading label="collection" />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
-                  datasetId={groupDataCollection.datasetId} tableId={groupDataCollection.tableId}
+                  datasetPath={groupDataCollection.datasetPath} tableId={groupDataCollection.tableId}
                   onOpenFile={(path) => openFile(path)}
                   onOpenScheduleSettings={() => openSettings("advanced")}
                   owner={!isShareView}
@@ -5964,9 +5964,9 @@ export function DesktopWorkspaceShell(props: {
       {recoveryWorkspaceId === workspaceId && !isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? (
         <ConnectedCollectionRecoveryRestore workspaceId={workspaceId} onError={reportShellError}
           onClose={() => setRecoveryWorkspaceId(null)}
-          onRestored={(datasetId, tableId) => {
+          onRestored={(datasetPath, tableId) => {
             if (workspaceIdRef.current !== workspaceId) return;
-            openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
+            openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
             showSuccessNotice("Restored the Collection. Sharing stays off.");
             void refreshDatasets().catch(error => {
               if (workspaceIdRef.current === workspaceId) reportShellError("Could not refresh Collections.", error);
@@ -5990,7 +5990,7 @@ export function DesktopWorkspaceShell(props: {
             if (ref.kind === "transactional") {
               void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
               void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
-              openVirtualTab(transactionalCollectionTabPath(ref.datasetId, ref.tableId));
+              openVirtualTab(transactionalCollectionTabPath(ref.datasetPath, ref.tableId));
               return;
             }
             const path = ref.path;

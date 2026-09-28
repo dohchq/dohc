@@ -11,6 +11,9 @@ export const DATASET_MAX_TABLES = 64;
 export const DATASET_MAX_FIELDS = 128;
 export const DATASET_MAX_OPERATIONS = 128;
 
+export { parseDatasetPath } from "@dohc/workspace-contracts/dataset-path";
+import { parseDatasetPath } from "@dohc/workspace-contracts/dataset-path";
+
 export type DatasetColumnFieldType = "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "relation" | "attachment";
 export type DatasetFieldType = DatasetColumnFieldType | "button";
 export type DatasetOperationKind = "read" | "create" | "edit" | "delete" | "action";
@@ -110,6 +113,7 @@ export interface AppDatasetBinding {
 }
 /** Public dispatch metadata, derived from the approved revision rather than app source. */
 export interface AppDatasetCapability extends AppDatasetBinding {
+  name: string;
   operations: Array<Pick<DatasetOperation, "operationId" | "name" | "access" | "readOnly"> & { fields?: Array<{ fieldId: string; name: string }> }>;
 }
 /** Grant-filtered metadata for Collection controls and agent discovery. */
@@ -392,7 +396,18 @@ export function parseDatasetRevision(value: unknown): DatasetRevision {
 export function parseDatasetBindingReference(value: unknown): AppDatasetBinding {
   const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds"], ["createFields", "linkReads"]);
   if (row.kind !== "dataset") fail();
-  const result: AppDatasetBinding = { kind: "dataset", datasetId: uuid(row.datasetId), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
+  return { ...parseBindingFields(row), datasetId: uuid(row.datasetId) };
+}
+
+export type AppDatasetReference = Omit<AppDatasetBinding, "datasetId"> & { datasetPath: string };
+export function parseAppDatasetReference(value: unknown): AppDatasetReference {
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetPath", "revision", "revisionSha256", "operationIds"], ["createFields", "linkReads"]);
+  if (row.kind !== "dataset") fail();
+  return { ...parseBindingFields(row), datasetPath: parseDatasetPath(row.datasetPath) };
+}
+
+function parseBindingFields(row: Record<string, unknown>): Omit<AppDatasetBinding, "datasetId"> {
+  const result: Omit<AppDatasetBinding, "datasetId"> = { kind: "dataset", revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
     operationIds: boundedArray(row.operationIds, DATASET_MAX_OPERATIONS, 1).map(uuid) };
   unique(result.operationIds);
   if (Object.hasOwn(row, "linkReads")) {
@@ -418,8 +433,8 @@ export function parseDatasetBindingReference(value: unknown): AppDatasetBinding 
 }
 /** Parse transport metadata. The host must verify it against its approved catalog. */
 export function parseAppDatasetCapability(value: unknown): AppDatasetCapability {
-  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations"], ["createFields", "linkReads"]);
-  const { operations: values, ...reference } = row;
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations", "name"], ["createFields", "linkReads"]);
+  const { operations: values, name, ...reference } = row;
   const binding = parseDatasetBindingReference(reference);
   const operations = boundedArray(values, DATASET_MAX_OPERATIONS, 1).map(value => {
     const item = record(value, ["operationId", "name", "access", "readOnly"], ["fields"]);
@@ -434,7 +449,7 @@ export function parseAppDatasetCapability(value: unknown): AppDatasetCapability 
   unique(operations.map(operation => operation.operationId));
   unique(operations.map(operation => operation.name));
   if (operations.length !== binding.operationIds.length || operations.some(operation => !binding.operationIds.includes(operation.operationId))) fail();
-  return { ...binding, operationIds: [...binding.operationIds].sort(), operations };
+  return { ...binding, name: text(name), operationIds: [...binding.operationIds].sort(), operations };
 }
 
 /** Stable inventory ordering and fixed member ordering for definition hashing. */

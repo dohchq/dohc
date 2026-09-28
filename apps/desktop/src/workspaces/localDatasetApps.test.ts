@@ -47,7 +47,7 @@ async function fixture(agentRun?: () => LocalDatasetAgent | null) {
   const prepared = await host.prepare({ descriptorPath: "data/dataset.json", adapter });
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
   async function prepareApp(appRoot: string, operationIds = [id(6)], fieldIds = [id(4), id(5)]) {
-    const generated = generateDatasetFormSources({ approvedRevision: revision, tableId: id(2), createOperationId: id(6), appRoot, fieldIds });
+    const generated = generateDatasetFormSources({ datasetPath: "data/dataset.json", approvedRevision: revision, tableId: id(2), createOperationId: id(6), appRoot, fieldIds });
     for (const [path, source] of Object.entries(generated.files)) files.set(`${appRoot}/${path}`, source);
     const manifest = JSON.parse(files.get(`${appRoot}/app.publish.json`)!); manifest.dataset.operationIds = operationIds;
     if (!operationIds.includes(id(6))) delete manifest.dataset.createFields;

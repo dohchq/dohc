@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { transform } from "esbuild";
 import { afterEach, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import { parseDatasetDefinition, type AppDatasetBinding } from "@dohc/security-contract/dataset";
+import { parseDatasetDefinition, parseAppDatasetReference, type AppDatasetBinding } from "@dohc/security-contract/dataset";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { createDatasetJournal } from "./journal.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
@@ -25,7 +25,11 @@ async function fixture(app = "fundraiser") {
   const schemaSql = read(app, "schema.sql"), operationSource = read(app, "backend.ts");
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
   const declaration = JSON.parse(read(app, app === "fundraiser" ? "app.publish.json" : "app.binding.json"));
-  const binding: AppDatasetBinding = declaration.dataset ?? declaration;
+  const reference = parseAppDatasetReference(declaration.dataset ?? declaration);
+  expect(reference.datasetPath).toBe(`${app}/dataset.json`);
+  const { datasetPath, ...fields } = reference;
+  const resolved = parseDatasetDefinition(JSON.parse(readFileSync(new URL(`../../../examples/${datasetPath}`, import.meta.url), "utf8")));
+  const binding: AppDatasetBinding = { ...fields, datasetId: resolved.datasetId };
   expect(binding.revisionSha256).toBe(revision.revisionSha256);
   // app.publish.json paths are relative to the app folder; the dataset's private sources stay out of them.
   if (declaration.inputs) expect(declaration.inputs.map((path: string) => `${app}/${path}`)).not.toEqual(expect.arrayContaining([definition.schemaPath, definition.operationsPath]));

@@ -2484,8 +2484,10 @@ describe("dataset agent wakes", () => {
       } });
     const noticeDependencies = { directory: join(f.root, "notices"), session: async () => null, installId: () => "test", onChanged() {} };
     const noticeStore = createNoticeStore(noticeDependencies);
-    const form = generateDatasetFormSources({ approvedRevision: f.approved, tableId: TABLE, createOperationId: CREATE, appRoot: "form", fieldIds: [NOTES] });
-    const adapter = sourceCaptureAdapter(new Map(Object.entries(form.files).map(([path, source]) => [`form/${path}`, source])), { workspaceId: "workspace" });
+    const form = generateDatasetFormSources({ datasetPath: "Budget/dataset.json", approvedRevision: f.approved, tableId: TABLE, createOperationId: CREATE, appRoot: "form", fieldIds: [NOTES] });
+    const sources = new Map(Object.entries(form.files).map(([path, source]) => [`form/${path}`, source]));
+    sources.set("Budget/dataset.json", JSON.stringify(f.approved.definition));
+    const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace" });
     const prepared = await prepareLocalAppPublication({ workspaceId: "workspace", appRoot: "form" }, {
       adapter, compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {},
       async resolveDatasetRevision(binding) { return f.host.approvedArtifacts(binding.datasetId).revision; },

@@ -95,7 +95,7 @@ export function createLocalDatasetApps(options: {
       if (!existing && Number(db.prepare("SELECT count(*) AS count FROM local_dataset_apps").get()!.count) >= 64) throw new Error("Remove an app before approving another one.");
       const authorityRevision = (existing?.authority_revision ?? 0) + 1;
       const storageBytes = Buffer.byteLength(json) + files.reduce((sum, file) => sum + file.bytes.byteLength, 0) + 512;
-      const { operations: _, ...binding } = verified;
+      const { operations: _, name: _name, ...binding } = verified;
       options.bind(verified.datasetId, publicationId, binding, () => {
         signal.throwIfAborted(); options.assertCurrent();
         if (existing) {
