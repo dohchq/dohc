@@ -546,9 +546,9 @@ describe("CLI socket server", () => {
     expect(writeFiles.mock.calls.flatMap(([files]) => files).every(file => file.path.startsWith("app/"))).toBe(true);
     await expect(stat(join(cwd, "site/index.html"))).resolves.toBeDefined();
     await expect(stat(join(cwd, "people.sqlite"))).resolves.toBeDefined();
-    writeFiles.mockResolvedValueOnce({ ok: false, written: ["app/partial/index.html"], path: "app/partial/styles.css", reason: "Disk full. Free space." });
+    writeFiles.mockResolvedValueOnce({ ok: false, written: ["app/partial/index.html"], path: "app/partial/styles.css", reason: "Cannot write app/partial/styles.css: disk full. Free space." });
     expect(await createApp(ctx, { appRoot: "partial" })).toEqual({
-      ok: false, written: ["partial/index.html"], path: "partial/styles.css", reason: "Disk full. Free space.",
+      ok: false, written: ["partial/index.html"], path: "partial/styles.css", reason: "Cannot write partial/styles.css: disk full. Free space.",
     });
   });
 

@@ -2335,7 +2335,9 @@ async function dispatch(
         return {
           ...result,
           ...(result.written !== undefined ? { written: result.written.map(callerPath) } : {}),
-          ...(result.path !== undefined ? { path: callerPath(result.path) } : {}),
+          ...(result.path !== undefined
+            ? { path: callerPath(result.path), reason: result.reason.replaceAll(result.path, callerPath(result.path)) }
+            : {}),
         };
       } catch (error) { return mcpFailure(error, "dohc could not write the files. Check that the files are writable."); }
     }
