@@ -1,7 +1,7 @@
 import { asRecord } from "@dohc/workspace-core/records";
 
 export function shareLinkSummary(
-  metadata: { access?: unknown; effectiveSelector?: unknown },
+  metadata: { access?: unknown; effectiveSelector?: unknown; subjectName?: unknown },
   liveEditingAvailable = true,
 ) {
   const selector = asRecord(metadata.effectiveSelector);
@@ -28,6 +28,7 @@ export function shareLinkSummary(
       ? "This link is limited to a pinned version."
       : "The included version is unavailable.";
   return {
+    subject: typeof metadata.subjectName === "string" ? metadata.subjectName : "Shared files",
     permissions,
     included: `${scope} ${version}`,
     history: "You can read retained history of files that remain in this share. " +

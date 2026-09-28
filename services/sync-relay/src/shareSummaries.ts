@@ -28,6 +28,7 @@ function storedSelectorKind(
 }
 
 export function createShareSummaries(
+  labels: (shareId: string) => import("@dohc/security-contract/share-labels").ShareLabels,
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
 ) {
@@ -54,6 +55,8 @@ export function createShareSummaries(
         : null;
     return {
       shareId: share.shareId,
+      ...labels(share.shareId),
+      sharerName: null,
       // An unreadable row says so. It does not get a stand-in scope: empty
       // paths with no version would claim the entire live workspace, on a row
       // whose own reads answer 404. The row stays listed because it is the
@@ -105,6 +108,7 @@ export function createShareSummaries(
     row: SyncRelayShareWithGrantRow,
     granterEmail: string | null,
     genericChatWritable: boolean,
+    sharerName: string | null = granterEmail,
   ): Record<string, unknown> => {
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
@@ -113,6 +117,7 @@ export function createShareSummaries(
       ...shareSummaryBase(row),
       granterUserId: row.share.granterUserId,
       granterEmail,
+      sharerName,
       genericChatWritable,
     };
   };
@@ -210,6 +215,8 @@ export function createShareSummaries(
     return {
       shareId: share.shareId,
       grantId: grant.grantId,
+      ...labels(share.shareId),
+      sharerName: null,
       selector,
       ...(selector
         ? {}

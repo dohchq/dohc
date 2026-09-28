@@ -279,6 +279,8 @@ export const WorkspaceSummary = z.object({
       // live-share action (refresh, dismiss) is addressed by share id, so a
       // marker that cannot name itself cannot be presented as a live share.
       shareId: OPAQUE_ID.optional(),
+      subjectName: z.string().max(320).nullable().optional(),
+      sharerName: z.string().max(320).nullable().optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
       // The pinned level. Absent only when `damaged` says the stored
       // grant could not be read. The banner states the level; it never
@@ -3251,6 +3253,8 @@ const RelayShareDamagedState = z.object({
 });
 
 const RelayShareGrantedRowBase = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   // The workspace coordinate. This device need not have that workspace in
   // its local registry.
@@ -3277,6 +3281,8 @@ export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 // relay deliberately omits the granter's workspace id; the selector and
 // granter identity are all a recipient ever sees.
 const RelayShareReceivedRowBase = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   granterEmail: EMAIL_STRING.nullable(),
   genericChatWritable: z.boolean(),
@@ -4343,6 +4349,8 @@ export const ChatChannelShareGrantRow = z.object({
 export type ChatChannelShareGrantRow = z.infer<typeof ChatChannelShareGrantRow>;
 
 export const ChatChannelShareReceivedRow = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   channelWireId: CHANNEL_WIRE_ID,
   access: ChatShareAccess,
