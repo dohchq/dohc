@@ -4588,8 +4588,9 @@ export type ListAutomationTargetsResult = { collections: CollectionAutomationTar
 
 // The builder checks a draft the way saving would: what the file contract
 // refuses, the syntax error of each formula and message in it, at its JSON
-// Pointer from the automation, and why dohc would not run it in its
-// Collection, which does not stop a save. Nothing runs.
+// Pointer from the automation, why dohc would not run it in its
+// Collection, and the code files its steps name that the Collection's
+// folder lacks. Neither stops a save. Nothing runs.
 export const CheckCollectionAutomationPayload = z.object({
   workspaceId: WORKSPACE_ID,
   collectionPath: PATH_STRING,
@@ -4600,6 +4601,8 @@ export type CheckCollectionAutomationResult = {
   diagnostics: AutomationDiagnostic[];
   formulaProblems: Array<{ path: string; problem: string } | { path: string; code: AutomationDiagnostic["code"] }>;
   cannotRun: string | null;
+  /** Each code file a step names, relative to the Collection's folder, that dohc cannot find. */
+  missingFiles: string[];
 };
 
 // Undo for a finished run, as the person who clicked it. `deletes` is null

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { parseExpressionAt, tokenizer, tokTypes, type Expression } from "acorn";
+import { parse, parseExpressionAt, tokenizer, tokTypes, type Expression } from "acorn";
 import {
   AUTOMATION_LIMITS,
   type AutomationFormula,
@@ -258,7 +258,11 @@ export function formulaProblems(automation: Automation): FormulaProblem[] {
         steps(`${at}/do`, step.do);
         steps(`${at}/otherwise`, step.otherwise);
         break;
-      case "run":
+      case "run": {
+        const problem = step.code.trim() === "" ? null : codeProblem(step.code);
+        if (problem !== null) problems.push({ path: `${at}/run`, problem });
+        break;
+      }
       case "run-file":
         break;
       default: {
@@ -277,6 +281,30 @@ export function formulaProblems(automation: Automation): FormulaProblem[] {
   if (automation.if !== null) add("/if", automation.if);
   steps("/do", automation.do);
   return problems;
+}
+
+/**
+ * Why a code step's source does not parse as the function the guest builds
+ * from it, a strict body with the parameter ctx, or null when it does. It
+ * only parses; the code never runs.
+ */
+function codeProblem(source: string): string | null {
+  try {
+    // The guest's body starts with "use strict" on its own line, so a line here is one less.
+    const wrapped = `(function (ctx) {"use strict";\n${source}\n})`;
+    const [statement, ...more] = parse(wrapped, { ecmaVersion: "latest", sourceType: "script" }).body;
+    // The one function must hold the whole source, so the source cannot close it early and add more.
+    const whole = more.length === 0 && statement?.type === "ExpressionStatement" &&
+      statement.expression.type === "FunctionExpression" && statement.expression.end === wrapped.length - 1;
+    return whole ? null : "The code ends the step's function early. Remove the extra closing brace.";
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) return "This is not code dohc can read.";
+    // An error past the source's end, such as a block it never closes, is on its last line.
+    const line = "loc" in error && typeof error.loc === "object" && error.loc !== null && "line" in error.loc && typeof error.loc.line === "number"
+      ? Math.min(error.loc.line - 1, source.split(/\r\n?|\n|\u2028|\u2029/u).length) : null;
+    const message = error.message.replace(/\s*\(\d+:\d+\)$/u, "");
+    return line === null || line < 1 ? `${message}.` : `${message} on line ${line}.`;
+  }
 }
 
 /** True when `source` is exactly one JavaScript expression, so it can sit inside another. */

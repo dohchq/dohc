@@ -161,14 +161,18 @@ export function registerCollectionAutomationsIpc<
         const written = writeAutomationsFile([{ status: "valid", automation: input.automation }]);
         diagnostics = written.status === "refused" ? written.diagnostics : [];
       } catch {
-        return { diagnostics: [{ code: "changed-on-reread", path: "/automations/0" }], formulaProblems: [], cannotRun: null };
+        return { diagnostics: [{ code: "changed-on-reread", path: "/automations/0" }], formulaProblems: [], cannotRun: null, missingFiles: [] };
       }
       // Whether it would run needs a readable automation, and says nothing in a shared view, whose automations run elsewhere.
       // A status dohc cannot give, as before the executor opens, leaves the syntax and file checks standing.
       const cannotRun = diagnostics.length > 0 || dependencies.sharedViewOf(input.workspaceId)
         ? null
         : await operation.state.collectionAutomations.draftCannotRun(input.collectionPath, input.automation).catch(() => null);
-      return { diagnostics, formulaProblems: formulaProblems(input.automation), cannotRun };
+      // A code file's path passed the file contract's relative-path check; main only looks for it, as a run would.
+      const missingFiles = dependencies.sharedViewOf(input.workspaceId)
+        ? []
+        : await operation.state.collectionAutomations.missingCodeFiles(input.collectionPath, input.automation).catch(() => []);
+      return { diagnostics, formulaProblems: formulaProblems(input.automation), cannotRun, missingFiles };
     });
   });
 
