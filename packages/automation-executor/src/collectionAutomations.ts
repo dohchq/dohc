@@ -88,7 +88,7 @@ import {
 } from "./datasetAutomationPlan";
 import { datasetPresser, datasetRecordExists, runDatasetAutomation, type DatasetRunClaim, type DatasetRunHost } from "./datasetAutomationRun";
 import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
-import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
+import { nextReachVerdict, reachVerdictKey, sameReachVerdict, type StoredReachVerdict } from "./reachVerdicts";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
 import type { GroupMessagesSkipped } from "./groupMessagesNotice";
 import {
@@ -1420,9 +1420,12 @@ export class CollectionAutomations {
         const steps = this.reachSteps(collectionPath, automation);
         checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps }).forEach((reach, index) => {
           const step = reachStepId(steps[index]!, index);
+          // A former link's evidence is part of what Allow answers now.
+          const accounted = reach.allowed ? (reach.formerStops ?? []).map((stop) => stop.evidence).sort() : [];
           this.verdicts.set(reachVerdictKey(automationId, hash, step), {
             automationId, definitionHash: hash, step,
             ...(reach.allowed ? { verdict: "held", stoppedFor: null } : { verdict: "stopped", stoppedFor: reach.person ?? null }),
+            ...(accounted.length === 0 ? {} : { accountedLinks: accounted }),
             seq: ++this.verdictSeq,
           });
         });
@@ -2830,7 +2833,7 @@ export class CollectionAutomations {
           const previous = this.verdicts.get(key);
           const next = nextReachVerdict(previous, reach, automation.enabled);
           if (next.verdict === "held") held = true;
-          if (previous?.verdict === next.verdict && previous.stoppedFor === next.stoppedFor && previous.narrowed === next.narrowed) return;
+          if (sameReachVerdict(previous, next)) return;
           this.verdicts.set(key, { automationId, definitionHash: hash, step, ...next, seq: ++this.verdictSeq });
         });
       }
@@ -3385,7 +3388,7 @@ export class CollectionAutomations {
       const key = reachVerdictKey(input.automationId, input.definitionHash, step, id);
       const previous = this.verdicts.get(key);
       const next = nextReachVerdict(previous, reach, true);
-      if (previous?.verdict !== next.verdict || previous.stoppedFor !== next.stoppedFor) {
+      if (!sameReachVerdict(previous, next)) {
         this.verdicts.set(key, {
           automationId: input.automationId, definitionHash: input.definitionHash, step,
           recipient: { id, name, action }, ...next, seq: ++this.verdictSeq,

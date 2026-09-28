@@ -6,7 +6,7 @@ import {
   SHARE_ACCESS_VALUES,
 } from "@dohc/security-contract/share-selector";
 import type { RegistryEntry } from "../workspaces/registryStore";
-import type { ReachRoster, RosterGrant, RosterProblem } from "@dohc/automation-executor/automation-reach";
+import type { FormerLinkEditor, ReachRoster, RosterGrant, RosterProblem } from "@dohc/automation-executor/automation-reach";
 
 // The share roster: the grants the owner gave on one workspace, as the relay
 // last listed them. Grants live only on the relay, and the reach check
@@ -57,20 +57,40 @@ const FileGrant = z.object({
     .refine((selector) => selector.paths.length > 0 || selector.versionId !== null),
   access: z.enum(SHARE_ACCESS_VALUES),
 });
-const ListedGrantSchema = z
-  .union([GroupGrant, ChatGrant, FileGrant])
-  .refine((grant) => grant.recipientUserId !== null || grant.recipientEmail !== null);
+const GrantSchema = z.union([GroupGrant, ChatGrant, FileGrant]);
+const ListedGrantSchema = GrantSchema.refine((grant) => grant.recipientUserId !== null || grant.recipientEmail !== null);
 export type ListedGrant = z.infer<typeof ListedGrantSchema>;
+
+// A share link's own grant. It names nobody: whoever holds the link is one
+// editor, the link. `ended` is a revoked link, kept only when it wrote a
+// Collection's automations.yaml directly (ADR 0013), so the reach check can
+// still hold what it may have written. `automationsGeneration` is the newest
+// grant generation it wrote one under, or null.
+const GENERATION = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
+const ListedLinkSchema = z.object({
+  grant: GrantSchema.refine((grant) => grant.recipientUserId === null && grant.recipientEmail === null),
+  ended: z.boolean(),
+  automationsGeneration: GENERATION.nullable(),
+}).refine((link) => link.automationsGeneration === null || coversFiles(link.grant));
+
+// A grant that wrote automations covered files by path. One that says it
+// wrote them and covers none, such as a chat grant, is damaged: read as
+// covering nothing, it would hold nothing.
+function coversFiles(grant: z.infer<typeof GrantSchema>): boolean {
+  return (rosterGrantOf(grant).files?.paths.length ?? 0) > 0;
+}
+export type ListedLink = z.infer<typeof ListedLinkSchema>;
 
 const ProblemSchema = z.union([
   z.object({ kind: z.literal("damaged-share"), recipientEmail: z.string().min(1).max(320).nullable() }),
   z.object({ kind: z.literal("damaged-link") }),
   z.object({ kind: z.literal("unusable-listing") }),
+  z.object({ kind: z.literal("outdated-server") }),
 ]);
 
-/** What one listing found: the grants, or why dohc cannot use them. */
+/** What one listing found: the grants and the share links, or why dohc cannot use them. */
 export type RosterListing =
-  | { grants: ListedGrant[] }
+  | { grants: ListedGrant[]; links: ListedLink[] }
   | { grants: null; problem: Exclude<RosterProblem, { kind: "unchecked" }> };
 
 /**
@@ -82,8 +102,10 @@ export type RosterListing =
  */
 export type ShareRoster = RosterListing & { version: number; pulledAfter?: true };
 
+// A copy from before links were listed has no `links`, so it reads as
+// unchecked rather than as a workspace with no links.
 const StoredRoster = z.union([
-  z.object({ grants: z.array(ListedGrantSchema) }),
+  z.object({ grants: z.array(ListedGrantSchema), links: z.array(ListedLinkSchema) }),
   z.object({ grants: z.null(), problem: ProblemSchema }),
 ]);
 
@@ -133,8 +155,11 @@ const RecipientEmail = z.object({ recipientEmail: z.string().min(1).max(320) });
 const RowWorkspace = z.object({ workspaceId: z.string() });
 const RowState = z.object({ revokedAtMs: z.number().nullable(), principalKind: z.enum(["user", "email", "link"]) });
 const LinkRow = z.object({
+  grantId: z.unknown(),
   status: z.enum(["active", "revoked"]),
   selector: z.unknown(),
+  access: z.unknown(),
+  automationsGeneration: GENERATION.nullable(),
   dependents: z.array(z.object({ grantId: z.unknown(), recipientUserId: z.unknown(), recipientEmail: z.unknown(), access: z.unknown() })),
 });
 
@@ -143,7 +168,7 @@ const LinkPage = z.object({ links: z.array(z.unknown()), nextCursor: z.string().
 // The owner's grants on this workspace from GET /sync/shares. Rows for other
 // workspaces are skipped before anything else is read, so their damage cannot
 // hide this workspace's grants.
-function grantedListing(workspaceId: string, shares: unknown): RosterListing {
+function grantedListing(workspaceId: string, shares: unknown): { grants: ListedGrant[] } | Extract<RosterListing, { grants: null }> {
   const listing = z.object({ granted: z.array(z.unknown()) }).safeParse(shares);
   if (!listing.success) return { grants: null, problem: { kind: "unusable-listing" } };
   const grants: ListedGrant[] = [];
@@ -163,31 +188,55 @@ function grantedListing(workspaceId: string, shares: unknown): RosterListing {
   return { grants };
 }
 
-// The dependents on one page of the owner's share links.
+// One page of the owner's share links: each link that can edit files or
+// wrote automations directly, and the dependents of every active link. A link that
+// can only view never edits an automation and reaches nothing for one, so
+// leaving it out keeps a workspace with many such links cheap to check.
 function linkListing(links: readonly unknown[]): RosterListing {
   const grants: ListedGrant[] = [];
+  const listed: ListedLink[] = [];
+  const damaged = { grants: null, problem: { kind: "damaged-link" } } as const;
   for (const value of links) {
+    // A relay from before links reported their automations writes leaves
+    // the field out. Ending the link would not help; updating the relay does.
+    if (value !== null && typeof value === "object" && !("automationsGeneration" in value)) {
+      return { grants: null, problem: { kind: "outdated-server" } };
+    }
     const link = LinkRow.safeParse(value);
-    if (!link.success) return { grants: null, problem: { kind: "damaged-link" } };
-    if (link.data.status !== "active") continue;
+    if (!link.success) return damaged;
+    const ended = link.data.status !== "active";
+    const wroteAutomations = link.data.automationsGeneration !== null;
+    if (ended && !wroteAutomations) continue;
+    const own = ListedLinkSchema.safeParse({
+      grant: { grantId: link.data.grantId, recipientUserId: null, recipientEmail: null, selector: link.data.selector, access: link.data.access },
+      ended,
+      automationsGeneration: link.data.automationsGeneration,
+    });
+    if (!own.success) return damaged;
+    if (wroteAutomations || (!ended && rosterGrantOf(own.data.grant).files?.access === "edit")) listed.push(own.data);
+    if (ended) continue;
     for (const dependent of link.data.dependents) {
       const grant = ListedGrantSchema.safeParse({ ...dependent, selector: link.data.selector });
-      if (!grant.success) return { grants: null, problem: { kind: "damaged-link" } };
+      if (!grant.success) return damaged;
       grants.push(grant.data);
     }
   }
-  return { grants };
+  return { grants, links: listed };
 }
+
+const byGrantId = (left: { grantId: string }, right: { grantId: string }) =>
+  left.grantId < right.grantId ? -1 : left.grantId > right.grantId ? 1 : 0;
 
 /**
  * Lists the roster for one workspace from the relay: the owner's granted
  * rows, and the dependents of the owner's share links. `get` sends one GET
  * with the owner's session and throws only when no response arrives.
  *
- * Link holders are not on the roster: they cannot change files other than
- * live documents (ADR 0002). A dependent is different. It is a person who
- * opened a link in dohc, and the relay lets a dependent with Edit send change
- * proposals, so the roster lists dependents like named grants.
+ * Every active share link is on the roster, as one editor keyed by its
+ * grant, even before anyone opens it: an Edit link can change a Collection's
+ * own files (ADR 0013). A dependent is a person who opened a link in dohc.
+ * The relay lets a dependent with Edit send change proposals, so the roster
+ * lists dependents like named grants, apart from their link.
  *
  * Each answer is read as it arrives. Damage or a refusal decides the listing
  * at once, whatever happens to the requests after it.
@@ -219,6 +268,7 @@ export async function listRosterGrants(
   const granted = grantedListing(workspaceId, shares.body);
   if (granted.grants === null) return answered(granted);
   const grants = granted.grants;
+  const links: ListedLink[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
   for (let page = 0; ; page += 1) {
@@ -231,12 +281,16 @@ export async function listRosterGrants(
     const linked = linkListing(body.data.links);
     if (linked.grants === null) return answered(linked);
     grants.push(...linked.grants);
+    links.push(...linked.links);
     cursor = body.data.nextCursor;
     if (cursor === undefined) break;
     if (cursors.has(cursor)) return UNUSABLE;
     cursors.add(cursor);
   }
-  return answered({ grants: grants.sort((left, right) => (left.grantId < right.grantId ? -1 : left.grantId > right.grantId ? 1 : 0)) });
+  return answered({
+    grants: grants.sort(byGrantId),
+    links: links.sort((left, right) => byGrantId(left.grant, right.grant)),
+  });
 }
 
 /**
@@ -261,7 +315,23 @@ export function reachRosterFor(input: {
   const stored = StoredRoster.safeParse(input.latest ?? entry.shareRoster);
   if (!stored.success) return { kind: "unknown", problem: { kind: "unchecked", next: input.next } };
   if (stored.data.grants === null) return { kind: "unknown", problem: stored.data.problem };
-  return { kind: "owner", ownerUserId: entry.remote.ownerUserId, grants: stored.data.grants.map(rosterGrantOf) };
+  const links = stored.data.links;
+  return {
+    kind: "owner",
+    ownerUserId: entry.remote.ownerUserId,
+    grants: [...stored.data.grants, ...links.filter((link) => !link.ended).map((link) => link.grant)].map(rosterGrantOf),
+    formerLinks: links.flatMap(formerLinkOf),
+  };
+}
+
+// A link that wrote automations directly and can no longer edit files, with
+// the files it covered.
+function formerLinkOf(link: ListedLink): FormerLinkEditor[] {
+  const generation = link.automationsGeneration;
+  if (generation === null) return [];
+  const { files } = rosterGrantOf(link.grant);
+  if (files === null || (!link.ended && files.access === "edit")) return [];
+  return [{ grantId: link.grant.grantId, generation, files: { paths: files.paths, versionId: files.versionId } }];
 }
 
 interface RosterState {

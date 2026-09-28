@@ -364,6 +364,11 @@ export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
   dependents: SyncRelayShareGrantRow[];
   lastUsedAtMs: number | null;
   urlIssuedAtMs: number | null;
+  // The newest grant generation at which the link wrote a Collection's
+  // automations.yaml directly (ADR 0013), or null when it never did. The
+  // owner's reach check keeps such a link as a former editor once it ends,
+  // and a later editing period writes under a newer generation.
+  automationsGeneration: number | null;
 }
 
 export interface SyncRelayLinkInventoryCursor {

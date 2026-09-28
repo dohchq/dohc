@@ -1565,6 +1565,89 @@ describe("Collection automations", () => {
     expect([...w.records.values()].filter((record) => record.collection === "Budget")).toHaveLength(1);
   });
 
+  it("holds a step first seen after a link that could have written it was revoked, until a current editor confirms it", async () => {
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+    ].join("\n") } });
+    // An Edit link on Trip wrote automations directly, and was revoked before this
+    // computer ever checked its automations: the roster has no editor now.
+    w.setRoster({
+      kind: "owner", ownerUserId: "user-owner", grants: [],
+      formerLinks: [{ grantId: "g-link", generation: 1, files: { paths: ["Trip"], versionId: null } }],
+    });
+    await w.executor.open();
+    const listed = await w.executor.automationsIn("Trip");
+    expect(listed).toMatchObject({
+      automations: [{ reach: { kind: "checked", steps: [{ verdict: "held", stoppedFor: "Anyone who had your share link to Trip" }] } }],
+    });
+    const trip = w.addRecord("Trip", "day-one", { Status: "Done" });
+    const claim = w.claim("collection:Trip#spend", trip);
+    const drained = w.idleDrains();
+    w.executor.notifyClaimed();
+    await w.until(() => w.idleDrains() > drained);
+    expect(claim.state).toBe("running");
+    expect([...w.records.values()].filter((record) => record.collection === "Budget")).toEqual([]);
+
+    const summary = (listed as { automations: Array<{ definitionHash: string; reach: { steps: Array<{ seq: number }> } }> }).automations[0]!;
+    await expect(w.executor.confirmReach({
+      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: "0", seq: summary.reach.steps[0]!.seq,
+    })).resolves.toBe("confirmed");
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect([...w.records.values()].filter((record) => record.collection === "Budget")).toHaveLength(1);
+  });
+
+  it("holds an allowed step once per ended editing period of a link that could have switched it on, and not again after Allow or a restart", async () => {
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+    ].join("\n") } });
+    await w.executor.open();
+    const steps = async (executor = w.executor) => {
+      const listed = await executor.automationsIn("Trip");
+      return (listed as { automations: Array<{ definitionHash: string; reach: { steps: Array<{ verdict: string; seq: number }> } }> }).automations[0]!;
+    };
+    expect((await steps()).reach.steps).toMatchObject([{ verdict: "allowed" }]);
+
+    // The next listing shows an Edit link on Trip that wrote automations directly and was
+    // revoked before this computer listed it as an editor.
+    w.setRoster({
+      kind: "owner", ownerUserId: "user-owner", grants: [],
+      formerLinks: [{ grantId: "g-link", generation: 1, files: { paths: ["Trip"], versionId: null } }],
+    });
+    const before = w.holdsChanged();
+    w.executor.rosterChanged();
+    await w.until(() => w.holdsChanged() > before);
+    const held = await steps();
+    expect(held.reach.steps).toMatchObject([{ verdict: "held", stoppedFor: "Anyone who had your share link to Trip" }]);
+    await expect(w.executor.confirmReach({
+      automationId: "collection:Trip#spend", definitionHash: held.definitionHash, step: "0", seq: held.reach.steps[0]!.seq,
+    })).resolves.toBe("confirmed");
+
+    // Allow answered for that link: the next roster check and a restart keep it.
+    const restarted = w.makeExecutor();
+    await restarted.open();
+    expect(restarted.holds()).toEqual([]);
+    expect((await steps(restarted)).reach.steps).toMatchObject([{ verdict: "allowed" }]);
+    await restarted.dispose();
+
+    // The link had Edit again, wrote automations under a newer generation,
+    // and ended before this computer listed it: that is new evidence.
+    w.setRoster({
+      kind: "owner", ownerUserId: "user-owner", grants: [],
+      formerLinks: [{ grantId: "g-link", generation: 2, files: { paths: ["Trip"], versionId: null } }],
+    });
+    const again = w.holdsChanged();
+    w.executor.rosterChanged();
+    await w.until(() => w.holdsChanged() > again);
+    expect((await steps()).reach.steps).toMatchObject([{ verdict: "held", stoppedFor: "Anyone who had your share link to Trip" }]);
+  });
+
   it("clears the Allow notice when a held step stops again", async () => {
     const spend = "  - id: spend\n    name: Spend\n    when: {field-changed: Status}\n    do: [{add-record: {Amount: 5}, collection: Budget}]\n";
     const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: spend } });
