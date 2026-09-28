@@ -745,6 +745,35 @@ describe("over the HTTP adapter", () => {
   });
 });
 
+// The owner's reach check keeps a revoked recipient who wrote automations as
+// a former editor, so the owner's share listing says who did, and under
+// which generation, after the grant ends too.
+describe("a grant's automations writes in the owner's share listing", () => {
+  async function grantedRow(r: Relay): Promise<Record<string, unknown>> {
+    const response = await r.h(request(OWNER, "/sync/shares"));
+    expect(response.status).toBe(200);
+    const granted = (await json(response)).granted as Array<Record<string, unknown>>;
+    return granted.find((row) => row.grantId === r.grantId)!;
+  }
+
+  it("names the generation a recipient last wrote automations under, before and after the owner revokes them", async () => {
+    const r = await relay();
+    expect(await grantedRow(r)).toMatchObject({ automationsGeneration: null });
+    await upload(r, SCHEMA_TWO);
+    expect((await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)], { submitId: "schema" })).status).toBe(200);
+    expect(await grantedRow(r), "a schema is not an automations file").toMatchObject({ automationsGeneration: null });
+
+    const one = automations(STAMP);
+    await upload(r, one);
+    expect((await write(r, [create(`${PACKING}/automations.yaml`, one)], { submitId: "automations" })).status).toBe(200);
+    expect(await grantedRow(r)).toMatchObject({ revokedAtMs: null, automationsGeneration: 1 });
+
+    // The owner revokes them from another computer.
+    expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: r.grantId, revokedAtMs: CLOCK }).ok).toBe(true);
+    expect(await grantedRow(r)).toMatchObject({ revokedAtMs: CLOCK, automationsGeneration: 1 });
+  });
+});
+
 describe("the owner's read of a grant's direct writes", () => {
   async function ownerRead(r: Relay, grantId: string, query = "", as = OWNER): Promise<Response> {
     return await r.h(request(as, `/sync/${WORKSPACE}/collection-writes/${grantId}${query}`));

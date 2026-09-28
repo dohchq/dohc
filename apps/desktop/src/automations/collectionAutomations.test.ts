@@ -1576,7 +1576,7 @@ describe("Collection automations", () => {
     // computer ever checked its automations: the roster has no editor now.
     w.setRoster({
       kind: "owner", ownerUserId: "user-owner", grants: [],
-      formerLinks: [{ grantId: "g-link", generation: 1, files: { paths: ["Trip"], versionId: null } }],
+      formerEditors: [{ grantId: "g-link", generation: 1, holder: "link", recipientEmail: null, files: { paths: ["Trip"], versionId: null } }],
     });
     await w.executor.open();
     const listed = await w.executor.automationsIn("Trip");
@@ -1618,7 +1618,7 @@ describe("Collection automations", () => {
     // revoked before this computer listed it as an editor.
     w.setRoster({
       kind: "owner", ownerUserId: "user-owner", grants: [],
-      formerLinks: [{ grantId: "g-link", generation: 1, files: { paths: ["Trip"], versionId: null } }],
+      formerEditors: [{ grantId: "g-link", generation: 1, holder: "link", recipientEmail: null, files: { paths: ["Trip"], versionId: null } }],
     });
     const before = w.holdsChanged();
     w.executor.rosterChanged();
@@ -1640,12 +1640,38 @@ describe("Collection automations", () => {
     // and ended before this computer listed it: that is new evidence.
     w.setRoster({
       kind: "owner", ownerUserId: "user-owner", grants: [],
-      formerLinks: [{ grantId: "g-link", generation: 2, files: { paths: ["Trip"], versionId: null } }],
+      formerEditors: [{ grantId: "g-link", generation: 2, holder: "link", recipientEmail: null, files: { paths: ["Trip"], versionId: null } }],
     });
     const again = w.holdsChanged();
     w.executor.rosterChanged();
     await w.until(() => w.holdsChanged() > again);
     expect((await steps()).reach.steps).toMatchObject([{ verdict: "held", stoppedFor: "Anyone who had your share link to Trip" }]);
+  });
+
+  it("holds a step first seen after the owner revoked, from another computer, the recipient who wrote it", async () => {
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+    ].join("\n") } });
+    // Bob wrote Trip's automations directly. The owner revoked him on another
+    // computer, and this computer lists the roster before it ever saw him.
+    w.setRoster({
+      kind: "owner", ownerUserId: "user-owner", grants: [],
+      formerEditors: [{ grantId: "g-bob", generation: 1, holder: "person", recipientEmail: "bob@dohc.test", files: { paths: ["Trip"], versionId: null } }],
+    });
+    await w.executor.open();
+    expect(await w.executor.automationsIn("Trip")).toMatchObject({
+      automations: [{ reach: { kind: "checked", steps: [{ verdict: "held", stoppedFor: "bob@dohc.test" }] } }],
+    });
+    const trip = w.addRecord("Trip", "day-one", { Status: "Done" });
+    const claim = w.claim("collection:Trip#spend", trip);
+    const drained = w.idleDrains();
+    w.executor.notifyClaimed();
+    await w.until(() => w.idleDrains() > drained);
+    expect(claim.state).toBe("running");
+    expect([...w.records.values()].filter((record) => record.collection === "Budget")).toEqual([]);
   });
 
   it("clears the Allow notice when a held step stops again", async () => {

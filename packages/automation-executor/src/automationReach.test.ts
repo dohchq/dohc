@@ -8,6 +8,7 @@ import {
   type ReachCollection,
   type ReachDatasetOperation,
   type ReachRoster,
+  type FormerEditor,
   type ReachStep,
   type RosterGrant,
 } from "./automationReach";
@@ -318,8 +319,8 @@ describe("share links as editors", () => {
 describe("a link that wrote automations directly and stopped editing", () => {
   const formerTrip = { grantId: "g-gone", generation: 1, files: { paths: ["Trip"], versionId: null } };
 
-  function withFormer(formerLinks: NonNullable<Extract<ReachRoster, { kind: "owner" }>["formerLinks"]>, ...grants: RosterGrant[]): ReachRoster {
-    return { kind: "owner", ownerUserId: OWNER, grants, formerLinks };
+  function withFormer(formerLinks: ReadonlyArray<Omit<FormerEditor, "recipientEmail" | "holder">>, ...grants: RosterGrant[]): ReachRoster {
+    return { kind: "owner", ownerUserId: OWNER, grants, formerEditors: formerLinks.map((link) => ({ ...link, holder: "link", recipientEmail: null })) };
   }
 
   const stopsFor = (...links: Array<[string, string]>) =>
@@ -344,6 +345,26 @@ describe("a link that wrote automations directly and stopped editing", () => {
   it("leaves a step a current editor stops stopped, for that editor", () => {
     expect(check(withFormer([formerTrip], grant(ana, { paths: ["Trip"], access: "edit" })), change(budget)))
       .toEqual(stopped("ana@dohc.test cannot edit Budget."));
+  });
+
+  it("names a former named editor by email, on its own, apart from the same person's current grants", () => {
+    const roster: ReachRoster = {
+      kind: "owner", ownerUserId: OWNER,
+      // Ana still edits Budget through another grant.
+      grants: [grant(ana, { paths: ["Budget"], access: "edit" })],
+      formerEditors: [{ grantId: "g-ana-trip", generation: 2, holder: "person", recipientEmail: "ana@dohc.test", files: { paths: ["Trip"], versionId: null } }],
+    };
+    expect(check(roster, change(budget), trip))
+      .toEqual({ allowed: true, formerStops: [{ evidence: "g-ana-trip#2", name: "ana@dohc.test" }] });
+  });
+
+  it("names a former person with no known email as a person, never as a link", () => {
+    const roster: ReachRoster = {
+      kind: "owner", ownerUserId: OWNER, grants: [],
+      formerEditors: [{ grantId: "g-cy", generation: 1, holder: "person", recipientEmail: null, files: { paths: ["Trip"], versionId: null } }],
+    };
+    expect(check(roster, change(budget), trip))
+      .toEqual({ allowed: true, formerStops: [{ evidence: "g-cy#1", name: "Someone you shared Trip with" }] });
   });
 
   it("checks each former link on its own, not a combination of them", () => {

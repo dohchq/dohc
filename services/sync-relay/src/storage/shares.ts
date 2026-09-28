@@ -8,6 +8,7 @@ import {
   type ShareGrantTransitionResult,
   type SyncRelayLinkSessionRow,
   type SyncRelayShareWithGrantRow,
+  type SyncRelayGrantedShareRow,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
   type SyncRelayLinkInventoryRow,
@@ -706,22 +707,39 @@ export function listActiveShareGrantsForRecipient(
       .map(rowToShareGrantRow);
   }
 
-export function listSharesGrantedBy(storage: StorageContext, granterUserId: string): SyncRelayShareWithGrantRow[] {
+export function listSharesGrantedBy(storage: StorageContext, granterUserId: string): SyncRelayGrantedShareRow[] {
     return storage.db
       .prepare(
         `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
                 s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
                 g.principal_kind, g.principal_user_id, g.principal_email, g.access,
                 g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
-                g.revoked_at_ms, g.parent_grant_id
+                g.revoked_at_ms, g.parent_grant_id,
+                ${AUTOMATIONS_GENERATION_SQL("g")} AS automations_generation
          FROM sync_relay_shares s
          JOIN sync_relay_share_grants g ON g.share_id = s.share_id
          WHERE s.granter_user_id = ? AND g.parent_grant_id IS NULL
          ORDER BY s.created_at_ms DESC, s.share_id, g.created_at_ms, g.grant_id`,
       )
       .all(granterUserId)
-      .map(rowToShareWithGrantRow);
+      .map((row) => ({ ...rowToShareWithGrantRow(row), automationsGeneration: automationsGenerationOf(row) }));
   }
+
+// The newest grant generation at which a grant wrote a Collection's
+// automations.yaml directly (ADR 0013), or null. A write names each path in
+// paths_json, so a Collection's automations.yaml ends in
+// '/automations.yaml"'. JSON escapes a quote inside a name, so no other path
+// does.
+const AUTOMATIONS_GENERATION_SQL = (grant: string) =>
+  `(SELECT MAX(direct.grant_generation) FROM sync_relay_collection_writes direct
+     WHERE direct.grant_id = ${grant}.grant_id
+       AND direct.paths_json LIKE '%/automations.yaml"%')`;
+
+function automationsGenerationOf(row: Record<string, unknown>): number | null {
+  return row.automations_generation === null || row.automations_generation === undefined
+    ? null
+    : Number(row.automations_generation);
+}
 
 export function listLinkGrantsByWorkspace(
     storage: StorageContext,
@@ -762,12 +780,7 @@ export function listLinkGrantsByWorkspace(
                 link.parent_grant_id AS link_parent_grant_id,
                 usage.last_used_at_ms AS last_used_at_ms,
                 credential.minted_at_ms AS url_issued_at_ms,
-                -- A write names each path it wrote in paths_json, so a
-                -- Collection's automations.yaml ends in '/automations.yaml"'.
-                -- JSON escapes a quote inside a name, so no other path does.
-                (SELECT MAX(direct.grant_generation) FROM sync_relay_collection_writes direct
-                  WHERE direct.grant_id = link.grant_id
-                    AND direct.paths_json LIKE '%/automations.yaml"%') AS automations_generation,
+                ${AUTOMATIONS_GENERATION_SQL("link")} AS automations_generation,
                 dependent.grant_id AS dependent_grant_id,
                 dependent.share_id AS dependent_share_id,
                 dependent.principal_kind AS dependent_principal_kind,
@@ -839,10 +852,7 @@ export function listLinkGrantsByWorkspace(
             row.url_issued_at_ms === null || row.url_issued_at_ms === undefined
               ? null
               : Number(row.url_issued_at_ms),
-          automationsGeneration:
-            row.automations_generation === null || row.automations_generation === undefined
-              ? null
-              : Number(row.automations_generation),
+          automationsGeneration: automationsGenerationOf(row),
         };
         links.set(grantId, link);
       }
