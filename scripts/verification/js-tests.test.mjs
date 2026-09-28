@@ -76,11 +76,13 @@ test("file selection reaches Vitest and refuses unsupported or empty scopes", ()
   assert.throws(() => testPlan([{name: "fixture", manifest: {scripts: {test: "node tests.js"}}}], {fixture: files}), /Invalid test file selection/);
 });
 
-for (const {name, cancel = false, selectedPackages, testFiles, missingFile = false, repoFail = false, packageFail = false, overlap = false} of [
+for (const {name, cancel = false, selectedPackages, testFiles, missingFile = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false} of [
   {name:"repository tests run beside the package tests and finish before the packaging step",overlap:true},
   {name:"cancellation rejects queued packages before launching their commands",cancel:true,overlap:true},
   {name:"selected packages run without unrelated desktop or runtime tests",selectedPackages:["@dohc/new-package"]},
   {name:"selected desktop tests retain their final script tests",selectedPackages:["@dohc/desktop"]},
+  {name:"packaging waits for the external runtime reader",selectedPackages:["@dohc/desktop"],barrier:true},
+  {name:"cancellation while waiting for the runtime reader skips packaging",selectedPackages:["@dohc/desktop"],barrier:true,barrierCancel:true},
   {name:"an explicit empty selection still runs repository checks",selectedPackages:[]},
   {name:"a selected package without tests still runs repository checks",selectedPackages:["@dohc/no-tests"]},
   {name:"a selected package missing from inventory fails before any package runs",selectedPackages:["@dohc/missing"]},
@@ -147,8 +149,18 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
     `);
     const args = selectedPackages === undefined ? ["scripts/verification/js-tests.mjs", "--output", "evidence"] : ["--input-type=module", "-e", `
       import {testWorkspace} from './scripts/verification/js-tests.mjs';
-      try {await testWorkspace({output:'evidence',selectedPackages:${JSON.stringify(selectedPackages)},testFiles:${JSON.stringify(testFiles)}});}
-      catch(error){console.error(error.message);process.exitCode=1;}
+      import assert from 'node:assert/strict';
+      import {readFileSync,writeFileSync} from 'node:fs';
+      import {setImmediate} from 'node:timers/promises';
+      const beforeDesktopScripts = ${barrier} ? async () => {
+        writeFileSync('barrier-entered','yes');
+        // Drain command admission while the reader remains unresolved.
+        for(let i=0;i<4;i++)await setImmediate();
+        assert.ok(!readFileSync('commands.jsonl','utf8').includes('test:scripts'));
+        if(${barrierCancel})process.emit('SIGTERM');
+      } : undefined;
+      try {await testWorkspace({output:'evidence',selectedPackages:${JSON.stringify(selectedPackages)},testFiles:${JSON.stringify(testFiles)},beforeDesktopScripts});}
+      catch(error){console.error(error.message);process.exitCode ||= 1;}
     `];
     const result = spawnSync(process.execPath, args, {
       cwd:root, encoding:"utf8", timeout:20_000, env:{...process.env, FIXTURE_CANCEL:cancel ? "1" : "0", FIXTURE_REPO_FAIL:repoFail ? "1" : "0",
@@ -156,16 +168,20 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
     });
     assert.equal(result.error, undefined);
     const failed = missing || missingFile || repoFail || packageFail;
-    assert.equal(result.status, cancel ? 130 : failed ? 1 : 0, result.stderr);
+    assert.equal(result.status, barrierCancel ? 143 : cancel ? 130 : failed ? 1 : 0, result.stderr);
     const report = JSON.parse(readFileSync(join(root, "evidence/result.json"), "utf8"));
-    assert.equal(report.verdict, cancel || failed ? "FAIL" : "PASS");
+    assert.equal(report.verdict, cancel || barrierCancel || failed ? "FAIL" : "PASS");
+    if(barrier)assert.ok(existsSync(join(root,'barrier-entered')));
     if (overlap && !cancel) assert.ok(existsSync(join(root, "repository-saw-package")), "the repository lane must still be open when a package starts");
     const commands = readFileSync(join(root,"commands.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
     if (missing || missingFile) {
       assert.match(report.error,missing ? /selected workspace package is missing/ : /Selected test file is missing/);
       assert.equal(commands.some(args=>args[2]==="run"),false);
     } else assert.deepEqual(report.packages.map(pkg=>pkg.name).sort(),expectedPackages.toSorted());
-    if (cancel) {
+    if (barrierCancel) {
+      assert.match(report.error, /interrupted by SIGTERM/);
+      assert.equal(commands.some(args => args.includes("test:scripts")), false);
+    } else if (cancel) {
       assert.match(report.error, /interrupted/);
       assert.equal(commands.some(args => args.includes("test:scripts") || args.includes("test:prepared") || args.includes("test")), false);
       assert.equal(report.steps.at(-1).verdict, "FAIL");

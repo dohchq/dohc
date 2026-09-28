@@ -28,6 +28,8 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
     export const assertPrepared=()=>({});
     export const buildEnvironment=()=>process.env;
     export const enginePath='fixture-engine';
+    export const stagedEnginePath='fixture-staged-engine';
+    export const assertIndependentStagedEngine=()=>{};
     export const hashFile=()=>{throw Error('unexpected engine hashing after cancellation');};
     export function sourceFingerprint(){if(existsSync('typecheck-complete'))interruptDuringSync();return 'fixture';}
   `);

@@ -209,13 +209,13 @@ const withPath = (dir) => ({
   PATH: dir ? `${dir}${platform() === "win32" ? ";" : ":"}${process.env.PATH}` : process.env.PATH,
 });
 
-function runGate(stubDir, extraEnv = {}) {
+function runGate(stubDir, extraEnv = {}, args = []) {
   // The gate takes a build slot before its first step (build-slot.mjs). A
   // private root keeps a suite run from holding a real lane's slot, and a
   // zero disk floor keeps the suite runnable on a low-disk machine.
   const slotRoot = mkdtempSync(join(tmpdir(), "dohc-gate-slots-"));
   try {
-    const res = spawnSync(process.execPath, [gate], {
+    const res = spawnSync(process.execPath, [gate, ...args], {
       cwd: repoRoot,
       encoding: "utf8",
       env: {
@@ -260,6 +260,8 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     assert.match(run.evidence, /, 10 reads\)/);
 
     const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
+    assert.ok(commands.includes("tools/rust-engine-program/check-fixture-drift.mjs"));
+    assert.ok(commands.includes("packages/app-backend-runtime/scripts/build.mjs"));
     assert.deepEqual(commands.filter((cmd) => /^(?:nextest|test|build) /u.test(cmd)), [
       "nextest run --locked --workspace --no-fail-fast",
       "test --locked --workspace --doc",
@@ -285,6 +287,17 @@ test("the gate stamps the tree it read, at every step boundary", () => {
   } finally {
     rmSync(stub, { recursive: true, force: true });
   }
+});
+
+test("a prepared runtime skips the rebuild and retains fixture drift", () => {
+  const stub = stubToolchain();
+  try {
+    const run = runGate(stub, {}, ["--prepared-runtime"]);
+    assert.equal(run.code, 0, run.summary);
+    const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
+    assert.ok(commands.includes("tools/rust-engine-program/check-fixture-drift.mjs"));
+    assert.equal(commands.some(cmd => cmd.includes("packages/app-backend-runtime/scripts/build.mjs")), false);
+  } finally { rmSync(stub, { recursive: true, force: true }); }
 });
 
 test("the caps and the scratch root reach every cargo child", () => {
