@@ -12,16 +12,26 @@ const inDm = (wireId: string, userId: string | null, email: string): RosterGrant
 });
 
 describe("where automations write", () => {
-  it("finds a Group by its name or slug, and names a missing or doubled one", () => {
-    const group = (id: string, name: string): ChatDirectoryChannel =>
-      ({ id, name, slug: name.toLowerCase(), kind: "channel", type: "both", wireId: id, runningThreadId: null });
+  it("finds a Group by its slug first, then by a name only one Group has, and names a missing or doubled one", () => {
+    const group = (id: string, name: string, slug = name.toLowerCase()): ChatDirectoryChannel =>
+      ({ id, name, slug, kind: "channel", type: "both", wireId: id, runningThreadId: null });
     const directory = chatDirectoryOf(
-      [group("trip", "Trip"), group("a", "Plans"), group("b", "Plans"), { ...dm("dm"), name: "Dm" }],
+      [
+        group("trip", "Trip"), group("a", "Plans", "plans"), group("b", "Plans", "plans-2"),
+        // One Group's name is another's slug: the slug names the Group.
+        group("named", "ops", "ops-team"), group("slugged", "Ops", "ops"),
+        { ...group("board", "Board"), readOnly: true, ended: true },
+        { ...dm("dm"), name: "Dm" },
+      ],
       { kind: "owner", ownerUserId: null, grants: [] },
     );
-    expect(directory.group("Trip")).toEqual({ channelId: "trip", wireId: "trip", name: "Trip", lane: "posts" });
+    expect(directory.group("Trip")).toEqual({ channelId: "trip", wireId: "trip", name: "Trip", lane: "posts", readOnly: false, ended: false });
     expect(directory.group("trip")).toMatchObject({ channelId: "trip" });
-    expect(directory.group("Plans")).toEqual({ problem: "More than one Group is called Plans. Rename one of them." });
+    expect(directory.group("Plans")).toEqual({ problem: "More than one Group is called Plans. Name one by its slug instead: plans or plans-2." });
+    expect(directory.group("plans-2")).toMatchObject({ channelId: "b" });
+    expect(directory.group("ops")).toMatchObject({ channelId: "slugged" });
+    expect(directory.group("ops-team")).toMatchObject({ channelId: "named" });
+    expect(directory.group("Board")).toMatchObject({ readOnly: true, ended: true });
     expect(directory.group("Dm")).toEqual({ problem: "dohc cannot find the Group Dm." });
   });
 
@@ -48,6 +58,19 @@ describe("where automations write", () => {
         problem: `There is no direct message with ${email}@dohc.test yet. Start one first: automations never start one.`,
       });
     }
+  });
+
+  it("names this computer's person by its own id for them only on a roster that proves nobody else had a part", () => {
+    const proved = chatDirectoryOf([], { kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] });
+    expect(proved.person("install-here")).toBe("you");
+    expect(proved.noticeRecipient("install-here")).toEqual({ name: "you" });
+    expect(proved.noticeRecipient("install-elsewhere")).toHaveProperty("problem");
+    expect(proved.directMessage("install-here")).toEqual({
+      problem: "There is no direct message with you yet. Start one first: automations never start one.",
+    });
+    const unproved = chatDirectoryOf([], { kind: "owner", ownerUserId: null, grants: [] });
+    expect(unproved.person("install-here")).toBe("that person");
+    expect(unproved.noticeRecipient("install-here")).toHaveProperty("problem");
   });
 });
 

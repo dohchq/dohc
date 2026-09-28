@@ -362,6 +362,31 @@ describe("formulas", () => {
         .rejects.toThrow(`The step result name "${name}" belongs to a JavaScript built-in.`);
     }
     expect(await evaluator.evaluate(scope, [])).toEqual([]);
+    for (const unavailable of [{ record: "No." }, { total: "Taken." }, { later: 1 as unknown as string }] as Array<Record<string, string>>) {
+      await expect(evaluator.evaluate({ ...scope, unavailable }, [expression("1")])).rejects.toThrow(/cannot bind the name|must each say why/);
+    }
+    await expect(evaluator.evaluate({ ...scope, unavailable: { Math: "No." } }, [expression("1")]))
+      .rejects.toThrow('The step result name "Math" belongs to a JavaScript built-in.');
+  });
+});
+
+describe("results of steps that have not run", () => {
+  const why = "later is step 3's result, and step 3 comes after step 2.";
+  const waiting: AutomationScope = { ...scope, unavailable: { later: why } };
+
+  it("throw why when a formula reads one, and leave every other name as it was", async () => {
+    expect(await evaluator.evaluate(waiting, [expression("later.length"), expression("typeof later"), expression("total + 1")])).toEqual([
+      { ok: false, error: { code: "runtime", message: `ReferenceError: ${why}` } },
+      { ok: false, error: { code: "runtime", message: `ReferenceError: ${why}` } },
+      { ok: true, value: 38.5 },
+    ]);
+  });
+
+  it("throw why when code reads one, directly or by taking it apart, and not when it reads the rest", async () => {
+    for (const source of ["return { output: ctx.later ?? 0 };", "const { later = 0 } = ctx; return { output: later };", "const c = ctx; return { output: c['later'] };"]) {
+      expect(await evaluator.runCode(waiting, source), source).toEqual({ ok: false, error: { code: "runtime", message: `ReferenceError: ${why}` } });
+    }
+    expect(await evaluator.runCode(waiting, "return { output: Object.keys(ctx).includes('later') ? 1 : ctx.total };")).toEqual({ ok: true, value: { output: 37.5 } });
   });
 });
 

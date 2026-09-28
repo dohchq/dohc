@@ -44,6 +44,7 @@ export function createWorkspaceEngineIpc<
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
   }>;
   localAgentDisplayName(): string;
+  localPersonId(): string;
   /** An automation author as History shows it, in one workspace. */
   automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
   /** A person the owner shared with, as History names their direct write. */
@@ -72,7 +73,7 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, automationAuthor, namedAuthorLabel,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, automationAuthor, namedAuthorLabel,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
@@ -147,7 +148,7 @@ export function createWorkspaceEngineIpc<
     // Runs dohc started use the Settings name. Other agents use their handshake label.
     function authorNames(workspaceId: string): EngineMomentAuthorNames {
       return {
-        agent: (author) => author.agentRunId && author.onBehalfOf === "local" ? localAgentDisplayName() : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
+        agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
         named: (author) => namedAuthorLabel(workspaceId, author),
       };

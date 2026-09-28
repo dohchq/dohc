@@ -118,6 +118,8 @@ describe("desktop relay helpers", () => {
         shareId: "share-a",
       }),
     ).resolves.toEqual({
+      subjectName: null,
+      sharerName: null,
       shareId: "share-a",
       granterUserId: "user-a",
       granterEmail: "owner@example.test",

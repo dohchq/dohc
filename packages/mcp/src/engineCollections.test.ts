@@ -346,11 +346,11 @@ describe("desktop CLI collection proxy", () => {
 describe("desktop CLI automation proxy", () => {
   const run = {
     run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
-    trigger: { kind: "changed" as const, recordId: "rec_1", by: "human" as const, depth: 0 },
+    trigger: { kind: "changed" as const, recordId: "rec_1", by: "human" as const, sharedAuthor: null, depth: 0 },
     definitionChanged: true, neverStarted: false, chainStopped: false, undone: false,
   };
   const answers = {
-    automationRuns: { ok: true, runs: [{ ...run, changes: 1 }] },
+    automationRuns: { ok: true, runs: [{ ...run, changes: 1 }], next: "1:atc_1" },
     automationRun: { ok: true, run: { ...run, steps: [{ step: 1, changes: [{ kind: "created", recordId: "rec_2", path: "tasks/two.md" }] }], failedStep: 2, startsOver: false } },
   } satisfies { [Verb in Extract<CliVerb, "automationRuns" | "automationRun">]: CliResultByVerb[Verb] };
 
@@ -373,6 +373,7 @@ describe("desktop CLI automation proxy", () => {
       const automation = { collectionPath: "tasks", automation: "stamp" };
 
       await expect(listAutomationRuns(ctx, automation)).resolves.toEqual(answers.automationRuns);
+      await listAutomationRuns(ctx, { ...automation, page: "1:atc_1" });
       await expect(readAutomationRun(ctx, { ...automation, run: "atc_1" })).resolves.toEqual(answers.automationRun);
       await expect(retryAutomationRun(ctx, { ...automation, run: "atc_1" })).resolves.toEqual({
         ok: false, status: "definition-changed", repeatsMessages: false, reason: "This automation changed since the run failed.",
@@ -382,6 +383,7 @@ describe("desktop CLI automation proxy", () => {
       const common = { cwd: base.root, actor: "agent", collectionPath: "tasks", automation: "stamp" };
       expect(requests.map((request) => ({ verb: request.verb, args: request.args }))).toEqual([
         { verb: "automationRuns", args: common },
+        { verb: "automationRuns", args: { ...common, page: "1:atc_1" } },
         { verb: "automationRun", args: { ...common, run: "atc_1" } },
         { verb: "automationRetry", args: { ...common, run: "atc_1", startOver: false } },
         { verb: "automationRetry", args: { ...common, run: "atc_1", startOver: true } },

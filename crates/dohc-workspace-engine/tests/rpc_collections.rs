@@ -1923,6 +1923,8 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
     const RESPONSE_CAP: usize = (8 * 1024 * 1024) - 64 * 1024;
     let response_with_empty_description = json!({
         "path": "at-limit",
+        // A captured file's object id: "object-" and 64 hex digits.
+        "objectId": format!("object-{}", "0".repeat(64)),
         "status": "valid",
         "reasons": [],
         "schema": {
@@ -3443,10 +3445,9 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn named_recipient_automations_write_shows_its_author_in_history() {
+async fn direct_writes_show_their_named_or_link_author_in_history() {
     const GRANT: &str = "grant-trip-edit";
-    const PATH: &str = "trip/automations.yaml";
-    const MOMENT: &str = "00000000-0000-4000-8000-000000000012";
+    const LINK_GRANT: &str = "grant-trip-link";
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = engine_db_path(&scratch).expect("db");
@@ -3455,61 +3456,83 @@ async fn named_recipient_automations_write_shows_its_author_in_history() {
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
-    let schema = "name: Trip\n";
+    let schema = "name: Trip
+";
     seed_text(&mut store, "trip/collection.yaml", schema, 2);
     write_file(scratch.path(), "trip/collection.yaml", schema.as_bytes());
-    let text = "version: 1\nautomations: []\n";
-    write_file(scratch.path(), PATH, text.as_bytes());
-    let sha = hex_sha256(text.as_bytes());
-    store
-        .write_with(&NoFaults, |conn| {
-            conn.execute(
-                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
-                rusqlite::params![sha, text.len() as i64, text],
-            )
-            .expect("hydrate automations blob");
-            Ok::<_, dohc_engine_storage::StorageError>(())
-        })
-        .expect("hydrate automations blob");
-    let author =
-        json!({ "kind": "named", "userId": "ana", "grantId": GRANT, "grantGeneration": 3 });
-    let envelope = ReplicationEnvelope {
-        workspace_id: WORKSPACE_ID.to_owned(),
-        origin_id: format!("relay:collection-file:{GRANT}"),
-        origin_seq: 0,
-        relay_seq: Some(1),
-        op_kind: "moment.append".to_owned(),
-        recorded_at_ms: 20,
-        payload: json!({
-            "momentId": MOMENT,
-            "versionId": "main",
-            "objectId": "00000000-0000-4000-8000-000000000013",
-            "path": PATH,
-            "recordedAtMs": 20,
-            "operation": "write",
-            "beforePresent": "null",
-            "payloadBeforeBlobSha256": null,
-            "payloadBeforePath": null,
-            "payloadAfterBlobSha256": sha,
-            "payloadAfterPath": PATH,
-            "payloadAfterContentKind": "text",
-            "payloadAfterByteLength": text.len(),
-            "metadata": { "origin": "sync" },
-            "author": author,
-        }),
-    };
-    let applied = apply_replication_envelope(
-        &mut store,
-        &mut dohc_engine_collab::WriterDocCache::new(),
-        &envelope,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .expect("apply named automations write");
-    assert!(
-        matches!(applied.primary, ApplyDisposition::Applied(_)),
-        "{applied:?}"
-    );
+    // A named recipient adds the automations, and an Edit link a record.
+    let writes = [
+        (
+            GRANT,
+            "trip/automations.yaml",
+            "version: 1
+automations: []
+",
+            "00000000-0000-4000-8000-000000000012",
+            "00000000-0000-4000-8000-000000000013",
+            json!({ "kind": "named", "userId": "ana", "grantId": GRANT, "grantGeneration": 3 }),
+        ),
+        (
+            LINK_GRANT,
+            "trip/porto.md",
+            "Porto
+",
+            "00000000-0000-4000-8000-000000000014",
+            "00000000-0000-4000-8000-000000000015",
+            json!({ "kind": "link", "grantId": LINK_GRANT, "grantGeneration": 2, "principalId": "holder" }),
+        ),
+    ];
+    for (grant, path, text, moment, object, author) in &writes {
+        write_file(scratch.path(), path, text.as_bytes());
+        let sha = hex_sha256(text.as_bytes());
+        store
+            .write_with(&NoFaults, |conn| {
+                conn.execute(
+                    "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    rusqlite::params![sha, text.len() as i64, text],
+                )
+                .expect("hydrate blob");
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("hydrate blob");
+        let envelope = ReplicationEnvelope {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            origin_id: format!("relay:collection-file:{grant}"),
+            origin_seq: 0,
+            relay_seq: Some(1),
+            op_kind: "moment.append".to_owned(),
+            recorded_at_ms: 20,
+            payload: json!({
+                "momentId": moment,
+                "versionId": "main",
+                "objectId": object,
+                "path": path,
+                "recordedAtMs": 20,
+                "operation": "write",
+                "beforePresent": "null",
+                "payloadBeforeBlobSha256": null,
+                "payloadBeforePath": null,
+                "payloadAfterBlobSha256": sha,
+                "payloadAfterPath": path,
+                "payloadAfterContentKind": "text",
+                "payloadAfterByteLength": text.len(),
+                "metadata": { "origin": "sync" },
+                "author": author,
+            }),
+        };
+        let applied = apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("apply direct write");
+        assert!(
+            matches!(applied.primary, ApplyDisposition::Applied(_)),
+            "{applied:?}"
+        );
+    }
     drop(store);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -3527,31 +3550,33 @@ async fn named_recipient_automations_write_shows_its_author_in_history() {
         .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
-    let moment = call(
-        &transport,
-        &handle,
-        2,
-        "moments.get",
-        json!({ "momentId": MOMENT }),
-    )
-    .await;
-    assert_eq!(moment["author"], author);
     let page = call(
         &transport,
         &handle,
-        3,
+        2,
         "moments.list",
         json!({ "versionId": "main", "limit": 10 }),
     )
     .await;
-    let listed = page["moments"]
-        .as_array()
-        .expect("moments")
-        .iter()
-        .find(|row| row["momentId"] == MOMENT)
-        .expect("named moment in History");
-    assert_eq!(listed["author"], author);
-    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+    for (id, (_, _, _, moment, _, author)) in (3_u64..).zip(&writes) {
+        let detail = call(
+            &transport,
+            &handle,
+            id,
+            "moments.get",
+            json!({ "momentId": moment }),
+        )
+        .await;
+        assert_eq!(&detail["author"], author);
+        let listed = page["moments"]
+            .as_array()
+            .expect("moments")
+            .iter()
+            .find(|row| &row["momentId"] == moment)
+            .expect("direct write in History");
+        assert_eq!(&listed["author"], author);
+    }
+    call(&transport, &handle, 5, "workspace.close", json!({})).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

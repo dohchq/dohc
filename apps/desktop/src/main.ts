@@ -1,6 +1,7 @@
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
 import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh} from "./workspaces/ownerShareLabels";
+import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
@@ -236,7 +237,7 @@ import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "@dohc/automation-executor/skipped-runs-notice";
 import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
-import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
+import { provedNeverShared, readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
 import {
@@ -276,11 +277,7 @@ import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
 } from "./workspaces/workspaceSummaryProjection";
-import {
-  assertSharedChannelWritable,
-  relayFetchWithTimeout,
-  RELAY_FETCH_TIMEOUT_MS,
-} from "./workspaces/sharedChannels";
+import { RELAY_FETCH_TIMEOUT_MS, assertSharedChannelWritable, joinedSharedChannelForWireId, relayFetchWithTimeout } from "./workspaces/sharedChannels";
 import {
   resolveChatRelayIdentity,
   resolveWorkspaceRelayAuthorId,
@@ -1310,6 +1307,14 @@ const shareRosters = createShareRosters({
     await warmCredentialCache().catch(() => undefined);
     return cachedCredentials?.userId ?? null;
   },
+  // This computer's own id for its person names them, signed in or not, only
+  // where nobody else ever had a part in the workspace.
+  localPersonId: async (workspace) => {
+    const proved = await provedNeverShared(workspace, () =>
+      withEngineAdapter(workspace, (adapter) => adapter.remoteChangesApplied()).catch(() => null));
+    return proved ? localReactorFallbackId() : null;
+  },
+  syncHistory: (workspace) => readSyncHistory(workspace.rootPath),
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
   onListed: (workspaceId) => collectionAutomationsOf(workspaceId)?.rosterChanged(),
@@ -1332,14 +1337,15 @@ function collectionAutomationsOf(workspaceId: string): CollectionAutomations | u
 
 // A Collection automation that wrote a moment, as History shows it: its
 // name from the workspace's automations.yaml as this computer read it, or
-// its id when the file no longer has it, and the Collection it belongs to.
-// Any other automation keeps the moment's origin label.
-function automationAuthor(workspaceId: string, automationId: string): { name: string; collection: string } | null {
+// its id when the file no longer has it, and the Collection it belongs to
+// now. Any other automation keeps the moment's origin label.
+function automationAuthor(workspaceId: string, automationId: string): { name: string; collection?: string } | null {
   const parsed = parseCollectionAutomationId(automationId);
   if (parsed === null) return null;
+  const located = collectionAutomationsOf(workspaceId)?.locate(automationId) ?? null;
   return {
     name: collectionAutomationsOf(workspaceId)?.automationName(automationId) ?? parsed.id,
-    collection: posix.basename(parsed.collectionPath),
+    ...(located === null ? {} : { collection: posix.basename(located.collectionPath) }),
   };
 }
 
@@ -2230,6 +2236,7 @@ const activity = {
 // launches its own copy via the Settings config snippet.
 const agentIntegration = createAgentIntegration({
   workspaceIds: () => workspaceAuthorities.workspaceIds(),
+  localPersonId: localUserId,
   acquire: (workspaceId) => {
     const lease = requireWorkspaceAuthority(workspaceId);
     const workspace = canonicalWorkspaceFor(lease);
@@ -3080,7 +3087,7 @@ const chatDispatchService = createChatDispatchService({
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
       const workspaceId = workspace.workspaceId;
       if (run) {
-      if (!(await activity.claimAgentRun(workspaceId, run,
+      if (!(await activity.claimAgentRun(workspaceId, { ...run, onBehalfOf: localUserId() },
             lease.binding.canonicalRootPath,
           ))) {
         throw new Error("Another agent run is already active in this workspace.");
@@ -3456,7 +3463,7 @@ async function sendSwitchedOffNotice(workspaceId: string, switched: AutomationSw
 // on any other computer, which does not keep who changed what.
 async function automationLastChangedBy(workspaceId: string, automationId: string): Promise<string | null> {
   const history = ownerHistory(workspaceId);
-  const parsed = parseCollectionAutomationId(automationId);
+  const parsed = collectionAutomationsOf(workspaceId)?.locate(automationId) ?? null;
   if (history === null || parsed === null) return null;
   return await whoChangedLast(history.capture, {
     path: `${parsed.collectionPath}/automations.yaml`, id: parsed.id, ownerUserId: history.ownerUserId,
@@ -3714,7 +3721,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     heldClaim: async (press) => {
       const executor = collectionAutomationsOf(workspaceId);
       if (!executor) throw new Error("This workspace was closed.");
-      return await executor.relayedClaim({ automationId: press.automationId, definitionHash: press.definitionHash, pressId: press.hostPressId });
+      return await executor.relayedClaim({ automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, pressId: press.hostPressId });
     },
     press: async (input, watch) => {
       const executor = collectionAutomationsOf(workspaceId);
@@ -3723,7 +3730,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     },
     notifyFailure: async ({ press, field, outcome, error }) => {
       const button = (field ?? "A button").slice(0, 80);
-      const collectionPath = press.automationId.slice("collection:".length, press.automationId.lastIndexOf("#"));
+      const { collectionPath } = press;
       await noticeStore().postNotice({
         workspaceId,
         noticeId: `automation-press:${press.hostPressId}`,
@@ -3765,15 +3772,17 @@ function createCollectionAutomationsFor(
       return withPhysicalWorkspaceOperation(workspaceId, async operation => {
         if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
         const capture = activity.engineCaptureFor(workspaceId);
-        if (!capture) throw new Error(captureRefusal("Automations"));
+        if (!capture || operation.workspace.shareView !== undefined) return writeWorkspaceText(rootPath, path, text, expectedContentHash);
         const result = await writeWorkspaceFilesAs(operation, [{ path, contentBase64: Buffer.from(text).toString("base64"), expectedSha256: expectedContentHash }],
-          { kind: "automation", automationId, onBehalfOf: "local", depth: 1 }, { capture });
+          { kind: "automation", automationId, depth: 1 }, { capture });
         if (result.ok) return { status: "written" as const };
         if (result.currentSha256 !== undefined) return { status: "conflict" as const };
         throw new Error(result.reason);
       });
     },
     pathExists: (path) => lstat(join(rootPath, path)).then(() => true, () => false),
+    // A watcher batch reaches the executor before the engine records it.
+    recorded: async () => { await activity.engineCaptureFor(workspaceId)?.flush(); },
     roster: () => shareRosters.forRun(workspaceId),
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
@@ -3793,8 +3802,12 @@ function createCollectionAutomationsFor(
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
     chat: {
+      // A joined Group this computer may only read is marked, as a chat write refuses it (assertJoinedChannelWritable).
       directory: (roster, needs) => withWorkspaceAttachmentAsync(workspace, (lease) =>
-        readChatDirectory(linkedChatStoreFor(lease), workspaceId, roster, needs)),
+        readChatDirectory(linkedChatStoreFor(lease), workspaceId, roster, needs, (wireId) => {
+          const joined = joinedSharedChannelForWireId(findWorkspace(workspaceId)?.sharedChannels, wireId);
+          return joined === null ? null : { readOnly: joined.access === "read-only", ended: joined.ended === true };
+        })),
       // The same write path as every other chat write, as the automation.
       write: (signal, message) => withWorkspaceAttachmentAsync(workspace, async (lease) => {
         const place = { workspaceId, store: linkedChatStoreFor(lease) };
@@ -3832,7 +3845,12 @@ function createCollectionAutomationsFor(
           : await chatWrites.sendMessage(place, { ...common, threadId: message.target.threadId });
       }),
     },
-    postNotice: (notice, signal) => noticeStore().postNotice({ workspaceId, ...notice, signal }),
+    // A notice to this computer's own id for its person stays here, even
+    // after a sign-in: the reach check allowed it as this computer's person.
+    postNotice: ({ recipientUserId, ...notice }, signal) => noticeStore().postNotice({
+      workspaceId, ...notice, signal,
+      ...(recipientUserId === localReactorFallbackId() ? { onlyHere: true } : { recipientUserId }),
+    }),
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
     groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
@@ -3843,6 +3861,10 @@ function createCollectionAutomationsFor(
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
     onSchedulesChanged: () => automationScheduler.wake(),
     hostCanRun: () => hostCanRun(workspaceId),
+    // The builder's Group pickers name this computer's Groups; direct messages are not Groups.
+    groupList: () => withWorkspaceAttachmentAsync(workspace, async (lease) =>
+      (await linkedChatStoreFor(lease).listChannels({ workspaceId }))
+        .flatMap((channel) => (channel.kind === "channel" ? [{ name: channel.name, slug: channel.slug }] : []))),
     personName: (userId) => (userId === localUserId() ? localUserDisplayName() : userId),
     mayRetryPress: async (pressedBy) => pressedBy === (await pressingPerson()) || (await localPersonOwns(workspaceId)),
     onPressSettled: (event) => {
@@ -3894,6 +3916,7 @@ async function stopAllSitePreviews(): Promise<void> {
   );
 }
 
+let describeDatasetForCli: ((workspaceId: string, datasetId: string) => ReturnType<typeof describeAutomationDataset>) | undefined;
 let datasetForCli: ((input: DatasetRequest, agent: LocalDatasetAgent | null) => Promise<DatasetResult>) | undefined;
 // A window's press path; the CLI's presses take it too.
 let pressNamedForCli: ReturnType<typeof registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>>["pressNamed"] | undefined;
@@ -3924,7 +3947,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
     let pending = slot.pending;
     if (!pending) {
       const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
-      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath,
+      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, localPersonId: localUserId,
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
         persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
         compile: async (source, path, signal) => {
@@ -3998,7 +4021,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
       return automations;
     };
     return {
-      runs: async (automationId) => (await opened()).runs(automationId),
+      automationIdAt: async (collectionPath, id) => (await opened()).automationIdAt(collectionPath, id),
+      runs: async (automationId, before) => (await opened()).runs(automationId, before),
       run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
       retry: (input) => retryAutomationRun({
         notices: noticeStore(),
@@ -4009,12 +4033,12 @@ const { startDesktopCliServer } = createDesktopCliServer({
     };
   },
   // A press goes through the press path a window's press takes, under this
-  // workspace's own operation. The dataset is described the way the CLI's
-  // dataset verbs describe it, and the executor opens before it is asked.
+  // workspace's own operation. Internal dataset ids use the same authority
+  // as renderer presses, and the executor opens before it is asked.
   buttons: (workspace) => ({
     press: async (input, by) => {
-      if (!pressNamedForCli || !datasetForCli) throw new Error("Buttons are not ready. Try again.");
-      const describe = datasetForCli;
+      if (!pressNamedForCli || !describeDatasetForCli) throw new Error("Buttons are not ready. Try again.");
+      const describe = describeDatasetForCli;
       let waiting: PressWaitReason | null = null;
       const result = await pressNamedForCli({ ...input, workspaceId: workspace.workspaceId }, {
         by,
@@ -4023,12 +4047,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
           if (!shareViewIsPresent(operation.workspace.shareView)) await operation.state.collectionAutomations.open();
           return await work(operation);
         }),
-        describeDataset: async (datasetId) => {
-          const described = await describe({ action: "describe", workspaceId: workspace.workspaceId,
-            datasetPath: `${input.collectionPath}/dataset.json`, expectedDatasetId: datasetId }, null);
-          if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
-          return described.dataset;
-        },
+        describeDataset: (datasetId) => describe(workspace.workspaceId, datasetId),
         // No window hears how the run settles; the caller follows it in run history.
         watch: (_claimId, reason) => { waiting = reason; },
       });
@@ -4056,6 +4075,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   startCliServer,
   stateDir,
   localUserDisplayName,
+  localPersonId: localUserId,
   notifyRenderer,
   syncSharedChannelsForChatTarget,
   chatDispatchService,
@@ -4063,6 +4083,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
 });
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
+  localPersonId: localUserId,
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
   acquireWorkspace: (workspaceId) => {
@@ -5077,7 +5098,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent",
+    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     namedAuthorLabel: (workspaceId, author) => rosterAuthorLabel(findWorkspace(workspaceId)?.shareRoster, author),
     automationAuthor, notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
@@ -5366,6 +5387,8 @@ function registerIpcHandlers(): void {
     },
   });
   datasetForCli = async (input, agent) => DatasetResult.parse(await cliDataset(input.workspaceId, input, agent));
+  describeDatasetForCli = (workspaceId, datasetId) => withPhysicalWorkspaceOperation(workspaceId,
+    operation => describeAutomationDataset(operation, datasetId, datasetDependencies));
   const localDatasetLaunches = new WeakMap<LocalDatasetHost, Promise<LocalAppLaunchHost>>();
   const localPublication = createLocalOwnerAppPublicationHandler<DesktopRendererWorkspaceOperation["workspace"],
     { workspace: DesktopRendererWorkspaceOperation["workspace"]; signal: AbortSignal; scope?: string; assertCurrent(): void }>({
@@ -5426,7 +5449,7 @@ function registerIpcHandlers(): void {
     // run's agent's, so the removed record's claims carry the run's depth.
     undoAcceptedResponse:(workspace,input)=>{
       const depth=activity.agentRunDepth(workspace.workspaceId);
-      return undoAcceptedResponse(workspace,input,depth>0?{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth}:undefined);
+      return undoAcceptedResponse(workspace,input,depth>0?{kind:"agent",agentId:"dohc-mcp",onBehalfOf:localUserId(),depth}:undefined);
     },
   });
   ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
@@ -5525,16 +5548,14 @@ function registerIpcHandlers(): void {
       if (details === null) throw new Error("The workspace engine is not running.");
       return details.schema.fields.flatMap((field) => (field.type === "button" ? [field.name] : []));
     },
+    collectionId: async (operation, collectionPath) => {
+      const details = await withEngineAdapter(operation.workspace, (engine) => engine.getCollection({ collectionPath }));
+      if (details === null) throw new Error("The workspace engine is not running.");
+      return details.objectId;
+    },
     describeDataset: (sender, workspaceId, datasetId) => withRendererWorkspaceOperation(sender, workspaceId,
-      "Collection changes stopped because this window changed workspaces.", async operation => {
-        const data = shareViewIsPresent(operation.workspace.shareView)
-          ? await datasetDependencies.namedDataForWorkspace(operation.workspace, operation.signal)
-          : await datasetDependencies.dataForWorkspace(operation.workspace, operation.signal);
-        operation.assertCurrent(); operation.signal.throwIfAborted();
-        const described = await data.describe(datasetId);
-        operation.assertCurrent(); operation.signal.throwIfAborted();
-        return described;
-      }),
+      "Collection changes stopped because this window changed workspaces.",
+      operation => describeAutomationDataset(operation, datasetId, datasetDependencies)),
     pressedBy: pressingPerson,
     // A shared view's press goes to the relay it came from, for this
     // person's own grant; the relay checks the grant again.
@@ -5566,6 +5587,10 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, init),
+    endLink: async (credentials, path, init) =>
+      (await relayShareJsonWithCredentials<unknown>(credentials, path, init, { retainDependentSetConflict: true })).kind === "success"
+        ? "ended"
+        : "dependents-changed",
     sharesChanged: shareRosters.sharesChanged,
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),
@@ -5714,6 +5739,10 @@ function registerIpcHandlers(): void {
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
     activity, desktopChatBookmarks, notifyRenderer,
+    automationCollectionOf: (workspaceId) => {
+      const executor = collectionAutomationsOf(workspaceId);
+      return (automationId) => executor?.locate(automationId)?.collectionPath ?? null;
+    },
     ensureGroupFolder: async (workspace, folderPath) => {
       await createFolder(workspace.rootPath, folderPath);
     },

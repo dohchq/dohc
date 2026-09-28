@@ -669,6 +669,7 @@ mod tests {
             let mut query = CollectionQueryResult {
                 collection: CollectionSummary {
                     path: "tasks".into(),
+                    object_id: "object-tasks".into(),
                     status: CollectionSchemaStatus::Valid,
                     reasons: Vec::new(),
                 },
@@ -890,6 +891,7 @@ mod tests {
         };
         let collection = json!({
             "path": "tasks",
+            "objectId": "object-tasks",
             "status": "degraded",
             "reasons": [{ "code": "invalid-yaml", "path": "" }]
         });
@@ -898,6 +900,7 @@ mod tests {
                 "collections.get",
                 json!({
                     "path": "tasks",
+                    "objectId": "object-tasks",
                     "status": "valid",
                     "reasons": [],
                     "schema": {

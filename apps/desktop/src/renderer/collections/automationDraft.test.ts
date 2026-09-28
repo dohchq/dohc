@@ -29,6 +29,8 @@ describe("Only if as rows", () => {
 
   it("keeps any other expression a formula", () => {
     expect(conditionRows('record.Points > 3')).toBeNull();
+    // A JavaScript escape JSON cannot read stays a formula rather than failing.
+    expect(conditionRows(String.raw`record.Title == "\x41"`)).toBeNull();
     expect(conditionRows('record.Status == "Done" || record.Status == "Shipped"')).toBeNull();
     expect(conditionRows('record.Status == "Done" && ')).toBeNull();
     expect(conditionRows("")).toEqual([]);

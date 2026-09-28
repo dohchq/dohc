@@ -24,10 +24,9 @@ export interface SkippedRunsNotice {
 
 
 // Open goes to the Collection's automations.yaml, where the automation is.
-function automationsFileTarget(automationId: string): SkippedRunsNotice["target"] {
-  const collection = /^collection:(.+)#[^#]+$/u.exec(automationId)?.[1];
-  const path = collection === undefined ? undefined : `${collection}/automations.yaml`;
-  return path !== undefined && [...path].length <= NOTICE_TARGET_FIELD_MAX_CHARS
+function automationsFileTarget(automationId: string, collectionPath: string): SkippedRunsNotice["target"] {
+  const path = `${collectionPath}/automations.yaml`;
+  return [...path].length <= NOTICE_TARGET_FIELD_MAX_CHARS
     ? { automation: automationId, path }
     : { automation: automationId };
 }
@@ -69,6 +68,6 @@ export function skippedRunsNotice(input: {
     kind: "schedule-skipped",
     title,
     body: lines.join("\n"),
-    target: automationsFileTarget(schedule.automationId),
+    target: automationsFileTarget(schedule.automationId, schedule.collectionPath),
   };
 }

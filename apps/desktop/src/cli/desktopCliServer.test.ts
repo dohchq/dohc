@@ -94,7 +94,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     notifyRenderer: () => undefined,
   });
   const dependencies: Dependencies = {
-    automations: () => ({ runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
+    automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
@@ -116,6 +116,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     startCliServer: vi.fn(async (input) => { options = input; return handle; }),
     stateDir: () => "state",
     localUserDisplayName: () => "Local name",
+    localPersonId: () => "person-local",
     notifyRenderer: vi.fn(),
     syncSharedChannelsForChatTarget: vi.fn(async () => undefined),
     chatDispatchService: { scanWorkspace: vi.fn(async () => undefined) },
@@ -392,7 +393,7 @@ describe("desktop CLI workspace context", () => {
     const f = fixture();
     const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);
     const context = await f.create().openCliWorkspace(f.workspace);
-    const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 } };
+    const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
     await context.documents!.edit({ path: "notes.md", edit: { find: "Draft", replacement: "Final" }, origin });
     const [input] = edit.mock.calls[0]!;
     expect(input).toMatchObject({ workspaceId: "workspace", path: "notes.md", origin });
@@ -421,7 +422,7 @@ describe("desktop CLI workspace context", () => {
         return { path: input.path, changed: update !== null };
       });
       const context = await f.create().openCliWorkspace(f.workspace);
-      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 } };
+      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
 
       await expect(context.documents!.create({ path: "notes/new.md", markdown: "# New\n\nFirst line.", origin }))
         .resolves.toEqual({ path: "notes/new.md" });
@@ -429,17 +430,17 @@ describe("desktop CLI workspace context", () => {
       expect(edit.mock.calls[0]![0]).toMatchObject({ workspaceId: "workspace", path: "notes/new.md", origin });
       // Unnamed agents still get agent attribution.
       const write = vi.mocked(f.capture.writeAuthoredFile);
-      expect(write.mock.calls[0]).toEqual([join(root, "notes/new.md"), "", { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" }, { createOnly: true }]);
+      expect(write.mock.calls[0]).toEqual([join(root, "notes/new.md"), "", { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local" }, { createOnly: true }]);
       await context.documents!.create({ path: "named.md", markdown: "Hi.", origin: { ...origin, actorOriginId: "Codex" } });
-      expect(write.mock.calls[1]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "local" });
+      expect(write.mock.calls[1]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "person-local" });
       // During a run an automation started, the file names the run's depth,
       // so a record it adds carries the chain on; with no name, the MCP
       // server's agent authors it.
-      const woken = { attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 3 } };
+      const woken = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 3 } };
       await context.documents!.create({ path: "woken.md", markdown: "Hi.", origin: woken });
-      expect(write.mock.calls[2]![2]).toEqual({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 3 });
+      expect(write.mock.calls[2]![2]).toEqual({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 });
       await context.documents!.create({ path: "woken-named.md", markdown: "Hi.", origin: { ...woken, actorOriginId: "Codex" } });
-      expect(write.mock.calls[3]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "local", depth: 3 });
+      expect(write.mock.calls[3]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "person-local", depth: 3 });
 
       await expect(context.documents!.create({ path: "taken.md", markdown: "x", origin }))
         .rejects.toThrow("taken.md already exists. Edit it instead.");
@@ -613,7 +614,7 @@ describe("raw fileWrite socket requests", () => {
     const f = await setup();
     vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
     expect(await f.invoke([{ path: "plain.txt", contentBase64: "bmV3" }], "agent", agent)).toEqual({ ok: true, written: ["plain.txt"] });
-    expect(f.capture.writeAuthoredFile.mock.calls[0]?.[2]).toEqual({ kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "local", depth: 4 });
+    expect(f.capture.writeAuthoredFile.mock.calls[0]?.[2]).toEqual({ kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 });
   });
   it("enforces byte limits and base64 validation without MCP", async () => {
     const f = await setup();

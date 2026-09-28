@@ -529,7 +529,7 @@ describe("collection folders", () => {
   it("reserves pending record names and retries the same partial identity", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(async () => ({ files: [], folders: ["tasks"] }));
-    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", status: "valid" as const, reasons: [] }] }));
+    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }] }));
     const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
     bridge.createCollectionRecord.mockImplementationOnce(() => pending.promise);
     renderShell(bridge);
@@ -562,7 +562,7 @@ describe("collection folders", () => {
       folders: ["tasks"],
     }));
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }],
     }));
     renderShell(bridge);
     const user = userEvent.setup();
@@ -616,10 +616,11 @@ describe("collection folders", () => {
       folders: ["tasks"],
     }));
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }],
     }));
     bridge.getCollection = vi.fn(async () => ({
       path: "tasks",
+      objectId: "object-test",
       status: "valid" as const,
       reasons: [],
       schema: {
@@ -653,7 +654,7 @@ describe("collection folders", () => {
       ],
     });
     bridge.queryCollectionRecords = vi.fn(async () => ({
-      collection: { path: "tasks", status: "valid" as const, reasons: [] },
+      collection: { path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] },
       records: [
         taskRecord("rec-1", "One", "tasks/one.md"),
         taskRecord("rec-2", "Two", "tasks/two.md"),
@@ -7879,13 +7880,15 @@ describe("notices sent to you", () => {
   });
   function withRuns(bridge: ReturnType<typeof makeBridge>) {
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }],
     }));
+    // Main finds each automation's Collection by its id.
+    bridge.findAutomationCollection.mockResolvedValue({ status: "found", collectionPath: "tasks" });
     bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
       claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
       error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
-      trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
-    }] }));
+      trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+    }], next: null }));
     return bridge;
   }
 
@@ -15492,7 +15495,39 @@ describe("workbench render cost", () => {
     }
   });
 
-  it("refreshes files for a POSIX-distinct .GIT activity path", async () => {
+  it("refreshes files for a non-reserved .GIT prefix on Linux", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "linux");
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".GIT-not-reserved/file.md"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        allowCached: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores reserved .GIT activity paths on Linux", async () => {
     const bridge = makeBridge(Promise.resolve(null), "linux");
     renderShell(bridge);
     await waitFor(() =>
@@ -15514,11 +15549,7 @@ describe("workbench render cost", () => {
         await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
       });
 
-      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
-      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        allowCached: true,
-      });
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings);
     } finally {
       vi.useRealTimers();
     }

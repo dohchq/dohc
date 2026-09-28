@@ -1,3 +1,5 @@
+import { foldPathSegment } from "@dohc/workspace-contracts/path-floor";
+
 // The key two paths share when a computer's disk may hold them as one file:
 // each component in NFKC form, case-folded, and without the trailing dots
 // and spaces Windows drops. It folds more than any common file system does.
@@ -10,5 +12,6 @@ export function pathCollisionKey(path: string): string {
 // Lower, upper, then lower again, so every spelling of a letter lands on one
 // form: "ẞ", "ß" and "ss" all become "ss", and "ς" and "σ" become one sigma.
 function componentKey(name: string): string {
-  return name.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase().normalize("NFKC").replace(/[. ]+$/u, "");
+  const compatible = name.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase();
+  return foldPathSegment(compatible).replace(/[. ]+$/u, "");
 }

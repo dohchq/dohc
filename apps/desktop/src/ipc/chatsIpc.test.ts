@@ -153,7 +153,7 @@ function fixture(kind: ScopeKind = "local") {
     syncWorkspaceSharedChannels: async () => 0, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels: async () => 0,
     withRendererWorkspaceOperation: async (_sender, _id, _message, run) => run({ workspace, assertCurrent() {} }),
-    activeEngineFileIndex, activity, desktopChatBookmarks, notifyRenderer: () => undefined,
+    activeEngineFileIndex, activity, desktopChatBookmarks, notifyRenderer: () => undefined, automationCollectionOf: () => () => null,
     ensureGroupFolder,
   });
   async function invoke(channel: string, payload: unknown, event: Event = { sender }) {
@@ -220,28 +220,33 @@ describe("the personal feed names each item's viewer", () => {
 describe("chat message IPC identity", () => {
   it("preserves an optional author identity through the bridge contract", () => {
     const { message } = fixture();
-    expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorUserId: "person-1" })))
+    expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorUserId: "person-1" }, () => null)))
       .toMatchObject({ authorUserId: "person-1" });
-    expect(ChatMessageRecord.parse(chatMessageForIpc(message))).not.toHaveProperty("authorUserId");
+    expect(ChatMessageRecord.parse(chatMessageForIpc(message, () => null))).not.toHaveProperty("authorUserId");
   });
 
-  it("carries an automation author and the automation that wrote the message", () => {
+  it("carries an automation author, the automation that wrote the message, and where its Collection is now", () => {
     const { message } = fixture();
     const automated = {
       ...message,
       author: { kind: "automation" as const, displayName: "Stamp the finish date" },
       authorOwnerDisplayName: "Ice",
-      automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+      automation: { automationId: "collection:object-tasks#stamp" },
     };
-    expect(ChatMessageRecord.parse(chatMessageForIpc(automated))).toMatchObject({
+    const movedTo = (automationId: string) => (automationId === "collection:object-tasks#stamp" ? "Voyage/Tasks" : null);
+    expect(ChatMessageRecord.parse(chatMessageForIpc(automated, movedTo))).toMatchObject({
       authorKind: "automation",
       authorDisplayName: "Stamp the finish date",
       authorOwnerDisplayName: "Ice",
-      automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+      automation: { automationId: "collection:object-tasks#stamp", collectionPath: "Voyage/Tasks" },
+    });
+    // A Collection this computer no longer has still names its automation.
+    expect(ChatMessageRecord.parse(chatMessageForIpc(automated, () => null))).toMatchObject({
+      automation: { automationId: "collection:object-tasks#stamp", collectionPath: null },
     });
     // Another computer's automation arrives without the automation.
     const { automation: _automation, ...remote } = automated;
-    expect(ChatMessageRecord.parse(chatMessageForIpc(remote))).not.toHaveProperty("automation");
+    expect(ChatMessageRecord.parse(chatMessageForIpc(remote, movedTo))).not.toHaveProperty("automation");
   });
 });
 

@@ -44,8 +44,9 @@ import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projectio
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
-  const depth = origin.attribution.depth ?? 0;
-  return { kind: "agent", agentId: origin.actorOriginId ?? "dohc-mcp", onBehalfOf: "local", ...(depth > 0 ? { depth } : {}) };
+  const { depth = 0, onBehalfOf } = origin.attribution;
+  if (onBehalfOf === undefined) throw new Error("The agent write has no local person identity.");
+  return { kind: "agent", agentId: origin.actorOriginId ?? "dohc-mcp", onBehalfOf, ...(depth > 0 ? { depth } : {}) };
 }
 
 // With no editor open, the file holds the document's settled text.
@@ -98,6 +99,7 @@ interface DesktopCliServerDependencies<State> {
   startCliServer: typeof startCliServerImplementation;
   stateDir(): string;
   localUserDisplayName(): string;
+  localPersonId(): string;
   notifyRenderer(input: { workspaceId: string }): void;
   syncSharedChannelsForChatTarget(
     workspaceId: string,
@@ -128,6 +130,7 @@ export function createDesktopCliServer<State>(
     startCliServer,
     stateDir,
     localUserDisplayName,
+    localPersonId,
     notifyRenderer,
     syncSharedChannelsForChatTarget,
     chatDispatchService,
@@ -398,6 +401,7 @@ export function createDesktopCliServer<State>(
       openWorkspace: openCliWorkspace,
       chatWrites,
       localUserDisplayName,
+      localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,

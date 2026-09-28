@@ -227,11 +227,14 @@ export const CHANNELS = {
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
+  getCollectionAutomationRun: "desktop:get-collection-automation-run",
   retryCollectionAutomation: "desktop:retry-collection-automation",
   undoCollectionAutomationRun: "desktop:undo-collection-automation-run",
   listAutomationTargets: "desktop:list-automation-targets",
+  listAutomationGroups: "desktop:list-automation-groups",
+  listAutomationPeople: "desktop:list-automation-people",
   checkCollectionAutomation: "desktop:check-collection-automation",
-  stopAndRestorePerson: "desktop:stop-and-restore-person",
+  stopAndRestore: "desktop:stop-and-restore",
   undoStopAndRestore: "desktop:undo-stop-and-restore",
   confirmCollectionAutomationStep: "desktop:confirm-collection-automation-step",
   writeCollectionAutomations: "desktop:write-collection-automations",
@@ -243,6 +246,7 @@ export const CHANNELS = {
   automationHoldsChanged: "desktop:automation-holds-changed",
   listCollectionFieldMarks: "desktop:list-collection-field-marks",
   findDatasetCollection: "desktop:find-dataset-collection",
+  findAutomationCollection: "desktop:find-automation-collection",
   collectionAutomationsChanged: "desktop:collection-automations-changed",
   // Button fields: main decides who may press and what runs, and tells the
   // pressing window how its run went.

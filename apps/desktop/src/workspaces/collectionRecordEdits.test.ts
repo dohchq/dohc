@@ -179,7 +179,7 @@ function fakeEngine() {
           const path = records.get(recordId);
           if (path === undefined) throw new Error("collection-record-not-found");
           return {
-            collection: { path: collectionPath, status: "valid", reasons: [] },
+            collection: { path: collectionPath, objectId: "object-test", status: "valid", reasons: [] },
             record: { id: recordId, path, conflicted: false, values: [] },
             history: [],
             nextBeforeHistoryId: null,

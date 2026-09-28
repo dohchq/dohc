@@ -3,12 +3,17 @@ import * as z from "zod/v4";
 import { readBoundedJson } from "@dohc/service-http";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 import {relayLinkRefusal} from "./linkRefusal";
+import { asRecord } from "@dohc/workspace-core/records";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, relayVersionRefusal } from "./relayVersion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
 import { shareLinkSummary } from "./shareSummary";
 import type { createLinkLiveClient } from "./linkLiveClient";
 import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
+import {
+  collectionWriteBody, collectionWriteContentBytes, COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_CONTENT_BYTES,
+  MAX_COLLECTION_WRITE_ENVELOPE_BYTES, MAX_COLLECTION_WRITE_FILES, MAX_SUBMIT_ID_CHARS, parseCollectionWriteOutcome,
+} from "./collectionWrites";
 
 type RemoteRequest = (path: string, init?: RequestInit) => Promise<Response>;
 type RemoteOptions = {
@@ -17,8 +22,20 @@ type RemoteOptions = {
   request: RemoteRequest;
   linkLive?: ReturnType<typeof createLinkLiveClient>;
   liveLimits?: NamedLiveBrowserLimits;
+  /** Admits a body larger than an ordinary request, for a Collection write: a release, or null when full. */
+  admitLargeBody(): (() => void) | null;
   signal: AbortSignal;
+  /** When `signal` aborts on its own, so a tool answers before it does. */
+  deadlineAtMs: number;
 };
+
+// An ordinary request fits this. A Collection write carries up to 4 MiB of
+// text; JSON escapes a line break, tab, quote, or backslash in two bytes.
+const MAX_REQUEST_BYTES = 32 * 1024;
+const COLLECTION_WRITE_TOOL = "dohc_write_collection_files";
+const MAX_WRITE_REQUEST_BYTES = 2 * MAX_COLLECTION_WRITE_CONTENT_BYTES + 1024 * 1024;
+// Time kept after a write gives up, to send the tool's answer.
+const ANSWER_RESERVE_MS = 5_000;
 
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
 const discussionPostSchema = z.object({
@@ -26,6 +43,22 @@ const discussionPostSchema = z.object({
   idempotencyKey: z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u),
   claimedName: z.string().describe("A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes.").refine(value => normalizeShareDiscussionDisplayName(value).ok, "The name must fit 40 code points and 160 UTF-8 bytes.").optional(),
 }).refine(value => Buffer.byteLength(JSON.stringify(value)) <= MAX_DISCUSSION_ENVELOPE_BYTES, "The discussion request exceeds 16 KiB.");
+// Each file names its path and base, and its content as text or as base64: one or the other.
+const writtenFile = {
+  path: z.string().min(1).max(1024).describe("The file's path exactly as dohc_list_files lists paths."),
+  basedOnBlobSha256: z.string().regex(/^[0-9a-f]{64}$/u).nullable()
+    .describe("The blobSha256 of the file this replaces, from dohc_list_files, or null to create the file."),
+};
+const collectionWriteSchema = z.object({
+  submitId: z.string().min(1).max(MAX_SUBMIT_ID_CHARS).regex(/^[\x20-\x7e]+$/u)
+    .describe("Names this write. Send the same id to retry after an unknown outcome; use a new id for any other write."),
+  files: z.array(z.union([
+    z.object({...writtenFile, text: z.string().describe("The file's complete new text.")}).strict(),
+    z.object({...writtenFile, base64: z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/u).refine(value => value.length % 4 === 0, "Base64 comes in groups of four characters.")
+      .describe("The file's complete new UTF-8 content as base64, for text whose JSON would not fit in 9 MiB.")}).strict(),
+  ])).min(1).max(MAX_COLLECTION_WRITE_FILES),
+}).refine(value => collectionWriteContentBytes(value.files) <= MAX_COLLECTION_WRITE_CONTENT_BYTES,
+  "The files' content exceeds 4 MiB in all.");
 const fileInventorySchema = z.object({
   ok: z.literal(true),
   files: z.array(z.object({blobSha256: z.string(), contentKind: z.enum(["text", "binary"])})),
@@ -139,6 +172,23 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
       return text(await jsonResponse(await options.request("/api/view/discussion", { method: "POST", body: JSON.stringify({ body, idempotencyKey, ...(claimedName ? { claimedName } : {}) }) })));
     } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
+  if (collectionWritesAllowed(metadata)) server.registerTool(COLLECTION_WRITE_TOOL, {
+    description: "Change a Collection's own files through this Edit link: edit its collection.yaml, create or replace the automations.yaml beside it, " +
+      "or create a new Collection in a new folder with its collection.yaml, an optional automations.yaml, and up to 500 Markdown records. " +
+      "Read a file with dohc_read_file before replacing it. The files apply together or not at all. Send this tool alone, not in a batch. " +
+      "stale means the file changed since you read it: read it again, merge your change, and send it with a new submitId. " +
+      "refused gives the reason. unknown means the answer was lost: send the same request again. " +
+      "accepted means the change is in the owner's workspace history; the owner's computer applies it when it next syncs.",
+    inputSchema: collectionWriteSchema,
+  }, async ({submitId, files}) => {
+    // A write that runs out of time may still have committed: it is unknown,
+    // answered before this request's own deadline.
+    try {
+      const signal = AbortSignal.timeout(Math.max(0, options.deadlineAtMs - Date.now() - ANSWER_RESERVE_MS));
+      const response = await options.request(COLLECTION_WRITES_PATH, {method: "POST", signal, body: collectionWriteBody(submitId, files, Date.now())});
+      return text(parseCollectionWriteOutcome(response.status, await readBoundedJson(response, 16 * 1024, signal).catch(() => null)));
+    } catch { return text({ok: false, outcome: "unknown"}); }
+  });
   const selector = metadata.effectiveSelector as {versionId?: string | null} | undefined;
   if (metadata.access === "edit" && selector?.versionId === null && options.linkLive && options.liveLimits) {
   const liveOptions = {client: options.linkLive, limits: options.liveLimits, discriminator: options.discriminator, cookie: options.cookie, request: options.request, signal: options.signal};
@@ -157,7 +207,6 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
 }
 
 export async function serveRemoteMcp(request: Request, options: RemoteOptions): Promise<{ body: BodyInit | null; status: number; headers: Headers }> {
-  const parsedBody = request.method === "POST" ? await readBoundedJson(request, 32 * 1024, options.signal) : undefined;
   const metadataResponse = await options.request("/api/view/meta");
   if (!metadataResponse.ok) {
     const result = await relayLinkRefusal(metadataResponse, options.signal);
@@ -166,15 +215,66 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
   }
   const metadata = await json(metadataResponse, options.signal) as Record<string, unknown>;
   if (metadata.ok !== true) throw new Error("Share is unavailable.");
-  if (parsedBody && typeof parsedBody === "object" && "method" in parsedBody && parsedBody.method === "subscriptions/listen") {
-    const result = Response.json({jsonrpc: "2.0", id: "id" in parsedBody ? parsedBody.id : null, error: {code: -32601, message: "This endpoint does not offer subscriptions."}});
-    return {body: result.body, status: result.status, headers: result.headers};
-  }
-  const handler = createMcpHandler(() => buildServer(options, metadata));
+  const body = request.method === "POST"
+    ? await readRequestJson(request, options.signal, collectionWritesAllowed(metadata) ? options.admitLargeBody : null)
+    : {value: undefined, release: () => {}};
+  if (!body) return {body: null, status: 429, headers: new Headers()};
   try {
-    const response = await handler.fetch(request, {parsedBody});
-    return { body: response.body ? await boundedBytes(response, 4 * 1024 * 1024, options.signal) : null, status: response.status, headers: response.headers };
-  } finally {await handler.close();}
+    const parsedBody = body.value;
+    // A write goes in a request of its own, so its answer never waits on, or
+    // shares a deadline or a body slot with, another call.
+    if (Array.isArray(parsedBody) && parsedBody.some(message => asRecord(message)?.method === "tools/call" &&
+        asRecord(asRecord(message)?.params)?.name === COLLECTION_WRITE_TOOL)) {
+      const result = Response.json({jsonrpc: "2.0", id: null, error: {code: -32600, message: `Send ${COLLECTION_WRITE_TOOL} in a request of its own, not in a batch.`}});
+      return {body: result.body, status: result.status, headers: result.headers};
+    }
+    if (parsedBody && typeof parsedBody === "object" && "method" in parsedBody && parsedBody.method === "subscriptions/listen") {
+      const result = Response.json({jsonrpc: "2.0", id: "id" in parsedBody ? parsedBody.id : null, error: {code: -32601, message: "This endpoint does not offer subscriptions."}});
+      return {body: result.body, status: result.status, headers: result.headers};
+    }
+    const handler = createMcpHandler(() => buildServer(options, metadata));
+    try {
+      const response = await handler.fetch(request, {parsedBody});
+      return { body: response.body ? await boundedBytes(response, 4 * 1024 * 1024, options.signal) : null, status: response.status, headers: response.headers };
+    } finally {await handler.close();}
+  } finally {body.release();}
+}
+
+/**
+ * Reads a request's JSON. Past an ordinary request's size it needs one of the
+ * few large-body slots, which only a link that writes Collections asks for:
+ * the body with the slot's release, null when no slot is free, or a throw.
+ */
+async function readRequestJson(request: Request, signal: AbortSignal, admitLarge: (() => (() => void) | null) | null):
+  Promise<{value: unknown; release(): void} | null> {
+  const reader = request.body?.getReader();
+  if (!reader) throw new TypeError("Missing JSON body.");
+  const chunks: Uint8Array[] = []; let size = 0, limit = MAX_REQUEST_BYTES, release = () => {};
+  const abort = () => {void reader.cancel().catch(() => {});};
+  signal.addEventListener("abort", abort, {once: true});
+  try {
+    signal.throwIfAborted();
+    while (true) {
+      const next = await reader.read(); signal.throwIfAborted(); if (next.done) break;
+      if (next.value.byteLength > limit - size) {
+        const admitted = limit === MAX_REQUEST_BYTES && admitLarge ? admitLarge() : undefined;
+        if (admitted === null) return null;
+        if (!admitted) throw new RangeError("The request exceeds the size limit.");
+        release = admitted; limit = MAX_WRITE_REQUEST_BYTES;
+        if (next.value.byteLength > limit - size) throw new RangeError("The request exceeds the size limit.");
+      }
+      size += next.value.byteLength; chunks.push(next.value);
+    }
+    const value: unknown = JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(Buffer.concat(chunks, size)));
+    return {value, release};
+  } catch (error) {release(); throw error;}
+  finally {signal.removeEventListener("abort", abort); await reader.cancel().catch(() => {}); reader.releaseLock();}
+}
+
+/** An Edit link on the current version writes a Collection's own files. */
+function collectionWritesAllowed(metadata: Record<string, unknown>): boolean {
+  const selector = metadata.effectiveSelector as {versionId?: string | null} | undefined;
+  return metadata.access === "edit" && selector?.versionId === null;
 }
 
 async function boundedBytes(response: Response, maxBytes: number, signal: AbortSignal): Promise<Buffer<ArrayBuffer>> {

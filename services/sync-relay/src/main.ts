@@ -373,7 +373,7 @@ const fetchHandler = async (request: Request): Promise<Response> => {
   const refusal = relayApiVersionRefusal(request.headers);
   const result = refusal ? errorResponse(refusal) : await relayHandler(request);
   const path = new URL(request.url).pathname;
-  return /^\/sync\/link(?:[/-]|$)/.test(path) || linkLivePaths.has(path) ? normalizeLinkRefusal(result, linkLivePaths.has(path)) : result;
+  return /^\/sync\/link(?:[/-]|$)/.test(path) || linkLivePaths.has(path) ? normalizeLinkRefusal(result, path, linkLivePaths.has(path)) : result;
 };
 
 // Headroom over the blob cap so a maximal valid blob PUT still passes; the

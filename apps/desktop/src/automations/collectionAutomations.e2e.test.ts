@@ -13,7 +13,7 @@ import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { waitForPathMoments } from "../workspaces/waitForPathMoments";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
-import { localIsoTime } from "@dohc/automation-executor/automation-plan";
+import { collectionAutomationId, localIsoTime } from "@dohc/automation-executor/automation-plan";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import { CollectionAutomations, type CollectionAutomationEngine } from "@dohc/automation-executor/collection-automations";
 
@@ -31,6 +31,8 @@ async function harness(automations: string, run: (context: {
   settled: () => Promise<{ claimId: string; state: string; error?: string }>;
   withEngine: <T>(work: (adapter: CollectionAutomationEngine & VersionedLiveAdapter) => Promise<T>) => Promise<T>;
   personSets: (fields: Record<string, unknown>) => Promise<unknown>;
+  /** The engine id of an automation in Tasks, by its id in the file. */
+  automationId: (id: string) => Promise<string>;
 }) => Promise<void>) {
   const root = await createTestScratch("dohc-collection-automation-e2e-");
   await mkdir(join(root, "Tasks"), { recursive: true });
@@ -122,6 +124,10 @@ async function harness(automations: string, run: (context: {
       personSets: (fields) => setCollectionRecordFields(editContext(new AbortController().signal), {
         recordPath: "Tasks/one.md", fields, author: { kind: "user", userId: "owner" },
       }),
+      automationId: async (id) => {
+        const { collections } = await withEngine((adapter) => adapter.listCollections());
+        return collectionAutomationId(collections.find((collection) => collection.path === "Tasks")!.objectId, id);
+      },
     });
     expect(errors).toEqual([]);
   } finally {
@@ -142,21 +148,22 @@ it.skipIf(engine.missing)(
       "    when: {field-changed: Status, to: Done}",
       "    do: [{set: {Finished on: '=today()'}}]",
       "",
-    ].join("\n"), async ({ settled, withEngine, personSets }) => {
+    ].join("\n"), async ({ settled, withEngine, personSets, automationId }) => {
       await personSets({ Status: "Done" });
       await expect(settled()).resolves.toMatchObject({ state: "done" });
+      const stamp = await automationId("stamp");
 
       const record = await withEngine(async (adapter) => {
         const { records } = await adapter.queryCollectionRecords({ collectionPath: "Tasks" });
         return await adapter.getCollectionRecord({ collectionPath: "Tasks", recordId: records[0]!.id, historyLimit: 10 });
       });
-      const { claims } = await withEngine((adapter) => adapter.listAutomationClaims({ automationId: "collection:Tasks#stamp" }));
+      const { claims } = await withEngine((adapter) => adapter.listAutomationClaims({ automationId: stamp }));
       expect(record.record.values.find((value) => value.field === "Finished on")?.value)
         .toBe(localIsoTime(claims[0]!.createdAtMs).slice(0, 10));
       // The automation's write is its own, one step down the chain, so its
       // own subscription does not claim it again.
       expect(record.history.find((entry) => entry.field === "Finished on")).toMatchObject({
-        actorKind: "automation", authorOriginId: "collection:Tasks#stamp", depth: 1,
+        actorKind: "automation", authorOriginId: stamp, depth: 1,
       });
       expect(claims).toHaveLength(1);
     });
@@ -177,12 +184,13 @@ it.skipIf(engine.missing)(
       "    when: {field-changed: Status, to: Done}",
       "    do: [{add-record: {Status: Logged}}]",
       "",
-    ].join("\n"), async ({ settled, withEngine, personSets }) => {
+    ].join("\n"), async ({ settled, withEngine, personSets, automationId }) => {
       await personSets({ Status: "Done" });
+      const followUp = await automationId("follow-up");
       // Log adds a record, and Follow up runs for it. Follow up's own record
       // is adopted before its claim settles, so any claim it made on itself
       // exists by then.
-      const followUpClaims = () => withEngine((adapter) => adapter.listAutomationClaims({ automationId: "collection:Tasks#follow-up" }));
+      const followUpClaims = () => withEngine((adapter) => adapter.listAutomationClaims({ automationId: followUp }));
       for (;;) {
         await expect(settled()).resolves.toMatchObject({ state: "done" });
         if ((await followUpClaims()).claims.some((claim) => claim.state === "done")) break;
@@ -191,6 +199,38 @@ it.skipIf(engine.missing)(
       expect(records.map((record) => record.values.find((value) => value.field === "Status")?.value).sort())
         .toEqual(["Done", "Follow up", "Logged"]);
       expect((await followUpClaims()).claims).toHaveLength(1);
+    });
+  },
+  120_000,
+);
+
+it.skipIf(engine.missing)(
+  "gives each step what the steps before it wrote through the real engine: a Find sees a field just set and a record just added",
+  async () => {
+    await harness([
+      "  - id: chain",
+      "    name: Chain",
+      "    when: {field-changed: Status, to: Done}",
+      "    do:",
+      "      - set: {Finished on: flagged}",
+      "      - find: record[\"Finished on\"] == \"flagged\"",
+      "        as: flagged",
+      "      - add-record: {Status: '=\"Found \" + flagged.length'}",
+      "        as: note",
+      "      - find: record.Status == note.Status",
+      "        as: notes",
+      "      - set: {Finished on: '=\"notes \" + notes.length'}",
+      "",
+    ].join("\n"), async ({ settled, withEngine, personSets }) => {
+      await personSets({ Status: "Done" });
+      await expect(settled()).resolves.toMatchObject({ state: "done" });
+      const { records } = await withEngine((adapter) => adapter.queryCollectionRecords({ collectionPath: "Tasks" }));
+      const fields = records.map((record) => Object.fromEntries(record.values.map(({ field, value }) => [field, value])));
+      expect(fields).toEqual(expect.arrayContaining([
+        expect.objectContaining({ Status: "Done", "Finished on": "notes 1" }),
+        expect.objectContaining({ Status: "Found 1" }),
+      ]));
+      expect(records).toHaveLength(2);
     });
   },
   120_000,

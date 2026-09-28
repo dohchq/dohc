@@ -578,8 +578,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_automation_runs",
     {
       description:
-        "List an automation's 20 newest runs on this computer, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. Each computer keeps the runs of the automations it ran.",
-      inputSchema: automationInput,
+        "List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.",
+      inputSchema: { ...automationInput, page: z.string().min(1).max(512).optional() },
     },
     async (args) => text(await listAutomationRuns(ctx, args)),
   );

@@ -52,7 +52,12 @@ function scopeProblem(scope: AutomationScope): string | undefined {
   if (scope.recordKeys !== undefined && (!Array.isArray(scope.recordKeys) || !scope.recordKeys.every(key => typeof key === "string"))) {
     return "The automation scope's record keys must be a list of names.";
   }
-  const taken = Object.keys(scope.bindings ?? {}).find(name => !BINDING_NAME.test(name) || AUTOMATION_SCOPE_NAMES.includes(name));
+  const unavailable = scope.unavailable ?? {};
+  if (typeof unavailable !== "object" || Array.isArray(unavailable) || !Object.values(unavailable).every(why => typeof why === "string")) {
+    return "The automation scope's unavailable names must each say why.";
+  }
+  const taken = [...Object.keys(scope.bindings ?? {}), ...Object.keys(unavailable)]
+    .find(name => !BINDING_NAME.test(name) || AUTOMATION_SCOPE_NAMES.includes(name) || (Object.hasOwn(unavailable, name) && Object.hasOwn(scope.bindings ?? {}, name)));
   return taken === undefined ? undefined : `The automation scope cannot bind the name ${JSON.stringify(taken)}.`;
 }
 

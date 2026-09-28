@@ -113,6 +113,8 @@ interface EngineYDocSessionIpcOptions {
     path: string,
   ) => Promise<string | null>;
   onError: (message: string, error?: unknown) => void;
+  /** The person typing on this computer: the account, or this installation's id when signed out. */
+  localPersonId: () => string;
 }
 
 interface SessionEvent {
@@ -332,6 +334,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     "resolveDocumentPath"
   ];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
+  readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
   readonly #owner: EngineYDocIpcSessionOwner;
   readonly #documentReservations: DocumentMutationReservations;
   // One main-side edit at a time per document. Each edit reads the document's
@@ -349,6 +352,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#sharedCaptureFor = options.sharedCaptureFor;
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
+    this.#localPersonId = options.localPersonId;
     this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
       onOutbound: (outbound) => this.#send(outbound),
@@ -734,10 +738,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         owned.provider.applyLocalUpdate(
           input.update,
           () => noteLocalEdit(owned.saveSeq, input.seq),
-          // A renderer editor update is a person typing: agent and
-          // automation writes take the collection write seam, never this
-          // IPC. The declared kind rides beside the device attribution.
-          { attribution: { actorKind: "human" } },
+          // A renderer editor update is this computer's person typing:
+          // agent and automation writes take the collection write seam,
+          // never this IPC. The declared kind and person ride beside the
+          // device attribution.
+          { attribution: { actorKind: "human", onBehalfOf: this.#localPersonId() } },
         );
         return { accepted: true };
       },

@@ -1429,7 +1429,11 @@ pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
         });
     }
     // The engine's own directory is reserved; a file must never alias into it.
-    if path == ".dohc" || path.starts_with(".dohc/") {
+    if path.split('/').any(|segment| {
+        dohc_engine_files::floor::segment_is_ignored(&dohc_engine_files::floor::reserved_key(
+            segment,
+        ))
+    }) {
         return Err(DomainError::InvalidPath {
             reason: "path must not target the reserved .dohc directory",
         });

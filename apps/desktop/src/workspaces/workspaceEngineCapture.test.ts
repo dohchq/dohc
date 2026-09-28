@@ -2978,14 +2978,14 @@ describe("workspaceEngineCapture agent attribution", () => {
         "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES),
         author,
       ),
-    ).resolves.toMatchObject({ resolvedAbsolutePath: join(root, "at-limit.txt"), materializeOutcome: "applied" });
+    ).resolves.toEqual({ resolvedAbsolutePath: join(root, "at-limit.txt"), materializeOutcome: "applied" });
     await expect(
       engine.writeAuthoredFile(
         join(root, "over-limit.txt"),
         "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1),
         author,
       ),
-    ).resolves.toMatchObject({ resolvedAbsolutePath: join(root, "over-limit.txt"), materializeOutcome: "applied" });
+    ).resolves.toEqual({ resolvedAbsolutePath: join(root, "over-limit.txt"), materializeOutcome: "applied" });
     await engine.stop();
   });
 

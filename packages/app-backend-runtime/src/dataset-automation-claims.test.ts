@@ -18,7 +18,7 @@ import {
   DATASET_AUTOMATION_CHAIN_STOPPED,
   DATASET_AUTOMATION_CLAIM_LIMIT,
   DATASET_AUTOMATION_CLAIMS_PER_COMMIT,
-  DATASET_AUTOMATION_HISTORY,
+  DATASET_AUTOMATION_HISTORY_RETENTION_MS,
   DATASET_AUTOMATION_PRESS_RETENTION_MS,
   DATASET_AUTOMATION_RECLAIM_EXHAUSTED,
   DATASET_AUTOMATION_RECORD_ID_TOO_LONG,
@@ -270,25 +270,52 @@ it("claims an agent's commit at its run's depth, and records nothing for History
   expect(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_automation_revisions").get()).toEqual({ count: 0 });
 });
 
-it("charges what it keeps, and keeps each automation's newest settled claims and newest failure", () => {
+it("charges what it keeps, and keeps claims 30 days, and the newest failure longer", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
   f.commit("INSERT INTO tasks VALUES('first','Open','')", { kind: "automation", automationId: "collection:tasks#x", depth: 4 });
-  const count = DATASET_AUTOMATION_HISTORY + 2;
+  const count = 5;
   f.commit(`INSERT INTO tasks VALUES${Array.from({ length: count }, (_, index) => `('${String(index).padStart(3, "0")}','Open','')`).join(",")}`);
   expect(f.charged).toBe(retained(f.db));
   const started = drain(f.claims);
   expect(started).toHaveLength(count);
   f.claims.settle(started[0]!, { state: "failed", error: `The step failed. ${"é".repeat(2000)}` });
   for (const claim of started.slice(1)) f.claims.settle(claim, { state: "done" });
-  // The chain stop and the oldest done claim leave; the newest failure stays with the newest 100.
-  const kept = f.db.prepare("SELECT claim_id,state,error FROM dohc_dataset_automation_claims ORDER BY rowid").all();
-  expect(kept).toHaveLength(DATASET_AUTOMATION_HISTORY + 1);
-  expect(kept[0]).toMatchObject({ claim_id: started[0]!.claimId, state: "failed" });
+  const rows = () => f.db.prepare("SELECT claim_id,state,error FROM dohc_dataset_automation_claims ORDER BY rowid").all();
+  // Within 30 days every claim stays.
+  f.tick(DATASET_AUTOMATION_HISTORY_RETENTION_MS);
+  expect(f.claims.pruneHistory(scope.workspaceId, [])).toEqual({ pruned: 0, more: false });
+  expect(rows()).toHaveLength(count + 1);
+  // Past them, a claim goes unless the prune keeps it or it is the newest
+  // failure, which the notice offers. The chain stop's failure stays counted.
+  f.tick(1);
+  const keep = started[4]!.claimId;
+  expect(f.claims.pruneHistory(scope.workspaceId, [keep])).toEqual({ pruned: count - 1, more: false });
+  const kept = rows();
+  expect(kept.map(row => row.claim_id)).toEqual([started[0]!.claimId, keep]);
   expect(Buffer.byteLength(String(kept[0]!.error))).toBeLessThanOrEqual(1024);
   expect(String(kept[0]!.error)).toMatch(/^The step failed\. é+$/);
-  expect(kept.slice(1).map(row => row.claim_id)).toEqual(started.slice(2).map(claim => claim.claimId));
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ claimId: started[0]!.claimId, generation: 2 }]);
   expect(f.charged).toBe(retained(f.db));
+});
+
+it("pages an automation's run history, newest first", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
+  for (const id of ["a", "b", "c", "d", "e"]) f.commit(`INSERT INTO tasks VALUES('${id}','Open','')`);
+  const newest = f.claims.claims(scope.workspaceId, "collection:tasks#a");
+  expect(newest.claims).toHaveLength(5);
+  expect(newest.next).toBeNull();
+  const paged: string[] = [];
+  let before: string | undefined;
+  do {
+    const page = f.claims.claims(scope.workspaceId, "collection:tasks#a", { before, limit: 2 });
+    paged.push(...page.claims.map(claim => claim.claimId));
+    before = page.next ?? undefined;
+  } while (before !== undefined);
+  expect(paged).toEqual(newest.claims.map(claim => claim.claimId));
+  expect(() => f.claims.claims(scope.workspaceId, "collection:tasks#a", { limit: 0 })).toThrow("Invalid automation claim page.");
+  expect(() => f.claims.claims(scope.workspaceId, "collection:tasks#a", { before: "x" })).toThrow("Invalid automation claim page.");
 });
 
 it("keeps History's automation names for the newest revisions, and refunds older ones", () => {
@@ -321,17 +348,17 @@ it("requeues a claim a dead process left running, and fails it once it died at t
   expect(f.charged).toBe(retained(f.db));
 });
 
-it("trims the claims the reaper fails to the history, with a refund", () => {
+it("expires old claims the reaper failed, except the newest, and refunds them", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
-  f.commit(`INSERT INTO tasks VALUES${tasks(DATASET_AUTOMATION_HISTORY)}`);
-  for (const claim of drain(f.claims)) f.claims.settle(claim, { state: "done" });
   f.commit("INSERT INTO tasks VALUES('x','Open',''),('y','Open',''),('z','Open','')");
   // Two crashes use up each claim's attempts.
   for (let crash = 0; crash < 2; crash++) { expect(drain(f.claims)).toHaveLength(3); f.reopen(); }
+  f.tick(DATASET_AUTOMATION_HISTORY_RETENTION_MS + 1);
+  expect(f.claims.pruneHistory(scope.workspaceId, [])).toEqual({ pruned: 2, more: false });
   const kept = f.db.prepare("SELECT state,error FROM dohc_dataset_automation_claims ORDER BY rowid").all();
-  expect(kept).toHaveLength(DATASET_AUTOMATION_HISTORY);
-  expect(kept.slice(-3)).toEqual([1, 2, 3].map(() => ({ state: "failed", error: DATASET_AUTOMATION_RECLAIM_EXHAUSTED })));
+  expect(kept).toEqual([{ state: "failed", error: DATASET_AUTOMATION_RECLAIM_EXHAUSTED }]);
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 3 }]);
   expect(f.charged).toBe(retained(f.db));
 });
 
@@ -367,7 +394,7 @@ it("hands a started claim back without counting its attempt, and refuses an atte
   f.commit("INSERT INTO tasks VALUES('a','Open','')");
   const started = f.claims.next(scope.workspaceId)!;
   f.claims.release(started);
-  expect(f.claims.claims(scope.workspaceId, "collection:tasks#a")).toMatchObject([{ claimId: started.claimId, state: "pending", attempts: 0, run: 1 }]);
+  expect(f.claims.claims(scope.workspaceId, "collection:tasks#a").claims).toMatchObject([{ claimId: started.claimId, state: "pending", attempts: 0, run: 1 }]);
   expect(() => f.claims.release(started)).toThrow("no longer current");
   const again = f.claims.next(scope.workspaceId)!;
   expect(again).toMatchObject({ claimId: started.claimId, attempts: 1 });
@@ -379,15 +406,17 @@ it("lists an automation's runs newest first, and offers the failure it settled l
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
   f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  // Claims made in one moment list by id; these are made a moment apart.
+  f.tick(1);
   f.commit("INSERT INTO tasks VALUES('b','Open','')");
   const [first, second] = drain(f.claims);
   f.claims.settle(second!, { state: "failed", error: "Second." });
   f.tick(1);
   f.claims.settle(first!, { state: "failed", error: "First." });
-  expect(f.claims.claims(scope.workspaceId, "collection:tasks#a").map(claim => claim.claimId)).toEqual([second!.claimId, first!.claimId]);
+  expect(f.claims.claims(scope.workspaceId, "collection:tasks#a").claims.map(claim => claim.claimId)).toEqual([second!.claimId, first!.claimId]);
   expect(f.claims.failures(scope.workspaceId)).toEqual([{ automationId: "collection:tasks#a", claimId: first!.claimId,
-    datasetInstance: JSON.stringify([scope.datasetId, "host-1"]), neverStarted: false, chainStopped: false, error: "First.", updatedAtMs: 1_001, generation: 2 }]);
-  expect(f.claims.claims(scope.workspaceId, "collection:tasks#b")).toEqual([]);
+    datasetInstance: JSON.stringify([scope.datasetId, "host-1"]), neverStarted: false, chainStopped: false, error: "First.", updatedAtMs: 1_002, generation: 2 }]);
+  expect(f.claims.claims(scope.workspaceId, "collection:tasks#b")).toEqual({ claims: [], next: null });
 });
 
 it("counts each automation's failures in a generation that trimming and Try again never lower, charged until the dataset goes", () => {
@@ -547,16 +576,14 @@ it("claims an agent's press for its person at the agent run's depth, and stops i
   expect(f.charged).toBe(retained(f.db));
 });
 
-it("keeps a claim a remembered press names past the run history, until the press is 30 days old", () => {
+it("keeps a pressed claim while its press is remembered, and expires both after 30 days", () => {
   const f = ledger();
   const press = presses(f);
   const first = press("press-first");
   if (first.kind === "busy") throw new Error("The first press ran.");
   for (const started of drain(f.claims)) f.claims.settle(started, { state: "done" });
-  for (let index = 0; index <= DATASET_AUTOMATION_HISTORY; index++) {
-    press(`press-${index}`, index);
-    for (const started of drain(f.claims)) f.claims.settle(started, { state: "done" });
-  }
+  f.tick(DATASET_AUTOMATION_HISTORY_RETENTION_MS);
+  expect(f.claims.pruneHistory(scope.workspaceId, [])).toEqual({ pruned: 0, more: false });
   expect(f.claims.pressed(scope.workspaceId, "press-first")?.claim.claimId).toBe(first.claim.claimId);
   f.tick(DATASET_AUTOMATION_PRESS_RETENTION_MS + 1);
   expect(f.claims.pressed(scope.workspaceId, "press-first")).toBeNull();
@@ -565,10 +592,12 @@ it("keeps a claim a remembered press names past the run history, until the press
   // The press sent again once the ledger forgot it still finds its claim, when nothing committed since.
   expect(press("press-first")).toMatchObject({ kind: "joined", claim: { claimId: first.claim.claimId, state: "done" } });
   expect(() => press("press-first", "a", BEN)).toThrow("already names another press");
-  // The next settle trims the claims no press names.
+  // Expiring run history deletes the claims no press names.
   for (const started of drain(f.claims)) f.claims.settle(started, { state: "done" });
+  f.tick(DATASET_AUTOMATION_HISTORY_RETENTION_MS + 1);
+  f.claims.pruneHistory(scope.workspaceId, []);
   const count = (table: string) => f.db.prepare(`SELECT count(*) AS count FROM dohc_dataset_automation_${table}`).get();
-  expect([count("presses"), count("claims")]).toEqual([{ count: 2 }, { count: DATASET_AUTOMATION_HISTORY + 1 }]);
+  expect([count("presses"), count("claims")]).toEqual([{ count: 0 }, { count: 0 }]);
   expect(f.charged).toBe(retained(f.db));
 });
 
@@ -596,7 +625,7 @@ it("tries a failed press again only while its button does not run on the record,
   const ben = press("press-ben", "a", BEN, "collection:tasks#settle");
   expect(ben).toMatchObject({ kind: "claimed" });
   expect(() => f.claims.retry(ana.claim)).toThrow("This button is already running for this record.");
-  expect(f.claims.claims(scope.workspaceId, "collection:tasks#paid").map(claim => claim.state)).toEqual(["failed"]);
+  expect(f.claims.claims(scope.workspaceId, "collection:tasks#paid").claims.map(claim => claim.state)).toEqual(["failed"]);
   for (const claim of drain(f.claims)) f.claims.settle(claim, { state: "done" });
   expect(f.claims.retry(ana.claim)).toMatchObject({ claimId: ana.claim.claimId, state: "pending", run: 2 });
 });

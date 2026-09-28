@@ -34,7 +34,7 @@ afterEach(async () => {
 const sourceAdapter = (files: Map<string, string>) => sourceCaptureAdapter(files);
 async function fixture(agentRun?: () => LocalDatasetAgent | null) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-dataset-app-")); roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
   const generated = generateDatasetSources(definition);
   const files = new Map(Object.entries(generated.files)); files.set("data/dataset.json", JSON.stringify(definition));
   files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{
@@ -73,7 +73,7 @@ describe("local approved dataset apps", () => {
     await expect(f.host.apps.activate(await f.prepareApp("replacement"), new AbortController().signal)).rejects.toThrow(/response is pending/);
     expect(await f.host.apps.request(other.publicationId, "attempt", { authorityRevision: other.authorityRevision, operation: "submit", action: "get" })).toEqual({ attempt: null });
     await f.host.close();
-    const restarted = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(restarted);
+    const restarted = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(restarted);
     expect(await restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "get" })).toEqual(first);
     expect(await restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "clear", token: first.attempt.token })).toEqual({ attempt: null });
     await expect(restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, operation: "list", action: "get" })).rejects.toThrow(/not approved/);
@@ -111,7 +111,7 @@ describe("local approved dataset apps", () => {
     const f = await fixture();
     const first = await f.host.apps.request(f.published.publicationId, "invoke", f.invocation());
     await f.host.close();
-    const restarted = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(restarted);
+    const restarted = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(restarted);
     expect(restarted.apps.list("app")).toMatchObject([{ active: true, datasetCapability: { operationIds: [id(6)] } }]);
     expect(await restarted.apps.request(f.published.publicationId, "invoke", f.invocation())).toEqual({ ...first as object, replayed: true });
     await expect(restarted.apps.request(f.published.publicationId, "invoke", { ...f.invocation(), operation: "list" })).rejects.toThrow(/not approved/);
@@ -210,7 +210,7 @@ it("keeps local form uploads, submissions and selected fields working through re
   const invoke=f.invocation(); invoke.input.values[id(5)]=uploaded.file.fileId;
   const first=await f.host.apps.request(f.published.publicationId,"invoke",invoke);
   await f.host.close();
-  const restarted=await createLocalDatasetHost({workspaceId:"w",workspaceRoot:f.workspaceRoot}); hosts.push(restarted);
+  const restarted=await createLocalDatasetHost({localPersonId:()=>"person-local",workspaceId:"w",workspaceRoot:f.workspaceRoot}); hosts.push(restarted);
   expect(restarted.apps.browserPublication(f.published.publicationId)).toBeDefined();
   expect(await restarted.apps.request(f.published.publicationId,"invoke",invoke)).toEqual({...first as object,replayed:true});
   await expect(restarted.apps.request(restricted.publicationId,"invoke",{...invoke,authorityRevision:restricted.authorityRevision})).rejects.toThrow("cannot submit those fields");
@@ -233,7 +233,8 @@ describe("local app write attribution", () => {
   it("names the app, and the agent at its run's depth while a run is active", async () => {
     const f = await attributed(), appId = f.published.publicationId;
     expect(await f.invoke("no-run")).toMatchObject({ replayed: false });
-    expect(f.host.automations.next()).toMatchObject({ depth: 0, actor: { kind: "owner", appId } });
+    // A local app's commit is made for this computer's person, never the owner key.
+    expect(f.host.automations.next()).toMatchObject({ depth: 0, actor: { kind: "owner", appId, userId: "person-local" } });
     for (const depth of [0, 1, 3]) {
       f.setRun({ depth });
       expect(await f.invoke(`depth-${depth}`)).toMatchObject({ replayed: false });
@@ -243,8 +244,8 @@ describe("local app write attribution", () => {
     f.setRun({ depth: 4 });
     expect(await f.invoke("depth-4")).toMatchObject({ replayed: false });
     expect(f.host.automations.next()).toBeNull();
-    expect(f.host.automations.claims(watcher)).toContainEqual(expect.objectContaining({
-      state: "failed", error: "chain-stopped", attempts: 0, depth: 4, actor: { kind: "agent", depth: 4, appId } }));
+    expect(f.host.automations.claims(watcher).claims).toContainEqual(expect.objectContaining({
+      state: "failed", error: "chain-stopped", attempts: 0, depth: 4, actor: { kind: "agent", depth: 4, appId, userId: "person-local" } }));
   });
 
   it("keeps the depth an invocation started with after its run ends or another replaces it", async () => {

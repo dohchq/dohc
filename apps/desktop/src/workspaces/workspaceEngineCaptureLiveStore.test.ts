@@ -1530,6 +1530,7 @@ describe("createCaptureLiveStores", () => {
 
   it.each(([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const).flatMap((method) => [
     { method, author: { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const },
+    { method, author: { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" } as const },
     { method, author: { kind: "agent", agentId: "agent" } as const },
     { method, author: { kind: "automation", automationId: "collection:Tasks#stamp", depth: 4 } as const },
   ]))(

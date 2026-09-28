@@ -329,6 +329,7 @@ describe("share grants", () => {
         grantId: expect.any(String),
         principalKind: "user",
         generation: 1,
+        automationsGeneration: null,
         createdAtMs: 5555,
         revokedAtMs: null,
       },

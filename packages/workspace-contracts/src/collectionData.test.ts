@@ -41,6 +41,10 @@ describe("Collection references", () => {
 });
 
 describe("Collection data requests", () => {
+  it.each([".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"])("refuses reserved Collection path %s", (name) => {
+    expect(() => parseCollectionRef({ kind: "document", path: `notes/${name}/data` })).toThrow();
+    expect(parseCollectionRef({ kind: "document", path: "my-dohc/data" })).toEqual({ kind: "document", path: "my-dohc/data" });
+  });
   it("matches bounded table query inputs and preserves document field names", () => {
     const query = { collection: transactional, limit: 50, after: { id: 3, value: "Alice" }, sort: { fieldId, direction: "asc" }, search: "", filters: [{ fieldId, value: "Alice" }] };
     expect(parseCollectionDataQuery(query)).toEqual(query);

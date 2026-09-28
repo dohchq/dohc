@@ -2,7 +2,7 @@ import { nameSlug as slug } from "@dohc/workspace-contracts/names";
 import { scanMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract";
-import { validateUserWritePath } from "@dohc/workspace-core";
+import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
 import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import { asObject, optionalString } from "./json";
@@ -83,12 +83,12 @@ function messageAutomation(authorKind: string, value: unknown): ChatMessage["aut
   }
   if (authorKind !== "automation" || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-input");
   const { automationId, chainDepth, ...rest } = value as Record<string, unknown>;
-  const match = typeof automationId === "string" ? /^collection:(.+)#([^#]+)$/su.exec(automationId) : null;
+  const match = typeof automationId === "string" ? /^collection:[A-Za-z0-9_-]+#.+$/su.exec(automationId) : null;
   if (Object.keys(rest).length > 0 || !match || automationId !== (automationId as string).trim() ||
     typeof chainDepth !== "number" || !Number.isInteger(chainDepth) || chainDepth < 1 || chainDepth > 64) {
     throw new Error("invalid-input");
   }
-  return { automationId: automationId as string, collectionPath: match[1]! };
+  return { automationId: automationId as string };
 }
 
 function strictObject(
@@ -233,8 +233,7 @@ function validateProjectionPath(path: string): string {
     path.includes("\\") ||
     path[1] === ":" ||
     path.includes("..") ||
-    path === ".dohc" ||
-    path.startsWith(".dohc/")
+    hasIgnoredSegment(path)
   ) {
     throw new Error("invalid-bookmark-target");
   }

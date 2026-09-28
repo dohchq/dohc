@@ -66,7 +66,8 @@ export function readOwnerCollectionWrites(
     const share = grant && storage.getShare(grant.shareId);
     if (!share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId) throw notFound();
     const rows = storage.db.prepare(
-      `SELECT submit_id, grant_generation, created_at_ms, origin_id, first_origin_seq, last_origin_seq, paths_json
+      `SELECT submit_id, grant_generation, author_kind, created_at_ms, origin_id, first_origin_seq, last_origin_seq,
+         paths_json
        FROM sync_relay_collection_writes
        WHERE grant_id = ? AND workspace_id = ? AND first_origin_seq > ?
        ORDER BY first_origin_seq LIMIT ?`,
@@ -99,7 +100,7 @@ export function readOwnerCollectionWrites(
       const files = logged.map((moment, index): OwnerCollectionWriteFile => {
         if (
           Number(moment.origin_seq) !== first + index || moment.op_kind !== "moment.append" ||
-          moment.operation !== "write" || moment.author_kind !== "named" || moment.author_grant_id !== input.grantId ||
+          moment.operation !== "write" || moment.author_kind !== row.author_kind || moment.author_grant_id !== input.grantId ||
           !identifier(moment.moment_id) || !identifier(moment.object_id) || moment.path !== paths[index] ||
           (moment.before_present !== "present" && moment.before_present !== "null")
         ) {

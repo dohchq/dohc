@@ -696,7 +696,7 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
         &dohc_engine_domain::AutomationGroupWatch {
             generation: 0,
             subscriptions: vec![dohc_engine_domain::AutomationGroupSubscription {
-                automation_id: "collection:Trip/Tasks#task".to_owned(),
+                automation_id: "collection:object-tasks#task".to_owned(),
                 channel_id,
                 starts_with: Some("/task".to_owned()),
             }],

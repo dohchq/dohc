@@ -17,6 +17,7 @@ import {
   SHARE_WEB_SECURITY_HEADERS,
   shareWebRefusalBody,
 } from "./server";
+import { COLLECTION_WRITES_PATH } from "./collectionWrites";
 
 const MAX_REQUEST_BODY_BYTES = 16 * 1024;
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
@@ -54,8 +55,11 @@ const application = createShareWebApplication({
 
 const server = serveFetchHandler({
   handler: application.handle,
-  maxBodyBytes: url => url.pathname === "/mcp" ? 32 * 1024 : url.pathname === "/api/mcp/exchange" ? 8 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
+  maxBodyBytes: url => url.pathname === "/api/mcp/exchange" ? 8 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
+  // These authenticate before they read, then bound the body and its deadline:
+  // an agent request and a Collection write can carry megabytes.
+  streamBody: url => url.pathname === "/mcp" || url.pathname === COLLECTION_WRITES_PATH,
   oversized: refusal,
   failure: refusal,
   prepareHeaders: (headers, incoming) => {

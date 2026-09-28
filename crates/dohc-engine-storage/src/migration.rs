@@ -2569,6 +2569,37 @@ CREATE INDEX materialization_displacements_state
     ON materialization_displacements(state, job_id);
 ";
 
+/// Run history keeps an automation's settled claims 30 days from when they
+/// last settled, and its newest failure. An expired claim that still keeps a
+/// trigger from running twice stays, marked `expired` and out of run
+/// history. A deleted claim's failures move to
+/// `automation_retired_failures`, so an automation's failure generation
+/// never goes down.
+const V2_AUTOMATION_RUN_RETENTION_DDL: &str = "\
+ALTER TABLE automation_claims ADD COLUMN expired INTEGER NOT NULL DEFAULT 0
+    CHECK (expired IN (0, 1));
+CREATE TABLE automation_retired_failures (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    failures      INTEGER NOT NULL CHECK (failures > 0),
+    PRIMARY KEY (workspace_id, automation_id)
+) STRICT;
+DROP INDEX idx_automation_claims_prunable;
+DROP INDEX idx_automation_claims_settled_facts;
+CREATE INDEX idx_automation_claims_expiring
+    ON automation_claims(workspace_id, updated_at_ms)
+    WHERE state IN ('done', 'failed') AND expired = 0;
+CREATE INDEX idx_automation_claims_failed
+    ON automation_claims(workspace_id, automation_id, updated_at_ms, claim_id)
+    WHERE state = 'failed' AND expired = 0;
+CREATE INDEX idx_automation_claims_expired_schedule_keys
+    ON automation_claims(workspace_id, automation_id)
+    WHERE expired = 1 AND change_kind = 'schedule' AND substr(trigger_key, 1, 9) = 'schedule:';
+CREATE INDEX idx_automation_claims_history
+    ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id)
+    WHERE expired = 0;
+";
+
 // A job references either content table. Keep the reference checks while
 // allowing text jobs to use the text blob already owned by their moment.
 const V2_MATERIALIZATION_TEXT_BLOBS_DDL: &str = "\
@@ -2743,6 +2774,30 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 20,
         id: "v2-materialization-displacements",
         sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
+        sets_user_version: None,
+    },
+    // Who the relay accepted a claimed live change from, when that was a
+    // person the owner shared with or an Edit share link. Null for every
+    // other claim.
+    Migration {
+        ordinal: 21,
+        id: "v2-automation-claim-shared-author",
+        sql: "ALTER TABLE automation_claims ADD COLUMN change_author_json TEXT CHECK (change_author_json IS NULL OR json_valid(change_author_json));",
+        sets_user_version: None,
+    },
+    // The relay's live journal cursor of the frame a claimed live change came
+    // in, so the relay can tell when a settlement has carried it. Null for
+    // every other claim.
+    Migration {
+        ordinal: 22,
+        id: "v2-automation-claim-live-cursor",
+        sql: "ALTER TABLE automation_claims ADD COLUMN change_live_cursor INTEGER CHECK (change_live_cursor IS NULL OR change_live_cursor BETWEEN 1 AND 9007199254740991);",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 23,
+        id: "v2-automation-run-retention",
+        sql: V2_AUTOMATION_RUN_RETENTION_DDL,
         sets_user_version: None,
     },
     Migration {
@@ -3089,6 +3144,18 @@ mod tests {
                 "2887eaf2ca3af9e0361b7dce143eddaf80e94c60dfaf46bcb2b29443c735a36b",
             ),
             (
+                "v2-automation-claim-shared-author",
+                "8533e507bf0a0d99971e20ce73e57068b076986b2088166c144a0345aa03e7ae",
+            ),
+            (
+                "v2-automation-claim-live-cursor",
+                "e0e03940b8d14b9e61ba21a9ea5d2d99410074802e43a5d0f593761d3a27c942",
+            ),
+            (
+                "v2-automation-run-retention",
+                "6adf05d0ee7187060acef8edd6ef82b1aaf482eeedd8c0e0c994c676b11a895a",
+            ),
+            (
                 "v2-materialization-text-blobs",
                 "2f5662203a97d14c1ecd6e1902a1dfd2d1b0dfe11734fe7c12b4a2982fc317ca",
             ),
@@ -3187,16 +3254,96 @@ mod tests {
         );
     }
 
+    /// Where a migration sits in the shipped list, so an upgrade test runs
+    /// everything before it however many migrations come after.
+    fn migration_index(id: &str) -> usize {
+        BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == id)
+            .expect("a shipped migration")
+    }
+
+    #[test]
+    fn a_claim_from_before_shared_authors_reads_none_and_a_new_one_must_be_json() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-automation-claim-shared-author");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let insert = |conn: &Connection, claim_id: &str| {
+            conn.execute(
+                "INSERT INTO automation_claims (workspace_id, claim_id, automation_id, trigger_history_id, \
+                 record_id, collection_path, depth, state, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', ?1, 'collection:tasks#stamp', ?2, 'rec', 'tasks', 0, 'pending', 1, 1)",
+                rusqlite::params![claim_id, claim_id.len() as i64],
+            )
+        };
+        insert(&conn, "atc_old").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let author: Option<String> = conn
+            .query_row(
+                "SELECT change_author_json FROM automation_claims WHERE claim_id = 'atc_old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(author, None, "a claim from before names no shared author");
+        insert(&conn, "atc_newer").unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE automation_claims SET change_author_json = 'not json' WHERE claim_id = 'atc_newer'",
+                [],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_claim_from_before_live_cursors_reads_none_and_a_new_one_must_be_positive() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-automation-claim-live-cursor");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute(
+            "INSERT INTO automation_claims (workspace_id, claim_id, automation_id, trigger_history_id, \
+             record_id, collection_path, depth, state, created_at_ms, updated_at_ms) \
+             VALUES ('ws', 'atc_old', 'collection:tasks#stamp', 1, 'rec', 'tasks', 0, 'pending', 1, 1)",
+            [],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let cursor: Option<i64> = conn
+            .query_row(
+                "SELECT change_live_cursor FROM automation_claims WHERE claim_id = 'atc_old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, None, "a claim from before has no live cursor");
+        assert!(
+            conn.execute(
+                "UPDATE automation_claims SET change_live_cursor = 0 WHERE claim_id = 'atc_old'",
+                [],
+            )
+            .is_err()
+        );
+        conn.execute(
+            "UPDATE automation_claims SET change_live_cursor = 7 WHERE claim_id = 'atc_old'",
+            [],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn relay_identity_claim_migration_preserves_existing_identity() {
         let dir = tempdir();
         let path = dir.join("engine.db");
         let mut conn = open_bare(&path);
         let ctx = MigrationContext::current(1_000);
-        let before = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == "v2-sync-identity-claim-state")
-            .expect("the identity claim migration ships");
+        let before = migration_index("v2-sync-identity-claim-state");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('ws','origin','epoch','stream',1)", []).unwrap();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();

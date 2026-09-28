@@ -110,7 +110,10 @@ export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"
 // collection creates stamp the public variant using a grant-scoped public
 // principal mapping, never an internal principal or account ID. A named
 // recipient's direct write to a Collection's own files stamps the named
-// variant with the opaque relay user id, never an email. Ordinary edits,
+// variant with the opaque relay user id, never an email. An Edit share
+// link's direct write stamps the link variant: the link's grant is the
+// author, and the server-minted link principal only tells its browser
+// sessions apart. Neither carries a claimed name. Ordinary edits,
 // reconciliation, and external agent CLIs remain actor-neutral. An
 // automation that creates a record stamps the automation variant, so the
 // record's added claim carries the automation and its chain depth.
@@ -138,6 +141,13 @@ interface NamedMomentAuthor {
   grantGeneration: number;
 }
 
+interface LinkMomentAuthor {
+  kind: "link";
+  grantId: string;
+  grantGeneration: number;
+  principalId: string;
+}
+
 /**
  * An automation writing a file. The depth is its trigger's chain depth plus
  * one, so the claims its write causes carry the chain onward and stop at the
@@ -154,12 +164,12 @@ export type MomentAuthor =
   | AgentMomentAuthor
   | PublicMomentAuthor
   | NamedMomentAuthor
+  | LinkMomentAuthor
   | AutomationMomentAuthor;
 
-// Local file writes require a principal even when historical attribution has none.
-export type MomentWriteAuthor = (AgentMomentAuthor | AutomationMomentAuthor) & {
-  onBehalfOf: string;
-};
+// A local agent write names the person the agent works for. An automation
+// names its run's person, and none when its run has none.
+export type MomentWriteAuthor = (AgentMomentAuthor & { onBehalfOf: string }) | AutomationMomentAuthor;
 
 type VersionedFileContentKind = "text" | "binary";
 
@@ -624,7 +634,7 @@ type ChatActor =
 
 // The automation executor's claim on a message it writes. Stays on this computer.
 export interface ChatMessageAutomationInput {
-  // `collection:<collection path>#<automation id>`.
+  // `collection:<collection id>#<automation id>`.
   automationId: string;
   // One more than the depth of the change that triggered the automation.
   chainDepth: number;
@@ -634,7 +644,6 @@ export interface ChatMessageAutomationInput {
 // computer's automation wrote has an automation author but no `automation`.
 interface ChatMessageAutomation {
   automationId: string;
-  collectionPath: string;
 }
 
 interface LinkedChatFileRef {
@@ -1545,12 +1554,13 @@ export type ChangeAuthor =
   | { kind: "agent"; agentId: string; onBehalfOf: string; depth: number }
   // An automation's write, derived main-side from the claim the executor is
   // running, never from a request. automationId is the engine subscription
-  // id ("collection:<collection path>#<automation id>"), and depth is the
+  // id ("collection:<collection id>#<automation id>"), and depth is the
   // write's automation-chain depth: one greater than its trigger's.
+  // onBehalfOf is the run's person, left out when it has none.
   | {
       kind: "automation";
       automationId: string;
-      onBehalfOf: string;
+      onBehalfOf?: string;
       depth: number;
     }
   | { kind: "local"; label: NonEmptyLocalAuthorLabel };

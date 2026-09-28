@@ -5,6 +5,7 @@ import type { NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import {
   ACCESS_ENDED_NOTE,
+  AUTOMATION_NOT_HERE_NOTE,
   NOT_HERE_NOTE,
   SHARE_LOOKUP_FAILED_NOTE,
   useSentNoticeProps,
@@ -80,7 +81,7 @@ function setup(
     workspaceId,
     workspaces,
     openFile: vi.fn(),
-    openAutomation: vi.fn(),
+    openAutomation: vi.fn(async (_automationId: string, _run: string | null): Promise<string | null> => null),
     onSwitchWorkspace: vi.fn(),
     onOpenShare: vi.fn(),
     reportShellError: vi.fn(),
@@ -205,14 +206,18 @@ describe("opening a sent notice", () => {
 
 describe("a failed run's notice", () => {
   const failed = notice({
-    kind: "automation-failed", workspaceId: "notes", recipientShareId: null,
+    kind: "automation-failed", workspaceId: "notes", recipientShareId: null, postedHere: true,
     target: { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml", run: "atc_1" },
   });
 
   it("opens its automation in the panel here, and its file from another workspace", async () => {
     const { result, openAutomation, openFile, onSwitchWorkspace } = setup([failed], [workspace("notes")]);
     await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBeNull();
-    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp");
+    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1");
+    // Another computer ran it, so its run is not here to open.
+    openAutomation.mockClear();
+    await result.current.onOpenSentNotice({ ...failed, postedHere: false }, live());
+    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", null);
     expect(openFile).not.toHaveBeenCalled();
     cleanup();
     const trip = workspace("trip");
@@ -220,6 +225,15 @@ describe("a failed run's notice", () => {
     await elsewhere.result.current.onOpenSentNotice(failed, live());
     expect(elsewhere.onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), "Tasks/automations.yaml");
     expect(onSwitchWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("says so on its row when this computer no longer has the automation's Collection", async () => {
+    const { result, openAutomation, openFile } = setup([failed], [workspace("notes")]);
+    openAutomation.mockResolvedValueOnce(AUTOMATION_NOT_HERE_NOTE);
+    await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBe(AUTOMATION_NOT_HERE_NOTE);
+    openAutomation.mockRejectedValueOnce(new Error("The workspace engine is not running."));
+    await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBe("dohc could not open this automation.");
+    expect(openFile).not.toHaveBeenCalled();
   });
 
   it("asks main to run it again for the list's account, and confirms first when it would start over", async () => {

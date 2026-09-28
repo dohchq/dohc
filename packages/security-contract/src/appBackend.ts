@@ -20,7 +20,7 @@ export type AppBackendCaller =
   /**
    * An automation running an operation for its Collection. It is not the
    * owner, so operation code that allows only the owner refuses it.
-   * `automationId` is the engine's id, `collection:<path>#<id>`.
+   * `automationId` is the engine's id, `collection:<collection id>#<id>`.
    */
   | { kind: "automation"; automationId: string };
 export interface AppBackendInvokeRequest {
