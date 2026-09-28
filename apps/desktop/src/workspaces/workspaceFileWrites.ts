@@ -8,7 +8,7 @@ import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withOrderedWorkspaceTargetPath } from "./workspaceAssets";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { historyPathAdmission, readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
+import { historyPathAdmission, readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
 import { AuthoredTextChangedError, requirePublishedWrite, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 export const FILE_DOCUMENT_REFUSAL = "Use dohc_create_document or dohc_edit_document for live documents. Choose a plain file path for this write.";
@@ -27,7 +27,8 @@ export function decodeFileWriteContent(contentBase64: string): Buffer {
   return bytes;
 }
 
-async function admit(rootPath: string, path: string) {
+async function admit(rootPath: string, path: string, policy: WorkspaceEnginePolicySnapshot) {
+  if (policy.errors.length) throw new Error(`dohc could not read the workspace file policy: ${policy.errors.join("; ")}. Fix the policy and retry.`);
   const checked = validateUserMaterializePath(path, { platform: process.platform });
   if (!checked.ok) throw new Error(`Cannot write ${path}: ${checked.reason}. Choose a writable workspace path.`);
   const target = await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, checked.normalized),
@@ -35,7 +36,7 @@ async function admit(rootPath: string, path: string) {
   for (const name of [checked.normalized, target.relative]) {
     if (liveDocumentKindForPath(name) !== null) throw new Error(FILE_DOCUMENT_REFUSAL);
   }
-  const allowed = historyPathAdmission(await readWorkspaceEnginePolicy(rootPath));
+  const allowed = historyPathAdmission(policy);
   if (!allowed(checked.normalized) || !allowed(target.relative)) {
     throw new Error(`History cannot record ${path}. Choose a non-secret path included by files.toml.`);
   }
@@ -58,27 +59,26 @@ export async function writeWorkspaceFilesAs<Workspace extends { rootPath: string
     if (operation.workspace.readOnly || operation.workspace.shareView !== undefined) {
       throw new Error("This workspace is read-only. Write in the owning workspace.");
     }
+    const policy = await readWorkspaceEnginePolicy(rootPath);
     const prepared = [];
     for (const file of files) {
       failedPath = file.path;
       const bytes = decodeFileWriteContent(file.contentBase64);
-      prepared.push({ ...file, bytes, ...(await admit(rootPath, file.path)) });
+      prepared.push({ ...file, bytes, ...(await admit(rootPath, file.path, policy)) });
     }
     for (const [index, file] of prepared.entries()) {
       failedPath = file.path;
       await withOrderedWorkspaceTargetPath(rootPath, file.resolvedAbsolute, async () => {
         operation.assertCurrent();
         if (operation.signal.aborted) throw new Error("The write was cancelled.");
-        const current = await admit(rootPath, file.path);
-        if (current.resolvedAbsolute !== file.resolvedAbsolute) throw new Error("The file path changed. Retry the write.");
-        failedAbsolute = current.resolvedAbsolute;
+        failedAbsolute = file.resolvedAbsolute;
         const outcome = await options.capture.writeAuthoredFile(file.resolvedAbsolute, file.bytes, author, {
           createOnly: file.createOnly, expectedContentHash: file.expectedSha256, signal: operation.signal,
           requestId: `fileWrite:${requestId}:${index}`, correlationId: `fileWrite:${requestId}`,
           beforeWrite: async resolvedAbsolute => {
             if (resolvedAbsolute !== file.resolvedAbsolute) throw new Error("The file path changed. Retry the write.");
             operation.assertCurrent();
-            const queued = await admit(rootPath, file.path);
+            const queued = await admit(rootPath, file.path, await readWorkspaceEnginePolicy(rootPath));
             if (queued.resolvedAbsolute !== file.resolvedAbsolute) throw new Error("The file path changed. Retry the write.");
           },
         });

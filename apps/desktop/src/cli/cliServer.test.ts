@@ -507,6 +507,18 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
+  it("receives a 10 MiB file through the socket and preserves partial batch results", async () => {
+    if (!server) throw new Error("This test requires the CLI socket.");
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => ({ ok: true, written: files.map(file => file.path) }));
+    context.writeFiles = writeFiles;
+    const args = { cwd: workspaceRoot, actor: "agent" as const, requestId: "large", files: [{ path: "large.txt", contentBase64: Buffer.alloc(10 * 1024 * 1024, 97).toString("base64") }] };
+    expect(await invoke("fileWrite", args)).toEqual({ ok: true, written: ["large.txt"] });
+    expect(writeFiles.mock.calls[0]?.[0][0]?.contentBase64).toBe(args.files[0]!.contentBase64);
+    const partial = { ok: false as const, written: ["1.txt", "2.txt"], path: "3.txt", reason: "Disk full. Free space and retry." };
+    writeFiles.mockResolvedValueOnce(partial);
+    expect(await invoke("fileWrite", { ...args, requestId: "batch", files: [1, 2, 3, 4, 5].map(n => ({ path: n + ".txt", contentBase64: "eA==" })) })).toEqual(partial);
+  });
+
   it("refuses a fileWrite envelope larger than 14 MiB before opening the workspace", async () => {
     if (!server) throw new Error("This test requires the CLI socket.");
     const opened = calls.openWorkspace;

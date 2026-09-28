@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { AuthoredTextChangedError } from "../workspaces/workspaceEngineCapture";
 import { parseCliResult, type CliFileWrite } from "@dohc/cli/protocol";
 import { createTestScratch } from "../workspaces/testTemp";
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -631,6 +633,14 @@ describe("raw fileWrite socket requests", () => {
     }
     expect(await f.invoke([{ path: "hidden.txt", contentBase64: "bmV3" }])).toMatchObject({ ok: false });
     expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+
+  it("returns currentSha256 through the raw request on a stale write", async () => {
+    const f = await setup();
+    await writeFile(join(f.workspace.rootPath, "plain.txt"), "original");
+    f.capture.writeAuthoredFile.mockRejectedValueOnce(new AuthoredTextChangedError("plain.txt"));
+    expect(await f.invoke([{ path: "plain.txt", contentBase64: "bmV3", expectedSha256: "0".repeat(64) }])).toMatchObject({ ok: false, written: [], currentSha256: createHash("sha256").update("original").digest("hex") });
+    expect(await readFile(join(f.workspace.rootPath, "plain.txt"), "utf8")).toBe("original");
   });
 
 });

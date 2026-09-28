@@ -2918,7 +2918,9 @@ async function workspaceContextForRequest(
     (request.verb === "show" && !request.args.peek);
   if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
-      collectionWriteRequest
+      request.verb === "fileWrite"
+        ? "This workspace is read-only. Write in the owning workspace."
+        : collectionWriteRequest
         ? "collection writes are not available in a read-only shared view"
         : documentWriteRequest
           ? "document changes are not available in a read-only shared view"
@@ -3006,7 +3008,8 @@ function attachSocketHandler(
 ): void {
   sockets.add(socket);
   socket.setEncoding("utf8");
-  let buffer = "";
+  const chunks: string[] = [];
+  let receivedBytes = 0;
   let handled = false;
   const deadline = setTimeout(() => socket.destroy(), CLI_REQUEST_DEADLINE_MS);
 
@@ -3022,16 +3025,18 @@ function attachSocketHandler(
 
   socket.on("data", (chunk: string) => {
     if (handled) return;
-    buffer += chunk;
-    if (Buffer.byteLength(buffer, "utf8") > MAX_REQUEST_BYTES) {
+    receivedBytes += Buffer.byteLength(chunk, "utf8");
+    if (receivedBytes > MAX_REQUEST_BYTES) {
       failOversized();
       return;
     }
-    const newline = buffer.indexOf("\n");
+    const newline = chunk.indexOf("\n");
+    chunks.push(newline === -1 ? chunk : chunk.slice(0, newline));
     if (newline === -1) return;
     handled = true;
     clearTimeout(deadline);
-    const line = buffer.slice(0, newline);
+    const line = chunks.join("");
+    chunks.length = 0;
     socket.pause();
     const task = handleCliRequestLine(line, token, options)
       .then((response) => {

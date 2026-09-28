@@ -46,9 +46,7 @@ import {
   readdir,
   realpath,
   rename,
-  rm,
   stat,
-  writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
@@ -181,19 +179,6 @@ function liveDocumentWriteRefusal(resolved: { normalized: string; realRelative: 
     return "This file is a live document. Create it with dohc_create_document, read it with dohc_read_document, and change it with dohc_edit_document; a raw file write cannot update its document state.";
   }
   return null;
-}
-
-async function safeResolveForMutation(
-  ctx: ToolContext,
-  normalizedPath: string,
-): Promise<{ absolute: string; normalized: string }> {
-  const resolved = await safeResolve(ctx, normalizedPath);
-  if (!resolved.ok) {
-    throw Object.assign(new Error(resolved.reason), { code: "EINVAL" });
-  }
-  const refusal = liveDocumentWriteRefusal(resolved);
-  if (refusal) throw new Error(refusal);
-  return resolved;
 }
 
 async function readFileWindowWithDigest(
@@ -397,10 +382,6 @@ async function safeTrashDir(ctx: ToolContext): Promise<string> {
   const dir = join(await safeMetadataDir(ctx), "trash");
   await ensureGuardedDir(dir, DOHC_TRASH_GUARD, ctx.root);
   return dir;
-}
-
-function mutationRetainedReason(error: unknown, fallback: string): string {
-  return `${failureReason(error, fallback)}; visible mutation retained because rollback cannot be made atomic`;
 }
 
 const requireFromHere = createRequire(import.meta.url);

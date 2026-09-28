@@ -259,9 +259,6 @@ export function createDesktopCliServer<State>(
           return result;
         },
       },
-      // Document reads and edits go through the desktop's live document
-      // sessions, the ones its editor holds, so an agent's edit merges into
-      // an open editor instead of racing it on disk.
       writeFiles: (files, origin, requestId) => withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
         operation.assertCurrent();
         if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
@@ -270,6 +267,9 @@ export function createDesktopCliServer<State>(
         if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
         return writeWorkspaceFilesAs(operation, files, agentWriteAuthor(origin), { capture: current, requestId });
       }),
+      // Document reads and edits go through the desktop's live document
+      // sessions, the ones its editor holds, so an agent's edit merges into
+      // an open editor instead of racing it on disk.
       documents: {
         read: async (path) => {
           const live = await liveDocuments.readDocument({ workspaceId: workspace.workspaceId, path });

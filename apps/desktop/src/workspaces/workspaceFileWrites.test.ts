@@ -136,6 +136,19 @@ describe("workspace file write admission", () => {
     expect(await readFile(join(f.rootPath, "plain.txt"), "utf8")).toBe("agent edit");
   });
 
+  it.each(["error", "skipped", undefined])("refuses unpublished outcome %s", async materializeOutcome => {
+    const f = await fixture();
+    f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome });
+    expect(await f.run([file("plain.txt")])).toMatchObject({ ok: false, written: [], reason: expect.stringContaining("could not publish") });
+  });
+
+  it("names malformed policy as the reason to fix before retrying", async () => {
+    const f = await fixture();
+    await writeFile(join(f.rootPath, ".dohc/files.toml"), "invalid [[");
+    expect(await f.run([file("plain.txt")])).toMatchObject({ ok: false, written: [], reason: expect.stringContaining("Fix the policy") });
+    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+
   it("reports publication conflicts as failures", async () => {
     const f = await fixture();
     f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome: "conflict" });
