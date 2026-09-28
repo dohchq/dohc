@@ -358,6 +358,14 @@ const ReportedFailuresSchema = z.object({
   })),
 });
 
+// The runs whose Undo started and has not finished, so run history keeps
+// their claims. One entry per run, since each of a claim's runs is saved
+// undone in turn.
+const UnfinishedUndosSchema = z.object({
+  version: z.literal(1),
+  runs: z.array(z.object({ automationId: z.string().min(1), claimId: z.string().min(1), run: z.string().min(1) })),
+});
+
 const EnabledAutomationsSchema = z.object({
   version: z.literal(1),
   collections: z.array(z.object({ path: z.string().min(1), enabled: z.array(z.string().min(1)) })),
@@ -491,6 +499,11 @@ export interface AutomationRunStore {
    * only once it has grown by the history bound since the last prune.
    */
   prune(automationId: string, resumableClaims: () => Promise<ReadonlySet<string> | null>): Promise<void>;
+  /**
+   * The claims of the runs whose Undo started and has not finished, as each
+   * run was last saved, or null when their list cannot be read.
+   */
+  unfinishedUndos(): Promise<ReadonlySet<string> | null>;
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   /**
@@ -572,6 +585,29 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   const runsFolder = async (automationId: string) =>
     realFolder(join(await realFolder(join(await base(), "runs")), hashName(automationId)));
   const runName = (claimId: string, keySeed: string) => `${hashName(claimId)}-${keySeed.replace(/[^a-z0-9-]/g, "")}`;
+  // The unfinished Undos, keyed by automation and run, read once; null when
+  // their file cannot be read, so nothing counts as finished.
+  let undos: Map<string, { automationId: string; claimId: string; run: string }> | null | undefined;
+  const undosFile = async () => join(await base(), "undoing.json");
+  const readUndos = async () => {
+    if (undos !== undefined) return undos;
+    const read = await readJson(await undosFile());
+    const parsed = read === undefined ? { success: true as const, data: { version: 1 as const, runs: [] } } : UnfinishedUndosSchema.safeParse(read);
+    undos = parsed.success ? new Map(parsed.data.runs.map((entry) => [`${entry.automationId}\n${entry.run}`, entry])) : null;
+    return undos;
+  };
+  // Records whether a saved run's Undo is unfinished, before the run itself is saved.
+  const noteUndo = async (run: StoredRun, name: string) => {
+    const known = await readUndos();
+    if (known === null) return;
+    const key = `${run.automationId}\n${name}`;
+    if ((run.undo === "started") === known.has(key)) return;
+    const next = new Map(known);
+    if (run.undo === "started") next.set(key, { automationId: run.automationId, claimId: run.claimId, run: name });
+    else next.delete(key);
+    await writeDurably(await undosFile(), `${JSON.stringify({ version: 1, runs: [...next.values()] })}\n`);
+    undos = next;
+  };
   // Every run keeps its plan and state in one file, written whole, and its
   // progress in a second, one line per landed effect.
   const readRun = async (folder: string, name: string, automationId: string): Promise<StoredRun | null> => {
@@ -681,8 +717,17 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         if (Buffer.byteLength(plan) > MAX_RUN_FILE_BYTES || Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
         const folder = await runsFolder(run.automationId);
         const name = runName(run.claimId, run.keySeed);
+        // Saved first, so a run saved with its Undo started is always listed.
+        if (run.undo === "started") await noteUndo(run, name);
         await writeDurably(join(folder, `${name}${PROGRESS_SUFFIX}`), progress);
         await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), plan);
+        if (run.undo !== "started") await noteUndo(run, name);
+      });
+    },
+    unfinishedUndos() {
+      return serial(async () => {
+        const known = await readUndos();
+        return known === null ? null : new Set([...known.values()].map((entry) => entry.claimId));
       });
     },
     appendEffect(run, applied) {
@@ -710,7 +755,8 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         let kept = names.length;
         for (const name of names) {
           const run = await readRun(folder, name, automationId);
-          if (!run) continue;
+          // A run whose Undo stopped part way stays whole until it finishes.
+          if (!run || run.undo === "started") continue;
           // Only a run nothing can resume leaves: its claim settled done, or
           // a person chose to start it over.
           if ((run.settled && run.outcome?.state === "done") || run.superseded) {

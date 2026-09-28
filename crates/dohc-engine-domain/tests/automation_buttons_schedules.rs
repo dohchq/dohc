@@ -5,14 +5,14 @@
 //! a mark that only moves forward.
 
 use dohc_engine_domain::{
-    AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_CLAIM_HISTORY_LIMIT,
+    AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_HISTORY_RETENTION_MS,
     AUTOMATION_PRESS_RETENTION_MS, AutomationChangeKind, AutomationClaim, AutomationClaimState,
     AutomationPress, AutomationPressed, AutomationScheduleClaim, AutomationScheduleClaimed,
     AutomationScheduleMark, AutomationSettle, AutomationSubscription, AutomationTrigger,
     ChangeActorKind, DomainError, MAX_AUTOMATION_SCHEDULE_RUNS, NoFaults, PressActor,
     claim_automation_run_now, claim_automation_schedule, claim_next_pending_automation,
-    list_automation_schedule_marks, press_automation, retry_automation_claim,
-    settle_automation_claim, subscribe_automation,
+    list_automation_schedule_marks, press_automation, prune_automation_history,
+    retry_automation_claim, settle_automation_claim, subscribe_automation,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -122,6 +122,14 @@ fn mark(hash: &str, through_ms: i64) -> AutomationScheduleMark {
         schedule_hash: hash.to_owned(),
         through_ms,
     }
+}
+
+/// Expires run history as it stands at `now_ms`, keeping nothing. Answers
+/// how many claims left it.
+fn expire(store: &mut EngineStore, now_ms: i64) -> u64 {
+    prune_automation_history(store, WS, &[], now_ms, &NoFaults)
+        .expect("prune")
+        .pruned
 }
 
 fn claim_exists(store: &EngineStore, claim_id: &str) -> bool {
@@ -342,39 +350,30 @@ fn a_press_finds_its_claim_while_remembered_or_while_its_key_remains() {
     let mut store = open_store(&scratch);
     let pressed = claimed(press(&mut store, "press-1", INVOICE, 10).expect("press"));
     run(&mut store, AutomationSettle::Done, 11);
+    let later_press = claimed(press(&mut store, "press-2", OTHER_INVOICE, 20).expect("press"));
+    run(&mut store, AutomationSettle::Done, 21);
 
-    // More done claims for the same automation than the history keeps.
-    let mut newest = None;
-    for index in 0..=AUTOMATION_CLAIM_HISTORY_LIMIT {
-        let press_id = format!("press-later-{index}");
-        claimed(press(&mut store, &press_id, OTHER_INVOICE, 20 + index).expect("later press"));
-        newest = Some((
-            press_id,
-            run(&mut store, AutomationSettle::Done, 20 + index),
-        ));
-    }
-    let (newest_press, newest_claim) = newest.expect("a later press");
-    assert!(
-        claim_exists(&store, &pressed.claim_id),
-        "a remembered press keeps its claim"
-    );
+    // Within 30 days of settling, run history keeps both claims, and a
+    // press sent again finds its claim.
+    assert_eq!(expire(&mut store, 11 + AUTOMATION_HISTORY_RETENTION_MS), 0);
     let remembered = joined(press(&mut store, "press-1", INVOICE, 500).expect("resend"));
     assert_eq!(remembered.claim_id, pressed.claim_id);
 
     // Past the retention, the next press forgets the old ones. A forgotten
     // press whose claim remains still finds it, for the same person only.
-    let later = 10 + AUTOMATION_PRESS_RETENTION_MS + 1_000;
+    let later = 21 + AUTOMATION_PRESS_RETENTION_MS + 1_000;
     claimed(press(&mut store, "press-after", OTHER_INVOICE, later).expect("press"));
-    let found = joined(press(&mut store, &newest_press, OTHER_INVOICE, later + 1).expect("resend"));
-    assert_eq!(found.claim_id, newest_claim.claim_id);
+    let found = joined(press(&mut store, "press-2", OTHER_INVOICE, later + 1).expect("resend"));
+    assert_eq!(found.claim_id, later_press.claim_id);
     assert!(matches!(
-        press_as(&mut store, BO, "press-later-99", OTHER_INVOICE, later + 2),
+        press_as(&mut store, BO, "press-2", OTHER_INVOICE, later + 2),
         Err(DomainError::InvalidInput { .. })
     ));
 
-    // The next settle prunes the forgotten claims; then the old id presses
-    // anew.
+    // Expiring run history deletes the forgotten press's claim; then the
+    // old id presses anew.
     run(&mut store, AutomationSettle::Done, later + 3);
+    assert!(expire(&mut store, later + 3) >= 1);
     assert!(!claim_exists(&store, &pressed.claim_id));
     claimed(press(&mut store, "press-1", INVOICE, later + 4).expect("a forgotten press id"));
 }
@@ -488,7 +487,7 @@ fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
 }
 
 #[test]
-fn a_done_schedule_claim_keeps_its_key_past_the_history() {
+fn a_done_schedule_claim_keeps_its_key_after_it_expires() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
     schedule(&mut store, "hourly", &[], 0).expect("start");
@@ -497,9 +496,11 @@ fn a_done_schedule_claim_keeps_its_key_past_the_history() {
         .expect("run 100")
         .claims;
     schedule(&mut store, "hourly", &[101], 101).expect("run one more");
-    for step in 0..=AUTOMATION_CLAIM_HISTORY_LIMIT {
+    for step in 0..101 {
         run(&mut store, AutomationSettle::Done, 200 + step);
     }
+    let later = 301 + AUTOMATION_HISTORY_RETENTION_MS;
+    assert_eq!(expire(&mut store, later), 101);
     assert!(
         claim_exists(&store, &first[0].claim_id),
         "the oldest schedule claim keeps its key"
@@ -514,10 +515,16 @@ fn a_done_schedule_claim_keeps_its_key_past_the_history() {
             .claims,
         Vec::new()
     );
+
+    // Once the mark is 30 days past its due times, the keys go.
+    schedule(&mut store, "hourly", &[], 40 * DAY_MS).expect("move the mark");
+    assert_eq!(expire(&mut store, later), 0, "the keys are not history");
+    assert!(!claim_exists(&store, &first[0].claim_id));
+    assert!(!claim_exists(&store, &first[99].claim_id));
 }
 
 #[test]
-fn a_done_schedule_claim_goes_once_it_is_30_days_behind_the_mark() {
+fn a_done_schedule_claim_goes_once_it_expires_30_days_behind_the_mark() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
     schedule(&mut store, "daily", &[], 0).expect("start");
@@ -529,18 +536,31 @@ fn a_done_schedule_claim_goes_once_it_is_30_days_behind_the_mark() {
                 .claims,
         );
     }
-    schedule(&mut store, "daily", &[101], 40 * DAY_MS).expect("run later");
-    for step in 0..=AUTOMATION_CLAIM_HISTORY_LIMIT {
+    claims.extend(
+        schedule(&mut store, "daily", &[101], 40 * DAY_MS)
+            .expect("run later")
+            .claims,
+    );
+    for step in 0..=100 {
         run(&mut store, AutomationSettle::Done, 40 * DAY_MS + step);
     }
+    assert_eq!(expire(&mut store, 40 * DAY_MS + 100), 0);
+    assert!(
+        claim_exists(&store, &claims[0].claim_id),
+        "30 days behind the mark, but within run history"
+    );
+    assert_eq!(
+        expire(
+            &mut store,
+            40 * DAY_MS + 101 + AUTOMATION_HISTORY_RETENTION_MS
+        ),
+        101
+    );
     assert!(
         !claim_exists(&store, &claims[0].claim_id),
-        "past the history and 30 days behind the mark"
+        "expired and 30 days behind the mark"
     );
-    assert!(
-        claim_exists(&store, &claims[1].claim_id),
-        "within the history"
-    );
+    assert!(!claim_exists(&store, &claims[100].claim_id));
 }
 
 #[test]
@@ -624,22 +644,23 @@ fn a_done_run_now_claim_keeps_its_key_after_schedule_claims_age_out() {
         .expect("run now")
         .claim;
     run(&mut store, AutomationSettle::Done, 2);
-    schedule(&mut store, "daily", &[40 * DAY_MS], 40 * DAY_MS).expect("run later");
-    for step in 0..=AUTOMATION_CLAIM_HISTORY_LIMIT {
-        schedule(
-            &mut store,
-            "daily",
-            &[40 * DAY_MS + 1 + step],
-            40 * DAY_MS + 1 + step,
-        )
-        .expect("run");
-        run(&mut store, AutomationSettle::Done, 40 * DAY_MS + step);
-    }
+    let due = schedule(&mut store, "daily", &[40 * DAY_MS], 40 * DAY_MS)
+        .expect("run later")
+        .claims;
+    run(&mut store, AutomationSettle::Done, 40 * DAY_MS);
+    let later = 40 * DAY_MS + AUTOMATION_HISTORY_RETENTION_MS + 1;
+    assert_eq!(expire(&mut store, later), 2);
+    schedule(&mut store, "daily", &[], 80 * DAY_MS).expect("move the mark");
+    expire(&mut store, later);
+    assert!(
+        !claim_exists(&store, &due[0].claim_id),
+        "the due time is 30 days behind the mark"
+    );
     assert!(
         claim_exists(&store, &ran.claim_id),
         "a run-now key is not a due time"
     );
-    let again = claim_automation_run_now(&mut store, WS, REPORT, notice, 50 * DAY_MS, &NoFaults)
+    let again = claim_automation_run_now(&mut store, WS, REPORT, notice, 90 * DAY_MS, &NoFaults)
         .expect("again");
     assert!(!again.inserted);
     assert_eq!(again.claim.claim_id, ran.claim_id);

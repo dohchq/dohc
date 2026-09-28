@@ -756,16 +756,26 @@ describe("automations wire schemas", () => {
     ).toEqual(removed);
   });
 
-  it("decodes the claim history", () => {
-    const history = { claims: [summary, { ...summary, state: "done" }] };
+  it("decodes a page of claim history, one claim, and a prune", () => {
+    const history = { claims: [summary, { ...summary, state: "done" }], next: "1000:atc_x" };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, history),
     ).toEqual(history);
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, {
         claims: [],
+        next: null,
       }),
-    ).toEqual({ claims: [] });
+    ).toEqual({ claims: [], next: null });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, { claims: [] }),
+    ).toThrow();
+    for (const claim of [summary, null]) {
+      expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsGetClaim, { claim })).toEqual({ claim });
+    }
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsPruneHistory, { pruned: 3, more: false }),
+    ).toEqual({ pruned: 3, more: false });
   });
 
   it("decodes the failure listing and refuses a row without a generation", () => {

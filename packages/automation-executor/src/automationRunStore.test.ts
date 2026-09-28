@@ -97,6 +97,27 @@ describe("the automation run store", () => {
     expect(listings).toBe(1);
   });
 
+  it("lists the claims whose Undo is unfinished until each of their runs is undone, and keeps those runs whole", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const first = { ...run("atc_undoing", "done", 0), undo: "started" as const };
+    const second = { ...first, keySeed: "fedcba9876543210" };
+    await store.save(first);
+    await store.save(second);
+    for (let index = 0; index < 30; index += 1) await store.save(run(`atc_done${index}`, "done", 1 + index));
+    await store.prune(AUTOMATION, async () => new Set());
+    expect((await store.runsOf(AUTOMATION, "atc_undoing")).runs).toHaveLength(2);
+    expect(await store.unfinishedUndos()).toEqual(new Set(["atc_undoing"]));
+    // A second store reads what the first saved.
+    await store.save({ ...first, undo: "done" });
+    expect(await createAutomationRunStore(root, testMetadataDir).unfinishedUndos()).toEqual(new Set(["atc_undoing"]));
+    await store.save({ ...second, undo: "done" });
+    expect(await store.unfinishedUndos()).toEqual(new Set());
+    // An unreadable list counts nothing as finished.
+    await writeFile(join(await testMetadataDir(root), "automations", "undoing.json"), "{");
+    expect(await createAutomationRunStore(root, testMetadataDir).unfinishedUndos()).toBeNull();
+  });
+
   it("keeps at most 100 compacted failures per automation", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
