@@ -742,7 +742,7 @@ describe("Collection automations", () => {
     expect(w.journaled).toHaveLength(onlyIf ? 0 : 1);
   });
 
-  it("fails a selected formula before writing any earlier planned step", async () => {
+  it("fails a step's formula once the steps before it landed, and keeps what they wrote", async () => {
     const w = await world({ automations: { Tasks: [
       "  - id: guarded", "    name: Guarded", "    when: {field-changed: Status}",
       "    do:", "      - set: {Seen: true}",
@@ -756,8 +756,7 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
     expect(claim.state).toBe("failed");
     expect(claim.error).toContain('The formula for "Note" in step 3 failed.');
-    expect(w.fieldsOf(task)).toEqual({ Status: "Done", Details: null });
-    expect(w.journaled).toEqual([]);
+    expect(w.fieldsOf(task)).toEqual({ Status: "Done", Details: null, Seen: true });
   });
 
   it("subscribes each automation it can run, then sets fields on the trigger record as the automation", async () => {
@@ -1966,7 +1965,7 @@ describe("Collection automations", () => {
       expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(Array(50).fill(1));
     } else {
       expect(claim.state).toBe("failed");
-      expect(claim.error).toBe("A Find matched more than 50 records. Narrow its condition, then try again.");
+      expect(claim.error).toBe("The Find in step 1 matched more than 50 records. Narrow its condition, then try again.");
       expect(boundCount).toBeUndefined();
       expect(w.saves()).toBe(0);
       expect(w.journaled).toEqual([]);
@@ -2018,7 +2017,7 @@ describe("Collection automations", () => {
         expect(claim.error).toBeUndefined();
       } else {
         expect(claim.state).toBe("failed");
-        expect(claim.error).toBe("A Find matched more than 50 records. Narrow its condition, then try again.");
+        expect(claim.error).toBe("The Find in step 1 matched more than 50 records. Narrow its condition, then try again.");
         expect(w.fieldsOf(task).Note).toBeUndefined();
       }
     }
@@ -2068,7 +2067,7 @@ describe("Collection automations", () => {
     const claim = w.claim("collection:Tasks#wide", w.addRecord("Tasks", "one", { Status: "Done" }));
     await w.executor.open();
     await w.settledClaim(claim);
-    expect(claim.error).toBe("This run would change more than 200 fields. Narrow its Find steps, or split it into smaller automations.");
+    expect(claim.error).toBe("Step 2 would make this run change more than 200 fields. Narrow its Find steps, or split it into smaller automations.");
     expect(w.journaled).toEqual([]);
   });
 
@@ -2481,7 +2480,7 @@ describe("Collection automations", () => {
     expect(later[0]!.error).not.toContain("switched off");
     expect(later[1]!.error).toContain('dohc switched off "Slow" after 3 runs in a row took too long.');
   });
-  it("checks every field after a stop, so a later write does not replace someone's change", async () => {
+  it("checks every field of the step a stop interrupted, so it keeps someone's change, and later steps start from it", async () => {
     const steps = "  - id: steps\n    name: Steps\n    when: {field-changed: Status}\n    do: [{set: {Count: 1}}, {set: {Note: a}}, {set: {Count: 2}}]\n";
     const w = await world({ automations: { Tasks: steps } });
     const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 0 });
@@ -2493,9 +2492,10 @@ describe("Collection automations", () => {
     task.doc.getMap("frontmatter").set("Count", 99);
     await w.executor.retry({ automationId: "collection:Tasks#steps", claimId: claim.claimId, startOver: false });
     await w.until(() => claim.state === "done");
-    expect(w.fieldsOf(task)).toMatchObject({ Count: 99, Note: "a" });
+    // The third step had not started, so it sets Count as the automation says.
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "a" });
     const [run] = (await w.executor.runs("collection:Tasks#steps")).runs;
-    expect(run!.writes.filter((write) => write.kind === "kept").map((write) => write.kind === "kept" && write.planned)).toEqual([1, 2]);
+    expect(run!.writes.filter((write) => write.kind === "kept").map((write) => write.kind === "kept" && write.planned)).toEqual([1]);
   });
 
   it("keeps a claim whose settle the engine did not take, and settles it later without running it again", async () => {
@@ -2597,7 +2597,7 @@ describe("Collection automations", () => {
     const claim = w.claim("collection:Tasks#clear", w.addRecord("Tasks", "one", { Status: "Done" }));
     await w.executor.open();
     await w.settledClaim(claim);
-    expect(claim.error).toBe("This run would change more data than dohc can save for it. Narrow its Find steps, or split it into smaller automations.");
+    expect(claim.error).toBe("Step 2 would make this run change more data than dohc can save for it. Narrow its Find steps, or split it into smaller automations.");
     expect(w.journaled).toEqual([]);
   });
 

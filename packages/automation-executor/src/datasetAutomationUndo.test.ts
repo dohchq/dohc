@@ -24,8 +24,8 @@ const definition: DatasetDefinition = {
 const rules = { datasetId: definition.datasetId, revision: 2, revisionSha256: "r".repeat(64) };
 const revision = { ...rules, definitionSha256: "", schemaSha256: "", operationsSha256: "", definition } satisfies DatasetRevision;
 const run = (operationId: string): StoredRun => ({
-  version: 4, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
-  plan: null, created: [], replans: [], undoRequests: [], readableFields: null, collections: [], datasetId: null, superseded: false, undo: null, settled: true, outcome: { state: "done" },
+  version: 5, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
+  steps: [], created: [], replans: [], undoRequests: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, settled: true, outcome: { state: "done" },
   applied: [{ ordinal: 0, writes: [
     { kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId: "a", version: 2,
       fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }] },
@@ -130,6 +130,91 @@ describe("undo of a dataset run", () => {
     expect(await undo(host, [newer])).toEqual({ ...none, reverted: 1 });
     expect(records.b.values[NOTE]).toBe("Sent");
     expect(writes).toHaveLength(2);
+  });
+
+  it("puts back a person's change made between two of the runs' edits, not what the field held first", async () => {
+    // The run set Open → Paid; someone set Held; the run then set Held → Closed.
+    const records = { a: { version: 4, values: { [STATUS]: "Closed" } } };
+    const { writes, host } = recordsHost(records);
+    const runs = [runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Paid", 2), edit(EDIT, "a", STATUS, "Held", "Closed", 4)])];
+    expect(await undo(host, runs)).toEqual({ ...none, reverted: 1 });
+    expect(records.a.values[STATUS]).toBe("Held");
+    expect(writes).toEqual([{ [STATUS]: "Held" }]);
+  });
+
+  it("undoes the edit a run may have landed just before it stopped, before recording it, whether or not it landed", async () => {
+    const planned = { kind: "dataset-edit" as const, rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 2 },
+      fields: [{ fieldId: STATUS, field: "Status", before: "Paid", after: "Closed" }] };
+    // The run recorded Open → Paid at version 2, saved its next step, and stopped as that edit was sent.
+    const stopped = (): StoredRun => ({ ...runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Paid", 2)]), outcome: null,
+      steps: [{ ordinal: 0, effects: [{ kind: "dataset-edit", rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 1 },
+        fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Paid" }] }] }, { ordinal: 1, effects: [planned] }] });
+    for (const landed of [true, false]) {
+      const records = { a: landed ? { version: 3, values: { [STATUS]: "Closed" } } : { version: 2, values: { [STATUS]: "Paid" } } };
+      const { host } = recordsHost(records);
+      expect(datasetUndoRulesChanged(host, [stopped()]), `landed ${landed}`).toBe(false);
+      expect(await undo(host, [stopped()]), `landed ${landed}`).toEqual({ ...none, reverted: 1 });
+      expect(records.a.values[STATUS], `landed ${landed}`).toBe("Open");
+    }
+    // Someone changed it since: it stays.
+    const records = { a: { version: 5, values: { [STATUS]: "Mine" } } };
+    const { writes, host } = recordsHost(records);
+    expect(await undo(host, [stopped()])).toEqual({ ...none, changedSince: 1 });
+    expect(writes).toEqual([]);
+  });
+
+  it("reads the record before trusting the version of an edit that may not have landed, so a person's change stays", async () => {
+    // The run set Status Open → Paid at version 2. Someone set Held at version 3. The run's
+    // next edit, replanned at version 3 to change only Note, never landed.
+    const noteEdit = { kind: "dataset-edit" as const, rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 2 },
+      fields: [{ fieldId: STATUS, field: "Status", before: "Paid", after: "Paid" }, { fieldId: NOTE, field: "Note", before: "Draft", after: "Sent" }] };
+    const stopped: StoredRun = { ...runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Paid", 2)]), outcome: null,
+      steps: [{ ordinal: 0, effects: [{ kind: "dataset-edit", rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 1 },
+        fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Paid" }] }] }, { ordinal: 1, effects: [noteEdit] }],
+      replans: [{ effect: 1, replan: 1, version: 3, fields: [{ fieldId: NOTE, field: "Note", before: "Draft", after: "Sent" }], kept: [] }] };
+    const records = { a: { version: 3, values: { [STATUS]: "Held", [NOTE]: "Draft" } } };
+    const { writes, host } = recordsHost(records);
+    expect(await undo(host, [stopped])).toEqual({ ...none, changedSince: 1 });
+    expect(records.a.values).toEqual({ [STATUS]: "Held", [NOTE]: "Draft" });
+    expect(writes).toEqual([]);
+  });
+
+  it("reads the record before putting back a field whose last edit may not have landed, though a later edit of another field did", async () => {
+    // A stopped run planned Status Open → Paid at version 2 and never landed it. Someone set Held.
+    // The start-over changed only Note, at version 3.
+    const statusEdit = { kind: "dataset-edit" as const, rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 2 },
+      fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Paid" }] };
+    const older: StoredRun = { ...runOf("h-1", 1, []), applied: [], outcome: null, steps: [{ ordinal: 0, effects: [statusEdit] }] };
+    const newer = runOf("h-2", 2, [edit(EDIT, "a", NOTE, "Draft", "Sent", 4)]);
+    const records = { a: { version: 4, values: { [STATUS]: "Held", [NOTE]: "Sent" } } };
+    const { writes, host } = recordsHost(records);
+    expect(await undo(host, [older, newer])).toEqual({ ...none, reverted: 1, changedSince: 1 });
+    expect(records.a.values).toEqual({ [STATUS]: "Held", [NOTE]: "Draft" });
+    expect(writes).toEqual([{ [NOTE]: "Draft" }]);
+  });
+
+  it("leaves a field of an edit that may not have landed when its run could not read it, or no approved read can check it", async () => {
+    const closing = { kind: "dataset-edit" as const, rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 2 },
+      fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }] };
+    const stopped = (readableFields: string[]): StoredRun => ({ ...runOf("h-1", 1, []), applied: [], outcome: null, readableFields, steps: [{ ordinal: 0, effects: [closing] }] });
+    // The run could not read Status, so the value it planned as before is not what the record held.
+    const hidden = recordsHost({ a: { version: 3, values: { [STATUS]: "Closed" } } });
+    expect(await undo(hidden.host, [stopped([NOTE])])).toEqual({ ...none, irreversible: 1 });
+    expect(hidden.writes).toEqual([]);
+    // Nor does a chain through it: the run cleared Status, then may have written it unread, someone cleared it, and a later run set Paid.
+    const statusEdit = (before: JsonValue, after: JsonValue) => ({ ...closing, fields: [{ fieldId: STATUS, field: "Status", before, after }] });
+    const cleared: StoredRun = { ...runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", null as unknown as string, 2)]), outcome: null, readableFields: [NOTE],
+      steps: [{ ordinal: 0, effects: [statusEdit("Open", null)] }, { ordinal: 1, effects: [statusEdit(null, "Closed")] }] };
+    const later = runOf("h-2", 2, [edit(EDIT, "a", STATUS, null as unknown as string, "Paid", 4)]);
+    const chained = recordsHost({ a: { version: 4, values: { [STATUS]: "Paid" } } });
+    expect(await undo(chained.host, [cleared, later])).toEqual({ ...none, reverted: 1 });
+    // Paid goes back to the cleared value the later run found, not past the edit it could not read.
+    expect(chained.writes).toEqual([{ [STATUS]: null }]);
+    // No approved read shows Status, so dohc cannot check whether the edit landed.
+    const unread = recordsHost({ a: { version: 3, values: { [STATUS]: "Closed" } } });
+    const withoutRead = { ...unread.host, revision: () => ({ ...revision, definition: { ...definition, operations: definition.operations.filter((operation) => operation.operationId !== READ) } }) };
+    expect(await undo(withoutRead, [stopped([STATUS, NOTE])])).toEqual({ ...none, irreversible: 1 });
+    expect(unread.writes).toEqual([]);
   });
 
   it("sends a request it sent again at a newer version first on a retry, so a person's later change stays", async () => {

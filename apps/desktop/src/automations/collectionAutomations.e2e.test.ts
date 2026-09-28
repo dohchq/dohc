@@ -203,3 +203,35 @@ it.skipIf(engine.missing)(
   },
   120_000,
 );
+
+it.skipIf(engine.missing)(
+  "gives each step what the steps before it wrote through the real engine: a Find sees a field just set and a record just added",
+  async () => {
+    await harness([
+      "  - id: chain",
+      "    name: Chain",
+      "    when: {field-changed: Status, to: Done}",
+      "    do:",
+      "      - set: {Finished on: flagged}",
+      "      - find: record[\"Finished on\"] == \"flagged\"",
+      "        as: flagged",
+      "      - add-record: {Status: '=\"Found \" + flagged.length'}",
+      "        as: note",
+      "      - find: record.Status == note.Status",
+      "        as: notes",
+      "      - set: {Finished on: '=\"notes \" + notes.length'}",
+      "",
+    ].join("\n"), async ({ settled, withEngine, personSets }) => {
+      await personSets({ Status: "Done" });
+      await expect(settled()).resolves.toMatchObject({ state: "done" });
+      const { records } = await withEngine((adapter) => adapter.queryCollectionRecords({ collectionPath: "Tasks" }));
+      const fields = records.map((record) => Object.fromEntries(record.values.map(({ field, value }) => [field, value])));
+      expect(fields).toEqual(expect.arrayContaining([
+        expect.objectContaining({ Status: "Done", "Finished on": "notes 1" }),
+        expect.objectContaining({ Status: "Found 1" }),
+      ]));
+      expect(records).toHaveLength(2);
+    });
+  },
+  120_000,
+);

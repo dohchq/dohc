@@ -4,14 +4,18 @@ import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetUndoRequest, RunWrite, StoredRun } from "./automationRunStore";
+import { unrecordedEffect } from "./automationStepRun";
 import type { CollectionAutomationUndone } from "./collectionAutomationUndo";
 import { readDatasetRecord, send, type DatasetInvocation, type DatasetRunHost } from "./datasetAutomationRun";
 
 // Undo for a dataset automation's run (AGENTS.md: every reversible change
 // gets a way back). Like document Undo, each field the runs wrote goes back
-// to what it held before their first write, and only while it still holds
-// what their last write left, so an Undo that stops part way never leaves a
-// field between two of the runs' writes. It is sent through the approved edit
+// to what it held before their last unbroken chain of writes to it, and only
+// while it still holds what that chain left, so an Undo that stops part way
+// never leaves a field between two of the runs' writes. A write that found
+// someone else's value starts the chain again, so their value is what comes
+// back. The edit a stopped run may have landed without recording it counts,
+// with the value before it as another value the chain may have left. It is sent through the approved edit
 // that last wrote the field, as the person who clicks Undo, at the version the
 // runs left the record. A record someone changed since is refused as stale;
 // then only fields that still hold what the runs wrote go back, and the rest
@@ -44,8 +48,26 @@ function writesOf(runs: readonly StoredRun[]): RunWrite[] {
     .flatMap((run) => run.applied.flatMap((effect) => effect.writes));
 }
 
-function editsOf(runs: readonly StoredRun[]): Edit[] {
-  return writesOf(runs).filter((write): write is Edit => write.kind === "dataset-edit");
+/**
+ * The runs' edits, oldest first. After each stopped run's recorded edits
+ * comes the edit it may have landed without recording, marked not sure: as
+ * last sent, at the version it was sent at, after any replan. `hidden` are
+ * that edit's fields its run could not read, so the value before it is not
+ * known.
+ */
+function editsOf(runs: readonly StoredRun[]): Array<{ edit: Edit; sure: boolean; hidden: ReadonlySet<string> }> {
+  return [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs).flatMap((run) => {
+    const recorded = run.applied.flatMap((effect) => effect.writes)
+      .flatMap((write) => (write.kind === "dataset-edit" ? [{ edit: write, sure: true, hidden: new Set<string>() }] : []));
+    const unrecorded = unrecordedEffect(run)?.effect;
+    if (unrecorded?.kind !== "dataset-edit") return recorded;
+    const replan = run.replans.filter((entry) => entry.effect === run.applied.length).at(-1);
+    const { rules, operationId, tableId, target } = unrecorded;
+    const maybe: Edit = { kind: "dataset-edit", rules, operationId, tableId, recordId: target.recordId,
+      version: replan?.version ?? target.version, fields: replan?.fields ?? unrecorded.fields };
+    const readable = new Set(run.readableFields ?? maybe.fields.map((field) => field.fieldId));
+    return [...recorded, { edit: maybe, sure: false, hidden: new Set(maybe.fields.map((field) => field.fieldId).filter((fieldId) => !readable.has(fieldId))) }];
+  });
 }
 
 function actionsOf(runs: readonly StoredRun[]): Action[] {
@@ -58,7 +80,7 @@ function actionsOf(runs: readonly StoredRun[]): Action[] {
  * with, so Undo must not start.
  */
 export function datasetUndoRulesChanged(host: Pick<DatasetRunHost, "resolves" | "revision">, runs: readonly StoredRun[]): boolean {
-  if ([...editsOf(runs), ...actionsOf(runs)].some((write) => !host.resolves(write.rules))) return true;
+  if ([...editsOf(runs).map(({ edit }) => edit), ...actionsOf(runs)].some((write) => !host.resolves(write.rules))) return true;
   return actionsOf(runs).some((action) => action.undo !== undefined && reverseOf(host, action)?.operationId !== action.reverseOperationId);
 }
 
@@ -71,37 +93,68 @@ function reverseOf(host: Pick<DatasetRunHost, "revision">, action: Action): Data
 
 interface FieldChange {
   fieldId: string;
-  /** The value before the runs' first write, and after their last. */
+  /** The value the field goes back to: before the runs' last unbroken chain of writes to it. */
   before: JsonValue;
-  after: JsonValue;
-  /** Every edit of the field is one the rules mark reversible. */
+  /** Each value the chain may have left, likeliest first. */
+  after: JsonValue[];
+  /** Every edit of the chain is one the rules mark reversible. */
   reversible: boolean;
   /** The edit that wrote the field last, whose operation puts it back. */
   last: Edit;
+  /** That edit surely landed. */
+  sure: boolean;
 }
 
-/** Per record, the runs' last edit of it and each field they wrote. */
-function changesOf(host: DatasetUndoHost, runs: readonly StoredRun[]): Array<{ last: Edit; fields: FieldChange[] }> {
-  const records = new Map<string, { last: Edit; fields: Map<string, FieldChange> }>();
-  for (const edit of editsOf(runs)) {
+/** One edit of one field. `known` is false when its run could not read the value before it. */
+type FieldWrite = { before: JsonValue; after: JsonValue; sure: boolean; known: boolean; reversible: boolean; edit: Edit };
+
+/** How one field goes back, as document Undo's wayBack works it out. */
+function fieldChange(fieldId: string, writes: readonly FieldWrite[]): FieldChange {
+  const last = writes.at(-1)!;
+  let value = last.before;
+  let reversible = last.reversible;
+  // A value before an edit its run could not read is not known, so the
+  // chain stops there and the field stays.
+  let known = last.known;
+  for (let index = writes.length - 2; known && index >= 0; index -= 1) {
+    const earlier = writes[index]!;
+    if (isDeepStrictEqual(earlier.after, value)) {
+      value = earlier.before;
+      reversible &&= earlier.reversible;
+      known = earlier.known;
+    } else if (!earlier.sure && earlier.known && isDeepStrictEqual(earlier.before, value)) {
+      // An unrecorded edit the next one did not find never landed.
+      continue;
+    } else {
+      break;
+    }
+  }
+  const after = last.sure ? [last.after] : [last.after, last.before];
+  if (!known) return { fieldId, before: value, after, reversible: false, last: last.edit, sure: last.sure };
+  return { fieldId, before: value, after: after.filter((candidate) => !isDeepStrictEqual(candidate, value)), reversible, last: last.edit, sure: last.sure };
+}
+
+/**
+ * Per record, the runs' last edit of it, whether that edit surely landed, and
+ * how each field they wrote goes back.
+ */
+function changesOf(host: DatasetUndoHost, runs: readonly StoredRun[]): Array<{ last: Edit; sure: boolean; fields: FieldChange[] }> {
+  const records = new Map<string, { last: Edit; sure: boolean; fields: Map<string, FieldWrite[]> }>();
+  for (const { edit, sure, hidden } of editsOf(runs)) {
     const operation = host.revision(edit.rules.datasetId).definition.operations
       .find((candidate) => candidate.operationId === edit.operationId);
     const key = JSON.stringify([edit.rules.datasetId, edit.tableId, edit.recordId]);
-    const record = records.get(key) ?? { last: edit, fields: new Map<string, FieldChange>() };
+    const record = records.get(key) ?? { last: edit, sure, fields: new Map<string, FieldWrite[]>() };
     record.last = edit;
+    record.sure = sure;
     for (const field of edit.fields) {
-      const earlier = record.fields.get(field.fieldId);
-      record.fields.set(field.fieldId, {
-        fieldId: field.fieldId,
-        before: earlier ? earlier.before : field.before,
-        after: field.after,
-        reversible: operation?.reversible === true && (earlier?.reversible ?? true),
-        last: edit,
-      });
+      // A field whose value before the edit its run could not read cannot go back to it.
+      const write = { before: field.before, after: field.after, sure, known: !hidden.has(field.fieldId), reversible: operation?.reversible === true, edit };
+      record.fields.set(field.fieldId, [...(record.fields.get(field.fieldId) ?? []), write]);
     }
     records.set(key, record);
   }
-  return [...records.values()].map(({ last, fields }) => ({ last, fields: [...fields.values()] }));
+  return [...records.values()].map(({ last, sure, fields }) => ({ last, sure, fields: [...fields].map(([fieldId, writes]) => fieldChange(fieldId, writes)) }));
 }
 
 // The same content always gets the same key, so a second Undo of a record
@@ -147,7 +200,7 @@ export async function undoDatasetAutomationRuns(
     undone.actionsReversed += 1;
   }
   for (const record of changesOf(host, runs)) {
-    const changed = record.fields.filter((field) => !isDeepStrictEqual(field.before, field.after));
+    const changed = record.fields.filter((field) => field.after.length > 0);
     const { definition } = host.revision(record.last.rules.datasetId);
     const table = definition.tables.find((candidate) => candidate.tableId === record.last.tableId);
     const reversible = table === undefined ? [] : changed.filter((field) => field.reversible);
@@ -182,24 +235,41 @@ export async function undoDatasetAutomationRuns(
       }
       let fields = group;
       let version = record.last.version;
-      for (let attempt = 0; fields.length > 0; attempt += 1) {
-        const input = { id: record.last.recordId, expectedVersion: version, values: Object.fromEntries(fields.map((field) => [field.fieldId, field.before])) };
-        const result = await call(operationId, input, undoKey(claimId, operationId, input));
-        if (!("refused" in result)) {
-          undone.reverted += fields.length;
-          break;
+      // An edit that may not have landed, the record's newest or any field's
+      // last, leaves the record's version saying nothing about the fields: the
+      // record is read first.
+      let unread = record.sure && group.every((field) => field.sure);
+      const unreadAtStart = unread;
+      let checked = false;
+      while (fields.length > 0) {
+        if (unread) {
+          const input = { id: record.last.recordId, expectedVersion: version, values: Object.fromEntries(fields.map((field) => [field.fieldId, field.before])) };
+          const result = await call(operationId, input, undoKey(claimId, operationId, input));
+          if (!("refused" in result)) {
+            undone.reverted += fields.length;
+            break;
+          }
+          if (result.refused.code === "not_found") {
+            undone.missing += fields.length;
+            break;
+          }
+          if (result.refused.code !== "stale_record" || checked) throw new Error(result.refused.message);
         }
-        if (result.refused.code === "not_found") {
-          undone.missing += fields.length;
-          break;
-        }
-        if (result.refused.code !== "stale_record" || attempt > 0) throw new Error(result.refused.message);
-        // Someone changed the record since the run: only fields still holding
-        // what the run wrote go back.
+        unread = true;
+        checked = true;
+        // The record may have changed since the run: only fields still
+        // holding what the runs may have left go back.
         const read = definition.operations
           .filter((candidate) => candidate.kind === "read" && candidate.tableId === table.tableId && fields.every((field) => candidate.fieldIds.includes(field.fieldId)))
           .sort((left, right) => left.fieldIds.length - right.fieldIds.length)[0];
-        if (read === undefined) throw new Error(`${table.name} changed, and dohc has no approved read of it to check the record again.`);
+        if (read === undefined) {
+          // Fields an edit that may not have landed wrote cannot be checked, so they stay.
+          if (!unreadAtStart) {
+            undone.irreversible += fields.length;
+            break;
+          }
+          throw new Error(`${table.name} changed, and dohc has no approved read of it to check the record again.`);
+        }
         const row = await readDatasetRecord(async (readId, readInput) => {
           const answered = await call(readId, readInput, "automation-undo-read");
           if ("refused" in answered) throw new Error(answered.refused.message);
@@ -209,8 +279,10 @@ export async function undoDatasetAutomationRuns(
           undone.missing += fields.length;
           break;
         }
-        const still = fields.filter((field) => isDeepStrictEqual(row.values[field.fieldId] ?? null, field.after));
-        undone.changedSince += fields.length - still.length;
+        const holds = (field: FieldChange, value: JsonValue) => isDeepStrictEqual(row.values[field.fieldId] ?? null, value);
+        const still = fields.filter((field) => field.after.some((after) => holds(field, after)));
+        // A field already back, from an Undo that stopped part way or an edit that never landed, is neither.
+        undone.changedSince += fields.filter((field) => !still.includes(field) && !holds(field, field.before)).length;
         fields = still;
         version = row.version;
         if (fields.length > 0) {

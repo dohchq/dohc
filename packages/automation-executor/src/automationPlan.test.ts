@@ -5,30 +5,42 @@ import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import { derivedRecordId } from "./recordIds";
 import {
+  answersOf,
+  bindingsIn,
+  codeChangesOf,
   codeFilesOf,
   codeRecordKey,
   collectionAutomationId,
+  conditionsHold,
+  conditionsRequest,
   definitionHash,
   evaluateRequest,
-  evaluationRequest,
   fieldWritesOf,
   expressionProblem,
-  FIND_OVERFLOW_ERROR,
+  filterValues,
   findQueryOf,
-  findValuesRequest,
+  findRequest,
   localIsoTime,
   MAX_CODE_RECORD_CHANGES,
+  namesUsed,
+  orderSteps,
   runNowSkippedFrom,
   operationsOf,
   parseCollectionAutomationId,
-  planRun,
+  planStep,
   scheduleDueAt,
   scheduleHash,
+  stepRequest,
   subscriptionFor,
   triggerMatches,
+  unavailableTo,
   unsupportedReason,
+  type Bound,
   type EvaluationRequest,
-  type RunInputs,
+  type OrderedStep,
+  type RunContext,
+  type RunRecord,
+  type StepInputs,
 } from "./automationPlan";
 import { chatDirectoryOf } from "./automationChat";
 
@@ -67,9 +79,6 @@ function claim(change: Partial<RecordChange> = {}): AutomationClaim & { collecti
 
 const task = { id: "rec_task", path: "Tasks/one.md", values: { Status: "Done", Count: 2 } };
 
-function inputs(definition: Automation, overrides: Partial<RunInputs> = {}): RunInputs {
-  return { automation: definition, claim: claim(), record: task, found: new Map(), person: null, message: null, chat: null, ...overrides };
-}
 
 describe("automation ids", () => {
   it("names a Collection automation by its Collection id, never a path, and its own id", () => {
@@ -114,18 +123,6 @@ describe("find conditions", () => {
       expect(findQueryOf(condition), condition).toEqual({ problem: expect.stringContaining("A Find can check one field") });
     }
     expect(findQueryOf("record.Owner == message.record")).toMatchObject({ value: { kind: "formula", expression: "message.record" } });
-  });
-
-  it("works out a Find's formulas in one request before it reads, where the trigger record is only trigger.record", () => {
-    const definition = automation("id: a\nname: A\nwhen: record-added\ndo: [{find: 'true', as: all}]");
-    const request = findValuesRequest(inputs(definition), [
-      { ordinal: 0, values: [{ kind: "trigger-field", field: "Status" }] },
-      { ordinal: 2, values: [{ kind: "literal", value: 1 }, { kind: "formula", expression: "trigger.record.Count + 1" }] },
-    ], 0);
-    expect(request.formulas).toEqual([{ kind: "expression", source: "trigger.record.Count + 1" }]);
-    expect(request.slots).toEqual([{ ordinal: 2, index: 1 }]);
-    expect(request.scope).not.toHaveProperty("record");
-    expect(request.scope).toMatchObject({ trigger: { record: { Status: "Done", Count: 2 } }, bindings: {} });
   });
 
   it("refuses a condition the query cannot run, instead of scanning the Collection", () => {
@@ -194,10 +191,9 @@ describe("what the executor can run", () => {
       .toBe("A Group message starts this automation, so a Find cannot compare with trigger.record. Compare with a value instead.");
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {group-message: Team}\ndo: [{post: Hi, group: Team}]")))
       .toBeNull();
-    // A Find's formula runs before the Find reads, so no step's result exists yet.
+    // A Find's formula can read the message, and an earlier step's result.
     expect(unsupportedReason(fromGroup("{find: 'record.ID == message.body.slice(6)', as: done}"))).toBeNull();
-    expect(unsupportedReason(withStep("{find: 'true', as: all}, {find: 'record.Owner == all[0].Owner', as: same}")))
-      .toBe("A Find cannot compare with all, another step's result. Compare with a value, the message, or a formula.");
+    expect(unsupportedReason(withStep("{find: 'true', as: all}, {find: 'record.Owner == all[0].Owner', as: same}"))).toBeNull();
     const finds = Array.from({ length: 6 }, (_, index) => `{find: 'true', as: f${index}}`).join(", ");
     expect(unsupportedReason(withStep(finds))).toMatch(/at most 5 Find steps/);
   });
@@ -231,7 +227,6 @@ describe("field writes", () => {
 });
 
 describe("schedule claims", () => {
-  const sweep = automation("id: sweep\nname: Sweep\nwhen: {schedule: day, at: '09:00', timezone: UTC}\ndo: [{add-record: {Title: '=today()'}}]");
   const due = Date.UTC(2026, 8, 25, 9);
   const scheduled = (key: string): AutomationClaim & { collectionPath: string } => ({
     ...claim(),
@@ -249,40 +244,6 @@ describe("schedule claims", () => {
     expect(scheduleDueAt(claim())).toBeNull();
   });
 
-  it("matches only a schedule claim, and gives formulas the due time instead of a record", () => {
-    const run = { person: null, message: null, chat: null, automation: sweep, claim: scheduled(`schedule:${due}`), record: null, found: new Map() };
-    expect(triggerMatches(run)).toBe(true);
-    expect(triggerMatches({ ...run, claim: claim() })).toBe(false);
-    const request = evaluationRequest(run, due);
-    expect(request.scope).not.toHaveProperty("record");
-    // The due time reads in the schedule's own zone, whatever this computer's is.
-    expect(request.scope.trigger).toEqual({ kind: "schedule", dueAt: "2026-09-25T09:00:00.000+00:00" });
-    for (const [timezone, instant, dueAt] of [
-      ["America/New_York", Date.UTC(2026, 8, 25, 13), "2026-09-25T09:00:00.000-04:00"],
-      ["Asia/Kolkata", Date.UTC(2026, 8, 25, 3, 30), "2026-09-25T09:00:00.000+05:30"],
-    ] as const) {
-      const zoned = automation(`id: sweep\nname: Sweep\nwhen: {schedule: day, at: '09:00', timezone: ${timezone}}\ndo: [{add-record: {Title: x}}]`);
-      const zonedRun = { ...run, automation: zoned, claim: scheduled(`schedule:${instant}`) };
-      expect(evaluationRequest(zonedRun, instant).scope.trigger, timezone).toEqual({ kind: "schedule", dueAt });
-    }
-  });
-
-  it("runs a Run now claim at its claim time, with when the skipped runs began", () => {
-    const first = Date.UTC(2026, 8, 22, 9);
-    const key = `run-now:schedule-skipped:ws-1:collection:Tasks#sweep:${first}`;
-    expect(runNowSkippedFrom(scheduled(key))).toBe(first);
-    for (const other of [`schedule:${first}`, "run-now:other:1", `run-now:schedule-skipped:${first}`]) {
-      expect(runNowSkippedFrom(scheduled(other)), other).toBeNull();
-    }
-    const run = { person: null, message: null, chat: null, automation: sweep, claim: scheduled(key), record: null, found: new Map() };
-    expect(triggerMatches(run)).toBe(true);
-    expect(evaluationRequest(run, due).scope.trigger).toEqual({
-      kind: "schedule",
-      dueAt: "2026-09-25T09:00:00.000+00:00",
-      skipped: "2026-09-22T09:00:00.000+00:00",
-    });
-  });
-
   it("hashes the schedule, so a changed time or zone starts a new mark", () => {
     const base = { kind: "schedule" as const, every: "day" as const, at: "09:00", timezone: "UTC" };
     expect(scheduleHash(base)).toBe(scheduleHash({ ...base }));
@@ -290,334 +251,6 @@ describe("schedule claims", () => {
     expect(scheduleHash(base)).not.toBe(scheduleHash({ ...base, timezone: "Europe/London" }));
   });
 });
-
-describe("trigger facts", () => {
-  const becomesDone = automation("id: stamp\nname: Stamp\nwhen: {field-changed: Status, to: Done}\ndo: [{set: {Done: true}}]");
-
-  it("matches a literal value against the change without the evaluator", () => {
-    expect(triggerMatches(inputs(becomesDone))).toBe(true);
-    const toBlocked = claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { value: "Blocked" } }] });
-    expect(triggerMatches(inputs(becomesDone, { claim: toBlocked }))).toBe(false);
-    expect(triggerMatches(inputs(becomesDone, { claim: claim({ kind: "added" }) }))).toBe(false);
-  });
-
-  it("reads a value too large for the claim from the record", () => {
-    const truncated = claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { truncated: true, bytes: 9000 } }] });
-    expect(triggerMatches(inputs(becomesDone, { claim: truncated }))).toBe(true);
-  });
-});
-
-describe("plans", () => {
-  const key = { claimId: "atc_one", hash: "0123456789abcdef" };
-
-  it("plans many formulas after matching a large formula-to value", async () => {
-    const definition = automation([
-      "id: large", "name: Large", "when: {field-changed: Status, to: '=record.Status'}",
-      `do: [{set: {${Array.from({ length: 12 }, (_, index) => `F${index}: '= ${index}'`).join(", ")}}}]`,
-    ].join("\n"));
-    const value = "x".repeat(24 * 1024);
-    const run = inputs(definition, {
-      record: { ...task, values: { Status: value } },
-      claim: claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { truncated: true, bytes: value.length } }] }),
-    });
-    const request = evaluationRequest(run, 0);
-    const evaluator = createAutomationEvaluator();
-    try {
-      const results = await evaluator.evaluate(request.scope, formulasOf(request));
-      expect(results).toEqual([value, ...Array.from({ length: 12 }, (_, index) => index)].map(value => ({ ok: true, value })));
-      expect(planRun(run, request, results, key).kind).toBe("plan");
-    } finally { await evaluator.close(); }
-  });
-
-  it("blocks formulas after an active overflowing Find and ignores an inactive Find", () => {
-    const definition = automation([
-      "id: find", "name: Find", "when: record-added", "do:",
-      "  - if: record.Count > 5", "    do: [{find: 'true', as: items}]",
-      "    otherwise: [{set: {Note: '=\"fallback\"'}}]",
-      "  - set: {Seen: '=true'}",
-    ].join("\n"));
-    const run = inputs(definition, { found: new Map([[1, [task]]]), unreadFinds: new Map([[1, { error: FIND_OVERFLOW_ERROR, timedOut: false }]]) });
-    const request = evaluationRequest(run, 0);
-    expect(request.scope.bindings).not.toHaveProperty("items");
-    expect(formulasOf(request).map(formula => formula.when ?? [])).toEqual([
-      [], [{ index: 0, truthy: true }],
-      [{ index: 0, truthy: false }, { index: 1, truthy: false }], [{ index: 1, truthy: false }],
-    ]);
-    const active = [true, true, null, null].map(value => ({ ok: true as const, value }));
-    expect(planRun(run, request, active, key)).toEqual({
-      kind: "failed", error: "A Find matched more than 50 records. Narrow its condition, then try again.", timedOut: false,
-    });
-    const inactive = [false, null, "fallback", true].map(value => ({ ok: true as const, value }));
-    const planned = planRun(run, request, inactive, key);
-    expect(planned.kind === "plan" && planned.steps.map(step => step.ordinal)).toEqual([2, 3]);
-  });
-
-  it("refuses a pre-step condition that reads a truncated Find instead of supplying zero matches", async () => {
-    const definition = automation([
-      "id: find", "name: Find", "when: record-added", "if: items.length > 50", "do:",
-      "  - find: 'true'", "    as: items", "  - set: {Seen: true}",
-    ].join("\n"));
-    const run = inputs(definition, { found: new Map([[0, [task]]]), unreadFinds: new Map([[0, { error: FIND_OVERFLOW_ERROR, timedOut: false }]]) });
-    const request = evaluationRequest(run, 0);
-    const evaluator = createAutomationEvaluator();
-    try {
-      const results = await evaluator.evaluate(request.scope, formulasOf(request));
-      expect(results[0]).toMatchObject({ ok: false, error: { code: "runtime" } });
-      expect(planRun(run, request, results, key)).toMatchObject({
-        kind: "failed", error: expect.stringContaining('The "Only if" condition failed.'),
-      });
-    } finally { await evaluator.close(); }
-  });
-
-  it.each([
-    'when: {starts-matching: record.Status == "Done"}',
-    `when: {field-changed: Status, to: '= "Done"'}`,
-  ])("skips Only if and actions when the trigger criterion does not match: %s", async when => {
-    const definition = automation([
-      "id: trigger", "name: Trigger", when, "if: record.Details.name", "do: [{set: {Note: '=record.Details.name'}}]",
-    ].join("\n"));
-    const run = inputs(definition, {
-      record: { ...task, values: { Status: "Doing", Details: null } },
-      claim: claim({ fields: [{ field: "Status", historyId: 7, previous: { value: "Todo" }, next: { value: "Doing" } }] }),
-    });
-    const request = evaluationRequest(run, 0);
-    const evaluator = createAutomationEvaluator();
-    try {
-      const results = await evaluator.evaluate(request.scope, formulasOf(request));
-      expect(planRun(run, request, results, key)).toEqual({ kind: "skip" });
-      expect(results.slice(-2)).toEqual([{ ok: true, value: null }, { ok: true, value: null }]);
-    } finally { await evaluator.close(); }
-  });
-
-  it.each([
-    { next: { first: 1, second: [2, 3] }, kind: "plan" },
-    { next: { first: 1, second: [3, 2] }, kind: "skip" },
-    { next: [1, { nested: true }], kind: "plan" },
-    { next: [1, { nested: false }], kind: "skip" },
-  ])("matches a formula-to value with deep JSON equality: $next", async ({ next, kind }) => {
-    const target = Array.isArray(next) ? '[1, {nested: true}]' : '({second: [2, 3], first: 1})';
-    const definition = automation([
-      "id: trigger", "name: Trigger", `when: {field-changed: Status, to: '= ${target}'}`, "do: [{set: {Note: '=\"matched\"'}}]",
-    ].join("\n"));
-    const run = inputs(definition, { claim: claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { value: next } }] }) });
-    const request = evaluationRequest(run, 0);
-    const evaluator = createAutomationEvaluator();
-    try {
-      const results = await evaluator.evaluate(request.scope, formulasOf(request));
-      expect(planRun(run, request, results, key).kind).toBe(kind);
-      expect(results[1]).toEqual({ ok: true, value: kind === "plan" ? "matched" : null });
-    } finally { await evaluator.close(); }
-  });
-
-  it("reports a failing trigger before a false Only if condition", async () => {
-    const definition = automation([
-      "id: trigger", "name: Trigger", "when: {starts-matching: record.Details.name}", "if: 'false'", "do: [{set: {Note: '=1'}}]",
-    ].join("\n"));
-    const run = inputs(definition, { record: { ...task, values: { Details: null } }, claim: claim({ kind: "added" }) });
-    const request = evaluationRequest(run, 0);
-    const evaluator = createAutomationEvaluator();
-    try {
-      const results = await evaluator.evaluate(request.scope, formulasOf(request));
-      expect(planRun(run, request, results, key)).toMatchObject({ kind: "failed" });
-      expect(results.slice(1)).toEqual([{ ok: true, value: null }, { ok: true, value: null }]);
-    } finally { await evaluator.close(); }
-  });
-
-  it("guards nested conditions and both branches without changing step ordinals", () => {
-    const definition = automation([
-      "id: guarded", "name: Guarded", "when: record-added", "if: record.Count > 0", "do:",
-      "  - if: record.Details != null", "    do:",
-      "      - if: record.Details.ready", "        do: [{set: {Note: '=record.Details.name'}}]",
-      "        otherwise: [{set: {Note: '=record.Details.fallback'}}]",
-      "    otherwise: [{set: {Note: '=\"missing\"'}}]",
-      "  - set: {Seen: '=true'}",
-    ].join("\n"));
-    const request = evaluationRequest(inputs(definition), 0);
-    const yes = (index: number) => ({ index, truthy: true });
-    const no = (index: number) => ({ index, truthy: false });
-    expect(formulasOf(request).map(formula => formula.when ?? [])).toEqual([
-      [], [yes(0)], [yes(0), yes(1)], [yes(0), yes(1), yes(2)],
-      [yes(0), yes(1), no(2)], [yes(0), no(1)], [yes(0)],
-    ]);
-    const plan = planRun(inputs(definition), request,
-      [true, false, null, null, null, "missing", true].map(value => ({ ok: true as const, value })), key);
-    expect(plan.kind === "plan" && plan.steps.map(step => step.ordinal)).toEqual([4, 5]);
-  });
-
-  it("runs a press for the record as it is now, naming the button, when it was pressed, and who pressed it", () => {
-    const definition = automation("id: paid\nname: Paid\nwhen: {button: Mark paid}\ndo: [{set: {Paid by: '=person.name'}}]");
-    const pressedAt = Date.UTC(2026, 8, 25, 2, 0);
-    const press = { ...claim({ kind: "button", onBehalfOf: "user-ice", fields: [] }), trigger: { key: "press:p1" }, createdAtMs: pressedAt };
-    const run = inputs(definition, { claim: press, person: { id: "user-ice", name: "Ice" } });
-    expect(triggerMatches(run)).toBe(true);
-    expect(triggerMatches(inputs(definition))).toBe(false);
-    const request = evaluationRequest(run, pressedAt);
-    expect(request.scope).toEqual({
-      record: { Status: "Done", Count: 2, id: "rec_task" },
-      previous: {},
-      trigger: { kind: "button", field: "Mark paid", pressedAt: localIsoTime(pressedAt), record: { Status: "Done", Count: 2, id: "rec_task" } },
-      person: { id: "user-ice", name: "Ice" },
-      bindings: {},
-      now: localIsoTime(pressedAt),
-    });
-  });
-
-  it("names who the relay accepted a live change from as trigger.author, and never as the person", () => {
-    const definition = automation(["id: stamp", "name: Stamp", "when: {field-changed: Status}", "do: [{set: {Note: '=trigger.author.kind'}}]"].join("\n"));
-    const link = { kind: "link" as const, grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" };
-    const linked = evaluationRequest(inputs(definition, { claim: claim({ sharedAuthor: link }) }), Date.UTC(2026, 8, 25, 1, 30));
-    expect(linked.scope.trigger).toMatchObject({ kind: "field-changed", author: link });
-    expect(linked.scope.person).toBeNull();
-    const named = { kind: "named" as const, userId: "user-ana", grantId: "grant-ana", grantGeneration: 1 };
-    const shared = evaluationRequest(inputs(definition, { claim: claim({ sharedAuthor: named }) }), Date.UTC(2026, 8, 25, 1, 30));
-    expect(shared.scope.trigger).toMatchObject({ author: named });
-    expect(shared.scope.person).toBeNull();
-    // The owner's own change names no shared author.
-    expect(evaluationRequest(inputs(definition), Date.UTC(2026, 8, 25, 1, 30)).scope.trigger).toMatchObject({ author: null });
-  });
-
-  it("asks for every formula in one request, reading now as the time of the change", () => {
-    const definition = automation([
-      "id: stamp", "name: Stamp", "when: {field-changed: Status}", "if: record.Count > 1",
-      "do:", "  - set: {Finished on: '=today()', Note: literal}",
-    ].join("\n"));
-    const request = evaluationRequest(inputs(definition), Date.UTC(2026, 8, 25, 1, 30));
-    expect(formulasOf(request)).toEqual([
-      { kind: "expression", source: "record.Count > 1" },
-      { kind: "expression", source: "today()", when: [{ index: 0, truthy: true }] },
-    ]);
-    expect(request.scope).toMatchObject({
-      record: { Status: "Done", Count: 2, id: "rec_task" },
-      previous: { Status: "Doing" },
-      trigger: { kind: "field-changed", change: "changed", fields: ["Status"], record: { id: "rec_task" } },
-      now: localIsoTime(Date.UTC(2026, 8, 25, 1, 30)),
-    });
-    expect(planRun(inputs(definition), request, [{ ok: true, value: true }, { ok: true, value: "2026-09-25" }], key)).toEqual({
-      kind: "plan",
-      steps: [{
-        ordinal: 0,
-        effects: [{
-          kind: "set",
-          target: { recordId: "rec_task", collectionPath: "Tasks", path: "Tasks/one.md" },
-          fields: [
-            { field: "Finished on", before: null, after: "2026-09-25" },
-            { field: "Note", before: null, after: "literal" },
-          ],
-        }],
-      }],
-    });
-    expect(planRun(inputs(definition), request, [{ ok: true, value: false }, { ok: true, value: "x" }], key)).toEqual({ kind: "skip" });
-  });
-
-  it("takes the branch its condition chose and names added records from the claim and step", () => {
-    const definition = automation([
-      "id: route", "name: Route", "when: record-added",
-      "do:",
-      "  - if: record.Count > 5",
-      "    do: [{set: {Size: big}}]",
-      "    otherwise:",
-      "      - add-record: {Title: '=\"Follow up \" + record.Status'}",
-      "        collection: Follow ups",
-      "        as: follow",
-      "      - set: {Owner: me}",
-      "        records: follow",
-    ].join("\n"));
-    const request = evaluationRequest(inputs(definition), 0);
-    expect(formulasOf(request).map((formula) => formula.kind === "expression" && formula.source)).toEqual([
-      "record.Count > 5",
-      '"Follow up " + record.Status',
-    ]);
-    const planned = planRun(inputs(definition), request, [{ ok: true, value: false }, { ok: true, value: "Follow up Done" }], key);
-    const recordId = derivedRecordId("atc_one/0123456789abcdef/2");
-    expect(planned).toEqual({
-      kind: "plan",
-      steps: [
-        { ordinal: 2, effects: [{
-          kind: "add", collectionPath: "Follow ups", recordId, name: `route-${recordId.slice(4, 12)}`,
-          fields: [{ field: "Title", value: "Follow up Done" }],
-        }] },
-        { ordinal: 3, effects: [{ kind: "set", target: { addedBy: 2 }, fields: [{ field: "Owner", before: null, after: "me" }] }] },
-      ],
-    });
-  });
-
-  it("maps a formula over each record a Find returned, with record bound to that record", () => {
-    const definition = automation([
-      "id: bump", "name: Bump", "when: record-added",
-      "do:",
-      "  - find: record.Project == trigger.record.Project",
-      "    as: siblings",
-      "  - set: {Count: '=record.Count + 1', Seen: true}",
-      "    records: siblings",
-    ].join("\n"));
-    const siblings = [
-      { id: "rec_a", path: "Tasks/a.md", values: { Count: 1 } },
-      { id: "rec_b", path: "Tasks/b.md", values: { Count: 4 } },
-    ];
-    const run = inputs(definition, { found: new Map([[0, siblings]]) });
-    const request = evaluationRequest(run, 0);
-    expect(formulasOf(request)).toEqual([{ kind: "expression", source: "(siblings).map((record) => (record.Count + 1\n))" }]);
-    expect(request.scope.bindings).toEqual({ siblings: [{ Count: 1, id: "rec_a" }, { Count: 4, id: "rec_b" }] });
-    const planned = planRun(run, request, [{ ok: true, value: [2, 5] }], key);
-    expect(planned).toMatchObject({ kind: "plan", steps: [{ ordinal: 1, effects: [
-      { target: { recordId: "rec_a" }, fields: [{ field: "Count", before: 1, after: 2 }, { field: "Seen", before: null, after: true }] },
-      { target: { recordId: "rec_b" }, fields: [{ field: "Count", before: 4, after: 5 }, { field: "Seen", before: null, after: true }] },
-    ] }] });
-    expect(planRun(run, request, [{ ok: true, value: [2] }], key)).toEqual({
-      kind: "failed", error: expect.stringContaining("did not give one value for each record"), timedOut: false,
-    });
-  });
-
-  it("expects each field to hold what the step before it wrote, on every record the run touches", () => {
-    const definition = automation([
-      "id: count", "name: Count", "when: record-added",
-      "do:",
-      "  - set: {Count: 1}",
-      "  - set: {Count: 2}",
-      "  - add-record: {Title: first}",
-      "    as: log",
-      "  - set: {Title: second}",
-      "    records: log",
-    ].join("\n"));
-    const run = inputs(definition, { record: { ...task, values: { Count: 0 } } });
-    const planned = planRun(run, evaluationRequest(run, 0), [], key);
-    expect(planned).toMatchObject({ kind: "plan", steps: [
-      { effects: [{ fields: [{ field: "Count", before: 0, after: 1 }] }] },
-      { effects: [{ fields: [{ field: "Count", before: 1, after: 2 }] }] },
-      { effects: [{ kind: "add", fields: [{ field: "Title", value: "first" }] }] },
-      { effects: [{ target: { addedBy: 2 }, fields: [{ field: "Title", before: "first", after: "second" }] }] },
-    ] });
-  });
-
-  it("refuses a run that would change more fields than one run may save", () => {
-    const fields = Array.from({ length: 5 }, (_, index) => `F${index}: 1`).join(", ");
-    const definition = automation(`id: wide\nname: Wide\nwhen: record-added\ndo: [{find: 'true', as: all}, {set: {${fields}}, records: all}]`);
-    const found = Array.from({ length: 50 }, (_, index) => ({ id: `rec_${index}`, path: `Tasks/${index}.md`, values: {} }));
-    const run = inputs(definition, { found: new Map([[0, found]]) });
-    expect(planRun(run, evaluationRequest(run, 0), [], key)).toEqual({
-      kind: "failed",
-      error: "This run would change more than 200 fields. Narrow its Find steps, or split it into smaller automations.",
-      timedOut: false,
-    });
-  });
-
-  it("fails the run with the formula's own words, and marks a timeout", () => {
-    const definition = automation("id: a\nname: A\nwhen: record-added\ndo: [{set: {X: '=loop()'}}]");
-    const request = evaluationRequest(inputs(definition), 0);
-    expect(planRun(inputs(definition), request, [{ ok: false, error: { code: "timeout", message: "It ran too long." } }], key))
-      .toEqual({ kind: "failed", error: 'The formula for "X" in step 1 failed. It ran too long.', timedOut: true });
-  });
-
-  it("runs a starts-matching automation only when the record did not match before the change", () => {
-    const definition = automation("id: a\nname: A\nwhen: {starts-matching: record.Status == \"Done\"}\ndo: [{set: {X: 1}}]");
-    const request = evaluationRequest(inputs(definition), 0);
-    expect(formulasOf(request)[0]).toEqual({ kind: "expression", source: '((record) => (record.Status == "Done"\n))(__dohc_before)' });
-    expect(request.scope.bindings).toEqual({ __dohc_before: { Status: "Doing", Count: 2, id: "rec_task" } });
-    expect(planRun(inputs(definition), request, [{ ok: true, value: false }, { ok: true, value: true }], key).kind).toBe("plan");
-    expect(planRun(inputs(definition), request, [{ ok: true, value: true }, { ok: true, value: true }], key)).toEqual({ kind: "skip" });
-  });
-});
-
 describe("a formula's syntax, for the builder", () => {
   it("parses without running, so a loop costs nothing, and names what is wrong", () => {
     expect(expressionProblem('record.Status == "Done"')).toBeNull();
@@ -627,95 +260,432 @@ describe("a formula's syntax, for the builder", () => {
   });
 });
 
+const key = { claimId: "atc_one", hash: "0123456789abcdef" };
+
+function context(definition: Automation, overrides: Partial<RunContext> = {}): RunContext {
+  return { automation: definition, claim: claim(), person: null, message: null, chat: null, nowMs: 0, key, ...overrides };
+}
+
+const inputsOf = (record: RunRecord | null = task, bound: ReadonlyMap<string, Bound> = new Map()): StepInputs => ({ record, bound, unavailable: {} });
+
+/** The step at `ordinal`, as the executor walks it. */
+function entryAt(definition: Automation, ordinal: number): OrderedStep {
+  const walk = (entries: readonly OrderedStep[]): OrderedStep | undefined => {
+    for (const entry of entries) {
+      if (entry.ordinal === ordinal) return entry;
+      const inner = "then" in entry ? walk([...entry.then, ...entry.otherwise]) : undefined;
+      if (inner) return inner;
+    }
+    return undefined;
+  };
+  const found = walk(orderSteps(definition.do));
+  if (!found) throw new Error(`No step ${ordinal}.`);
+  return found;
+}
+
+const ok = (...values: JsonValue[]): AutomationOutcome<JsonValue>[] => values.map((value) => ({ ok: true, value }));
+
+/** Plans the step at `ordinal` from the evaluator's answers to its request. */
+function planAt(
+  ctx: RunContext,
+  ordinal: number,
+  inputs: StepInputs,
+  results: readonly AutomationOutcome<JsonValue>[],
+  extra: { codeRecords?: ReadonlyMap<string, RunRecord> } = {},
+) {
+  const entry = entryAt(ctx.automation, ordinal);
+  const request = stepRequest(ctx, entry, inputs);
+  const answers = answersOf(request, results);
+  if ("error" in answers) return answers;
+  const codeChanges = codeChangesOf(request, results, ctx.claim.collectionPath);
+  if ("problem" in codeChanges) return codeChanges;
+  return planStep(ctx, entry, inputs, answers, { chat: ctx.chat, codeChanges, codeRecords: extra.codeRecords ?? new Map() });
+}
+
+describe("schedule and press scopes", () => {
+  const sweep = automation("id: sweep\nname: Sweep\nwhen: {schedule: day, at: '09:00', timezone: UTC}\ndo: [{add-record: {Title: '=today()'}}]");
+  const due = Date.UTC(2026, 8, 25, 9);
+  const scheduled = (claimKey: string): AutomationClaim & { collectionPath: string } => ({
+    ...claim(),
+    automationId: "collection:Tasks#sweep",
+    trigger: { key: claimKey },
+    recordId: null,
+    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
+  });
+
+  it("matches only a schedule claim, and gives formulas the due time instead of a record", () => {
+    expect(triggerMatches(sweep, scheduled(`schedule:${due}`), null)).toBe(true);
+    expect(triggerMatches(sweep, claim(), null)).toBe(false);
+    const request = stepRequest(context(sweep, { claim: scheduled(`schedule:${due}`), nowMs: due }), entryAt(sweep, 0), inputsOf(null));
+    expect(request.scope).not.toHaveProperty("record");
+    // The due time reads in the schedule's own zone, whatever this computer's is.
+    expect(request.scope.trigger).toEqual({ kind: "schedule", dueAt: "2026-09-25T09:00:00.000+00:00" });
+    for (const [timezone, instant, dueAt] of [
+      ["America/New_York", Date.UTC(2026, 8, 25, 13), "2026-09-25T09:00:00.000-04:00"],
+      ["Asia/Kolkata", Date.UTC(2026, 8, 25, 3, 30), "2026-09-25T09:00:00.000+05:30"],
+    ] as const) {
+      const zoned = automation(`id: sweep\nname: Sweep\nwhen: {schedule: day, at: '09:00', timezone: ${timezone}}\ndo: [{add-record: {Title: x}}]`);
+      const scope = stepRequest(context(zoned, { claim: scheduled(`schedule:${instant}`), nowMs: instant }), entryAt(zoned, 0), inputsOf(null)).scope;
+      expect(scope.trigger, timezone).toEqual({ kind: "schedule", dueAt });
+    }
+  });
+
+  it("runs a Run now claim at its claim time, with when the skipped runs began", () => {
+    const first = Date.UTC(2026, 8, 22, 9);
+    const claimKey = `run-now:schedule-skipped:ws-1:collection:Tasks#sweep:${first}`;
+    expect(runNowSkippedFrom(scheduled(claimKey))).toBe(first);
+    for (const other of [`schedule:${first}`, "run-now:other:1", `run-now:schedule-skipped:${first}`]) {
+      expect(runNowSkippedFrom(scheduled(other)), other).toBeNull();
+    }
+    expect(triggerMatches(sweep, scheduled(claimKey), null)).toBe(true);
+    expect(stepRequest(context(sweep, { claim: scheduled(claimKey), nowMs: due }), entryAt(sweep, 0), inputsOf(null)).scope.trigger).toEqual({
+      kind: "schedule",
+      dueAt: "2026-09-25T09:00:00.000+00:00",
+      skipped: "2026-09-22T09:00:00.000+00:00",
+    });
+  });
+
+  it("runs a press for the record as it is now, naming the button, when it was pressed, and who pressed it", () => {
+    const definition = automation("id: paid\nname: Paid\nwhen: {button: Mark paid}\ndo: [{set: {Paid by: '=person.name'}}]");
+    const pressedAt = Date.UTC(2026, 8, 25, 2, 0);
+    const press = { ...claim({ kind: "button", onBehalfOf: "user-ice", fields: [] }), trigger: { key: "press:p1" }, createdAtMs: pressedAt };
+    expect(triggerMatches(definition, press, task)).toBe(true);
+    expect(triggerMatches(definition, claim(), task)).toBe(false);
+    const request = stepRequest(context(definition, { claim: press, person: { id: "user-ice", name: "Ice" }, nowMs: pressedAt }), entryAt(definition, 0), inputsOf());
+    expect(request.scope).toEqual({
+      record: { Status: "Done", Count: 2, id: "rec_task" },
+      previous: {},
+      trigger: { kind: "button", field: "Mark paid", pressedAt: localIsoTime(pressedAt), record: { Status: "Done", Count: 2, id: "rec_task" } },
+      person: { id: "user-ice", name: "Ice" },
+      bindings: {},
+      now: localIsoTime(pressedAt),
+    });
+  });
+});
+
+describe("trigger facts", () => {
+  const becomesDone = automation("id: stamp\nname: Stamp\nwhen: {field-changed: Status, to: Done}\ndo: [{set: {Done: true}}]");
+
+  it("matches a literal value against the change without the evaluator", () => {
+    expect(triggerMatches(becomesDone, claim(), task)).toBe(true);
+    const toBlocked = claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { value: "Blocked" } }] });
+    expect(triggerMatches(becomesDone, toBlocked, task)).toBe(false);
+    expect(triggerMatches(becomesDone, claim({ kind: "added" }), task)).toBe(false);
+  });
+
+  it("reads a value too large for the claim from the record", () => {
+    const truncated = claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { truncated: true, bytes: 9000 } }] });
+    expect(triggerMatches(becomesDone, truncated, task)).toBe(true);
+  });
+});
+
+describe("who a change came through", () => {
+  it("names who the relay accepted a live change from as trigger.author, and never as the person", () => {
+    const definition = automation(["id: stamp", "name: Stamp", "when: {field-changed: Status}", "do: [{set: {Note: '=trigger.author.kind'}}]"].join("\n"));
+    const scope = (change: Partial<RecordChange>) => stepRequest(context(definition, { claim: claim(change) }), entryAt(definition, 0), inputsOf()).scope;
+    const link = { kind: "link" as const, grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" };
+    expect(scope({ sharedAuthor: link }).trigger).toMatchObject({ kind: "field-changed", author: link });
+    expect(scope({ sharedAuthor: link }).person).toBeNull();
+    const named = { kind: "named" as const, userId: "user-ana", grantId: "grant-ana", grantGeneration: 1 };
+    expect(scope({ sharedAuthor: named }).trigger).toMatchObject({ author: named });
+    expect(scope({ sharedAuthor: named }).person).toBeNull();
+    // The owner's own change names no shared author.
+    expect(scope({}).trigger).toMatchObject({ author: null });
+  });
+});
+
+describe("conditions", () => {
+  it("checks a large formula-to value against the record the claim left it out of", async () => {
+    const definition = automation("id: large\nname: Large\nwhen: {field-changed: Status, to: '=record.Status'}\ndo: [{set: {F: 1}}]");
+    const value = "x".repeat(24 * 1024);
+    const record = { ...task, values: { Status: value } };
+    const ctx = context(definition, { claim: claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { truncated: true, bytes: value.length } }] }) });
+    const request = conditionsRequest(ctx, record);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, formulasOf(request));
+      expect(results).toEqual([{ ok: true, value }]);
+      expect(conditionsHold(ctx, record, request, results)).toBe("go");
+    } finally { await evaluator.close(); }
+  });
+
+  it.each([
+    'when: {starts-matching: record.Status == "Done"}',
+    `when: {field-changed: Status, to: '= "Done"'}`,
+  ])("skips Only if when the trigger criterion does not match: %s", async (when) => {
+    const definition = automation(["id: trigger", "name: Trigger", when, "if: record.Details.name", "do: [{set: {Note: '=record.Details.name'}}]"].join("\n"));
+    const record = { ...task, values: { Status: "Doing", Details: null } };
+    const ctx = context(definition, { claim: claim({ fields: [{ field: "Status", historyId: 7, previous: { value: "Todo" }, next: { value: "Doing" } }] }) });
+    const request = conditionsRequest(ctx, record);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, formulasOf(request));
+      expect(conditionsHold(ctx, record, request, results)).toBe("skip");
+      expect(results.at(-1)).toEqual({ ok: true, value: null });
+    } finally { await evaluator.close(); }
+  });
+
+  it.each([
+    { next: { first: 1, second: [2, 3] }, go: true },
+    { next: { first: 1, second: [3, 2] }, go: false },
+    { next: [1, { nested: true }], go: true },
+    { next: [1, { nested: false }], go: false },
+  ])("matches a formula-to value with deep JSON equality: $next", async ({ next, go }) => {
+    const target = Array.isArray(next) ? "[1, {nested: true}]" : "({second: [2, 3], first: 1})";
+    const definition = automation(["id: trigger", "name: Trigger", `when: {field-changed: Status, to: '= ${target}'}`, "do: [{set: {Note: matched}}]"].join("\n"));
+    const ctx = context(definition, { claim: claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { value: next } }] }) });
+    const request = conditionsRequest(ctx, task);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, formulasOf(request));
+      expect(conditionsHold(ctx, task, request, results)).toBe(go ? "go" : "skip");
+    } finally { await evaluator.close(); }
+  });
+
+  it("reports a failing trigger before a false Only if condition", async () => {
+    const definition = automation("id: trigger\nname: Trigger\nwhen: {starts-matching: record.Details.name}\nif: 'false'\ndo: [{set: {Note: 1}}]");
+    const record = { ...task, values: { Details: null } };
+    const ctx = context(definition, { claim: claim({ kind: "added" }) });
+    const request = conditionsRequest(ctx, record);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, formulasOf(request));
+      expect(conditionsHold(ctx, record, request, results)).toMatchObject({ error: expect.stringContaining("The condition this automation waits for failed.") });
+      expect(results.slice(1)).toEqual([{ ok: true, value: null }]);
+    } finally { await evaluator.close(); }
+  });
+
+  it("runs a starts-matching automation only when the record did not match before the change", () => {
+    const definition = automation("id: a\nname: A\nwhen: {starts-matching: record.Status == \"Done\"}\ndo: [{set: {X: 1}}]");
+    const ctx = context(definition);
+    const request = conditionsRequest(ctx, task);
+    expect(formulasOf(request)[0]).toEqual({ kind: "expression", source: '((record) => (record.Status == "Done"\n))(__dohc_before)' });
+    expect(request.scope.bindings).toEqual({ __dohc_before: { Status: "Doing", Count: 2, id: "rec_task" } });
+    expect(conditionsHold(ctx, task, request, ok(false, true))).toBe("go");
+    expect(conditionsHold(ctx, task, request, ok(true, true))).toBe("skip");
+  });
+
+  it("asks nothing when the automation has no condition", () => {
+    const definition = automation("id: a\nname: A\nwhen: record-added\ndo: [{set: {X: 1}}]");
+    expect(conditionsRequest(context(definition), task).items).toEqual([]);
+  });
+});
+
+describe("steps", () => {
+  it("evaluates one step's formulas against the record as the step read it, reading now as the time of the change", () => {
+    const definition = automation("id: stamp\nname: Stamp\nwhen: {field-changed: Status}\ndo:\n  - set: {Finished on: '=today()', Note: literal}");
+    const ctx = context(definition, { nowMs: Date.UTC(2026, 8, 25, 1, 30) });
+    const request = stepRequest(ctx, entryAt(definition, 0), inputsOf());
+    expect(formulasOf(request)).toEqual([{ kind: "expression", source: "today()" }]);
+    expect(request.scope).toMatchObject({
+      record: { Status: "Done", Count: 2, id: "rec_task" },
+      previous: { Status: "Doing" },
+      trigger: { kind: "field-changed", change: "changed", fields: ["Status"], record: { id: "rec_task" } },
+      now: localIsoTime(Date.UTC(2026, 8, 25, 1, 30)),
+    });
+    expect(planAt(ctx, 0, inputsOf(), ok("2026-09-25"))).toEqual({ step: {
+      ordinal: 0,
+      effects: [{
+        kind: "set",
+        target: { recordId: "rec_task", collectionPath: "Tasks", path: "Tasks/one.md" },
+        fields: [{ field: "Finished on", before: null, after: "2026-09-25" }, { field: "Note", before: null, after: "literal" }],
+      }],
+    } });
+  });
+
+  it("takes each field's before value from the record as this step read it, after the steps before it landed", () => {
+    const definition = automation("id: count\nname: Count\nwhen: record-added\ndo: [{set: {Count: '=record.Count + 1'}}, {set: {Count: '=record.Count + 1'}}]");
+    const ctx = context(definition);
+    const later = { ...task, values: { Count: 3 } };
+    expect(planAt(ctx, 1, inputsOf(later), ok(4))).toMatchObject({ step: { effects: [{ fields: [{ field: "Count", before: 3, after: 4 }] }] } });
+  });
+
+  it("decides an If's branch as its result, with no effects", () => {
+    const definition = automation("id: route\nname: Route\nwhen: record-added\ndo:\n  - if: record.Count > 5\n    do: [{set: {Size: big}}]\n    otherwise: [{set: {Size: small}}]");
+    const ctx = context(definition);
+    expect(formulasOf(stepRequest(ctx, entryAt(definition, 0), inputsOf()))).toEqual([{ kind: "expression", source: "record.Count > 5" }]);
+    expect(planAt(ctx, 0, inputsOf(), ok(false))).toEqual({ step: { ordinal: 0, effects: [], output: { kind: "if", branch: false } } });
+  });
+
+  it("names an added record from the claim and step, and sets fields on it as a later step read it", () => {
+    const definition = automation([
+      "id: route", "name: Route", "when: record-added", "do:",
+      "  - add-record: {Title: '=\"Follow up \" + record.Status'}", "    collection: Follow ups", "    as: follow",
+      "  - set: {Owner: '=follow.Title + \"!\"'}", "    records: follow",
+    ].join("\n"));
+    const ctx = context(definition);
+    const recordId = derivedRecordId("atc_one/0123456789abcdef/0");
+    expect(planAt(ctx, 0, inputsOf(), ok("Follow up Done"))).toEqual({ step: { ordinal: 0, effects: [{
+      kind: "add", collectionPath: "Follow ups", recordId, name: `route-${recordId.slice(4, 12)}`, fields: [{ field: "Title", value: "Follow up Done" }],
+    }] } });
+    const added = { id: "rec_added", path: "Follow ups/route.md", values: { Title: "Follow up Done", Owner: null } };
+    const bound = new Map<string, Bound>([["follow", { kind: "add", record: added }]]);
+    const request = stepRequest(ctx, entryAt(definition, 1), inputsOf(task, bound));
+    expect(request.scope.bindings).toEqual({ follow: { Title: "Follow up Done", Owner: null, id: "rec_added" } });
+    expect(planAt(ctx, 1, inputsOf(task, bound), ok("Follow up Done!"))).toEqual({ step: { ordinal: 1, effects: [{
+      kind: "set", target: { recordId: "rec_added", collectionPath: "Follow ups", path: "Follow ups/route.md" },
+      fields: [{ field: "Owner", before: null, after: "Follow up Done!" }],
+    }] } });
+    // An added record someone removed since leaves nothing to change.
+    expect(planAt(ctx, 1, inputsOf(task, new Map([["follow", { kind: "add", record: null }]])), ok("x"))).toEqual({ step: { ordinal: 1, effects: [] } });
+  });
+
+  it("maps a formula over each record a Find returned, as this step read them, with record bound to that record", () => {
+    const definition = automation([
+      "id: bump", "name: Bump", "when: record-added", "do:",
+      "  - find: record.Project == trigger.record.Project", "    as: siblings",
+      "  - set: {Count: '=record.Count + 1', Seen: true}", "    records: siblings",
+    ].join("\n"));
+    const siblings = [{ id: "rec_a", path: "Tasks/a.md", values: { Count: 1 } }, { id: "rec_b", path: "Tasks/b.md", values: { Count: 4 } }];
+    const ctx = context(definition);
+    const inputs = inputsOf(task, new Map([["siblings", { kind: "find", records: siblings }]]));
+    const request = stepRequest(ctx, entryAt(definition, 1), inputs);
+    expect(formulasOf(request)).toEqual([{ kind: "expression", source: "(siblings).map((record) => (record.Count + 1\n))" }]);
+    expect(request.scope.bindings).toEqual({ siblings: [{ Count: 1, id: "rec_a" }, { Count: 4, id: "rec_b" }] });
+    expect(planAt(ctx, 1, inputs, ok([2, 5]))).toMatchObject({ step: { ordinal: 1, effects: [
+      { target: { recordId: "rec_a" }, fields: [{ field: "Count", before: 1, after: 2 }, { field: "Seen", before: null, after: true }] },
+      { target: { recordId: "rec_b" }, fields: [{ field: "Count", before: 4, after: 5 }, { field: "Seen", before: null, after: true }] },
+    ] } });
+    expect(planAt(ctx, 1, inputs, ok([2]))).toEqual({ problem: expect.stringContaining("did not give one value for each record") });
+  });
+
+  it("asks a Find's formulas with earlier results in scope and the trigger record only as trigger.record", () => {
+    const definition = automation([
+      "id: a", "name: A", "when: record-added", "do:",
+      "  - run: 'return { output: 3 }'", "    as: limit",
+      "  - find: record.Count == limit + trigger.record.Count", "    as: matched",
+    ].join("\n"));
+    const ctx = context(definition);
+    const values = [{ kind: "formula" as const, expression: "limit + trigger.record.Count" }];
+    const request = findRequest(ctx, 1, inputsOf(task, new Map([["limit", { kind: "code", value: 3 }]])), values);
+    expect(formulasOf(request)).toEqual([{ kind: "expression", source: "limit + trigger.record.Count" }]);
+    expect(request.scope).not.toHaveProperty("record");
+    expect(request.scope).toMatchObject({ trigger: { record: { Count: 2 } }, bindings: { limit: 3 } });
+    const answers = answersOf(request, ok(5));
+    expect(answers instanceof Map && filterValues([{ kind: "literal", value: 1 }, { kind: "trigger-field", field: "Count" }, ...values], task,
+      new Map([["find:2", 5]]))).toEqual([1, 2, 5]);
+  });
+
+  it("fails a step with the formula's own words, and marks a timeout", () => {
+    const definition = automation("id: a\nname: A\nwhen: record-added\ndo: [{set: {X: '=loop()'}}]");
+    expect(planAt(context(definition), 0, inputsOf(), [{ ok: false, error: { code: "timeout", message: "It ran too long." } }]))
+      .toEqual({ error: 'The formula for "X" in step 1 failed. It ran too long.', timedOut: true });
+  });
+
+  it("keeps a timed-out formula's failure when another formula in the same step failed before it", () => {
+    const definition = automation(["id: a", "name: A", "when: record-added", "do: [{set: {X: '=a()', Y: '=b()', Z: '=1'}}]"].join("\n"));
+    const request = stepRequest(context(definition), entryAt(definition, 0), inputsOf());
+    expect(answersOf(request, [
+      { ok: false, error: { code: "runtime", message: "It threw." } },
+      { ok: false, error: { code: "timeout", message: "It ran out of time." } },
+      { ok: true, value: 1 },
+    ])).toEqual({ error: 'The formula for "Y" in step 1 failed. It ran out of time.', timedOut: true });
+  });
+
+  it("fails a Set with no record to change", () => {
+    // Someone removed the trigger record after an earlier step ran.
+    const definition = automation("id: a\nname: A\nwhen: record-added\ndo: [{set: {X: 1}}]");
+    expect(planAt(context(definition), 0, inputsOf(null), [])).toEqual({ problem: "The record was removed, so the automation has no record to change." });
+  });
+});
+
+describe("what a step can read", () => {
+  const definition = automation([
+    "id: a", "name: A", "when: record-added", "do:",
+    "  - set: {Note: '=later.length'}",
+    "  - if: record.Count > 5",
+    "    do: [{find: 'true', as: big}]",
+    "  - set: {Note: '=big.length'}",
+    "  - find: 'true'", "    as: later",
+    "  - run: 'return {}'",
+  ].join("\n"));
+  const bindings = bindingsIn(definition);
+
+  it("names the earlier results a step's formulas read, and every result for code", () => {
+    expect([...(namesUsed(entryAt(definition, 0).step) as Set<string>)]).toEqual(["later"]);
+    expect(namesUsed(entryAt(definition, 5).step)).toBe("all");
+    const indirect = automation(["id: g", "name: G", "when: record-added", "do: [{find: 'true', as: team}, {set: {X: '=globalThis.team.length'}}]"].join("\n"));
+    // A result a formula reaches without naming it is not read, and reading it that way says so.
+    expect([...(namesUsed(entryAt(indirect, 1).step) as Set<string>)]).toEqual(["globalThis"]);
+    expect(unavailableTo(1, bindingsIn(indirect), new Set(["team"]), new Set(["globalThis"]))).toEqual({
+      team: "team is step 1's result, and a formula gets it only by naming it. Write team in the formula.",
+    });
+    expect(unavailableTo(1, bindingsIn(indirect), new Set(["team"]), "all")).toEqual({});
+    // A result named __proto__ is kept as a name of its own.
+    const odd = automation(["id: o", "name: O", "when: record-added", "do: [{set: {X: 1}}, {find: 'true', as: __proto__}]"].join("\n"));
+    expect(Object.keys(unavailableTo(0, bindingsIn(odd), new Set(), "all"))).toEqual(["__proto__"]);
+    const set = automation("id: s\nname: S\nwhen: record-added\ndo: [{find: 'true', as: all}, {set: {X: 1}, records: all}, {post: 'Hi {all.length}', group: Trip}]");
+    expect([...(namesUsed(entryAt(set, 1).step) as Set<string>)]).toEqual(["all"]);
+    expect([...(namesUsed(entryAt(set, 2).step) as Set<string>)]).toEqual(["all"]);
+  });
+
+  it("says why a step cannot read a result a later step makes, or one a branch the run did not take makes", () => {
+    expect(unavailableTo(0, bindings, new Set(), "all")).toEqual({
+      big: "big is step 3's result, and step 3 comes after step 1.",
+      later: "later is step 5's result, and step 5 comes after step 1.",
+    });
+    expect(unavailableTo(3, bindings, new Set(["later"]), new Set(["later"]))).toEqual({ big: "big is step 3's result, and step 3 did not run." });
+    // The evaluator stops a formula that reads one with that text.
+    const inputs = { ...inputsOf(), unavailable: unavailableTo(0, bindings, new Set(), "all") };
+    expect(stepRequest(context(definition), entryAt(definition, 0), inputs).scope.unavailable).toEqual(inputs.unavailable);
+  });
+
+  it("gives the conditions no step's result, since they are checked before any step runs", () => {
+    expect(conditionsRequest(context(definition), task).scope.unavailable).toMatchObject({
+      big: "big is step 3's result, and steps run only once this automation's conditions hold. Check it in an If step instead.",
+    });
+  });
+});
+
 describe("messages", () => {
   const directory = chatDirectoryOf(
     [{ id: "trip", name: "Trip", slug: "trip", kind: "channel", type: "both", wireId: "trip", runningThreadId: null }],
     { kind: "owner", ownerUserId: null, grants: [] },
   );
   const tell = automation("id: t\nname: T\nwhen: record-added\ndo: [{post: 'Hi {record.Status}', group: Trip}]");
-  const key = { claimId: "atc_1", hash: "h" };
 
   it("posts the text the evaluator rendered, and refuses a message with no text", () => {
-    const run = inputs(tell, { chat: directory });
-    const request = evaluationRequest(run, 0);
-    expect(formulasOf(request)).toEqual([{
+    const ctx = context(tell, { chat: directory, key: { claimId: "atc_1", hash: "h" } });
+    expect(formulasOf(stepRequest(ctx, entryAt(tell, 0), inputsOf()))).toEqual([{
       kind: "text", parts: [{ kind: "text", text: "Hi " }, { kind: "expression", expression: "record.Status" }],
     }]);
-    expect(planRun(run, request, [{ ok: true, value: "Hi Done  \r\n" }], key)).toMatchObject({
-      kind: "plan",
-      steps: [{ ordinal: 0, effects: [{
-        kind: "message", effectId: "atc_1/h/0/post", to: { kind: "group", channelId: "trip", lane: "posts" }, body: "Hi Done",
-      }] }],
-    });
-    expect(planRun(run, request, [{ ok: true, value: " \n" }], key))
-      .toEqual({ kind: "failed", error: "The message in step 1 is empty.", timedOut: false });
-    expect(planRun(run, request, [{ ok: true, value: 5 }], key))
-      .toEqual({ kind: "failed", error: "The message in step 1 is not text.", timedOut: false });
+    expect(planAt(ctx, 0, inputsOf(), ok("Hi Done  \r\n"))).toMatchObject({ step: { ordinal: 0, effects: [{
+      kind: "message", effectId: "atc_1/h/0/post", to: { kind: "group", channelId: "trip", lane: "posts" }, body: "Hi Done",
+    }] } });
+    expect(planAt(ctx, 0, inputsOf(), ok(" \n"))).toEqual({ problem: "The message in step 1 is empty." });
+    expect(planAt(ctx, 0, inputsOf(), ok(5))).toEqual({ problem: "The message in step 1 is not text." });
   });
 });
 
 describe("code steps", () => {
-  const key = { claimId: "atc_1", hash: "h" };
-
-  it("runs code after the formulas before it, and gives the formulas after it the value it returned", async () => {
-    const definition = automation([
-      "id: total", "name: Total", "when: record-added", "if: record.Count > 1", "do:",
-      "  - run: 'return { output: ctx.record.Count * 10 }'", "    as: total",
-      "  - if: total > 5",
-      "    do: [{set: {Note: '=\"big \" + total'}}]",
-      "    otherwise: [{run: 'while (true) {}'}]",
-    ].join("\n"));
-    const run = inputs(definition);
-    const request = evaluationRequest(run, 0);
-    expect(request.slots.map((slot) => slot.kind)).toEqual(["only-if", "code", "if", "value", "code"]);
+  it("runs code alone in its step, and gives later steps the value it returned", async () => {
+    const definition = automation("id: total\nname: Total\nwhen: record-added\ndo:\n  - run: 'return { output: ctx.record.Count * 10 }'\n    as: total");
+    const ctx = context(definition);
+    const request = stepRequest(ctx, entryAt(definition, 0), inputsOf());
+    expect(request.slots.map((slot) => slot.kind)).toEqual(["code"]);
     const shared = createAutomationFormulaEvaluator();
-    const asked: string[] = [];
-    const base = shared.forWorkspace("trip");
-    const budgets = new Set<unknown>();
-    const evaluator: AutomationFormulaEvaluator = {
-      evaluate: async (id, scope, formulas, spent) => {
-        budgets.add(spent);
-        asked.push(`formulas ${formulas.length}, total ${JSON.stringify(scope.bindings?.total)}`);
-        return await base.evaluate(id, scope, formulas, spent);
-      },
-      runCode: async (id, scope, source, spent) => {
-        budgets.add(spent);
-        asked.push(`code ${source}`);
-        return await base.runCode(id, scope, source, spent);
-      },
-    };
     try {
-      const results = await evaluateRequest(evaluator, "collection:Tasks#total", request, { prepareMs: 0, runMs: 0 });
-      // The otherwise branch's code never runs.
-      expect(asked).toEqual(["formulas 1, total null", "code return { output: ctx.record.Count * 10 }", "formulas 2, total 20"]);
-      // Every request counts against one time budget for the run.
-      expect(budgets.size).toBe(1);
-      expect([...budgets][0]).toMatchObject({ runMs: expect.any(Number) });
-      expect(results).toEqual([true, { output: 20 }, true, "big 20", null].map((value) => ({ ok: true, value })));
-      expect(planRun(run, request, results as AutomationOutcome<JsonValue>[], key)).toMatchObject({
-        kind: "plan", steps: [{ ordinal: 0, effects: [] }, { ordinal: 2, effects: [{ kind: "set", fields: [{ field: "Note", after: "big 20" }] }] }],
-      });
+      const spent = { prepareMs: 0, runMs: 0 };
+      const results = await evaluateRequest(shared.forWorkspace("trip"), "collection:Tasks#total", request, spent);
+      expect(results).toEqual(ok({ output: 20 }));
+      // The run's one budget counts the step's time.
+      expect(spent.runMs).toBeGreaterThan(0);
+      expect(planAt(ctx, 0, inputsOf(), results as AutomationOutcome<JsonValue>[])).toEqual({ step: { ordinal: 0, effects: [], output: { kind: "code", value: 20 } } });
     } finally { await shared.close(); }
   });
 
-  it("runs no code once the run's condition fails, and stops at code that fails", async () => {
-    const guarded = automation("id: c\nname: C\nwhen: record-added\nif: record.Count > 5\ndo: [{run: 'return {}'}]");
-    const never: AutomationFormulaEvaluator = {
-      evaluate: async () => [{ ok: true, value: false }],
-      runCode: async () => { throw new Error("The code ran."); },
-    };
-    await expect(evaluateRequest(never, "a", evaluationRequest(inputs(guarded), 0), { prepareMs: 0, runMs: 0 }))
-      .resolves.toEqual([{ ok: true, value: false }, { ok: true, value: null }]);
+  it("fails a step whose code fails, and marks a timeout", async () => {
     const failing: AutomationFormulaEvaluator = {
-      evaluate: async () => { throw new Error("Nothing runs after the failed code."); },
+      evaluate: async () => { throw new Error("A code step asks no formulas."); },
       runCode: async () => ({ ok: false, error: { code: "timeout", message: "The code ran longer than 1000 ms, so it stopped." } }),
     };
-    const run = inputs(automation("id: c\nname: C\nwhen: record-added\ndo: [{run: 'return {}'}, {set: {Note: '=1'}}]"));
-    const request = evaluationRequest(run, 0);
+    const definition = automation("id: c\nname: C\nwhen: record-added\ndo: [{run: 'return {}'}]");
+    const ctx = context(definition);
+    const request = stepRequest(ctx, entryAt(definition, 0), inputsOf());
     const results = await evaluateRequest(failing, "a", request, { prepareMs: 0, runMs: 0 });
     expect(results).toHaveLength(1);
-    expect(planRun(run, request, results as AutomationOutcome<JsonValue>[], key))
-      .toEqual({ kind: "failed", error: "The code in step 1 failed. The code ran longer than 1000 ms, so it stopped.", timedOut: true });
+    expect(planAt(ctx, 0, inputsOf(), results as AutomationOutcome<JsonValue>[]))
+      .toEqual({ error: "The code in step 1 failed. The code ran longer than 1000 ms, so it stopped.", timedOut: true });
   });
 
   it("turns the changes code returns into Set fields and Add record effects, one write per record", () => {
@@ -730,48 +700,44 @@ describe("code steps", () => {
         { action: "add", collection: "Log", fields: { Title: "Two" } },
       ],
     };
-    const run = inputs(definition, { codeRecords: new Map([
+    const ctx = context(definition, { key: { claimId: "atc_1", hash: "h" } });
+    const planned = planAt(ctx, 0, inputsOf(), ok(answer), { codeRecords: new Map([
       [codeRecordKey("Tasks", "rec_other"), other],
       [codeRecordKey("Tasks", "rec_task"), task],
     ]) });
-    const planned = planRun(run, evaluationRequest(run, 0), [{ ok: true, value: answer }], key);
     const added = (index: number) => {
       const recordId = derivedRecordId(`atc_1/h/0/${index}`);
       return { recordId, name: `c-${recordId.slice(4, 12)}` };
     };
-    expect(planned).toEqual({ kind: "plan", steps: [{ ordinal: 0, effects: [
+    expect(planned).toEqual({ step: { ordinal: 0, effects: [
       { kind: "set", target: { recordId: "rec_task", collectionPath: "Tasks", path: "Tasks/one.md" }, fields: [
         { field: "Count", before: 2, after: 3 }, { field: "Note", before: null, after: "same record" },
       ] },
       { kind: "add", collectionPath: "Log", ...added(1), fields: [{ field: "Title", value: "One" }] },
       { kind: "set", target: { recordId: "rec_other", collectionPath: "Tasks", path: "Tasks/other.md" }, fields: [{ field: "Count", before: 7, after: 8 }] },
       { kind: "add", collectionPath: "Log", ...added(4), fields: [{ field: "Title", value: "Two" }] },
-    ] }] });
+    ] } });
   });
 
-  it("fails a run whose code changes a record it cannot find, sets fields with no record, or breaks the contract", () => {
+  it("fails a step whose code changes a record it cannot find, sets fields with no record, or breaks the contract", () => {
     const definition = automation("id: c\nname: C\nwhen: record-added\ndo: [{set: {Seen: true}}, {run: 'return {}'}]");
-    const plan = (answer: JsonValue) => {
-      const run = inputs(definition);
-      return planRun(run, evaluationRequest(run, 0), [{ ok: true, value: answer }], key);
-    };
+    const plan = (answer: JsonValue) => planAt(context(definition), 1, inputsOf(), ok(answer));
     expect(plan({ records: [{ action: "change", collection: "Tasks", id: "rec_gone", fields: { Count: 1 } }] }))
-      .toMatchObject({ kind: "failed", error: "The code in step 2 changes record rec_gone, which is not in Tasks." });
+      .toEqual({ problem: "The code in step 2 changes record rec_gone, which is not in Tasks." });
     const scheduled = automation("id: c\nname: C\nwhen: {schedule: day, timezone: UTC}\ndo: [{run: 'return {}'}]");
-    const nightly = inputs(scheduled, { record: null });
-    expect(planRun(nightly, evaluationRequest(nightly, 0), [{ ok: true, value: { set: { Count: 1 } } }], key))
-      .toMatchObject({ kind: "failed", error: 'The code in step 1 returned "set", but a schedule starts this automation, so it has no record to set fields on. Change records by id in "records" instead.' });
-    expect(plan({ set: { id: "rec_new" } })).toMatchObject({ kind: "failed", error: "The code in step 2 sets id. A record's id cannot change." });
+    expect(planAt(context(scheduled), 0, inputsOf(null), ok({ set: { Count: 1 } })))
+      .toEqual({ problem: 'The code in step 1 returned "set", but a schedule starts this automation, so it has no record to set fields on. Change records by id in "records" instead.' });
+    expect(plan({ set: { id: "rec_new" } })).toEqual({ problem: "The code in step 2 sets id. A record's id cannot change." });
     const many = Array.from({ length: MAX_CODE_RECORD_CHANGES + 1 }, () => ({ action: "add", collection: "Log", fields: {} }));
-    expect(plan({ records: many })).toMatchObject({ kind: "failed", error: expect.stringMatching(/^The code in step 2 changes more than 50 records/) });
+    expect(plan({ records: many })).toEqual({ problem: expect.stringMatching(/^The code in step 2 changes more than 50 records/) });
   });
 
   it("reads each code file a step runs once, and counts it among the automation's sources", () => {
     const definition = automation("id: c\nname: C\nwhen: record-added\ndo: [{run-file: scripts/a.js}, {run-file: scripts/a.js, as: again}, {run: 'return {}'}]");
     expect(codeFilesOf(definition, "Trip/Tasks")).toEqual(["Trip/Tasks/scripts/a.js"]);
-    const run = inputs(definition, { codeFiles: new Map([["scripts/a.js", "return { output: 1 }"]]) });
-    expect(evaluationRequest(run, 0).items).toEqual([
-      { kind: "code", source: "return { output: 1 }" }, { kind: "code", source: "return { output: 1 }" }, { kind: "code", source: "return {}" },
+    const ctx = context(definition);
+    expect([0, 1, 2].map((ordinal) => stepRequest(ctx, entryAt(definition, ordinal), inputsOf(), "return { output: 1 }").items)).toEqual([
+      [{ kind: "code", source: "return { output: 1 }" }], [{ kind: "code", source: "return { output: 1 }" }], [{ kind: "code", source: "return {}" }],
     ]);
   });
 });

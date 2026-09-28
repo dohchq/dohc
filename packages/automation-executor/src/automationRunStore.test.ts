@@ -10,13 +10,15 @@ const AUTOMATION = "collection:Tasks#bump";
 const NOW = 30 * 24 * 60 * 60 * 1000 + 1000;
 const hashOf = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 32);
 
+const setA = { kind: "set" as const, target: { recordId: "rec_a", collectionPath: "Tasks", path: "Tasks/a.md" }, fields: [{ field: "A", before: null, after: 1 }] };
+
 function run(claimId: string, state: "done" | "failed" | null, atMs: number, settled = state === "done"): StoredRun {
   return {
-    version: 4, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
-    startedAtMs: atMs, finishedAtMs: state === null ? null : atMs, plan: null,
+    version: 5, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
+    startedAtMs: atMs, finishedAtMs: state === null ? null : atMs, steps: [{ ordinal: 0, effects: [setA, setA] }],
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    created: [], replans: [], undoRequests: [], readableFields: null, collections: [], datasetId: null, superseded: false, undo: null, settled,
-    outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1 },
+    created: [], replans: [], undoRequests: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, settled,
+    outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1, step: 0 },
   };
 }
 
@@ -129,7 +131,7 @@ describe("the automation run store", () => {
     const files = await readdir(join(folder, automationFolder!));
     const planOf = (claimId: string) => join(folder, automationFolder!, files.find((file) => file.endsWith(".json") && file.startsWith(hashOf(claimId)))!);
     const text = await readFile(planOf("atc_older"), "utf8");
-    await writeFile(planOf("atc_older"), text.replace('"version":4', '"version":3'));
+    await writeFile(planOf("atc_older"), text.replace('"version":5', '"version":4'));
     await writeFile(planOf("atc_damaged"), "{ torn");
     const later = Date.now() + 31 * 24 * 60 * 60 * 1000;
     await expect(store.expire(Date.now(), async () => "gone", null)).resolves.toBeNull();
@@ -206,11 +208,29 @@ describe("the automation run store", () => {
     expect(await createAutomationRunStore(root, testMetadataDir).unfinishedUndos()).toBeNull();
   });
 
-  it("appends each effect after the plan, and a line a crash cut short counts as not recorded", async () => {
+  it("reads a Collection a step names with the step, until the run's state names it where it is now", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
-    const saved = { ...run("atc_one", null, 1), applied: [] };
+    const saved = { ...run("atc_one", null, 1), steps: [], applied: [] };
     await store.save(saved);
+    await store.appendStep(saved, { ordinal: 0, effects: [setA], collections: [{ collectionId: "object-tasks", path: "Tasks" }] });
+    const [read] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
+    expect(read!.collections).toEqual([{ collectionId: "object-tasks", path: "Tasks" }]);
+    // Once a move is saved, the state's path wins over the step's.
+    await store.save({ ...read!, collections: [{ collectionId: "object-tasks", path: "Trip/Tasks" }] });
+    const [moved] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
+    expect(moved!.collections).toEqual([{ collectionId: "object-tasks", path: "Trip/Tasks" }]);
+  });
+
+  it("appends each step and effect after the run, and a line a crash cut short counts as not recorded", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = { ...run("atc_one", null, 1), steps: [], applied: [] };
+    await store.save(saved);
+    // A Find leaves the records it found; an If, the branch it took.
+    const found = { ordinal: 0, effects: [], output: { kind: "find" as const, records: [{ id: "7", key: 7, path: "[\"d\",\"t\",7]" }] } };
+    await store.appendStep(saved, found);
+    await store.appendStep(saved, { ordinal: 2, effects: [setA, setA] });
     const effect = { ordinal: 0, writes: [{ kind: "field" as const, recordId: "rec_a", path: "Tasks/a.md", field: "A", before: null, after: 1 }] };
     await store.appendEffect(saved, effect);
     await store.recordCreated(saved, { ordinal: 1, planned: "rec_b", recordId: "rec_b", path: "Log/b.md" });
@@ -219,12 +239,19 @@ describe("the automation run store", () => {
     const progress = (await readdir(join(folder, automationFolder!))).find((file) => file.endsWith(".progress.jsonl"))!;
     await appendFile(join(folder, automationFolder!, progress), '{"kind":"effect","ordinal":2,"wri');
     const [read] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
+    expect(read!.steps).toEqual([found, { ordinal: 2, effects: [setA, setA] }]);
     expect(read!.applied).toEqual([effect]);
     expect(read!.created).toEqual([{ ordinal: 1, planned: "rec_b", recordId: "rec_b", path: "Log/b.md" }]);
     // The next effect starts on a line of its own.
     await store.appendEffect(saved, { ...effect, ordinal: 2 });
     const [again] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
     expect(again!.applied.map((entry) => entry.ordinal)).toEqual([0, 2]);
+    // An effect no saved step planned, or steps out of order, are not a run this store wrote.
+    await store.appendEffect(saved, effect);
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
+    const other = { ...run("atc_two", null, 1), steps: [{ ordinal: 3, effects: [] }, { ordinal: 1, effects: [] }], applied: [] };
+    await store.save(other);
+    await expect(store.runsOf(AUTOMATION, "atc_two")).resolves.toMatchObject({ runs: [], unreadable: true });
   });
 
   it("reads runs without making folders", async () => {
@@ -275,7 +302,7 @@ describe("the automation run store", () => {
     const text = await readFile(join(files, header), "utf8");
 
     // An earlier format kept its progress inside the run.
-    await writeFile(join(files, header), text.replace('"version":4', '"version":3'));
+    await writeFile(join(files, header), text.replace('"version":5', '"version":4'));
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
     await writeFile(join(files, header), text);
     await rm(join(files, progress));

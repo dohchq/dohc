@@ -64,7 +64,11 @@ export interface DatasetSteps {
   trigger: { table: DatasetTable; read: DatasetOperation | null } | null;
   steps: ReadonlyMap<number, { operation: DatasetOperation; table: DatasetTable }>;
   finds: ReadonlyMap<number, DatasetFindFilter[]>;
-  /** For each Set step, the read that shows its record again after someone changed it. */
+  /**
+   * For each Set step, the read that shows its record again after someone
+   * changed it; for each Add record step whose record later steps read, the
+   * read that shows that record.
+   */
   rereads: ReadonlyMap<number, DatasetOperation>;
 }
 
@@ -275,7 +279,13 @@ function resolve(
   const rereads = new Map<number, DatasetOperation>();
   for (const { ordinal, step } of ordered) {
     const own = steps.get(ordinal);
-    if (step.kind !== "set" || own === undefined) continue;
+    if (own === undefined) continue;
+    if (step.kind === "add-record" && step.as !== null) {
+      // Later steps read the record an Add record step bound through the widest read of its table.
+      const reader = candidates(definition, [own.table], "read", []).sort((left, right) => right.fieldIds.length - left.fieldIds.length || left.name.localeCompare(right.name))[0];
+      if (reader) rereads.set(ordinal, reader);
+    }
+    if (step.kind !== "set") continue;
     const bound = step.records === null ? null : bindings.get(step.records) ?? null;
     const source = bound === null ? triggerRead : steps.get(bound)?.operation.kind === "read" ? steps.get(bound)!.operation : undefined;
     const reader = source ?? candidates(definition, [own.table], "read", step.values.map((entry) => entry.field))[0];
