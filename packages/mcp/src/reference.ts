@@ -150,6 +150,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_read_change: { cli: "moment" },
   dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
   dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`",
+  dohc_list_kept_copies: { cli: "keptCopies" },
+  dohc_save_kept_copy: { cli: "saveKeptCopy" },
   dohc_read_document: { cli: "documentRead" },
   dohc_edit_document: { cli: "documentEdit" },
   dohc_create_document: { cli: "documentCreate" },

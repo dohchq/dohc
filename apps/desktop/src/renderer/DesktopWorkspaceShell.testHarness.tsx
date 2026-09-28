@@ -606,6 +606,8 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
+    listKeptCopies: vi.fn(async () => ({ keptCopies: [], more: false })),
+    saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
     retryAutomationNotice: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),

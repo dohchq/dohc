@@ -62,6 +62,26 @@ List workspace history, newest first: workspace-engine moments (the recorder for
 
 Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
 
+### `dohc_list_kept_copies`
+
+List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.
+
+Known copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them.
+
+No arguments.
+
+Returns `{ ok: true, keptCopies: { id, path, keptAtMs }[], more } | { ok: false, reason }`.
+
+### `dohc_save_kept_copy`
+
+Move one kept copy from dohc_list_kept_copies to a visible file beside its file, such as `notes (kept copy).md`. The original file does not change. `status` is `saved` with the copy's `path`: read both, keep what you need, and delete the copy when you are done. `gone` means nothing is kept under that id any more. `no-valid-name` means no name beside the file fits dohc's path limits, so the copy stays kept: rename the file or its folder to something shorter and try again.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `id`: `integer`. Required.
+
+Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { ok: true, status: "no-valid-name" } | { ok: false, reason }`.
+
 ### `dohc_read_change`
 
 Read one history entry by id: a workspace-engine moment with its full before/after payload.

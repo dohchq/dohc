@@ -31,6 +31,8 @@ import {
   type VersionedComparisonRecord,
   type VersionedTextListEntry,
   type VersionedTextReadValue,
+  type KeptCopy,
+  type KeptCopySaveResult,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
@@ -161,6 +163,10 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
   watcherStatus?(): Promise<WatcherStatusResult>;
+  // Files dohc moved aside while saving because another program changed
+  // them meanwhile, and the step that moves one to a visible copy.
+  listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
+  saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
 };
 
@@ -1368,6 +1374,14 @@ export function createCaptureLiveStores(
 
     async watcherStatus() {
       return await runRead(async (adapter) => await adapter.watcherStatus());
+    },
+
+    async listKeptCopies() {
+      return await runRead(async (adapter) => await adapter.listKeptCopies());
+    },
+
+    async saveKeptCopy(id: number) {
+      return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
     },
 
     async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {

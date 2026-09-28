@@ -15,6 +15,8 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "mergeVersionIntoMain"
   | "listOpenConflictsPage"
   | "resolveConflict"
+  | "listKeptCopies"
+  | "saveKeptCopy"
 >;
 
 export function workspaceVersionHandlers(dependencies: {
@@ -105,6 +107,18 @@ export function workspaceVersionHandlers(dependencies: {
         conflicts: page.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: page.nextAfterConflictId,
       };
+    },
+
+    async listKeptCopies(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      return await capture.listKeptCopies();
+    },
+
+    async saveKeptCopy(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      const saved = await capture.saveKeptCopy(input.id);
+      if (saved.status === "saved") notifyRenderer({ workspaceId: input.workspaceId });
+      return saved;
     },
 
     async listWorkspaceVersionConflicts(input) {

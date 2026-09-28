@@ -7,11 +7,12 @@ use dohc_engine_domain::{
     decode_binary_rollback_job_identity,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer, materialize_one,
-    materialize_secret_delete_one, materialize_secret_one, recover_displacements,
+    DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, StdBackoff, StdReplacer,
+    materialize_one, materialize_secret_delete_one, materialize_secret_one, recover_displacements,
+    save_kept_displacement,
 };
 use dohc_engine_storage::{
-    EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
+    Displacement, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
     MaterializationOperation, NoFaults, StorageError, hex_sha256,
 };
 use rusqlite::{OptionalExtension, params};
@@ -48,6 +49,44 @@ impl SelfWriteRecorder for () {
 }
 
 impl ActorHandle {
+    /// The workspace's kept displacements, oldest first: files a replace
+    /// moved aside that hold bytes the store does not have.
+    pub async fn list_kept_displacements(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<Displacement>, RuntimeError> {
+        self.run(move |store, _cache| Ok(store.list_kept_displacements(&workspace_id)?))
+            .await
+    }
+
+    /// Move one kept file to a visible copy beside its path. Runs on the
+    /// actor, where materialization and its recovery run, so no replace moves
+    /// the file meanwhile.
+    pub async fn save_kept_displacement(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        displacement_id: i64,
+        now_ms: i64,
+    ) -> Result<KeptCopySave, RuntimeError> {
+        self.run(move |store, _cache| {
+            Ok(save_kept_displacement(
+                store,
+                &root_dir,
+                &workspace_id,
+                displacement_id,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults: &NoFaults,
+                },
+            )?)
+        })
+        .await
+    }
+
     /// Replay every pending materialization job (best-effort, per-job
     /// failures tolerated). Returns the number of jobs that reached disk.
     pub async fn materialize_replay_pending(

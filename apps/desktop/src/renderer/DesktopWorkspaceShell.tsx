@@ -86,6 +86,7 @@ import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
+import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useShellError } from "./shell/useShellError";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
@@ -799,6 +800,8 @@ export function DesktopWorkspaceShell(props: {
     clearEditorGroupRefusalError,
     showSettingsFileNotice,
     showSuccessNotice,
+    showKeptCopies,
+    showKeptCopySaved,
     showDirectWriteNotice,
     dismissShellError,
     retryShellError,
@@ -2257,6 +2260,19 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  const reportKeptCopyFailure = useCallback(
+    (message: string, retry: () => void) => reportShellFailure({ message, retry }),
+    [reportShellFailure],
+  );
+  const refreshKeptCopies = useKeptCopyNotices({
+    workspaceId,
+    workspaceIsReady: workspaceIsReady && !isShareView,
+    show: showKeptCopies,
+    showSaved: showKeptCopySaved,
+    reportShellError,
+    reportFailure: reportKeptCopyFailure,
+    openFile,
+  });
   // Read once: the shell remounts for each workspace.
   const openPathOnReady = useRef(props.openPathOnReady);
   useEffect(() => {
@@ -3537,6 +3553,7 @@ export function DesktopWorkspaceShell(props: {
       if (!isShareView || shareViewEditsCollections) void refreshCollections();
       if (!isShareView) {
         void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
+        void refreshKeptCopies();
       }
     });
     const unsubscribe = bridge().onWorkspaceActivity(
@@ -3567,6 +3584,7 @@ export function DesktopWorkspaceShell(props: {
     isShareView,
     refreshCollections,
     refreshDatasets,
+    refreshKeptCopies,
     hasCommittedListing,
   ]);
 
@@ -4652,7 +4670,7 @@ export function DesktopWorkspaceShell(props: {
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
-    paths: syncStatus?.keptFiles,
+    paths: syncStatus?.keptFiles?.filter(([path]) => !path),
     report: reportKeptFiles,
     openFolder: revealRecoveryWorkspace,
   });

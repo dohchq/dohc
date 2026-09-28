@@ -60,6 +60,7 @@ import {
   type ChatUnreadFileThread,
   type GranularChatMessageSearchResponse,
   type GranularChatMessageSearchResult,
+  type KeptCopySaveResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -219,6 +220,14 @@ export interface CliDocumentsPort {
   }): Promise<{ path: string }>;
 }
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile, and the step that moves one to a visible copy beside its
+// file. The desktop's Notices row offers the same step.
+export interface CliKeptCopiesPort {
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  save(id: number): Promise<KeptCopySaveResult>;
+}
+
 // The Automations panel's run history and Try again, for the automation
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
@@ -265,6 +274,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
+  // Absent in a shared view, which keeps no copies of its own.
+  keptCopies?: CliKeptCopiesPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -630,6 +641,13 @@ function documentEditOrigin(
       onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     },
+  };
+}
+
+function keptCopiesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "kept copies are not available in this workspace",
   };
 }
 
@@ -2436,6 +2454,28 @@ async function dispatch(
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
       } catch (error) {
         return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "keptCopies": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await keptCopies.list()) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list kept copies");
+      }
+    }
+
+    case "saveKeptCopy": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        const saved = await keptCopies.save(request.args.id);
+        if (saved.status === "saved") await notifyWrite(options, context);
+        return { ok: true as const, ...saved };
+      } catch (error) {
+        return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
       }
     }
 

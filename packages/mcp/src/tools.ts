@@ -2615,6 +2615,17 @@ export async function createRecord(
   });
 }
 
+// Files dohc moved aside while it saved, because another program changed them
+// meanwhile. The desktop shows each as a Notices row; an agent reads the same
+// list and takes the same step.
+export async function listKeptCopies(ctx: ToolContext) {
+  return requestCli(ctx, "keptCopies", {});
+}
+
+export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
+  return requestCli(ctx, "saveKeptCopy", { id: args.id });
+}
+
 // An automation's runs, and Try again, through the desktop's Automations
 // panel calls. An automation is named by its Collection's folder and its id
 // in that Collection's automations.yaml.

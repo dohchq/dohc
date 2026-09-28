@@ -1564,6 +1564,42 @@ describe("CLI socket server", () => {
     ]);
   });
 
+  it("lists kept copies and saves one for an agent, the step a person takes from Notices", async () => {
+    let kept = [{ id: 3, path: "notes/plan.md", keptAtMs: 10 }];
+    context.keptCopies = {
+      async list() {
+        return { keptCopies: kept, more: false };
+      },
+      async save(id) {
+        const found = kept.some((copy) => copy.id === id);
+        kept = kept.filter((copy) => copy.id !== id);
+        return found
+          ? { status: "saved", path: "notes/plan (kept copy).md" }
+          : { status: "gone" };
+      },
+    };
+
+    await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
+      ok: true,
+      keptCopies: [{ id: 3, path: "notes/plan.md", keptAtMs: 10 }],
+      more: false,
+    });
+    await expect(invoke("saveKeptCopy", { cwd: workspaceRoot, actor: "agent", id: 3 }))
+      .resolves.toEqual({ ok: true, status: "saved", path: "notes/plan (kept copy).md" });
+    expect(calls.writes).toBe(1);
+    await expect(invoke("saveKeptCopy", { cwd: workspaceRoot, actor: "agent", id: 3 }))
+      .resolves.toEqual({ ok: true, status: "gone" });
+    expect(calls.writes).toBe(1);
+    await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toEqual({ ok: true, keptCopies: [], more: false });
+
+    delete context.keptCopies;
+    await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
+      ok: false,
+      reason: "kept copies are not available in this workspace",
+    });
+  });
+
   it("reads and edits documents with provenance the door derives", async () => {
     const edits: Array<Parameters<CliDocumentsPort["edit"]>[0]> = [];
     context.documents = {

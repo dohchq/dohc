@@ -7,6 +7,7 @@ pub(super) mod conflicts;
 pub(super) mod dispatch;
 pub(super) mod error;
 pub(super) mod history;
+pub(super) mod kept_copies;
 pub(crate) mod live_application;
 pub(crate) mod ordinary_live_host;
 pub(crate) mod owner_delivery;

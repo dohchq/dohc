@@ -142,6 +142,11 @@ const documentReadArgsSchema = z
 // dohc runs instead of doing its work twice.
 export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
 
+const keptCopiesArgsSchema = z.object(argsBase).strict();
+const saveKeptCopyArgsSchema = z
+  .object({ ...argsBase, id: z.number().int() })
+  .strict();
+
 const documentEditArgsSchema = z
   .object({
     ...argsBase,
@@ -375,6 +380,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     args: collectionCreateRecordArgsSchema,
   }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -883,6 +890,31 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
+// visible copy beside its file.
+const keptCopiesResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    keptCopies: z.array(z.object({
+      id: z.number().int(),
+      path: z.string().min(1),
+      keptAtMs: z.number().int().nonnegative(),
+    }).strict()),
+    more: z.boolean(),
+  }).strict(),
+  rawFailureSchema,
+]);
+// `saved` with the copy's path; `gone` when nothing is kept under that id any
+// more; `no-valid-name` when no name beside the file fits dohc's path limits,
+// so the copy stays kept.
+const saveKeptCopyResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("saved"), path: z.string().min(1) }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("gone") }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("no-valid-name") }).strict(),
+  rawFailureSchema,
+]);
+
 // What an automation run did, as this computer's run history keeps it:
 // a field it wrote, a record it added, a field someone else had changed
 // since the run planned it (kept as they left it), a record it could no
@@ -1085,6 +1117,8 @@ export const cliResultSchemas = {
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
+  keptCopies: keptCopiesResultSchema,
+  saveKeptCopy: saveKeptCopyResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

@@ -2502,3 +2502,122 @@ async fn a_conflict_row_at_the_hard_cap_ships_in_band_and_one_byte_more_degrades
         json!(128 * 1024)
     );
 }
+
+/// A file a replace kept at its hidden displaced name is listed until it is
+/// saved as a visible copy beside its path, and saving it twice finds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
+    let (scratch, transport, handle, workspace_id) = fixture("kept-copy").await;
+    write_file(scratch.path(), "notes/a.md", b"a newer save");
+    write_file(
+        scratch.path(),
+        ".dohc/engine/displaced/6a6f62.0",
+        b"bytes another program wrote",
+    );
+    let store =
+        dohc_engine_storage::EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 10)
+            .expect("store");
+    // Older orphan rows remain accessible through watcher.status, but cannot
+    // consume the page of named copies or violate its nonempty-path contract.
+    for n in 0..100 {
+        let job_id = format!("orphan-{n}");
+        let name = format!("h{}.0", dohc_engine_storage::hex_sha256(job_id.as_bytes()));
+        write_file(
+            scratch.path(),
+            &format!(".dohc/engine/displaced/{name}"),
+            b"orphan bytes",
+        );
+        store
+            .keep_displacement(
+                &dohc_engine_storage::DisplacementSpec {
+                    job_id,
+                    workspace_id: workspace_id.clone(),
+                    target_path: String::new(),
+                    displaced_name: name,
+                    expected_sha256: String::new(),
+                    content_sha256: None,
+                    now_ms: 9,
+                },
+                Some(&dohc_engine_storage::hex_sha256(b"orphan bytes")),
+            )
+            .expect("keep orphan");
+    }
+    let id = store
+        .open_displacement(&dohc_engine_storage::DisplacementSpec {
+            job_id: "job".to_owned(),
+            workspace_id: workspace_id.clone(),
+            target_path: "notes/a.md".to_owned(),
+            displaced_name: "6a6f62.0".to_owned(),
+            expected_sha256: dohc_engine_storage::hex_sha256(b"ours before"),
+            content_sha256: Some(dohc_engine_storage::hex_sha256(b"ours")),
+            now_ms: 10,
+        })
+        .expect("open displacement");
+    store
+        .resolve_displacement(
+            id,
+            dohc_engine_storage::DisplacementResolution::Keep {
+                displaced_sha256: Some(&dohc_engine_storage::hex_sha256(
+                    b"bytes another program wrote",
+                )),
+            },
+            None,
+            11,
+        )
+        .expect("keep");
+    drop(store);
+
+    let status = call(&transport, &handle, 9, "watcher.status", json!({})).await;
+    let recovery = status["keptFiles"].as_array().expect("recovery copies");
+    assert_eq!(recovery.iter().filter(|copy| copy[0] == "").count(), 100);
+    let listed = call(&transport, &handle, 10, "keptCopies.list", json!({})).await;
+    assert_eq!(
+        listed,
+        json!({
+            "keptCopies": [{ "id": id, "path": "notes/a.md", "keptAtMs": 10 }],
+            "more": false,
+        })
+    );
+
+    let saved = call(
+        &transport,
+        &handle,
+        11,
+        "keptCopies.save",
+        json!({ "id": id }),
+    )
+    .await;
+    assert_eq!(
+        saved,
+        json!({ "status": "saved", "path": "notes/a (kept copy).md" })
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("notes/a (kept copy).md")).expect("copy"),
+        b"bytes another program wrote"
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("notes/a.md")).expect("file"),
+        b"a newer save"
+    );
+    assert!(
+        !scratch
+            .path()
+            .join(".dohc/engine/displaced/6a6f62.0")
+            .exists()
+    );
+    assert_eq!(
+        call(&transport, &handle, 12, "keptCopies.list", json!({})).await,
+        json!({ "keptCopies": [], "more": false })
+    );
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            13,
+            "keptCopies.save",
+            json!({ "id": id })
+        )
+        .await,
+        json!({ "status": "gone" })
+    );
+}

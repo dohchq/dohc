@@ -460,6 +460,11 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace).await?,
+            "keptCopies.list" => self.kept_copies_list(&ctx, request.workspace).await?,
+            "keptCopies.save" => {
+                self.kept_copies_save(request.workspace, request.params)
+                    .await?
+            }
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "capture.reconcile" => self.capture_reconcile(&ctx, request.workspace).await?,
             "capture.setAuthor" => {
@@ -1281,6 +1286,8 @@ mod tests {
             "conflicts.resolve",
             "engine.ping",
             "history.page",
+            "keptCopies.list",
+            "keptCopies.save",
             "keys.download",
             "keys.upload",
             "moments.get",
