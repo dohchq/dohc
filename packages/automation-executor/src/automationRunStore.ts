@@ -200,10 +200,11 @@ const UndoRequestSchema = z.object({
   version: z.number().int().positive(),
   values: z.record(z.string(), JsonValueSchema),
 });
-// Version 2 keeps progress in a file beside the plan. A run in any other
-// format cannot be read, and the claim fails instead of starting over.
+// Version 3 keeps progress in a file beside the plan, and names each
+// Collection the plan writes by its Collection id. A run in any other format
+// cannot be read, and the claim fails instead of starting over.
 const StoredRunSchema = z.object({
-  version: z.literal(2),
+  version: z.literal(3),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -216,6 +217,7 @@ const StoredRunSchema = z.object({
   replans: z.array(ReplanSchema),
   undoRequests: z.array(UndoRequestSchema),
   readableFields: z.array(z.string()).nullable(),
+  collections: z.array(z.object({ collectionId: z.string().min(1), path: z.string().min(1) })),
   datasetId: z.string().min(1).nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
@@ -245,9 +247,9 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 2;
+  version: 3;
   claimId: string;
-  /** The engine automation id, "collection:<collection path>#<id>". */
+  /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
   definitionHash: string;
   /** What the run's idempotency keys and added record ids derive from: the definition hash and the claim's run. */
@@ -275,6 +277,12 @@ export interface StoredRun {
    * Collection. A run resumes only while every one of them is still readable.
    */
   readableFields: string[] | null;
+  /**
+   * Each document Collection the plan writes, by its Collection id and its
+   * path when the run last saw it. A resume or an Undo moves the run's
+   * paths to where each Collection is now.
+   */
+  collections: Array<{ collectionId: string; path: string }>;
   /**
    * The dataset a dataset Collection's plan read and writes, or null for a
    * document Collection. A plan resumes only while its Collection keeps

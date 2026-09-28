@@ -17,7 +17,6 @@ import {
 } from "@dohc/cli/protocol";
 import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
-import { collectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
 import type {
   CollectionAutomationRun,
@@ -39,6 +38,7 @@ import type {
   CollectionQueryParams,
   CollectionQueryResult,
   CollectionRecord,
+  CollectionSummary,
 } from "@dohc/workspace-contracts/collection";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type {
@@ -221,6 +221,8 @@ export interface CliDocumentsPort {
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
 export interface CliAutomationsPort {
+  /** The engine id of an automation in the Collection at a path, or null when no Collection is there. */
+  automationIdAt(collectionPath: string, id: string): Promise<string | null>;
   runs(automationId: string): Promise<CollectionAutomationRun[]>;
   run(automationId: string, claimId: string): Promise<CollectionAutomationRunDetail | null>;
   retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
@@ -520,6 +522,11 @@ function cliPathRejected(reason: string, path: string) {
 
 // Collection values enter and leave the CLI socket in the engine wire's JSON
 // encoding; the engine adapter speaks decoded CollectionValue on both sides.
+// A Collection as the CLI names it: by its path. Its object id stays in dohc.
+function cliCollection({ objectId: _objectId, ...collection }: CollectionSummary) {
+  return collection;
+}
+
 function encodedCollectionRecord(record: CollectionRecord) {
   return {
     id: record.id,
@@ -2190,7 +2197,7 @@ async function dispatch(
         if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
-          collection: result.collection,
+          collection: cliCollection(result.collection),
           records: result.records.map(encodedCollectionRecord),
           groups:
             result.groups === null
@@ -2232,7 +2239,7 @@ async function dispatch(
         if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
-          collection: result.collection,
+          collection: cliCollection(result.collection),
           record: encodedCollectionRecord(result.record),
           history: result.history.map((entry) => ({
             historyId: entry.historyId,
@@ -2349,8 +2356,9 @@ async function dispatch(
       if (isSharedWithMePath(validated.normalized)) {
         return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
       }
-      const automationId = collectionAutomationId(validated.normalized, request.args.automation);
       try {
+        const automationId = await automations.automationIdAt(validated.normalized, request.args.automation);
+        if (automationId === null) return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
         if (request.verb === "automationRuns") {
           const runs = await automations.runs(automationId);
           const listed: CliResultByVerb["automationRuns"] = {
@@ -2384,7 +2392,7 @@ async function dispatch(
           startOver: request.args.startOver,
         }));
       } catch (error) {
-        return mcpFailure(error, `failed to reach the runs of ${automationId}`);
+        return mcpFailure(error, `failed to reach the runs of ${request.args.automation} in ${validated.normalized}`);
       }
     }
 

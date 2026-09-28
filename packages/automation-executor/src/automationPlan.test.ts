@@ -47,7 +47,7 @@ function automation(yaml: string): Automation {
 /** A request's formulas, for a run without code steps. */
 const formulasOf = (request: EvaluationRequest) => request.items.filter((item): item is AutomationFormula => item.kind !== "code");
 
-function claim(change: Partial<RecordChange> = {}): AutomationClaim {
+function claim(change: Partial<RecordChange> = {}): AutomationClaim & { collectionPath: string } {
   return {
     claimId: "atc_one",
     automationId: "collection:Tasks#stamp",
@@ -72,11 +72,14 @@ function inputs(definition: Automation, overrides: Partial<RunInputs> = {}): Run
 }
 
 describe("automation ids", () => {
-  it("names a Collection automation by its path and id, with the path's last # ending it", () => {
-    const id = collectionAutomationId("Plans #1/Tasks", "stamp");
-    expect(id).toBe("collection:Plans #1/Tasks#stamp");
-    expect(parseCollectionAutomationId(id)).toEqual({ collectionPath: "Plans #1/Tasks", id: "stamp" });
+  it("names a Collection automation by its Collection id, never a path, and its own id", () => {
+    const id = collectionAutomationId("object-3f9a", "stamp");
+    expect(id).toBe("collection:object-3f9a#stamp");
+    expect(parseCollectionAutomationId(id)).toEqual({ collectionId: "object-3f9a", id: "stamp" });
     expect(parseCollectionAutomationId("other:tools/stamp")).toBeNull();
+    expect(parseCollectionAutomationId("collection:Plans/Tasks#stamp"), "a path is not a Collection id").toBeNull();
+    expect(parseCollectionAutomationId("collection:#stamp")).toBeNull();
+    expect(parseCollectionAutomationId("collection:object-3f9a#")).toBeNull();
   });
 
   it("hashes what an automation does, not its name or switch", () => {
@@ -230,7 +233,7 @@ describe("field writes", () => {
 describe("schedule claims", () => {
   const sweep = automation("id: sweep\nname: Sweep\nwhen: {schedule: day, at: '09:00', timezone: UTC}\ndo: [{add-record: {Title: '=today()'}}]");
   const due = Date.UTC(2026, 8, 25, 9);
-  const scheduled = (key: string): AutomationClaim => ({
+  const scheduled = (key: string): AutomationClaim & { collectionPath: string } => ({
     ...claim(),
     automationId: "collection:Tasks#sweep",
     trigger: { key },

@@ -1177,8 +1177,8 @@ describe("CLI socket server", () => {
     const unsupported = state !== "valid";
     const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
     const collection: Awaited<ReturnType<CliCollectionsPort["query"]>>["collection"] = unsupported
-      ? { path: "tasks", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }] }
-      : { path: "tasks", status: "valid", reasons: [] };
+      ? { path: "tasks", objectId: "object-test", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }] }
+      : { path: "tasks", objectId: "object-test", status: "valid", reasons: [] };
     const queries: Array<Parameters<CliCollectionsPort["query"]>[0]> = [];
     const recordReads: Array<Parameters<CliCollectionsPort["getRecord"]>[0]> = [];
     context.collections = {
@@ -1306,7 +1306,7 @@ describe("CLI socket server", () => {
   });
 
   it("answers the automation verbs from the Automations panel's calls", async () => {
-    const AUTOMATION = "collection:tasks#stamp";
+    const AUTOMATION = "collection:object-tasks#stamp";
     const trigger = { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 };
     const field = { kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" };
     const run = {
@@ -1324,6 +1324,7 @@ describe("CLI socket server", () => {
       },
     ];
     context.automations = {
+      automationIdAt: vi.fn(async (collectionPath: string, id: string) => (collectionPath === "tasks" ? `collection:object-tasks#${id}` : null)),
       runs: vi.fn(async () => [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }]),
       run: vi.fn(async (_automationId: string, claimId: string) =>
         claimId === "atc_1" ? { ...run, steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
@@ -1341,7 +1342,7 @@ describe("CLI socket server", () => {
         trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false, changes: 2,
       }],
     });
-    expect(context.automations.runs).toHaveBeenCalledWith(AUTOMATION);
+    expect(context.automations!.runs).toHaveBeenCalledWith(AUTOMATION);
     await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
       ok: true,
       run: { run: "atc_1", trigger, steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },
@@ -2042,7 +2043,7 @@ describe("CLI socket server", () => {
     context.collections = {
       async query() {
         return {
-          collection: { path: "tasks", status: "valid", reasons: [] },
+          collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
           records: [],
           groups: null,
           nextCursor: null,

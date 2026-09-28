@@ -510,6 +510,7 @@ const CollectionSchemaReason = z.object({
 // have no .extend, so the shape is the reusable piece.
 const collectionSummaryShape = {
   path: PATH_STRING,
+  objectId: z.string().min(1).max(256),
   status: z.enum(["valid", "degraded"]),
   reasons: z.array(CollectionSchemaReason).max(MAX_SCHEMA_COLLECTION_ITEMS),
   omittedReasons: z.number().int().nonnegative().optional(),
@@ -1412,7 +1413,8 @@ export const EngineMomentRecord = z.object({
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.
-  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096) }).strict().optional(),
+  // `collection` is left out once this computer no longer has the automation's Collection.
+  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096).optional() }).strict().optional(),
   // Present when a person the owner shared with wrote the moment directly
   // (ADR 0013): main names them from the owner's share roster. The user id
   // picks them for Stop and restore.
@@ -1588,10 +1590,11 @@ export type ChatFileReferenceInput = z.infer<typeof ChatFileReferenceInput>;
 // Messages and their authors as the renderer shows them. Only the automation
 // executor in main writes an automation's message; the renderer never sends one.
 const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation"]);
-// Which automation wrote a message, when it ran on this computer.
+// Which automation wrote a message, when it ran on this computer, and
+// where its Collection is now: null once this computer no longer has it.
 const CHAT_MESSAGE_AUTOMATION = z.object({
   automationId: z.string().min(1).max(1024),
-  collectionPath: SAFE_RELATIVE_PATH,
+  collectionPath: SAFE_RELATIVE_PATH.nullable(),
 });
 
 export const ChatMessageRecord = z.object({
@@ -4714,6 +4717,19 @@ export type FindDatasetCollectionResult =
   | { status: "cannot-run"; reason: string }
   | { status: "unavailable" };
 
+// Where an automation's Collection is now, found by its Collection id, so
+// Open automation follows a Collection that moved. A shared view holds no
+// executor.
+export const FindAutomationCollectionPayload = z.strictObject({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+});
+export type FindAutomationCollectionPayload = z.infer<typeof FindAutomationCollectionPayload>;
+export type FindAutomationCollectionResult =
+  | { status: "found"; collectionPath: string }
+  | { status: "missing" }
+  | { status: "unavailable" };
+
 // Replaces the file's automations with these, over the content the panel
 // read (null when the file did not exist). `reformat` is the person's
 // agreement to lose the file's comments and hand formatting.
@@ -6082,6 +6098,7 @@ export interface DohcDesktopBridge
   automationShareImpact(payload: AutomationShareImpactPayload): Promise<AutomationShareImpactResult>;
   listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
   findDatasetCollection(payload: FindDatasetCollectionPayload): Promise<FindDatasetCollectionResult>;
+  findAutomationCollection(payload: FindAutomationCollectionPayload): Promise<FindAutomationCollectionResult>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   listAutomationButtons(payload: ListAutomationButtonsPayload): Promise<ListAutomationButtonsResult>;
   listRecordButtons(payload: ListRecordButtonsPayload): Promise<ListRecordButtonsResult>;

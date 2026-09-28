@@ -202,6 +202,7 @@ function makeBridge(
     getCollection: vi.fn(
       async (): Promise<GetCollectionResult> => ({
         path: "tasks",
+        objectId: "object-test",
         status: "valid",
         reasons: [],
         schema: currentSchema,
@@ -209,7 +210,7 @@ function makeBridge(
       }),
     ),
     listCollections: vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid", reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid", reasons: [] }],
     })),
     readWorkspaceText: vi.fn(async () => ({
       text: serializeCollectionSchema(currentSchema),
@@ -234,14 +235,14 @@ function makeBridge(
         const related = extra?.related?.[params.collectionPath];
         if (related) {
           return {
-            collection: { path: params.collectionPath, status: "valid", reasons: [] },
+            collection: { path: params.collectionPath, objectId: "object-test", status: "valid", reasons: [] },
             records: related,
             groups: null,
             nextCursor: null,
           };
         }
         return {
-          collection: { path: "tasks", status: "valid", reasons: [] },
+          collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
           records,
           groups: extra?.groups ?? null,
           nextCursor: null,
@@ -318,7 +319,7 @@ function renderPage(
 describe("CollectionPage", () => {
   it("names a newer Collection file and asks to update dohc", async () => {
     const bridge = makeBridge([]);
-    bridge.getCollection.mockResolvedValue({ path: "tasks", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }],
+    bridge.getCollection.mockResolvedValue({ path: "tasks", objectId: "object-test", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }],
       schema: { name: null, description: null, fields: [], views: [] }, recordCount: 0 });
     renderPage(bridge);
     expect(await screen.findByText("tasks/collection.yaml uses a newer version. Update dohc to read this file.")).toBeDefined();
@@ -752,7 +753,7 @@ describe("CollectionPage", () => {
     page.rerender(pageWithHost());
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     await act(async () => resolveQuery({
-      collection: { path: "tasks", status: "valid", reasons: [] },
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
       records,
       groups: null,
       nextCursor: null,
@@ -1615,7 +1616,7 @@ describe("pagination", () => {
       const page = pages[index];
       if (!page) throw new Error(`no page ${index}`);
       return {
-        collection: { path: "tasks", status: "valid", reasons: [] },
+        collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
         records: page.records,
         groups: page.groups,
         nextCursor: index + 1 < pages.length ? cursorFor(index) : null,

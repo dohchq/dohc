@@ -161,7 +161,7 @@ describe("workspace wire schemas", () => {
   it("rejects excess fields nested in collection results", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         records: [
           {
             id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -184,6 +184,7 @@ describe("workspace wire schemas", () => {
   it("decodes a button field definition", () => {
     const result = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
       path: "invoices",
+      objectId: "object-invoices",
       status: "valid",
       reasons: [],
       schema: {
@@ -204,6 +205,7 @@ describe("workspace wire schemas", () => {
           collections: [
             {
               path: "projects",
+              objectId: "object-projects",
               status: "degraded",
               reasons: [{ code, path: "/fields" }],
             },
@@ -215,7 +217,7 @@ describe("workspace wire schemas", () => {
 
     for (const code of reasonCodes.fieldValueReasonCodes) {
       const result = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         records: [
           {
             id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -258,7 +260,7 @@ describe("workspace wire schemas", () => {
       };
     });
     const decoded = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-      collection: { path: "pipeline", status: "valid", reasons: [] },
+      collection: { path: "pipeline", objectId: "object-pipeline", status: "valid", reasons: [] },
       records: [
         {
           id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -313,7 +315,7 @@ describe("workspace wire schemas", () => {
     };
 
     const queried = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-      collection: { path: "projects", status: "valid", reasons: [] },
+      collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
       records: [record],
       groups: [{ value: marker, records: [record] }],
       nextCursor: {
@@ -330,7 +332,7 @@ describe("workspace wire schemas", () => {
     const fetched = decodeWorkspaceResult(
       WORKSPACE_METHOD.collectionsGetRecord,
       {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         record,
         history: [
           {
@@ -378,7 +380,7 @@ describe("workspace wire schemas", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.collectionsList, {
         collections: [
-          { path: "projects", status: "valid", reasons: [] },
+          { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         ],
         nextCursor: null,
       }).collections,
@@ -386,6 +388,7 @@ describe("workspace wire schemas", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
         path: "projects",
+        objectId: "object-projects",
         status: "valid",
         reasons: [],
         schema: {
@@ -495,7 +498,7 @@ describe("workspace wire schemas", () => {
   it("rejects malformed collection integer markers", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         records: [
           {
             id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",

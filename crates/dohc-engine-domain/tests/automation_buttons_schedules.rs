@@ -159,7 +159,7 @@ fn a_press_claims_once_and_joins_an_unfinished_run_of_its_button() {
         }
     );
     assert_eq!(first.record_id.as_deref(), Some(INVOICE));
-    assert_eq!(first.collection_path, "Invoices");
+    assert_eq!(first.collection_path, None);
     assert_eq!(first.depth, 0);
     assert_eq!(first.change.kind, AutomationChangeKind::Button);
     assert_eq!(first.change.actor_kind, Some(ChangeActorKind::Human));
@@ -458,7 +458,7 @@ fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
         }
     );
     assert_eq!(claims[0].record_id, None);
-    assert_eq!(claims[0].collection_path, "Invoices");
+    assert_eq!(claims[0].collection_path, None);
     assert_eq!(claims[0].change.kind, AutomationChangeKind::Schedule);
     assert_eq!(claims[0].change.actor_kind, None);
     assert_eq!(claims[0].depth, 0);

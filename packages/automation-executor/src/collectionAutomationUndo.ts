@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { StoredRun } from "./automationRunStore";
-import type { CollectionAutomationReads, CollectionRecordWrites } from "./collectionAutomationRun";
+import { rebaseRun, type CollectionAutomationReads, type CollectionRecordWrites } from "./collectionAutomationRun";
 
 // Undo for one run of a Collection automation (AGENTS.md: every reversible
 // change gets a way back). A field goes back to what it held before the run
@@ -41,6 +41,8 @@ export interface CollectionAutomationUndoDependencies {
   withRecordWrites<T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>): Promise<T>;
   /** Moves a file to the trash the way a person's delete does. */
   trash(path: string): Promise<void>;
+  /** Where the document Collection with this id is now, or null when this workspace has none. */
+  collectionPathOf(collectionId: string): string | null;
 }
 
 interface RecordChanges {
@@ -104,7 +106,13 @@ export async function undoCollectionAutomationRuns(
   runs: readonly StoredRun[],
   signal: AbortSignal,
 ): Promise<CollectionAutomationUndone> {
-  const { added, records } = changesOf(runs);
+  // Each run's records are found where their Collections are now. A
+  // Collection no longer here keeps its paths, where no record is found.
+  const { added, records } = changesOf(runs.map((run) => {
+    const moved = structuredClone(run);
+    rebaseRun(moved, (collectionId) => dependencies.collectionPathOf(collectionId));
+    return moved;
+  }));
   const undone: CollectionAutomationUndone = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0 };
   for (const record of records.values()) {
     // A record the run added goes to the trash whole.

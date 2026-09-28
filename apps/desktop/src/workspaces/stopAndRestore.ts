@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
-import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
+import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { sendsMessages } from "@dohc/automation-executor/collection-automation-run";
 
 // Stop and restore (ADR 0013): after the owner stops a person they shared
@@ -63,7 +63,7 @@ export interface StopAndRestoreDependencies {
   /** Removes a workspace folder only when it is empty. */
   removeEmptyFolder(path: string): Promise<void>;
   undoRuns(
-    definitions: ReadonlyArray<{ automationId: string; definitionHash: string }>,
+    definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
   ): Promise<{ undone: number; left: number; kept: number; errorMessage: string | null }>;
 }
 
@@ -111,14 +111,14 @@ function sameContent(left: Content, right: Content): boolean {
 }
 
 /**
- * The valid automations in an automations.yaml text, by "<engine id>
- * <definition hash>", each with whether it sends messages.
+ * The valid automations in an automations.yaml text, by "<definition hash>
+ * <automation id>", each with whether it sends messages.
  */
-function definitionsIn(collectionPath: string, text: string | null): Map<string, boolean> {
+function definitionsIn(text: string | null): Map<string, boolean> {
   const parsed = text === null ? null : parseAutomationsFile(text);
   if (parsed?.status !== "read") return new Map();
   return new Map(parsed.entries.flatMap((entry) => entry.status === "valid"
-    ? [[`${collectionAutomationId(collectionPath, entry.automation.id)} ${definitionHash(entry.automation)}`, sendsMessages(entry.automation)] as const]
+    ? [[`${definitionHash(entry.automation)} ${entry.automation.id}`, sendsMessages(entry.automation)] as const]
     : []));
 }
 
@@ -183,7 +183,7 @@ export async function restoreDirectWrites(
 
   // The automations the person wrote: in each of their writes, each
   // definition the file held after it and not before it.
-  const definitions: Array<{ automationId: string; definitionHash: string }> = [];
+  const definitions: Array<{ collectionPath: string; id: string; definitionHash: string }> = [];
   const seen = new Set<string>();
   let messages = false;
   for (const entry of written) {
@@ -191,14 +191,14 @@ export async function restoreDirectWrites(
     for (const file of entry.all) {
       const moment = entry.moments.get(file.momentId)!;
       const folder = posix.dirname(file.path);
-      const before = definitionsIn(folder, moment.payload.before?.text ?? null);
-      for (const [key, sends] of definitionsIn(folder, moment.payload.after.text)) {
-        if (before.has(key) || seen.has(key)) continue;
-        seen.add(key);
+      const before = definitionsIn(moment.payload.before?.text ?? null);
+      for (const [key, sends] of definitionsIn(moment.payload.after.text)) {
+        if (before.has(key) || seen.has(`${folder}/${key}`)) continue;
+        seen.add(`${folder}/${key}`);
         messages ||= sends;
         // The hash has no spaces; an automation id may.
-        const split = key.lastIndexOf(" ");
-        definitions.push({ automationId: key.slice(0, split), definitionHash: key.slice(split + 1) });
+        const split = key.indexOf(" ");
+        definitions.push({ collectionPath: folder, id: key.slice(split + 1), definitionHash: key.slice(0, split) });
       }
     }
   }

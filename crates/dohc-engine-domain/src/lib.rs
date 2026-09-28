@@ -53,7 +53,7 @@ pub use automations::{
     MAX_AUTOMATION_GROUP_SUBSCRIPTIONS, MAX_AUTOMATION_SCHEDULE_RUNS,
     MAX_AUTOMATION_SUBSCRIPTION_FIELDS, PressActor, claim_automation_run_now,
     claim_automation_schedule, claim_automation_triggers_in_tx, claim_group_message_in_tx,
-    claim_next_pending_automation, claim_record_lifecycle_in_tx, collection_automation_path,
+    claim_next_pending_automation, claim_record_lifecycle_in_tx, is_collection_automation_id,
     list_automation_claims, list_automation_failures, list_automation_schedule_marks,
     list_running_automation_attempts, press_automation, read_automation_group_skips,
     reclaim_running_automations, release_automation_claim, release_automation_groups,

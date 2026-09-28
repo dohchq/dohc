@@ -736,6 +736,9 @@ export interface RelayAutomationPress {
   // again after a restart; its engine answers the same claim.
   state: "pending" | "accepted";
   automationId: string;
+  // Where the recipient saw the Collection, which their grant edits. The
+  // host runs the press only while the automation's Collection is there.
+  collectionPath: string;
   recordId: string;
   pressedBy: string;
   createdAtMs: number;

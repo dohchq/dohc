@@ -8,10 +8,10 @@ const AUTOMATION = "collection:Tasks#bump";
 
 function run(claimId: string, state: "done" | "failed" | null, updatedAtMs: number, settled = state === "done"): StoredRun {
   return {
-    version: 2, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
+    version: 3, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: updatedAtMs, updatedAtMs, plan: null,
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    created: [], replans: [], undoRequests: [], readableFields: null, datasetId: null, superseded: false, undo: null, settled, compacted: false,
+    created: [], replans: [], undoRequests: [], readableFields: null, collections: [], datasetId: null, superseded: false, undo: null, settled, compacted: false,
     outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1 },
   };
 }
@@ -182,7 +182,7 @@ describe("the automation run store", () => {
     const text = await readFile(join(files, header), "utf8");
 
     // An earlier format kept its progress inside the run.
-    await writeFile(join(files, header), text.replace('"version":2', '"version":1'));
+    await writeFile(join(files, header), text.replace('"version":3', '"version":2'));
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
     await writeFile(join(files, header), text);
     await rm(join(files, progress));

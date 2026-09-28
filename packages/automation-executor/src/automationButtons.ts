@@ -83,8 +83,8 @@ export function resolveButton(
  * ready once one switched-on automation it can run uses it. The owner's
  * computer checks the rest when it runs the press.
  */
-export function relayedButtonState(file: AutomationsFileParseResult | null, collectionPath: string, field: string, collectionName: string): AutomationButtonState {
-  const target = relayedButtonTarget(file, collectionPath, field, collectionName);
+export function relayedButtonState(file: AutomationsFileParseResult | null, collectionId: string, field: string, collectionName: string): AutomationButtonState {
+  const target = relayedButtonTarget(file, collectionId, field, collectionName);
   return "state" in target ? target.state : { kind: "ready", automationId: target.automationId };
 }
 
@@ -95,7 +95,8 @@ export function relayedButtonState(file: AutomationsFileParseResult | null, coll
  */
 export function relayedButtonTarget(
   file: AutomationsFileParseResult | null,
-  collectionPath: string,
+  /** The Collection's id: the object id of its collection.yaml. */
+  collectionId: string,
   field: string,
   collectionName: string,
 ): { automationId: string; definitionHash: string } | { state: Exclude<AutomationButtonState, { kind: "ready" }> } {
@@ -103,7 +104,7 @@ export function relayedButtonTarget(
   if (resolved.kind === "state") return { state: resolved.state };
   const unsupported = unsupportedReason(resolved.automation);
   if (unsupported !== null) return { state: { kind: "disabled", reason: unsupported } };
-  return { automationId: collectionAutomationId(collectionPath, resolved.automation.id), definitionHash: definitionHash(resolved.automation) };
+  return { automationId: collectionAutomationId(collectionId, resolved.automation.id), definitionHash: definitionHash(resolved.automation) };
 }
 
 /**

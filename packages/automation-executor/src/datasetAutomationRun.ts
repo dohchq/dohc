@@ -489,7 +489,8 @@ async function plan(
       let record: RunRecord | null = null;
       if (held.source === "engine") {
         if (steps.trigger !== null) return { skipped: true } as const;
-        runClaim = held.claim;
+        // A due time or a message names no Collection path: it runs where its Collection is now.
+        runClaim = { ...held.claim, collectionPath: collection.path };
       } else {
         if (steps.trigger === null) return { skipped: true } as const;
         runClaim = datasetRunClaim(held.claim, collection.path, steps.trigger.table, readable);

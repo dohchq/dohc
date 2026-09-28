@@ -100,7 +100,7 @@ async function harness() {
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({ collections: [] })),
     getCollection: vi.fn<VersionedLiveAdapter["getCollection"]>(async () => { throw new Error("get boundary"); }),
     queryCollectionRecords: vi.fn<VersionedLiveAdapter["queryCollectionRecords"]>(async () => ({
-      collection: { path: "data", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
+      collection: { path: "data", objectId: "object-data", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
     })),
   };
   const capture = {
@@ -292,10 +292,10 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.getCollection, { workspaceId: "workspace", collectionPath: "data" })).rejects.toThrow("get boundary");
     expect(h.adapter.getCollection).toHaveBeenCalledWith({ collectionPath: "data" });
-    h.adapter.listCollections.mockResolvedValue({ collections: [{ path: "", status: "valid", reasons: [] }] });
+    h.adapter.listCollections.mockResolvedValue({ collections: [{ path: "", objectId: "object-data", status: "valid", reasons: [] }] });
     await expect(h.invoke(CHANNELS.listCollections)).rejects.toThrow();
     h.adapter.queryCollectionRecords.mockResolvedValue({
-      collection: { path: "", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
+      collection: { path: "", objectId: "object-data", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
     });
     await expect(h.invoke(CHANNELS.queryCollectionRecords, { workspaceId: "workspace", collectionPath: "data" })).rejects.toThrow();
   });

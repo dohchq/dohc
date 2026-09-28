@@ -6,6 +6,7 @@ import {
   AutomationShareImpactPayload,
   DismissAutomationStopsPayload,
   FindDatasetCollectionPayload,
+  FindAutomationCollectionPayload,
   CheckCollectionAutomationPayload,
   ConfirmCollectionAutomationStepPayload,
   ListAutomationTargetsPayload,
@@ -21,6 +22,7 @@ import {
   type AutomationShareImpactResult,
   type CheckCollectionAutomationResult,
   type FindDatasetCollectionResult,
+  type FindAutomationCollectionResult,
   type ConfirmCollectionAutomationStepResult,
   type ListAutomationTargetsResult,
   type DeleteWorkspacePathPayload,
@@ -222,6 +224,16 @@ export function registerCollectionAutomationsIpc<
       dependencies.sharedViewOf(input.workspaceId)
         ? { status: "unavailable" }
         : await operation.state.collectionAutomations.datasetCollection(input.datasetId));
+  });
+
+  registerHandler(CHANNELS.findAutomationCollection, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = FindAutomationCollectionPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<FindAutomationCollectionResult> => {
+      if (dependencies.sharedViewOf(input.workspaceId)) return { status: "unavailable" };
+      const found = await operation.state.collectionAutomations.whereIs(input.automationId);
+      return found === null ? { status: "missing" } : { status: "found", collectionPath: found };
+    });
   });
 
   registerHandler(CHANNELS.confirmCollectionAutomationStep, async (event, payload) => {

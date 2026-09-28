@@ -247,7 +247,7 @@ mod tests {
                     origin_seq: 41,
                 },
                 record_id: Some("rec_a".to_owned()),
-                collection_path: "tasks".to_owned(),
+                collection_path: Some("tasks".to_owned()),
                 depth: 1,
                 change: dohc_engine_domain::AutomationChange {
                     shared_author: None,
@@ -269,7 +269,7 @@ mod tests {
                 automation_id: "collection:tasks#janitor".to_owned(),
                 trigger: dohc_engine_domain::AutomationTrigger::History { history_id: 7 },
                 record_id: Some("rec_a".to_owned()),
-                collection_path: "tasks".to_owned(),
+                collection_path: Some("tasks".to_owned()),
                 depth: 0,
                 change: dohc_engine_domain::AutomationChange {
                     shared_author: None,
