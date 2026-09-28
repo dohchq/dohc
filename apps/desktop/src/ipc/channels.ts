@@ -231,6 +231,7 @@ export const CHANNELS = {
   undoCollectionAutomationRun: "desktop:undo-collection-automation-run",
   listAutomationTargets: "desktop:list-automation-targets",
   listAutomationGroups: "desktop:list-automation-groups",
+  listAutomationPeople: "desktop:list-automation-people",
   checkCollectionAutomation: "desktop:check-collection-automation",
   stopAndRestore: "desktop:stop-and-restore",
   undoStopAndRestore: "desktop:undo-stop-and-restore",

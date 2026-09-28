@@ -686,7 +686,7 @@ export function datasetSubscriptionFor(
 }
 
 /** A post to the direct message with `userId`, as the reach check reads it. */
-function directMessageReach(chat: ChatDirectory | null, userId: string): ReachStep {
+export function directMessageReach(chat: ChatDirectory | null, userId: string): ReachStep {
   const target = chat?.directMessage(userId);
   return {
     kind: "post",

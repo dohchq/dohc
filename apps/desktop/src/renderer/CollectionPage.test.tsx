@@ -2158,6 +2158,7 @@ describe("Button fields", () => {
       listAutomationTargets: async () => ({ collections: [] }),
       checkCollectionAutomation: async () => ({ diagnostics: [], formulaProblems: [], cannotRun: null, missingFiles: [] }),
       listAutomationGroups: async () => ({ groups: [] }),
+      listAutomationPeople: async () => ({ status: "listed", people: [] }),
       readScheduleHost: async () => ({ kind: "this-computer" }),
       onScheduleHostChanged: () => () => undefined,
       onCloudSessionChanged: () => () => undefined,

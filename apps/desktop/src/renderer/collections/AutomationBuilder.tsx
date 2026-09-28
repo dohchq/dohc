@@ -5,7 +5,7 @@ import { flushSync } from "react-dom";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
 import type { AutomationDiagnostic, AutomationScheduleTrigger, AutomationWeekday } from "@dohc/workspace-contracts/automations";
 import { nextDue, UnknownTimeZoneError } from "@dohc/workspace-contracts/automation-schedule";
-import type { CheckCollectionAutomationResult, ListAutomationGroupsResult, ListAutomationTargetsResult } from "../../ipc/bridgeContract";
+import type { CheckCollectionAutomationResult, ListAutomationGroupsResult, ListAutomationPeopleResult, ListAutomationTargetsResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
@@ -50,13 +50,14 @@ import {
 // button, a schedule, or a Group's messages; in a dataset it watches one
 // table, whose fields Only if and Set fields offer.
 // An If holds a condition and its own Do and Otherwise steps, which edit
-// like the automation's. Steps the builder cannot edit yet, such as a
-// message, stay as they are and read as their sentence; the file edits
-// them. A Find or an added record can name its result, and a later Set
-// fields step in the same list can change it. Save runs the file
-// contract's check through main first, so it never writes what the parser
-// would refuse, and the panel writes the whole list over the content it
-// read.
+// like the automation's. Messages go to a Group, to people, or to your
+// agent; another person's agent step stays theirs and reads as its
+// message. Steps the builder cannot edit stay as they are and read as
+// their sentence; the file edits them. A Find or an added record can name
+// its result, and a later Set fields step in the same list can change it.
+// Save runs the file contract's check through main first, so it never
+// writes what the parser would refuse, and the panel writes the whole list
+// over the content it read.
 
 type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 type Target = Extract<ListAutomationTargetsResult, { collections: unknown }>["collections"][number];
@@ -64,8 +65,10 @@ type SetStep = Extract<AutomationStep, { kind: "set" }>;
 type AddStep = Extract<AutomationStep, { kind: "add-record" }>;
 type FindStep = Extract<AutomationStep, { kind: "find" }>;
 type CodeStep = Extract<AutomationStep, { kind: "run" | "run-file" }>;
-type YourStep = Extract<AutomationStep, { kind: "notify" | "wake-agent" }>;
+type PeopleStep = Extract<AutomationStep, { kind: "notify" | "direct-message" }>;
+type WakeStep = Extract<AutomationStep, { kind: "wake-agent" }>;
 type Group = Extract<ListAutomationGroupsResult, { groups: unknown }>["groups"][number];
+type Person = Extract<ListAutomationPeopleResult, { status: "listed" }>["people"][number];
 type FieldValue = SetStep["values"][number];
 type Reach = ValidAutomationSummary["reach"];
 
@@ -864,10 +867,12 @@ function placeOf(
     if (name === undefined) {
       // A Find's condition, a result's name, and a Set's records each have a control where the step edits.
       const control = kind === "find" || kind === "if" ? "condition" : kind === "run" || kind === "run-file" ? "source"
-        : kind === "post" || kind === "notify" || kind === "wake-agent" ? "message" : kind === "group" ? "group"
-        : kind === "as" || kind === "records" ? kind : null;
+        : kind === "post" || kind === "notify" || kind === "direct-message" || kind === "wake-agent" ? "message"
+        : kind === "group" || kind === "to" || kind === "as" || kind === "records" ? kind : null;
       return { key: control !== null && edits(entry) ? `step-${entry.key}/${control}` : `step-${entry.key}`, name: null, step: entry.step.kind };
     }
+    // A recipient's problem goes beside its row.
+    if (kind === "to") return { key: edits(entry) ? `step-${entry.key}/to/${name}` : `step-${entry.key}`, name: null };
     if (kind !== "set" && kind !== "add-record" && kind !== "input") return { key: `step-${entry.key}`, name: null };
     const row = edits(entry) ? entry.rows.find(({ value }) => value.field === name) : undefined;
     return row === undefined ? { key: `step-${entry.key}`, name } : { key: `row-${row.key}/${part}`, name: null };
@@ -926,17 +931,9 @@ function triggerFor(
   }
 }
 
-/**
- * A step for this computer's person that the builder edits: notify you, or
- * wake your agent. `you` is how steps name that person, which the builder
- * writes and never shows; null where no step can name them that way.
- */
-function yourStep(step: AutomationStep, you: string | null): YourStep | null {
-  if (you === null) return null;
-  if (step.kind === "wake-agent") return step.person === you ? step : null;
-  if (step.kind !== "notify" || step.to.length !== 1) return null;
-  const [person] = step.to;
-  return person?.kind === "literal" && person.value === you ? step : null;
+/** The user id a recipient names, or "" for a formula or a person not chosen yet. */
+function userIdOf(person: AutomationValue): string {
+  return person.kind === "literal" && typeof person.value === "string" ? person.value : "";
 }
 
 /** The trigger kind the builder edits, or null when only the file can. */
@@ -1066,7 +1063,7 @@ export function AutomationBuilder(props: {
   onOpenFile: (path: string) => void;
   /** Opens the dialog that adds fields, such as a Button field; undefined where this person cannot. */
   onOpenFields?: () => void;
-  /** How a step names this computer's person, in a workspace proved never shared; otherwise null. */
+  /** How a step names this computer's person, in a workspace proved never shared; otherwise null. The builder never shows it. */
   you: string | null;
   /** What stops or delays this workspace's schedules, from the panel; shown under a schedule. */
   scheduleHost: ReactNode;
@@ -1089,6 +1086,14 @@ export function AutomationBuilder(props: {
     const found = (groups ?? []).find((group) => (use === "read" ? group.readStopped : group.postStopped) === null);
     return found?.ref ?? "";
   };
+  // The people a Direct message or a Notify step can name: null until main answers, "failed" when it could
+  // not, "unavailable" in a shared view, and why main cannot list them yet while it waits for the roster.
+  const [peopleList, setPeopleList] = useState<readonly Person[] | null | "failed" | "unavailable" | { waiting: string }>(null);
+  const people = peopleList !== null && typeof peopleList === "object" && !("waiting" in peopleList) ? peopleList : null;
+  /** Whether a step names this computer's person there: as the file says in a workspace never shared, or as main lists them. */
+  const isYou = (userId: string) => userId !== "" && (userId === props.you || (people?.some((person) => person.you && person.userId === userId) ?? false));
+  /** A Wake agent step for your own agent, which the builder edits; another person's stays theirs. */
+  const ownWake = (step: AutomationStep): WakeStep | null => (step.kind === "wake-agent" && isYou(step.person) ? step : null);
   const [schemas, setSchemas] = useState(() => new Map<string, readonly FieldDefinition[]>([[collectionPath, props.fields.filter(holdsValue)]]));
   const [checked, setChecked] = useState<{
     key: string;
@@ -1220,7 +1225,7 @@ export function AutomationBuilder(props: {
   const editableOf = (entry: StepEntry) => editableStep(entry.step, table, triggerTable);
   const edits = (entry: StepEntry) =>
     entry.step.kind === "if" || entry.step.kind === "run" || entry.step.kind === "run-file" || entry.step.kind === "post" ||
-    yourStep(entry.step, props.you) !== null || editableAction(entry.step, table) !== null || editableOf(entry) !== null || editableFind(entry.step, table, triggerTable) !== null;
+    entry.step.kind === "notify" || entry.step.kind === "direct-message" || ownWake(entry.step) !== null || editableAction(entry.step, table) !== null || editableOf(entry) !== null || editableFind(entry.step, table, triggerTable) !== null;
   const dirty = JSON.stringify(automation) !== JSON.stringify(props.baseline);
   // What Save writes: a draft without a name takes its sentence, and a new
   // one an id from its name. Main checks exactly this.
@@ -1300,6 +1305,52 @@ export function AutomationBuilder(props: {
       window.removeEventListener("focus", read);
     };
   }, [workspaceId, collectionPath, choosesGroups]);
+
+  // The people steps can name, read while a step that names people is on
+  // screen, and again when the window gets focus or a share changes what a
+  // step reaches.
+  const peopleRequests = useRequestSequence([workspaceId, collectionPath]);
+  const peopleFailed = useRef(false);
+  // The reading that is on now: a Try again from an earlier one, as after its steps went, reads nothing.
+  const peopleReading = useRef<object | null>(null);
+  const readPeople = (reading: object) => {
+    if (reading !== peopleReading.current) return;
+    const token = peopleRequests.next();
+    const current = () => reading === peopleReading.current && peopleRequests.isCurrent(token);
+    void bridge()
+      .listAutomationPeople({ workspaceId, collectionPath })
+      .then((result) => {
+        if (!current()) return;
+        peopleFailed.current = false;
+        setPeopleList(result.status === "listed" ? result.people : result.status === "waiting" ? { waiting: result.reason } : "unavailable");
+      })
+      .catch((error: unknown) => {
+        if (!current()) return;
+        setPeopleList((list) => (list === null || list === "failed" ? "failed" : list));
+        if (peopleFailed.current) return;
+        peopleFailed.current = true;
+        onError("dohc could not list the people an automation can message.", error, () => readPeople(reading));
+      });
+  };
+  const choosesPeople = ordered.some(({ entry }) => entry.step.kind === "notify" || entry.step.kind === "direct-message" || entry.step.kind === "wake-agent");
+  useEffect(() => {
+    if (!choosesPeople) return;
+    const reading = {};
+    peopleReading.current = reading;
+    // Its first failure is reported, with a Try again that works.
+    peopleFailed.current = false;
+    const read = () => readPeople(reading);
+    read();
+    window.addEventListener("focus", read);
+    const offHolds = bridge().onAutomationHoldsChanged((event) => {
+      if (event.workspaceId === workspaceId) read();
+    });
+    return () => {
+      peopleReading.current = null;
+      window.removeEventListener("focus", read);
+      offHolds();
+    };
+  }, [workspaceId, collectionPath, choosesPeople]);
 
   // The Collections a Find or an Add a record step can reach. A dataset's
   // steps stay in its own tables, so it asks for none.
@@ -1427,11 +1478,16 @@ export function AutomationBuilder(props: {
     else if (bound !== null && !RESULT_NAME.test(bound.name)) {
       problems.set(`step-${key}/as`, "A result name starts with a letter or _, then uses only letters, digits, and _.");
     }
-    if (step.kind === "post") {
-      if (step.group === "") problems.set(`step-${key}/group`, "Choose a Group.");
-      if (step.text.trim() === "") problems.set(`step-${key}/message`, "Write a message.");
+    if (step.kind === "post" && step.group === "") problems.set(`step-${key}/group`, "Choose a Group.");
+    if (step.kind === "notify" || step.kind === "direct-message") {
+      if (step.to.length === 0) problems.set(`step-${key}/to`, "Add a person.");
+      step.to.forEach((person, index) => {
+        if (person.kind === "formula") formulaProblem(`step-${key}/to/${index}`, person.expression);
+        else if (userIdOf(person) === "") problems.set(`step-${key}/to/${index}`, "Choose a person.");
+      });
     }
-    if (yourStep(step, props.you)?.text.trim() === "") problems.set(`step-${key}/message`, "Write a message.");
+    const message = step.kind === "post" || step.kind === "notify" || step.kind === "direct-message" ? step : ownWake(step);
+    if (message?.text.trim() === "") problems.set(`step-${key}/message`, "Write a message.");
     if (step.kind === "run" || step.kind === "run-file") {
       if (step.kind === "run" && step.code.trim() === "") problems.set(`step-${key}/source`, "Write the code this step runs.");
       else if (step.kind === "run" && step.code.length > MAX_CODE_LENGTH) {
@@ -1677,13 +1733,132 @@ export function AutomationBuilder(props: {
       <Problem shown={problem(`step-${key}/message`)} />
     </>
   );
+  /**
+   * A Direct message's or a Notify step's people, one row each: a person
+   * main lists, or a formula that gives a person's id. A person the step
+   * cannot reach is offered disabled with why; a saved one stays chosen
+   * with why beside it.
+   */
+  const recipients = (number: number, key: number, step: PeopleStep) => {
+    const stopOf = (person: Person) => (step.kind === "notify" ? person.noticeStopped : person.dmStopped);
+    const setTo = (to: AutomationValue[]) => setStep(key, (current) => ({ ...current, step: { ...step, to } }));
+    const focusOf = (index: number) => (index === 0 ? `step-${key}-first` : `step-${key}-to-${index}`);
+    const listed = people ?? [];
+    return (
+      <>
+        {step.to.map((person, index) => {
+          const problemKey = `step-${key}/to/${index}`;
+          const userId = userIdOf(person);
+          const at = userId === "" ? -1 : listed.findIndex((candidate) => candidate.userId === userId);
+          // Options are named by their place in the list, so a person's id is never on screen.
+          const value = person.kind === "formula" ? "formula" : userId === "" ? "" : at >= 0 ? String(at) : "kept";
+          const chosen = listed[at];
+          const stopped = chosen === undefined ? null : stopOf(chosen);
+          const label = `Step ${number}, person ${index + 1}`;
+          const replace = (next: AutomationValue) => setTo(step.to.map((current, place) => (place === index ? next : current)));
+          return (
+            <div key={index} className="flex items-start gap-1">
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <select
+                  aria-label={label}
+                  data-focus={focusOf(index)}
+                  value={value}
+                  onChange={(event) => {
+                    const picked = listed[Number(event.target.value)];
+                    if (event.target.value === "formula" && person.kind !== "formula") replace({ kind: "formula", expression: "" });
+                    if (picked !== undefined) replace({ kind: "literal", value: picked.userId });
+                  }}
+                  className={selectClass}
+                  {...(person.kind === "formula" ? {} : invalid(problem(problemKey)))}
+                >
+                  {value === "" ? (
+                    <option value="" disabled>
+                      {peopleList === "failed" ? "People could not be listed" : peopleList === "unavailable" ? "People are unavailable here"
+                        : peopleList === null ? "Loading people" : people === null ? "Waiting for the list of people" : "Choose a person"}
+                    </option>
+                  ) : null}
+                  {value === "kept" ? (
+                    <option value="kept">{isYou(userId) ? "You" : peopleList === null ? "Loading people" : people === null ? "A saved person" : "Someone not listed"}</option>
+                  ) : null}
+                  {listed.map((candidate, place) => {
+                    const stop = stopOf(candidate);
+                    const name = candidate.you ? "You" : candidate.name;
+                    return (
+                      <option key={candidate.userId} value={String(place)} disabled={stop !== null && place !== at}>
+                        {stop === null ? name : `${name} (${stop})`}
+                      </option>
+                    );
+                  })}
+                  <option value="formula">Formula</option>
+                </select>
+                {person.kind === "formula" ? (
+                  <input
+                    aria-label={`${label}, formula`}
+                    value={person.expression}
+                    spellCheck={false}
+                    placeholder="person.id"
+                    onChange={(event) => replace({ kind: "formula", expression: event.target.value })}
+                    className={formulaClass}
+                    {...invalid(problem(problemKey))}
+                  />
+                ) : null}
+                {stopped !== null ? (
+                  <StatusLine tone="warning" icon={AlertTriangle} label="Out of reach">{stopped}</StatusLine>
+                ) : value === "kept" && people !== null && !isYou(userId) ? (
+                  <StatusLine tone="warning" icon={AlertTriangle} label="Not listed">
+                    dohc cannot find this person among the people this workspace is shared with. Choose someone else.
+                  </StatusLine>
+                ) : person.kind === "formula" && step.kind === "direct-message" ? (
+                  <p className="m-0 text-[12px] text-muted">dohc sends it only to a person you already have a direct message with.</p>
+                ) : null}
+                <Problem shown={problem(problemKey)} />
+              </div>
+              <IconButton
+                aria-label={`Remove person ${index + 1} from step ${number}`}
+                title="Remove"
+                data-focus={`step-${key}-to-${index}-remove`}
+                onClick={() => focusAfter(
+                  step.to.length > 1 ? `step-${key}-to-${Math.min(index, step.to.length - 2)}-remove` : `step-${key}-add-person`,
+                  () => setTo(step.to.filter((_, place) => place !== index)),
+                )}
+              >
+                <Trash2 size={13} aria-hidden />
+              </IconButton>
+            </div>
+          );
+        })}
+        <SecondaryButton
+          size="compact"
+          className="flex items-center gap-1 self-start"
+          data-focus={`step-${key}-add-person`}
+          aria-describedby={problem(`step-${key}/to`)?.id}
+          onClick={() => focusAfter(focusOf(step.to.length), () => setTo([...step.to, { kind: "literal", value: "" }]))}
+        >
+          <Plus size={12} aria-hidden />
+          Add person
+        </SecondaryButton>
+        <Problem shown={problem(`step-${key}/to`)} />
+        {peopleList === "unavailable" ? (
+          <p className="m-0 text-[12px] text-muted">People are unavailable in a shared view.</p>
+        ) : peopleList === "failed" ? (
+          <p className="m-0 text-[12px] text-muted">dohc could not list the people this workspace is shared with.</p>
+        ) : peopleList !== null && "waiting" in peopleList ? (
+          <StatusLine tone="muted" icon={Clock} label="Waiting">{peopleList.waiting}</StatusLine>
+        ) : step.kind === "direct-message" && people !== null && people.every((person) => person.you) ? (
+          <p className="m-0 text-[12px] text-muted">No other people are listed for this workspace.</p>
+        ) : null}
+      </>
+    );
+  };
   /** One step: its controls, or its sentence where the builder cannot edit it yet. */
   const stepItem = ({ entry, list, listId, index, number, scope }: (typeof ordered)[number]): ReactNode => {
     const { key, step, rows } = entry;
     const editable = editableOf(entry);
     const find = editableFind(step, table, triggerTable);
     const action = editableAction(step, table);
-    const yours = yourStep(step, props.you);
+    const wake = ownWake(step);
+    // Whose agent another person's Wake agent step wakes, as main lists them.
+    const owner = step.kind === "wake-agent" ? people?.find((person) => person.userId === step.person) : undefined;
     const chosen = action === null ? undefined : table?.actions.find((candidate) => candidate.name === action.operation);
     const targetPath = targetOf(entry);
     // Main lists the Collections a step can change; a Find's read reach shows in its saved verdict.
@@ -1775,8 +1950,9 @@ export function AutomationBuilder(props: {
             : step.kind === "run" || step.kind === "run-file" ? "Run code"
             : step.kind === "if" ? "If"
             : step.kind === "post" ? "Post in a Group"
-            : yours?.kind === "notify" ? "Notify you"
-            : yours?.kind === "wake-agent" ? "Wake your agent"
+            : step.kind === "notify" ? (step.to.length === 1 && isYou(userIdOf(step.to[0]!)) ? "Notify you" : "Notify")
+            : step.kind === "direct-message" ? "Send a direct message"
+            : step.kind === "wake-agent" ? (wake !== null ? "Wake your agent" : "Wake an agent")
             : `Step ${number}`}
           </span>
           <IconButton
@@ -1972,8 +2148,30 @@ export function AutomationBuilder(props: {
               (group) => setStep(key, (current) => ({ ...current, step: { ...step, group } })))}
             {messageEditor(number, key, step.text, (text) => setStep(key, (current) => ({ ...current, step: { ...step, text } })), null)}
           </div>
-        ) : yours !== null ? (
-          messageEditor(number, key, yours.text, (text) => setStep(key, (current) => ({ ...current, step: { ...yours, text } })), `step-${key}-first`)
+        ) : step.kind === "notify" || step.kind === "direct-message" ? (
+          <div className="flex flex-col gap-2">
+            {recipients(number, key, step)}
+            {messageEditor(number, key, step.text, (text) => setStep(key, (current) => ({ ...current, step: { ...step, text } })), null)}
+          </div>
+        ) : wake !== null ? (
+          messageEditor(number, key, wake.text, (text) => setStep(key, (current) => ({ ...current, step: { ...wake, text } })), `step-${key}-first`)
+        ) : step.kind === "wake-agent" ? (
+          // Another person's agent step acts as them, so its words stay theirs. Moving or removing it keeps its verdict.
+          <div className="flex flex-col gap-1.5">
+            <p className="m-0 whitespace-pre-wrap break-words rounded-md border border-line bg-panel-2 px-2 py-1 text-[12px] leading-snug text-muted">
+              {step.text}
+            </p>
+            {people === null ? null : owner !== undefined ? (
+              <StatusLine tone="muted" icon={Info} label="Someone else's step">
+                This step wakes {owner.name}'s agent and acts as them, so you cannot change its message here.
+              </StatusLine>
+            ) : (
+              // A person main does not list may still be you by an account this computer does not know.
+              <StatusLine tone="muted" icon={Info} label="dohc cannot tell whose step this is">
+                dohc cannot tell whose agent this step wakes, so you cannot change its message here.
+              </StatusLine>
+            )}
+          </div>
         ) : entry.branches !== null && entry.condition !== null && step.kind === "if" ? (
           <div className="flex flex-col gap-2">
             <ConditionEditor
@@ -2210,27 +2408,35 @@ export function AutomationBuilder(props: {
             <Plus size={12} aria-hidden />
             Post in a Group
           </SecondaryButton>
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1"
+            disabled={full}
+            onClick={() => addStep(listId, { kind: "direct-message", text: "", to: [{ kind: "literal", value: "" }] })}
+          >
+            <Plus size={12} aria-hidden />
+            Send a direct message
+          </SecondaryButton>
+          {/* In a workspace never shared, a notice can reach only you. */}
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1"
+            disabled={full}
+            onClick={() => addStep(listId, { kind: "notify", text: "", to: [{ kind: "literal", value: props.you ?? "" }] })}
+          >
+            <Plus size={12} aria-hidden />
+            {props.you !== null ? "Notify you" : "Notify"}
+          </SecondaryButton>
           {props.you !== null ? (
-            <>
-              <SecondaryButton
-                size="compact"
-                className="flex items-center gap-1"
-                disabled={full}
-                onClick={() => addStep(listId, { kind: "notify", text: "", to: [{ kind: "literal", value: props.you! }] })}
-              >
-                <Plus size={12} aria-hidden />
-                Notify you
-              </SecondaryButton>
-              <SecondaryButton
-                size="compact"
-                className="flex items-center gap-1"
-                disabled={full}
-                onClick={() => addStep(listId, { kind: "wake-agent", text: "", person: props.you! })}
-              >
-                <Plus size={12} aria-hidden />
-                Wake your agent
-              </SecondaryButton>
-            </>
+            <SecondaryButton
+              size="compact"
+              className="flex items-center gap-1"
+              disabled={full}
+              onClick={() => addStep(listId, { kind: "wake-agent", text: "", person: props.you! })}
+            >
+              <Plus size={12} aria-hidden />
+              Wake your agent
+            </SecondaryButton>
           ) : null}
         </div>
         {full ? <p className="m-0 text-[12px] text-muted">An automation holds at most {MAX_STEPS} steps. Remove a step to add another.</p> : null}
