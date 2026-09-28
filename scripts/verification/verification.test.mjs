@@ -657,6 +657,7 @@ test("verification selects packages and proofs and prepares the engine after Rus
         assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
         assert.ok(report.steps.every(step => step.startedAt && step.finishedAt && step.seconds >= 0));
         assert.ok(report.timings.every(phase => phase.startedAt && phase.finishedAt && phase.seconds >= 0));
+        assert.equal(report.timings.some(phase => phase.name === "queue"), mode === "pr");
         assert.equal(report.timings.some(phase => phase.name === "prepare"), prepare);
         assert.equal(report.timings.some(phase => phase.name === "postgres-start"), database);
         assert.equal(report.timings.some(phase => phase.name === "postgres-stop"), database);
@@ -1076,7 +1077,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     `;
     const invoke = (extra = []) => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
       cwd: root, encoding: "utf8", timeout: 20_000,
-      env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))) },
+      env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), DOHC_BUILD_SLOT_ROOT: join(root, "slots") },
     });
     const clean = invoke();
     assert.equal(clean.error, undefined);
