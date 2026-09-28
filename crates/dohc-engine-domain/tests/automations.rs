@@ -75,6 +75,7 @@ fn facts(
 ) -> CollectionRecordApplyFacts {
     CollectionRecordApplyFacts {
         shared_author: None,
+        live_cursor: None,
         collection_path: collection_path.to_owned(),
         record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         created: false,
@@ -459,6 +460,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
         claims[0].change,
         AutomationChange {
             shared_author: None,
+            live_cursor: None,
             kind: AutomationChangeKind::Changed,
             author_origin_id: Some("agent-editor".to_owned()),
             actor_kind: Some(ChangeActorKind::Agent),
@@ -560,6 +562,40 @@ fn a_claim_keeps_the_person_or_link_the_relay_accepted_its_change_from() {
         "{refused:?}"
     );
     assert_eq!(claim_rows(&store, WS), 2);
+}
+
+#[test]
+fn a_claim_keeps_its_live_cursor_and_still_dedupes_on_its_change() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    assert!(subscribe(&mut store, "collection:tasks#stamp", "tasks"));
+    let mut applied = field_change(1, &["status"]);
+    applied.live_cursor = Some(41);
+    let claims = claim_for(&mut store, WS, &applied, 10);
+    assert_eq!(claims[0].change.live_cursor, Some(41));
+    // The same change again, as a retried apply, claims nothing: the cursor
+    // is not part of the key, whatever cursor the retry carries.
+    applied.live_cursor = Some(42);
+    assert!(claim_for(&mut store, WS, &applied, 11).is_empty());
+    let (served, _) = claim_next_pending_automation(&mut store, WS, "collection:", 20, &NO_FAULTS)
+        .expect("claim next")
+        .expect("the claim is pending");
+    assert_eq!(
+        served.change.live_cursor,
+        Some(41),
+        "it survives the ledger"
+    );
+    // A cursor the relay never issues never reaches the ledger.
+    let mut applied = field_change(2, &["status"]);
+    applied.live_cursor = Some(0);
+    let refused = store.write_with(&NO_FAULTS, |tx| {
+        claim_automation_triggers_in_tx(tx, WS, &applied, 30)
+    });
+    assert!(
+        matches!(refused, Err(DomainError::InvalidInput { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(claim_rows(&store, WS), 1);
 }
 
 #[test]
@@ -1521,6 +1557,7 @@ fn a_group_message_claims_each_matching_subscription_once() {
         claim.change,
         AutomationChange {
             shared_author: None,
+            live_cursor: None,
             kind: AutomationChangeKind::Message,
             author_origin_id: None,
             actor_kind: Some(ChangeActorKind::Human),

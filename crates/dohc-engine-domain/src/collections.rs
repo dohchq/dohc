@@ -3013,6 +3013,10 @@ pub struct CollectionRecordApplyFacts {
     /// the session host, from the relay's authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_author: Option<SharedChangeAuthor>,
+    /// The relay's live journal cursor of the frame this change came in,
+    /// set only by the session host that accepted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_cursor: Option<i64>,
     /// The replication coordinate of the op this apply came from:
     /// `(origin_id, origin_seq)`. A replicated apply carries the envelope's
     /// coordinate; a local apply carries its own journaled coordinate, set by
@@ -3241,6 +3245,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
         author_origin_id: author_origin_id.map(str::to_owned),
         attribution: attribution.cloned(),
         shared_author: None,
+        live_cursor: None,
         source: source_update.map(|(origin_id, origin_seq)| (origin_id.to_owned(), origin_seq)),
         recorded_at_ms,
         fields: field_facts,

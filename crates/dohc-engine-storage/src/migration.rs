@@ -2698,6 +2698,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE automation_claims ADD COLUMN change_author_json TEXT CHECK (change_author_json IS NULL OR json_valid(change_author_json));",
         sets_user_version: None,
     },
+    // The relay's live journal cursor of the frame a claimed live change came
+    // in, so the relay can tell when a settlement has carried it. Null for
+    // every other claim.
+    Migration {
+        ordinal: 22,
+        id: "v2-automation-claim-live-cursor",
+        sql: "ALTER TABLE automation_claims ADD COLUMN change_live_cursor INTEGER CHECK (change_live_cursor IS NULL OR change_live_cursor BETWEEN 1 AND 9007199254740991);",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -3039,6 +3048,10 @@ mod tests {
                 "v2-automation-claim-shared-author",
                 "8533e507bf0a0d99971e20ce73e57068b076986b2088166c144a0345aa03e7ae",
             ),
+            (
+                "v2-automation-claim-live-cursor",
+                "e0e03940b8d14b9e61ba21a9ea5d2d99410074802e43a5d0f593761d3a27c942",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3117,6 +3130,44 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_claim_from_before_live_cursors_reads_none_and_a_new_one_must_be_positive() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-automation-claim-live-cursor");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute(
+            "INSERT INTO automation_claims (workspace_id, claim_id, automation_id, trigger_history_id, \
+             record_id, collection_path, depth, state, created_at_ms, updated_at_ms) \
+             VALUES ('ws', 'atc_old', 'collection:tasks#stamp', 1, 'rec', 'tasks', 0, 'pending', 1, 1)",
+            [],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let cursor: Option<i64> = conn
+            .query_row(
+                "SELECT change_live_cursor FROM automation_claims WHERE claim_id = 'atc_old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, None, "a claim from before has no live cursor");
+        assert!(
+            conn.execute(
+                "UPDATE automation_claims SET change_live_cursor = 0 WHERE claim_id = 'atc_old'",
+                [],
+            )
+            .is_err()
+        );
+        conn.execute(
+            "UPDATE automation_claims SET change_live_cursor = 7 WHERE claim_id = 'atc_old'",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

@@ -56,7 +56,7 @@ function claim(change: Partial<RecordChange> = {}): AutomationClaim {
     collectionPath: "Tasks",
     depth: 0,
     change: {
-      kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null,
+      kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null,
       fields: [{ field: "Status", historyId: 7, previous: { value: "Doing" }, next: { value: "Done" } }],
       fieldsOmitted: 0,
       ...change,
@@ -235,7 +235,7 @@ describe("schedule claims", () => {
     automationId: "collection:Tasks#sweep",
     trigger: { key },
     recordId: null,
-    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, fields: [], fieldsOmitted: 0 },
+    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
   });
 
   it("reads the due time from the claim's key", () => {

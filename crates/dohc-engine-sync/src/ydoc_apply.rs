@@ -3596,6 +3596,7 @@ mod merge_drained_tests {
     fn facts(record_id: &str) -> dohc_engine_domain::CollectionRecordApplyFacts {
         dohc_engine_domain::CollectionRecordApplyFacts {
             shared_author: None,
+            live_cursor: None,
             collection_path: "tasks".to_owned(),
             record_id: record_id.to_owned(),
             created: false,
