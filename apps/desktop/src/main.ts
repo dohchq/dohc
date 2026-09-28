@@ -1258,6 +1258,7 @@ const shareRosters = createShareRosters({
       withEngineAdapter(workspace, (adapter) => adapter.remoteChangesApplied()).catch(() => null));
     return proved ? localReactorFallbackId() : null;
   },
+  syncHistory: (workspace) => readSyncHistory(workspace.rootPath),
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
   onListed: (workspaceId) => collectionAutomationsOf(workspaceId)?.rosterChanged(),

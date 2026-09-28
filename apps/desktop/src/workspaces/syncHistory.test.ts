@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { RegistryEntry } from "./registryStore";
@@ -95,7 +95,28 @@ describe("a workspace proved never shared", () => {
     expect(await readFile(path, "utf8")).toBe("{");
     await rm(path);
     recordReceivedShare(root);
+    expect(await readSyncHistory(root)).toBe("absent");
+  });
+
+  it("reads a record it cannot read as unknown, and only a missing one as absent", async () => {
+    const path = join(root, ".dohc", "sync-history.json");
+    expect(await readSyncHistory(root)).toBe("absent");
+    // A directory where the record should be fails the read with an error other than ENOENT.
+    await mkdir(path);
     expect(await readSyncHistory(root)).toBe("unknown");
+    await rm(path, { recursive: true });
+    recordSynced(root);
+    const synced = await readFile(path, "utf8");
+    await writeFile(path, synced.slice(0, 10));
+    expect(await readSyncHistory(root), "a record cut off mid-write").toBe("unknown");
+  });
+
+  it("replaces the record whole, leaving nothing beside it", async () => {
+    await recordNeverSynced(root);
+    recordReceivedShare(root);
+    recordSynced(root);
+    expect(await readSyncHistory(root)).toBe("synced");
+    expect(await readdir(join(root, ".dohc"))).toEqual(["sync-history.json"]);
   });
 
   it("refuses to keep a share whose coming in it cannot record", async () => {
