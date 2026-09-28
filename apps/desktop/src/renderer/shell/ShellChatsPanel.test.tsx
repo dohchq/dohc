@@ -71,7 +71,7 @@ describe("chats panel (right side)", () => {
       ],
       fileThreads: [],
     });
-    Object.assign(bridge, { listChatChannelShares: vi.fn(async () => ({ joined: [], sessionKey: null, relay: { state: "answered", granted: [], received: [] } })) });
+    Object.assign(bridge, { listChatChannelShares: vi.fn(async () => ({ joined: [], sessionKey: null, relay: { state: "answered", granted: [], received: [], removed: [] } })) });
     const user = userEvent.setup();
     renderShell(bridge);
 

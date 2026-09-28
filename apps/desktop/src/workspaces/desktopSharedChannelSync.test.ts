@@ -20,7 +20,7 @@ function joined(id: string, overrides: Partial<JoinedSharedChannel> = {}): Joine
   };
 }
 
-function harness(rows: JoinedSharedChannel[]) {
+function harness(rows: JoinedSharedChannel[], recheckRemovedShares?: (workspaceId: string) => Promise<void>) {
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath: "/workspace", kind: "personal",
     mode: "local-first", sharedChannels: rows,
@@ -53,6 +53,7 @@ function harness(rows: JoinedSharedChannel[]) {
     linkedChatStoreFor: () => ({
       findThreadChannelId: async () => "channel", getChannelWireId: async () => rows[0]?.channelWireId ?? null,
     }),
+    ...(recheckRemovedShares ? { recheckRemovedShares } : {}),
   });
   const rendererPass = () => authorities.withOperation("workspace", (operation) =>
     sync.syncRendererWorkspaceSharedChannels(operation));
@@ -85,6 +86,27 @@ describe("desktop shared-channel pass composition", () => {
       workspaceId: "workspace", rootPath: "/workspace", attachmentId: expect.any(Symbol),
       relay: expect.objectContaining({ token: "token", baseUrl: "https://relay.test" }),
     }));
+  });
+
+  // An ended row the relay ended may be one the owner has since restored. The
+  // pass asks before deciding the row is not its work, and syncs a row the
+  // recheck resumed. A row the person left is theirs to rejoin, not rechecked.
+  it("rechecks a relay-ended row before the pass and syncs it once it resumes", async () => {
+    let workspaceRows: JoinedSharedChannel[] = [];
+    const recheck = vi.fn(async () => {
+      workspaceRows = workspaceRows.map((row) => row.shareId === "gone" ? { ...row, ended: false } : row);
+      h.workspace.sharedChannels = workspaceRows;
+    });
+    const h = harness([joined("gone", { ended: true }), joined("left", { ended: true, left: true })], recheck);
+    workspaceRows = h.workspace.sharedChannels!;
+    await h.sync.syncWorkspaceSharedChannels("workspace");
+    expect(recheck).toHaveBeenCalledWith("workspace");
+    expect(h.pull.mock.calls.map(([input]) => input.shareId)).toEqual(["gone"]);
+
+    const left = harness([joined("left", { ended: true, left: true })], recheck);
+    recheck.mockClear();
+    await left.sync.syncWorkspaceSharedChannels("workspace");
+    expect(recheck).not.toHaveBeenCalled();
   });
 
   it("reports signed-out rows without opening a relay", async () => {

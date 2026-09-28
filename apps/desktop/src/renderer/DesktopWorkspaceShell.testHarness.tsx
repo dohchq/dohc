@@ -44,6 +44,7 @@ import type {
   ReadShareProposalChangesResult,
   ReadShareProposalFileContentResult,
   SettleShareProposalPayload,
+  UndoRelaySharePayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
   PushShareDirectWritesResult,
@@ -489,10 +490,15 @@ function makeBaseBridge(
       shareCode: "dohc-share:relay-share-1:http://relay.test",
       recipientEmail: "friend@dohc.test",
     })),
-    listRelayShares: vi.fn(async () => ({ granted: [], received: [] })),
+    listRelayShares: vi.fn(async () => ({ granted: [], received: [], removed: [] })),
     retryShareHandoff: vi.fn(async () => undefined),
     dismissShareHandoff: vi.fn(async () => undefined),
-    revokeRelayShare: vi.fn(async () => undefined),
+    revokeRelayShare: vi.fn(async () => ({
+      undo: { undoId: "undo-1", expiresAtMs: Date.now() + 600_000 },
+    })),
+    undoRelayShare: vi.fn(async (payload: UndoRelaySharePayload) => ({
+      shareId: payload.shareId,
+    })),
     // Share changes. Typed to the contract, not to these empty
     // defaults: the review and submit tests drive real rows through them.
     listShareProposals: vi.fn(

@@ -701,6 +701,12 @@ export interface WorkspaceEngineCaptureOptions {
     failure: WorkspaceEngineCaptureFailure,
     detail?: string | null,
   ) => void;
+  // The engine found that this workspace's drive has no rename that refuses
+  // to replace, so a save can lose another program's change made at the same
+  // moment. Sticky: the drive does not change while the workspace is open.
+  onAtomicPlacementUnavailable?: () => void;
+  onRecoveryUnavailable?: (unavailable: boolean) => void;
+  onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -2950,6 +2956,7 @@ export function createWorkspaceEngineCapture(
     path: string,
     metadata: ActorNeutralWriteMetadata,
     author?: MomentWriteAuthor,
+    onlyIfAbsentOnDisk = false,
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     if (!current) return false;
@@ -2959,6 +2966,7 @@ export function createWorkspaceEngineCapture(
       path,
       metadata,
       ...(author !== undefined ? { author } : {}),
+      ...(onlyIfAbsentOnDisk ? { onlyIfAbsentOnDisk } : {}),
     });
     return true;
   }
@@ -3336,6 +3344,12 @@ export function createWorkspaceEngineCapture(
       reportCaptureOutcome(async () => {
         const engine = await engineStore();
         const status = await engine.watcherStatus?.();
+        if (stopped) return true;
+        if (status?.noAtomicPlacement) options.onAtomicPlacementUnavailable?.();
+        if (status) {
+          options.onKeptFiles?.(status.keptFiles);
+          options.onRecoveryUnavailable?.(status.recoveryUnavailable);
+        }
         if (status === undefined || (status.running && !status.terminal)) {
           await drainPendingCollectionAdoptions(engine);
         }
@@ -5664,9 +5678,17 @@ export function createWorkspaceEngineCapture(
           if (disk.kind === "text" || disk.kind === "binary") {
             await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
           } else {
-            // Confirmed absent: reconcile the deletion so engine and disk agree
-            // before the restore moment is recorded.
-            await deleteIfTracked(engine, activeVersionId, path, saveMetadata);
+            // Seen absent: reconcile the deletion so engine and disk agree
+            // before the restore moment is recorded. A replace the engine is
+            // finishing can empty the name for a moment, so the engine
+            // confirms the absence itself. When it refuses, the disk decides.
+            try {
+              await deleteIfTracked(engine, activeVersionId, path, saveMetadata, undefined, true);
+            } catch (error) {
+              const again = await readDiskTextState(rootPath, path);
+              if (again.kind !== "text" && again.kind !== "binary") throw error;
+              await writeIfChanged(engine, activeVersionId, path, again, saveMetadata);
+            }
           }
           const target = moment.payload.before;
           const metadata: ActorNeutralWriteMetadata = {

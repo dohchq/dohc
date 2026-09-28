@@ -1162,8 +1162,12 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
-  it("serves collection reads through the engine port and translates wire values both ways", async () => {
+  it.each(["valid", "unsupported", "unbound"])("serves collection reads and diagnoses unsupported schemas: %s", async (state) => {
+    const unsupported = state !== "valid";
     const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
+    const collection: Awaited<ReturnType<CliCollectionsPort["query"]>>["collection"] = unsupported
+      ? { path: "tasks", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }] }
+      : { path: "tasks", status: "valid", reasons: [] };
     const queries: Array<Parameters<CliCollectionsPort["query"]>[0]> = [];
     const recordReads: Array<Parameters<CliCollectionsPort["getRecord"]>[0]> = [];
     context.collections = {
@@ -1178,7 +1182,7 @@ describe("CLI socket server", () => {
       async query(params) {
         queries.push(params);
         return {
-          collection: { path: "tasks", status: "valid", reasons: [] },
+          collection,
           records: [
             {
               id: recordId,
@@ -1200,8 +1204,9 @@ describe("CLI socket server", () => {
       },
       async getRecord(params) {
         recordReads.push(params);
+        if (state === "unbound") throw new Error("collection-record-not-found");
         return {
-          collection: { path: "tasks", status: "valid", reasons: [] },
+          collection,
           record: {
             id: recordId,
             path: "tasks/a.md",
@@ -1228,6 +1233,12 @@ describe("CLI socket server", () => {
 
     // The filter value arrives marker-encoded and reaches the engine port as
     // a real 64-bit integer; the result value leaves marker-encoded again.
+    if (unsupported) {
+      const expected = { ok: false, reason: "tasks/collection.yaml uses a newer version. Update dohc to read this file." };
+      await expect(invoke("collectionQuery", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks" })).resolves.toEqual(expected);
+      await expect(invoke("collectionRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", recordId, historyLimit: 25 })).resolves.toEqual(expected);
+      return;
+    }
     await expect(invoke("collectionQuery", {
       cwd: workspaceRoot,
       actor: "agent",

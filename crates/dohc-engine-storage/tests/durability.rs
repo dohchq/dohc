@@ -6,9 +6,10 @@
 //! `cargo test --workspace`).
 
 use dohc_engine_storage::{
-    BackupOutcome, CorruptionKind, DiagnosticBundle, EngineStore, FreeSpaceProbe,
-    MaterializationJobSpec, NoFaults, Preimage, StorageError, classify, create_verified_backup,
-    enqueue_job, hex_sha256, load_valid_backup,
+    BackupOutcome, CorruptionKind, DiagnosticBundle, DisplacementResolution, DisplacementSpec,
+    DisplacementState, EngineStore, FreeSpaceProbe, JobStatus, MaterializationJobSpec, NoFaults,
+    Preimage, StorageError, classify, create_verified_backup, enqueue_job, hex_sha256,
+    load_valid_backup,
 };
 use dohc_test_scratch::ScratchDir;
 use rusqlite::config::DbConfig;
@@ -865,4 +866,185 @@ fn an_ordinary_sql_failure_is_still_terminal() {
         })
         .expect_err("a malformed statement must fail");
     assert_eq!(refused.code(), "persist-failed");
+}
+
+// ---------------------------------------------------------------------------
+// materialization displacements
+// ---------------------------------------------------------------------------
+
+fn displacement_spec(job_id: &str, displaced_name: &str) -> DisplacementSpec {
+    DisplacementSpec {
+        job_id: job_id.to_owned(),
+        workspace_id: "ws".to_owned(),
+        target_path: "notes/a.md".to_owned(),
+        displaced_name: displaced_name.to_owned(),
+        expected_sha256: hex_sha256(b"preimage"),
+        content_sha256: Some(hex_sha256(b"content")),
+        now_ms: 5,
+    }
+}
+
+#[test]
+fn displacement_group_commit_rolls_back_every_row_on_failure() {
+    let sc = Scratch::new("displacement-batch");
+    let store = EngineStore::open(&sc.db_path(), 1).expect("open");
+    let one = displacement_spec("j1", "6a31.0");
+    let mut invalid = displacement_spec("j2", "6a32.0");
+    invalid.displaced_name = one.displaced_name.clone();
+    // Duplicate names may not be unique in old stores; force a trigger error
+    // after the first insertion to prove transaction-wide rollback.
+    let conn = Connection::open(sc.db_path()).expect("connection");
+    conn.execute_batch("CREATE TRIGGER reject_second BEFORE INSERT ON materialization_displacements WHEN NEW.job_id = 'j2' BEGIN SELECT RAISE(ABORT, 'injected'); END;").expect("trigger");
+    assert!(store.open_displacements(&[one.clone(), invalid]).is_err());
+    assert!(
+        store
+            .list_unsettled_displacements()
+            .expect("rows")
+            .is_empty()
+    );
+    conn.execute_batch("DROP TRIGGER reject_second")
+        .expect("drop trigger");
+    let ids = store
+        .open_displacements(&[one, displacement_spec("j2", "6a32.0")])
+        .expect("batch");
+    assert_eq!(ids.len(), 2);
+    assert_eq!(store.list_unsettled_displacements().expect("rows").len(), 2);
+}
+
+/// A row moves open, then kept or deleted, and its job's status changes in
+/// the same transaction as the row's end. A row can also start kept.
+#[test]
+fn a_displacement_resolves_with_its_job_in_one_transaction() {
+    let sc = Scratch::new("displacements");
+    let mut store = EngineStore::open(&sc.db_path(), 1).expect("open");
+    let content = b"content";
+    let sha = store.put_binary_blob(content).expect("blob");
+    store
+        .write_with(&NoFaults, |tx| {
+            enqueue_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: "j1".to_owned(),
+                    workspace_id: "ws".to_owned(),
+                    target_path: "notes/a.md".to_owned(),
+                    content_sha256: sha.clone(),
+                    preimage: Preimage::Absent,
+                    target_generation: 1,
+                    now_ms: 1,
+                },
+            )?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enqueue");
+    let returned = store
+        .open_displacement(&displacement_spec("j1", "6a31.0"))
+        .expect("open returned");
+    let kept = store
+        .open_displacement(&displacement_spec("j2", "6a32.0"))
+        .expect("open kept");
+    assert!(
+        store
+            .path_is_displaced("ws", "notes/a.md")
+            .expect("displaced")
+    );
+    assert_eq!(
+        store.synchronous_setting().expect("synchronous"),
+        1,
+        "opening a row syncs that one commit and leaves the session at NORMAL"
+    );
+    assert_eq!(
+        store.list_displacements_for_job("j1").expect("for job")[0].state,
+        DisplacementState::Open
+    );
+    assert!(
+        store
+            .displacement_names()
+            .expect("names")
+            .contains("6a31.0")
+    );
+    assert!(
+        !store
+            .displacement_names()
+            .expect("names")
+            .contains("6a31.1")
+    );
+
+    store
+        .resolve_displacement(
+            returned,
+            DisplacementResolution::Discard,
+            Some(("j1", JobStatus::Complete)),
+            9,
+        )
+        .expect("discard");
+    assert_eq!(
+        store
+            .load_materialization_job("j1")
+            .expect("load")
+            .expect("job")
+            .status,
+        JobStatus::Complete
+    );
+    let outside = hex_sha256(b"outside");
+    store
+        .resolve_displacement(
+            kept,
+            DisplacementResolution::Keep {
+                displaced_sha256: Some(&outside),
+            },
+            None,
+            10,
+        )
+        .expect("keep");
+    assert!(
+        !store
+            .displacement_names()
+            .expect("names")
+            .contains("6a31.0")
+    );
+
+    assert!(
+        !store
+            .path_is_displaced("ws", "notes/a.md")
+            .expect("displaced")
+    );
+    assert!(
+        store
+            .list_unsettled_displacements()
+            .expect("unsettled")
+            .is_empty()
+    );
+
+    // A staged file that stays where it is starts kept, in an ordinary
+    // commit. With no hash it stays unsettled, so a sweep reads it again.
+    store
+        .keep_displacement(&displacement_spec("j3", "6a33.0"), None)
+        .expect("keep unread");
+    assert_eq!(
+        store.list_unsettled_displacements().expect("unsettled")[0].job_id,
+        "j3"
+    );
+    assert!(
+        !store
+            .path_is_displaced("ws", "notes/a.md")
+            .expect("displaced"),
+        "a kept file is not going back"
+    );
+    let evidence = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(evidence.len(), 2);
+    assert_eq!(evidence[0].displacement_id, kept);
+    assert_eq!(
+        evidence[0].displaced_sha256.as_deref(),
+        Some(outside.as_str())
+    );
+    assert_eq!(evidence[1].state, DisplacementState::Kept);
+    assert_eq!(evidence[1].displaced_sha256, None);
+    assert!(
+        store
+            .list_kept_displacements("other")
+            .expect("other")
+            .is_empty()
+    );
+    assert!(store.holds_content(&sha).expect("holds"));
+    assert!(!store.holds_content(&outside).expect("holds"));
 }

@@ -41,6 +41,7 @@ import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes"
 import { createLiveTickets } from "./liveTickets";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import {createLinkLiveBrowserResolver} from "./linkLiveBrowserAuth";
+import {normalizeLinkRefusal, opaqueLinkRefusal} from "./linkRefusal";
 import {createLinkLiveHttp} from "./linkLiveHttp";
 import {createLiveMembershipRegistry} from "./liveMembership";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
@@ -370,8 +371,9 @@ const fetchHandler = async (request: Request): Promise<Response> => {
     }, { status: storage.unavailable.aborted ? 503 : 200 });
   }
   const refusal = relayApiVersionRefusal(request.headers);
-  if (refusal) return errorResponse(refusal);
-  return relayHandler(request);
+  const result = refusal ? errorResponse(refusal) : await relayHandler(request);
+  const path = new URL(request.url).pathname;
+  return /^\/sync\/link(?:[/-]|$)/.test(path) || linkLivePaths.has(path) ? normalizeLinkRefusal(result, linkLivePaths.has(path)) : result;
 };
 
 // Headroom over the blob cap so a maximal valid blob PUT still passes; the
@@ -426,6 +428,11 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 // more arrive or any host lists them.
 const AUTOMATION_PRESS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 setInterval(() => {
+  try {
+    storage.purgeExpiredShareRemovals(Date.now());
+  } catch (error) {
+    console.error("[sync-relay] share removal prune failed:", error);
+  }
   pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
     console.error("[sync-relay] automation press prune failed:", error);
   });
@@ -444,6 +451,7 @@ const server = serveFetchHandler({
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES),
   oversized: (url) =>
+    /^\/sync\/link(?:[/-]|$)/.test(url.pathname) || linkLivePaths.has(url.pathname) ? opaqueLinkRefusal() :
     url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),

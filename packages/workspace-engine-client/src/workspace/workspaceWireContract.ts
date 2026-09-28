@@ -1144,6 +1144,12 @@ const WorkspaceResultSchemas = {
       Schema.Literal("ready"),
       Schema.Literal("degraded"),
     ]),
+    // A write in this workspace found a filesystem with no rename that
+    // refuses to replace (FAT, exFAT, some SMB and FUSE mounts). Writes still
+    // happen, but a file another program changes at that moment can be lost.
+    noAtomicPlacement: Schema.Boolean,
+    recoveryUnavailable: Schema.Boolean,
+    keptFiles: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
   }),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,

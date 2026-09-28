@@ -92,10 +92,14 @@ export async function collectUnreferencedBlobs(
     // point of holding it. Without this second clause a proposal left open
     // past the grace window would lose its content to the sweep and could
     // never be accepted, so the granter's only honest answer would be
-    // "decline". A settled proposal stops protecting its blobs: an accepted
-    // one has them in the log, and a declined one never will.
+    // "decline". Removal receipts retain declined proposals during Undo.
     // Immutable publications retain their manifest and bundle pins after withdrawal.
     const cutoff = options.nowMs - storage.options.blobGraceMs;
+    const retainedProposal = `(p.state = 'open' OR EXISTS (
+      SELECT 1 FROM sync_relay_share_removals r, json_each(r.proposals_json) proposal
+      WHERE r.share_id = p.share_id AND r.undone = 0 AND r.voided = 0
+        AND r.expires_at_ms > ? AND proposal.value = p.proposal_id
+    ))`;
     // Read aged candidates without a write lock, then scan log roots once.
     const agedCandidates = new Set<string>();
     const agedRows = storage.db
@@ -109,7 +113,7 @@ export async function collectUnreferencedBlobs(
              FROM sync_relay_share_proposal_ops o
              JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
              WHERE p.workspace_id = b.workspace_id
-               AND p.state = 'open'
+               AND ${retainedProposal}
                AND o.after_blob_sha256 = b.sha256
            )
            AND NOT EXISTS (
@@ -118,7 +122,7 @@ export async function collectUnreferencedBlobs(
            )
          ORDER BY b.sha256`,
       )
-      .iterate(workspaceId, cutoff);
+      .iterate(workspaceId, cutoff, options.nowMs);
     for (const row of agedRows) agedCandidates.add(String(row.sha256));
     const smallInventory = agedCandidates.size <= DIRECT_SQL_INVENTORY_LIMIT;
     const candidates = await excludeLogReferencedBlobs(storage, workspaceId, agedCandidates);
@@ -139,7 +143,7 @@ export async function collectUnreferencedBlobs(
            SELECT 1
            FROM sync_relay_share_proposal_ops o
            JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
-           WHERE p.workspace_id = ? AND p.state = 'open' AND o.after_blob_sha256 = ?
+           WHERE p.workspace_id = ? AND ${retainedProposal} AND o.after_blob_sha256 = ?
          )
          AND NOT EXISTS (
            SELECT 1 FROM sync_relay_app_publication_blobs p
@@ -152,7 +156,7 @@ export async function collectUnreferencedBlobs(
          AND NOT EXISTS (
            SELECT 1 FROM sync_relay_share_proposal_ops o
            JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
-           WHERE p.workspace_id = ? AND p.state = 'open' AND o.after_blob_sha256 = ?
+           WHERE p.workspace_id = ? AND ${retainedProposal} AND o.after_blob_sha256 = ?
          )
          AND NOT EXISTS (
            SELECT 1 FROM sync_relay_app_publication_blobs p
@@ -176,13 +180,14 @@ export async function collectUnreferencedBlobs(
         for (const sha256 of chunk) {
           const scanned = bulk && isCanonicalBlobSha(sha256);
           if (scanned && !unreferenced.has(sha256)) continue;
-          const result = scanned ? deleteScannedStmt!.run(workspaceId, sha256, cutoff, workspaceId, sha256) : deleteStmt.run(
+          const result = scanned ? deleteScannedStmt!.run(workspaceId, sha256, cutoff, workspaceId, options.nowMs, sha256) : deleteStmt.run(
             workspaceId,
             sha256,
             cutoff,
             workspaceId,
             sha256,
             workspaceId,
+            options.nowMs,
             sha256,
           );
           if (result.changes > 0) removedSha256s.push(sha256);

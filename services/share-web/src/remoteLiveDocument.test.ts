@@ -9,6 +9,7 @@ import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createLinkLiveClient} from "./linkLiveClient";
 import {remoteLiveDocument} from "./remoteLiveDocument";
 import {LIVE_UPDATE_REFUSAL_VALUES, type LiveUpdateRefusal} from "@dohc/live-session-contract/live-update-admission";
+import {LINK_REFUSALS, linkRefusalBody, type LinkRefusalCode} from "@dohc/security-contract/link-refusal";
 
 const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384},
   maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384},
@@ -16,6 +17,15 @@ const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVecto
   maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {for (const stop of cleanup.splice(0)) await stop();});
+
+it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("returns the same scoped message to an agent: %s", async code => {
+  const client = createLinkLiveClient({relayUrl: "https://relay.test", publicOrigin: "https://share.test", exchangeKey: "x".repeat(32),
+    limits: {maxPendingRequests: 1, maxRequestBytes: 4096, maxResponseBytes: 8192, timeoutMs: 1000}, browserLimits: limits,
+    resolveMaterial: async () => ({ok: false, status: 404}), fetchRelay: async () => {throw Error("unused");}});
+  const result = await remoteLiveDocument({client, limits, discriminator: "abcdefghijkl", cookie: "", signal: new AbortController().signal,
+    request: async () => Response.json(linkRefusalBody(code), {status: LINK_REFUSALS[code].status})}, "docs/a.md");
+  expect(result).toMatchObject({ok: false, outcome: "not-applied", error: LINK_REFUSALS[code].error});
+});
 
 async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.provider.maxPendingUpdateBytes, result?: LiveUpdateRefusal | "application-pending") {
   const doc = markdownToYDoc("Hello **world**.\n");

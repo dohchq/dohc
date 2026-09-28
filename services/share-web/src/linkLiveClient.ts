@@ -8,6 +8,7 @@ import type {LiveGatewayOptions, LiveGatewaySession, LiveGatewayHostRoute} from 
 import {parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits} from "./namedLiveBrowserClient";
 import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {isSessionDiscriminator} from "./sessionDiscriminator";
+import {linkRefusalBody, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 
 const exact = (value: unknown, keys: string): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join() === keys;
 async function untilAborted<T>(work: Promise<T>, signal: AbortSignal, refusal: () => T): Promise<T> {
@@ -45,9 +46,14 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
         "x-dohc-link-profile-secret": material.profileSecret, origin: options.publicOrigin, "x-dohc-relay-exchange-key": options.exchangeKey}}));
     try {
       signal.throwIfAborted();
-      if (response.status !== 200 || response.redirected || response.headers.has("location") ||
+      if (response.redirected || response.headers.has("location") ||
         response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") return null;
-      return {value: await readBoundedJson(response, limits.maxResponseBytes, signal), setCookie: material.setCookie};
+      const value = await readBoundedJson(response, limits.maxResponseBytes, signal);
+      if (response.status !== 200) {
+        const code = parseLinkRefusal(value, response.status);
+        return code ? {refusal: Response.json(linkRefusalBody(code), {status: response.status, headers: {"cache-control": "private, no-store"}})} : null;
+      }
+      return {value, setCookie: material.setCookie};
     } finally {await response.body?.cancel().catch(() => {});}
   }
   async function handle(request: Request): Promise<Response> {
@@ -65,6 +71,7 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
       if (document ? typeof body.path !== "string" || body.path.length > 1024 || !/\.md$/i.test(body.path) : !parseLiveUpdateIdentifier(body.objectId)) return refused();
       const result = await relayRequest(request, body.discriminator, document ? "/sync/live/link-document" : "/sync/live/link-tickets", body, signal);
       if (!result) return refused();
+      if (result.refusal) return result.refusal;
       let output: unknown;
       if (document) {
         if (!exact(result.value, "objectId")) return refused();
@@ -91,7 +98,7 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
     const work = (async (): Promise<LiveGatewaySession | null> => {
     try {
       const result = await relayRequest(request, discriminator, "/sync/live/link-session", {discriminator}, signal);
-      if (!result || !exact(result.value, "grantId,kind,principalId,sessionId,shareId,workspaceId") || result.value.kind !== "link") return null;
+      if (!result || "refusal" in result || !exact(result.value, "grantId,kind,principalId,sessionId,shareId,workspaceId") || result.value.kind !== "link") return null;
       const value = result.value;
       return {kind: "link", workspaceId: parseLiveUpdateIdentifier(value.workspaceId), shareId: parseLiveUpdateIdentifier(value.shareId),
         grantId: parseLiveUpdateIdentifier(value.grantId), principalId: parseLiveUpdateIdentifier(value.principalId), sessionId: parseLiveUpdateIdentifier(value.sessionId)};

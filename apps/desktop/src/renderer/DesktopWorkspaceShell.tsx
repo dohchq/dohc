@@ -85,8 +85,11 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
+import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
+import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
+import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -158,6 +161,7 @@ import {
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
+import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { useAskAgent } from "./shell/useAskAgent";
 import { collectionAutomationOf, NoticeCenter } from "./workbench/NoticeCenter";
@@ -622,6 +626,9 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const workspaceId = props.workspace.workspaceId;
+  const focusRoot = useRef<HTMLDivElement>(null);
+  useFocusReturn(true, focusRoot, () => document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'));
+  useFocusSurface(focusRoot, () => null);
   // Read by callbacks that outlive a render: the global key handler and a
   // slow update check must not act for a workspace this window has left.
   const workspaceIdRef = useRef(workspaceId);
@@ -780,6 +787,9 @@ export function DesktopWorkspaceShell(props: {
     clearSearchError,
     reportSyncFailure,
     clearSyncFailure,
+    reportDriveLimit,
+    reportKeptFiles,
+    reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -792,6 +802,13 @@ export function DesktopWorkspaceShell(props: {
     runShellErrorAction,
   } = useShellError(workspaceId);
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
+  // Share removals from Chats, Settings and the share dialog: one notice
+  // with Undo, held here so it outlives the surface that removed the access.
+  const shareRemovals = useShareRemovalNotices({
+    workspaceId,
+    showSuccessNotice,
+    reportShellFailure,
+  });
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
   // polls and subscriptions off onError, so a fresh arrow per shell render
@@ -4342,6 +4359,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportFailureMessage,
+    shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
     collaboration: chatCollaboration,
@@ -4376,6 +4394,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportFailureMessage,
+    shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
     collaboration: null,
@@ -4558,15 +4577,50 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
-  // A dismissed sync failure stays dismissed until it ends, across remounts.
+  const driveLimitNotice = useDriveLimitNotice({
+    workspaceId,
+    unavailable: syncStatus?.atomicPlacementUnavailable === true,
+    report: reportDriveLimit,
+  });
+  const revealRecoveryWorkspace = useCallback(() => {
+    const askedFor = workspaceId;
+    void bridge().revealWorkspaceFolder({ workspaceId: askedFor, recoveryCopies: true }).catch((error) => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportShellError("Could not show the recovery folder.", error);
+    });
+  }, [workspaceId, reportShellError]);
+  const retryFileRecovery = useCallback(() => {
+    const askedFor = workspaceId;
+    if (workspaceIdRef.current !== askedFor) return;
+    void bridge().retryFileRecovery({ workspaceId: askedFor }).then(() => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportRecoveryUnavailable(false, () => undefined, revealRecoveryWorkspace);
+    }).catch((error) => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportShellError("dohc could not retry file recovery.", error, retryFileRecovery, "file-recovery-unavailable");
+    });
+  }, [workspaceId, reportRecoveryUnavailable, revealRecoveryWorkspace, reportShellError]);
+  useEffect(() => {
+    if (syncStatus?.recoveryUnavailable === undefined) return;
+    reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
+  }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
+  const keptFilesNotice = useKeptFilesNotice({
+    workspaceId,
+    paths: syncStatus?.keptFiles,
+    report: reportKeptFiles,
+    openFolder: revealRecoveryWorkspace,
+  });
+  // A dismissed sync failure stays dismissed until it ends, and a dismissed
+  // drive limit for the session, across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
-      if (shellErrors.find((error) => error.id === id)?.kind === "cloud-sync") {
-        syncFailureNotice.noteDismissed();
-      }
+      const kind = shellErrors.find((error) => error.id === id)?.kind;
+      if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
+      if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
+      if (kind === "kept-files") keptFilesNotice.noteDismissed();
       dismissShellError(id);
     },
-    [dismissShellError, shellErrors, syncFailureNotice],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, syncFailureNotice],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
@@ -4574,6 +4628,9 @@ export function DesktopWorkspaceShell(props: {
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <div
       data-testid="workspace-shell"
+      ref={focusRoot}
+      tabIndex={-1}
+      data-focus-surface="workspace"
       // Flips to "true" only once openWorkspace has resolved — which in main
       // awaits the file watcher's initial scan (workspaceActivity.open races
       // handle.ready). The shell element itself mounts immediately, so a test
@@ -5833,6 +5890,7 @@ export function DesktopWorkspaceShell(props: {
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
             onWorkspaceFilesChanged={onSettingsFilesChanged}
+            shareRemovals={shareRemovals}
             onOpenCloud={() => {
               closeSettings();
               setCloudOpen(true);
@@ -5873,6 +5931,7 @@ export function DesktopWorkspaceShell(props: {
               workspaceId={workspaceId}
               target={shareTarget}
               onClose={() => setShareTarget(null)}
+              shareRemovals={shareRemovals}
             />
           </Suspense>
         </Overlay>

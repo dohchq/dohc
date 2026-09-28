@@ -60,6 +60,16 @@ async fn open_workspace(
     workspace_id: &str,
     id: u64,
 ) -> WorkspaceHandle {
+    open_workspace_with_capture_mode(transport, scratch, workspace_id, id, None).await
+}
+
+async fn open_workspace_with_capture_mode(
+    transport: &InProcessTransport<EngineService>,
+    scratch: &ScratchDir,
+    workspace_id: &str,
+    id: u64,
+    capture_mode: Option<&str>,
+) -> WorkspaceHandle {
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -70,6 +80,7 @@ async fn open_workspace(
                 json!({
                     "rootDir": scratch.path().to_string_lossy(),
                     "workspaceId": workspace_id,
+                    "captureMode": capture_mode,
                 }),
             ),
         )
@@ -77,6 +88,10 @@ async fn open_workspace(
         .expect("workspace open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    if capture_mode == Some("none") {
+        // workspace.open awaits startup replay even when capture is disabled.
+        return handle;
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut status_id = id.saturating_add(1_000_000);
     loop {
@@ -4519,18 +4534,20 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     use std::os::windows::fs::OpenOptionsExt;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let workspace_id = "ws-rpc-ydoc-rename-pair-not-stranded";
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
-    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+    // Capture could re-import old.bin while its paired delete is pending.
+    let handle =
+        open_workspace_with_capture_mode(&transport, &scratch, workspace_id, 1, Some("none")).await;
+    call(&transport, &handle, 2, "versions.ensureMain", json!({})).await;
 
     let bytes: &[u8] = &[4, 8, 15, 16, 23, 42];
     call(
         &transport,
         &handle,
-        2,
+        3,
         "versionedBinary.write",
         json!({ "versionId": "main", "path": "old.bin", "bytes": bytes, "origin": "api" }),
     )
@@ -4556,7 +4573,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     let renamed = call(
         &transport,
         &handle,
-        3,
+        4,
         "versionedText.rename",
         json!({
             "versionId": "main",
@@ -4577,7 +4594,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     call(
         &transport,
         &handle,
-        4,
+        5,
         "versionedText.delete",
         json!({
             "versionId": "main",
@@ -4589,12 +4606,19 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     .await;
     drop(lock);
 
-    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
     drop(transport);
 
     let restarted_service = Arc::new(EngineService::new());
     let restarted_transport = InProcessTransport::new(restarted_service);
-    let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
+    let restarted_handle = open_workspace_with_capture_mode(
+        &restarted_transport,
+        &scratch,
+        workspace_id,
+        1,
+        Some("none"),
+    )
+    .await;
 
     // RED (bug): the replay's rename-pair check treats the write's cancelled
     // status like Conflict — it marks the paired old.bin delete conflict too

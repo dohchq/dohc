@@ -1,4 +1,5 @@
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
+import {normalizeLinkRefusal} from "./linkRefusal";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import type { AppBackendRoute } from "./appBackendRoutes";
 import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
@@ -391,6 +392,7 @@ export function createSyncRelayHandler({
   ): AuthorizedShareAction {
     const result = authorizeShareAction({ storage, actorUserId, shareId, action });
     if (result.ok) return result;
+    if (storage.listRemovedSharesForRecipient(actorUserId, shareId).length > 0) throw relayError("share_access_removed");
     if (result.reason === "denied" && (action === "append" || action === "propose")) {
       throw relayError("share_read_only");
     }
@@ -555,14 +557,12 @@ export function createSyncRelayHandler({
   ) => {
     const {capabilityToken, capability} = requireLinkCapability(request);
     const admittedAtMs = nowMs();
-    if (
-      !capabilityRateLimiter.allow(
+    const admitted =
+      capabilityRateLimiter.allow(
         capability.session.capabilityHash,
         admittedAtMs,
-      ) || !grantRateLimiter.allow(capability.grantId, admittedAtMs)
-    ) {
-      throw relayError("link_read_rate_limited");
-    }
+      ) && grantRateLimiter.allow(capability.grantId, admittedAtMs);
+    if (!admitted) throw relayError("link_read_rate_limited");
     return { capabilityToken, capability };
   };
 
@@ -688,7 +688,7 @@ export function createSyncRelayHandler({
     egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
   const respondToLinkAppCollection = createLinkAppCollectionRoutes({storage,limits:appPublicationLimits,policy:appCollectionPolicy,linkKey:linkKey!,publicEditRelease,nowMs,
     requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes},discussionActivity});
-  const handle: SyncRelayHandler = async (request) => {
+  const dispatch: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
       if (pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve") {
@@ -868,6 +868,7 @@ export function createSyncRelayHandler({
         route.route === "share-link-retune" ||
         route.route === "share-grant-promote" ||
         route.route === "share-grant-revoke" ||
+        route.route === "share-undo" ||
         route.route === "share-revoke"
       ) {
         return await respondToShareGrantTransition(request, route, actor);
@@ -958,6 +959,12 @@ export function createSyncRelayHandler({
     } catch (error) {
       return errorResponse(error);
     }
+  };
+  const handle: SyncRelayHandler = async (request) => {
+    const result = await dispatch(request);
+    const path = new URL(request.url).pathname;
+    if (!/^\/sync\/link(?:[/-]|$)/.test(path) || result.status < 400) return result;
+    return normalizeLinkRefusal(result);
   };
   return Object.assign(handle, {
     resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
@@ -1052,6 +1059,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
       throw notFound();
     }
     if (parts.length === 3) return { route: "share", shareId };
+    if (parts.length === 4 && parts[3] === "undo") return { route: "share-undo", shareId };
     if (parts.length === 4 && parts[3] === "revoke") return { route: "share-revoke", shareId };
     if (parts.length === 6 && parts[3] === "links" && parts[5] === "rotate") {
       return {

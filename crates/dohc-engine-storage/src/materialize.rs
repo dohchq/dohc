@@ -357,11 +357,23 @@ const JOB_COLUMNS: &str = "job_id, workspace_id, target_path, content_sha256, pr
 pub(crate) fn list_pending_jobs(
     conn: &Connection,
 ) -> Result<Vec<MaterializationJob>, StorageError> {
+    list_jobs(conn, true)
+}
+
+pub(crate) fn list_jobs(
+    conn: &Connection,
+    pending_only: bool,
+) -> Result<Vec<MaterializationJob>, StorageError> {
+    let filter = if pending_only {
+        "WHERE status = 'pending'"
+    } else {
+        ""
+    };
     let sql = format!(
         "SELECT {JOB_COLUMNS} FROM materialization_jobs \
-         WHERE status = 'pending' ORDER BY created_at_ms ASC, job_id ASC"
+         {filter} ORDER BY created_at_ms ASC, job_id ASC"
     );
-    let mut stmt = conn.prepare(&sql).map_err(StorageError::corrupt)?;
+    let mut stmt = conn.prepare_cached(&sql).map_err(StorageError::corrupt)?;
     let rows = stmt
         .query_map([], row_to_job)
         .map_err(StorageError::corrupt)?;
@@ -370,6 +382,14 @@ pub(crate) fn list_pending_jobs(
         jobs.push(job.map_err(StorageError::corrupt)?);
     }
     Ok(jobs)
+}
+
+pub(crate) fn has_pending_job_for_path(
+    conn: &Connection,
+    workspace_id: &str,
+    path: &str,
+) -> Result<bool, StorageError> {
+    conn.query_row("SELECT EXISTS (SELECT 1 FROM materialization_jobs WHERE status = 'pending' AND target_path = ?2 AND (?1 = '' OR workspace_id = ?1 OR workspace_id = ''))", [workspace_id, path], |row| row.get(0)).map_err(StorageError::corrupt)
 }
 
 /// Load a single job by id.
@@ -438,6 +458,351 @@ pub(crate) fn requeue_conflict(conn: &Connection, job_id: &str) -> Result<bool, 
     .map_err(StorageError::persist)
 }
 
+/// Where a displaced file stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplacementState {
+    /// The displaced file holds bytes the store does not have, and has not
+    /// gone back to its path yet. Recovery puts it back.
+    Open,
+    /// The displaced file held bytes the store does not have, and could not
+    /// go back to its path. It stays in the staging directory and this row is
+    /// the evidence of that outside change until the engine captures it.
+    Kept,
+}
+
+impl DisplacementState {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "open" => Some(DisplacementState::Open),
+            "kept" => Some(DisplacementState::Kept),
+            _ => None,
+        }
+    }
+}
+
+/// Inputs to [`open_displacement`] and [`keep_displacement`], for a file the
+/// materializer moved off `target_path` into its staging directory.
+#[derive(Debug, Clone)]
+pub struct DisplacementSpec {
+    pub job_id: String,
+    pub workspace_id: String,
+    /// Empty for a staged file no job identifies.
+    pub target_path: String,
+    /// File name, in the staging directory, the target moved to.
+    pub displaced_name: String,
+    /// The bytes the job expected to move aside, its preimage. Empty when no
+    /// job identifies the file.
+    pub expected_sha256: String,
+    /// The bytes the job writes, or `None` for a delete.
+    pub content_sha256: Option<String>,
+    pub now_ms: i64,
+}
+
+/// A file the materializer moved off a target path whose bytes the store does
+/// not have.
+///
+/// A moved file the store holds needs no row: it is deleted, and a crash
+/// before that leaves a staged file whose name recovery decodes. Bytes the
+/// store lacks get an `open` row before anything else happens to them. The
+/// file then goes back to its path and the row is deleted, or the row turns
+/// `kept` when the file cannot go back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Displacement {
+    pub displacement_id: i64,
+    pub job_id: String,
+    pub workspace_id: String,
+    pub target_path: String,
+    pub displaced_name: String,
+    pub expected_sha256: String,
+    pub content_sha256: Option<String>,
+    pub state: DisplacementState,
+    /// For a kept file, the hash of the bytes it held when inspected. `None`
+    /// when they could not be read whole: over the cap, not a regular file,
+    /// unreadable, or still open for writing by another program. Replay
+    /// inspects such a file again.
+    pub displaced_sha256: Option<String>,
+    pub created_at_ms: i64,
+}
+
+/// How [`resolve_displacement`] ends a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplacementResolution<'a> {
+    /// Delete the row: nothing is left at the displaced name.
+    Discard,
+    /// Keep the row as the evidence of an outside change.
+    Keep { displaced_sha256: Option<&'a str> },
+}
+
+const DISPLACEMENT_COLUMNS: &str = "displacement_id, job_id, workspace_id, target_path, \
+     displaced_name, expected_sha256, content_sha256, state, displaced_sha256, created_at_ms";
+
+fn row_to_displacement(row: &rusqlite::Row<'_>) -> rusqlite::Result<Displacement> {
+    let state_raw: String = row.get(7)?;
+    let state = DisplacementState::parse(&state_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unknown displacement state",
+            )),
+        )
+    })?;
+    Ok(Displacement {
+        displacement_id: row.get(0)?,
+        job_id: row.get(1)?,
+        workspace_id: row.get(2)?,
+        target_path: row.get(3)?,
+        displaced_name: row.get(4)?,
+        expected_sha256: row.get(5)?,
+        content_sha256: row.get(6)?,
+        state,
+        displaced_sha256: row.get(8)?,
+        created_at_ms: row.get(9)?,
+    })
+}
+
+/// Which rows come first.
+#[derive(Clone, Copy)]
+enum Order {
+    /// For evidence: in the order the outside changes happened.
+    OldestFirst,
+    /// For recovery: the last file moved off a path held its newest bytes, so
+    /// it goes back first and an older displaced file then finds the name
+    /// taken instead of taking it.
+    NewestFirst,
+}
+
+fn query_displacements(
+    conn: &Connection,
+    filter: &str,
+    order: Order,
+    params: impl rusqlite::Params,
+) -> Result<Vec<Displacement>, StorageError> {
+    let direction = match order {
+        Order::OldestFirst => "ASC",
+        Order::NewestFirst => "DESC",
+    };
+    let sql = format!(
+        "SELECT {DISPLACEMENT_COLUMNS} FROM materialization_displacements \
+         WHERE {filter} ORDER BY displacement_id {direction}"
+    );
+    let mut stmt = conn.prepare_cached(&sql).map_err(StorageError::corrupt)?;
+    let rows = stmt
+        .query_map(params, row_to_displacement)
+        .map_err(StorageError::corrupt)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt)
+}
+
+/// Record that a staged file holds bytes the store does not have, before the
+/// materializer moves anything to put it back. Returns the row id later
+/// transitions name.
+///
+/// The engine runs with `synchronous = NORMAL`, where an operating-system
+/// crash can lose recent commits while file renames survive. This commit alone
+/// runs with `synchronous = FULL`, which syncs the WAL, so no rename that
+/// follows outlives the row that says the file must not be deleted. Every
+/// earlier commit is synced with it. The connection's own setting is restored
+/// after.
+pub(crate) fn open_displacement(
+    conn: &Connection,
+    spec: &DisplacementSpec,
+) -> Result<i64, StorageError> {
+    Ok(open_displacements(conn, std::slice::from_ref(spec))?[0])
+}
+
+/// Adopt a recovery sweep's unknown files with one WAL sync.
+pub(crate) fn open_displacements(
+    conn: &Connection,
+    specs: &[DisplacementSpec],
+) -> Result<Vec<i64>, StorageError> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    const SYNCHRONOUS_FULL: i64 = 2;
+    let session: i64 = conn
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .map_err(StorageError::corrupt)?;
+    conn.pragma_update(None, "synchronous", SYNCHRONOUS_FULL)
+        .map_err(StorageError::persist)?;
+    let inserted = (|| {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(StorageError::persist)?;
+        let mut ids = Vec::with_capacity(specs.len());
+        for spec in specs {
+            tx.execute(
+                "INSERT INTO materialization_displacements \
+             (job_id, workspace_id, target_path, displaced_name, expected_sha256, content_sha256, \
+              state, displaced_sha256, created_at_ms, resolved_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', NULL, ?7, NULL)",
+                rusqlite::params![
+                    spec.job_id,
+                    spec.workspace_id,
+                    spec.target_path,
+                    spec.displaced_name,
+                    spec.expected_sha256,
+                    spec.content_sha256,
+                    spec.now_ms,
+                ],
+            )
+            .map_err(StorageError::persist)?;
+            ids.push(tx.last_insert_rowid());
+        }
+        tx.commit().map_err(StorageError::persist)?;
+        Ok::<_, StorageError>(ids)
+    })();
+    let restored = conn
+        .pragma_update(None, "synchronous", session)
+        .map_err(StorageError::persist);
+    let displacement_id = inserted?;
+    restored?;
+    Ok(displacement_id)
+}
+
+/// Record a staged file that stays where it is as a `kept` row, in an
+/// FULL commit before resolving it as kept.
+pub(crate) fn keep_displacement(
+    conn: &Connection,
+    spec: &DisplacementSpec,
+    displaced_sha256: Option<&str>,
+) -> Result<(), StorageError> {
+    let id = open_displacement(conn, spec)?;
+    resolve_displacement(
+        conn,
+        id,
+        DisplacementResolution::Keep { displaced_sha256 },
+        None,
+        spec.now_ms,
+    )
+}
+
+/// Names held by displacement rows, including retained copies.
+pub(crate) fn displacement_names(
+    conn: &Connection,
+) -> Result<std::collections::HashSet<String>, StorageError> {
+    let mut query = conn
+        .prepare("SELECT displaced_name FROM materialization_displacements")
+        .map_err(StorageError::corrupt)?;
+    query
+        .query_map([], |row| row.get(0))
+        .map_err(StorageError::corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(StorageError::corrupt)
+}
+
+/// End a row and, in the same transaction, give its job a terminal status.
+pub(crate) fn resolve_displacement(
+    conn: &Connection,
+    displacement_id: i64,
+    resolution: DisplacementResolution<'_>,
+    job: Option<(&str, JobStatus)>,
+    now_ms: i64,
+) -> Result<(), StorageError> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::persist)?;
+    match resolution {
+        DisplacementResolution::Discard => tx.execute(
+            "DELETE FROM materialization_displacements WHERE displacement_id = ?1",
+            [displacement_id],
+        ),
+        DisplacementResolution::Keep { displaced_sha256 } => tx.execute(
+            "UPDATE materialization_displacements \
+             SET state = 'kept', displaced_sha256 = ?2, resolved_at_ms = ?3 \
+             WHERE displacement_id = ?1",
+            rusqlite::params![displacement_id, displaced_sha256, now_ms],
+        ),
+    }
+    .map_err(StorageError::persist)?;
+    if let Some((job_id, status)) = job {
+        set_status(&tx, job_id, status, now_ms)?;
+    }
+    tx.commit().map_err(StorageError::persist)
+}
+
+/// Rows a replay must look at, newest first: every open row, and every kept
+/// row whose bytes could not be read.
+pub(crate) fn list_unsettled_displacements(
+    conn: &Connection,
+) -> Result<Vec<Displacement>, StorageError> {
+    query_displacements(
+        conn,
+        "state = 'open' OR (state = 'kept' AND displaced_sha256 IS NULL)",
+        Order::NewestFirst,
+        [],
+    )
+}
+
+/// Open rows for one path, from any job, newest first. An empty
+/// `workspace_id` on either side matches every workspace.
+pub(crate) fn list_unsettled_displacements_for_path(
+    conn: &Connection,
+    workspace_id: &str,
+    path: &str,
+) -> Result<Vec<Displacement>, StorageError> {
+    query_displacements(
+        conn,
+        "state = 'open' AND target_path = ?2 \
+         AND (?1 = '' OR workspace_id = ?1 OR workspace_id = '')",
+        Order::NewestFirst,
+        [workspace_id, path],
+    )
+}
+
+/// Every row of one job, in any state, newest first.
+pub(crate) fn list_displacements_for_job(
+    conn: &Connection,
+    job_id: &str,
+) -> Result<Vec<Displacement>, StorageError> {
+    query_displacements(conn, "job_id = ?1", Order::NewestFirst, [job_id])
+}
+
+/// Kept rows for one workspace, oldest first. They are the outside changes the
+/// engine has not captured yet.
+pub(crate) fn list_kept_displacements(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<Displacement>, StorageError> {
+    query_displacements(
+        conn,
+        "state = 'kept' AND (workspace_id = ?1 OR workspace_id = '')",
+        Order::OldestFirst,
+        [workspace_id],
+    )
+}
+
+/// Whether an open row names `path`: a replace moved bytes the store lacks
+/// off that path and has not put them back yet, so its absence on disk is not
+/// a delete. Staged files without a row are the materializer's to find. An
+/// empty `workspace_id` on either side matches every workspace.
+pub(crate) fn path_is_displaced(
+    conn: &Connection,
+    workspace_id: &str,
+    path: &str,
+) -> Result<bool, StorageError> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM materialization_displacements \
+         WHERE state = 'open' AND target_path = ?2 \
+           AND (?1 = '' OR workspace_id = ?1 OR workspace_id = ''))",
+        [workspace_id, path],
+        |row| row.get(0),
+    )
+    .map_err(StorageError::corrupt)
+}
+
+/// Whether the store holds content with this hash, as a text or binary blob.
+pub(crate) fn holds_content(conn: &Connection, sha256: &str) -> Result<bool, StorageError> {
+    conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM blobs WHERE sha256 = ?1) \
+             OR EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = ?1)",
+    )
+    .map_err(StorageError::corrupt)?
+    .query_row([sha256], |row| row.get(0))
+    .map_err(StorageError::corrupt)
+}
+
 /// The number of pending jobs (cheap gauge for tests / startup logging).
 pub(crate) fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
     conn.query_row(
@@ -464,13 +829,13 @@ pub(crate) fn max_completed_generation_for_path(
     path: &str,
 ) -> Result<Option<i64>, StorageError> {
     // MAX over an empty set yields a single NULL row → `None`.
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT MAX(target_generation) FROM materialization_jobs \
          WHERE (?1 = '' OR workspace_id = ?1 OR workspace_id = '') \
            AND target_path = ?2 AND status = 'complete' \
            AND job_id NOT LIKE 'version-switch-%'",
-        [workspace_id, path],
-        |r| r.get::<_, Option<i64>>(0),
     )
+    .map_err(StorageError::corrupt)?
+    .query_row([workspace_id, path], |r| r.get::<_, Option<i64>>(0))
     .map_err(StorageError::corrupt)
 }

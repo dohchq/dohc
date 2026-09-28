@@ -559,8 +559,22 @@ describe("share-web Node request adapter", () => {
       });
     }
 
+    const firstClientLimited = await sendExchange(server.port, "198.51.100.1", true);
+    expect(firstClientLimited).toMatchObject({ kind: "response", status: 429 });
     const secondClient = await sendExchange(server.port, "198.51.100.2", true);
     expect(secondClient).toMatchObject({ kind: "response", status: 404 });
+  });
+
+  it.each([
+    {name: "ignores untrusted forwarding headers", trustedProxies: undefined, forwarded: "198.51.100.1", expected: "127.0.0.1"},
+    {name: "uses the rightmost untrusted address", trustedProxies: "127.0.0.1,10.0.0.2", forwarded: "198.51.100.1, 203.0.113.5, 10.0.0.2", expected: "203.0.113.5"},
+    {name: "forwards distinct trusted clients", trustedProxies: "127.0.0.1", forwarded: "198.51.100.2", expected: "198.51.100.2"},
+  ])("$name to the relay", async ({trustedProxies, forwarded, expected}) => {
+    const addresses: unknown[] = [];
+    const relayUrl = await startRelay(undefined, request => addresses.push(request.headers["x-dohc-relay-client-ip"]));
+    const server = await startShareWeb({relayUrl, trustedProxies});
+    expect(await sendExchange(server.port, forwarded)).toMatchObject({kind: "response", status: 200});
+    expect(addresses).toEqual([expected]);
   });
 
   it("limits each session to 8 blob proxies and releases settled slots", { timeout: 30_000 }, async () => {
@@ -584,7 +598,7 @@ describe("share-web Node request adapter", () => {
 
       expect(outcome.kind).toBe("response");
       if (outcome.kind !== "response") return;
-      expect(outcome.response.statusCode).toBe(429);
+      expect(outcome.response.statusCode).toBe(404);
       expect(await readResponse(outcome.response)).toBe(shareWebRefusalBody);
 
       relay.finishBlob(0);
@@ -937,7 +951,7 @@ async function settleWithin<T>(
   }
 }
 
-async function startRelay(onExchangeBody?: (body: Buffer) => void): Promise<string> {
+async function startRelay(onExchangeBody?: (body: Buffer) => void, onExchangeRequest?: (request: IncomingMessage) => void): Promise<string> {
   const server = createServer((request, response) => {
     if (request.method !== "POST" || request.url !== "/sync/link-exchange") {
       request.resume();
@@ -949,6 +963,7 @@ async function startRelay(onExchangeBody?: (body: Buffer) => void): Promise<stri
     request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
     request.on("end", () => {
       onExchangeBody?.(Buffer.concat(chunks));
+      onExchangeRequest?.(request);
       response.setHeader("content-type", "application/json");
       response.end(
         JSON.stringify({

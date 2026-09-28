@@ -4545,7 +4545,7 @@ describe("ui-state merge-on-load", () => {
       listChatChannelShares: vi.fn(async () => ({
         joined: [],
         sessionKey: "session-a",
-        relay: { state: "answered" as const, granted: [], received: [] },
+        relay: { state: "answered" as const, granted: [], received: [], removed: [] },
       })),
       presencePublish: vi.fn(async () => ({
         ok: true as const,
@@ -4679,7 +4679,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = Object.assign(chatsPageBridge(CHATS_PAGE_STATE), {
       listChatChannelShares: vi.fn(async () => ({
         joined: [], sessionKey: null,
-        relay: { state: "answered" as const, granted: [], received: [] },
+        relay: { state: "answered" as const, granted: [], received: [], removed: [] },
       })),
     });
     vi.stubGlobal("dohcDesktop", bridge);
@@ -14481,6 +14481,65 @@ describe("owner live documents", () => {
     await openCloudSettings(user);
     expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
   });
+
+  // Ending a share is reversible for 10 minutes, so the notice carries Undo.
+  // The shell holds it: it works after Settings closes, from the toast and
+  // from the Notices row the toast leaves behind.
+  it("offers Undo for an ended share on the toast and in Notices after Settings closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listRelayShares = vi.fn().mockResolvedValue({
+      granted: [
+        {
+          shareId: "share-1",
+          workspaceId: WORKSPACE.workspaceId,
+          recipientUserId: "friend",
+          recipientEmail: "friend@dohc.test",
+          selector: { paths: ["docs"], versionId: null },
+          access: "view",
+          grantId: "grant-1",
+          generation: 1,
+          createdAtMs: 1000,
+          revokedAtMs: null,
+          shareCode: "dohc-share:share-1:http://relay.test",
+        },
+      ],
+      received: [],
+      removed: [],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await openCloudSettings(user);
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    await user.click(screen.getByTestId("shared-by-me-revoke"));
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(toast.textContent).toContain(
+      "Ended the share of docs with friend@dohc.test. You can undo this for 10 minutes.",
+    );
+    expect(within(toast).getByRole("button", { name: "Undo" })).toBeTruthy();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+
+    // Closing the toast keeps the row, and the row keeps the Undo.
+    await user.click(screen.getByRole("button", { name: "Dismiss workspace notice" }));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(notices.textContent).toContain("Ended the share of docs with friend@dohc.test.");
+    await user.click(within(notices).getByRole("button", { name: "Undo" }));
+
+    await waitFor(() =>
+      expect(bridge.undoRelayShare).toHaveBeenCalledWith({ shareId: "share-1", undoId: "undo-1" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(
+        "Restored the share of docs with friend@dohc.test.",
+      ),
+    );
+    // The Undo row ran once and is gone.
+    expect(screen.queryByText(/You can undo this for 10 minutes/)).toBeNull();
+  });
 });
 
 describe("connection dialog retries", () => {
@@ -15582,6 +15641,7 @@ describe("workbench render cost", () => {
             state: "answered" as const,
             granted: [],
             received: [],
+            removed: [],
           },
         })),
         listChannelThreads: vi.fn(async () => ({

@@ -67,6 +67,10 @@ export interface ShareMountCommandDependencies<WorkspaceSummary> {
   // to refetch after a mount change.
   notifyRenderer(scope: { workspaceId: string }): void;
   logError(message: string, error: unknown): void;
+  // Reads the relay's account listing again for a workspace with an ended
+  // mount the owner may have restored, so the mount resumes. Decides for
+  // itself whether the recheck is due; a refresh only says it saw one.
+  recheckRemovedShares?(workspaceId: string): Promise<void>;
 }
 
 type ShareMountFilesLifecycleProjectionFactory = (
@@ -426,7 +430,15 @@ export function createShareMountCommands<WorkspaceSummary>(
     refresh({ workspace, assertCurrent }) {
       return withCommandAdmission(workspace.workspaceId, async () => {
         assertCurrent();
-        const mounts = dependencies.readMounts(workspace.workspaceId);
+        let mounts = dependencies.readMounts(workspace.workspaceId);
+        if (
+          dependencies.recheckRemovedShares &&
+          mounts.some((mount) => record(mount) && mount.ended === true)
+        ) {
+          await dependencies.recheckRemovedShares(workspace.workspaceId);
+          assertCurrent();
+          mounts = dependencies.readMounts(workspace.workspaceId);
+        }
         const results: ShareMountStatusRow[] = [];
         const pushResult = (
           mount: unknown,

@@ -1,4 +1,5 @@
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
+import { relayError } from "./errors";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
 
 export interface NamedLiveBrowserScope {
@@ -15,6 +16,7 @@ export interface NamedLiveBrowserContext extends NamedLiveBrowserScope {
 export function createNamedLiveBrowserResolver(options: {
   resolveActor: ResolveActor;
   authentication?: "cookie" | "bearer";
+  explainRemoval?: boolean;
   storage: Parameters<typeof authorizeNamedLiveEditShareGrant>[0]["storage"];
 }) {
   // Callers supply trusted route scope and the production session resolver.
@@ -33,6 +35,14 @@ export function createNamedLiveBrowserResolver(options: {
       throw error;
     }
     if (actor.workspaceId !== workspaceId) return null;
+    if (options.explainRemoval) {
+      const grant = options.storage.getShareGrant(grantId);
+      const share = grant && options.storage.getShare(grant.shareId);
+      if (grant?.principalKind === "user" && grant.principalUserId === actor.userId && grant.status === "revoked" &&
+        share?.shareId === shareId && share.workspaceId === workspaceId && options.storage.workspaceIsOwnedBy(workspaceId, share.granterUserId)) {
+        throw relayError("share_access_removed");
+      }
+    }
     const current = authorizeNamedLiveEditShareGrant({
       storage: options.storage, actorUserId: actor.userId, grantId,
     });
