@@ -161,6 +161,7 @@ import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 // user clicked to open the panel — queries arrived with their first letters
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "./workbench/SearchView";
+import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { SidePanel } from "./workbench/SidePanel";
 import { MoreMenu } from "./ui/MoreMenu";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
@@ -647,6 +648,9 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const workspaceId = props.workspace.workspaceId;
+  const focusRoot = useRef<HTMLDivElement>(null);
+  useFocusReturn(true, focusRoot, () => document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'));
+  useFocusSurface(focusRoot, () => null);
   // Read by callbacks that outlive a render: the global key handler and a
   // slow update check must not act for a workspace this window has left.
   const workspaceIdRef = useRef(workspaceId);
@@ -4637,6 +4641,9 @@ export function DesktopWorkspaceShell(props: {
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <div
       data-testid="workspace-shell"
+      ref={focusRoot}
+      tabIndex={-1}
+      data-focus-surface="workspace"
       // Flips to "true" only once openWorkspace has resolved — which in main
       // awaits the file watcher's initial scan (workspaceActivity.open races
       // handle.ready). The shell element itself mounts immediately, so a test

@@ -260,10 +260,11 @@ describe("transactional Collection page", () => {
   it("closes details on Escape and returns keyboard focus to the row", async () => {
     setup(); await screen.findByText("Alice");
     const open = screen.getByRole("button", { name: "Open record 1" });
+    open.focus();
     fireEvent.click(open);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
-    expect(document.activeElement).toBe(open);
+    await waitFor(() => expect(document.activeElement).toBe(open));
   });
   it("clears previously displayed records when a read loses access", async () => {
     const result = setup(); await screen.findByText("Alice");
