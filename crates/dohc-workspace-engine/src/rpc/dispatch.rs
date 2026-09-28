@@ -453,7 +453,7 @@ impl EngineService {
                 self.collections_list_pending_adoptions(&ctx, request.workspace, request.params)
                     .await?
             }
-            "watcher.status" => self.watcher_status(request.workspace)?,
+            "watcher.status" => self.watcher_status(request.workspace).await?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "capture.reconcile" => self.capture_reconcile(&ctx, request.workspace).await?,
             "capture.setAuthor" => {

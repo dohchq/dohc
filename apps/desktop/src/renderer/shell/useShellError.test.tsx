@@ -204,3 +204,31 @@ describe("useShellError", () => {
       .toBe("Could not open this Collection. The Collection changed after this preview. Preview the change again.");
   });
 });
+
+
+it("reports unavailable recovery without replacing unrelated Notices and clears it when recovery returns", () => {
+  const openFolder = vi.fn();
+  const { result } = renderHook(() => useShellError("recovery"));
+  act(() => {
+    result.current.reportShellError("Unrelated failure", undefined);
+    result.current.reportRecoveryUnavailable(true, () => undefined, openFolder);
+  });
+  const notice = result.current.shellErrors.find(row => row.kind === "file-recovery-unavailable")!;
+  expect(notice.seen).toBe(false);
+  expect(notice.details).toEqual([["Folder", ".dohc/engine/displaced"]]);
+  act(() => result.current.runShellErrorAction(notice.id));
+  expect(openFolder).toHaveBeenCalledOnce();
+  act(() => result.current.reportRecoveryUnavailable(false, () => undefined, openFolder));
+  expect(result.current.shellErrors).toHaveLength(1);
+  expect(result.current.shellErrors[0].message).toBe("Unrelated failure");
+});
+
+
+it("retries unavailable recovery through the supplied action", () => {
+  const retry = vi.fn();
+  const { result } = renderHook(() => useShellError("retry-recovery"));
+  act(() => result.current.reportRecoveryUnavailable(true, retry, vi.fn()));
+  act(() => result.current.retryShellError(result.current.shellErrors[0].id));
+  expect(retry).toHaveBeenCalledOnce();
+  expect(result.current.shellErrors).toEqual([]);
+});

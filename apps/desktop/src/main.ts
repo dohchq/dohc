@@ -2570,7 +2570,7 @@ async function syncWorkspaceForDispatch(
               // Guarded above: a shared view already returned false.
               shareView: false,
             },
-            { onCaptureOutcome: () => undefined },
+            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined },
             requireEngineSessions(),
           );
           if (!capture) return false;
@@ -4032,6 +4032,15 @@ const desktopEngine = createDesktopEngine({
   workspaceAuthorities, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
   launchMarks, desktopMarks, logLaunchMarksOnce,
+  noteNoAtomicPlacement: (workspaceId) => {
+    try {
+      withWorkspaceActivityState(workspaceId, (lease) =>
+        workspaceActivity.recordAtomicPlacementUnavailable(lease.state.activity),
+      );
+    } catch {
+      // The workspace closed since the engine wrote; nothing to show.
+    }
+  },
 });
 const {
   requireEngineSessions, closeRelayTransportWorkspace, closeAllRelayTransportWorkspaces,

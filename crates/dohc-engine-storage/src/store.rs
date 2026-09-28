@@ -4,7 +4,9 @@
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
-use crate::materialize::MaterializationJob;
+use crate::materialize::{
+    Displacement, DisplacementResolution, DisplacementSpec, JobStatus, MaterializationJob,
+};
 use crate::schema::{OPEN_WORK_STEP_OPS, open_engine_db, open_engine_db_read_only};
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -315,6 +317,20 @@ impl EngineStore {
         materialize::list_pending_jobs(&self.conn)
     }
 
+    /// Retained jobs, including terminal jobs, for resolving staged identities.
+    pub fn list_materialization_jobs(&self) -> Result<Vec<MaterializationJob>, StorageError> {
+        materialize::list_jobs(&self.conn, false)
+    }
+
+    /// Whether a pending job could explain a path's rowless staged file.
+    pub fn has_pending_materialization_for_path(
+        &self,
+        workspace_id: &str,
+        path: &str,
+    ) -> Result<bool, StorageError> {
+        materialize::has_pending_job_for_path(&self.conn, workspace_id, path)
+    }
+
     /// Load a single materialization job by id.
     pub fn load_materialization_job(
         &self,
@@ -358,6 +374,87 @@ impl EngineStore {
     /// The number of pending materialization jobs.
     pub fn pending_materialization_count(&self) -> Result<i64, StorageError> {
         materialize::pending_job_count(&self.conn)
+    }
+
+    /// Record, in one synced commit, that a staged file holds bytes the store
+    /// does not have. Returns the id later transitions name.
+    pub fn open_displacement(&self, spec: &DisplacementSpec) -> Result<i64, StorageError> {
+        materialize::open_displacement(&self.conn, spec)
+    }
+
+    /// Adopt unknown staged files with one FULL commit.
+    pub fn open_displacements(&self, specs: &[DisplacementSpec]) -> Result<Vec<i64>, StorageError> {
+        materialize::open_displacements(&self.conn, specs)
+    }
+
+    /// Record a staged file that stays where it is as a kept row.
+    pub fn keep_displacement(
+        &self,
+        spec: &DisplacementSpec,
+        displaced_sha256: Option<&str>,
+    ) -> Result<(), StorageError> {
+        materialize::keep_displacement(&self.conn, spec, displaced_sha256)
+    }
+
+    /// Names held by displacement rows, including retained copies.
+    pub fn displacement_names(&self) -> Result<std::collections::HashSet<String>, StorageError> {
+        materialize::displacement_names(&self.conn)
+    }
+
+    /// End a displacement row and, in the same transaction, give `job` a
+    /// terminal status.
+    pub fn resolve_displacement(
+        &self,
+        displacement_id: i64,
+        resolution: DisplacementResolution<'_>,
+        job: Option<(&str, JobStatus)>,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        materialize::resolve_displacement(&self.conn, displacement_id, resolution, job, now_ms)
+    }
+
+    /// Open displacements, and kept ones whose bytes could not be read: the
+    /// rows a replay resolves or inspects again, newest first.
+    pub fn list_unsettled_displacements(&self) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_unsettled_displacements(&self.conn)
+    }
+
+    /// The open displacements of one path, from any job, newest first.
+    pub fn list_unsettled_displacements_for_path(
+        &self,
+        workspace_id: &str,
+        path: &str,
+    ) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_unsettled_displacements_for_path(&self.conn, workspace_id, path)
+    }
+
+    /// Every displacement of one job, in any state, newest first.
+    pub fn list_displacements_for_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_displacements_for_job(&self.conn, job_id)
+    }
+
+    /// The kept displacements of one workspace, which are outside changes the
+    /// engine has not captured yet.
+    pub fn list_kept_displacements(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_kept_displacements(&self.conn, workspace_id)
+    }
+
+    /// Whether an open row says a replace moved bytes the store lacks off
+    /// `path`, so that its absence on disk is not a delete.
+    pub fn path_is_displaced(&self, workspace_id: &str, path: &str) -> Result<bool, StorageError> {
+        materialize::path_is_displaced(&self.conn, workspace_id, path)
+    }
+
+    /// Whether the store holds content with this hash, as a text or binary
+    /// blob.
+    pub fn holds_content(&self, sha256: &str) -> Result<bool, StorageError> {
+        materialize::holds_content(&self.conn, sha256)
     }
 
     /// The highest complete `target_generation` for `path` in `workspace_id`

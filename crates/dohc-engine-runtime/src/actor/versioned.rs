@@ -320,6 +320,7 @@ impl ActorHandle {
         self.versioned_text_delete_expected_object(
             input,
             None,
+            false,
             root_dir,
             self_writes,
             faults,
@@ -328,11 +329,16 @@ impl ActorHandle {
         .await
     }
 
+    /// `confirm_absent` marks a delete whose reason is that the file is gone
+    /// from disk, observed off the actor. The actor confirms it on its own
+    /// thread and refuses with a retryable error while anything is at the path
+    /// or an unfinished replace moved it aside.
     #[allow(clippy::too_many_arguments)]
     pub async fn versioned_text_delete_expected_object(
         &self,
         input: DeleteTextFile,
         expected_object_id: Option<String>,
+        confirm_absent: bool,
         root_dir: PathBuf,
         self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
@@ -344,6 +350,7 @@ impl ActorHandle {
                     store,
                     &input,
                     expected_object_id.as_deref(),
+                    confirm_absent,
                     &root_dir,
                     self_writes.as_ref(),
                     faults.as_ref(),
@@ -1040,10 +1047,12 @@ fn versioned_text_rename_on_store(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn versioned_text_delete_on_store(
     store: &mut EngineStore,
     input: &DeleteTextFile,
     expected_object_id: Option<&str>,
+    confirm_absent: bool,
     root_dir: &std::path::Path,
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
@@ -1051,6 +1060,15 @@ fn versioned_text_delete_on_store(
 ) -> Result<DeleteResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    if confirm_absent {
+        super::capture::confirm_absent_on_disk(
+            store,
+            Some(root_dir),
+            &input.workspace_id,
+            &input.path,
+            input.now_ms,
+        )?;
     }
     let outcome = store.write_with(faults, |tx| {
         let result = dohc_engine_domain::delete_text_in_tx_checked(tx, input, expected_object_id)

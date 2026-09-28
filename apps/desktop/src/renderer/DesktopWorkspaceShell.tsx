@@ -83,6 +83,8 @@ import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
+import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
+import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -787,6 +789,9 @@ export function DesktopWorkspaceShell(props: {
     clearSearchError,
     reportSyncFailure,
     clearSyncFailure,
+    reportDriveLimit,
+    reportKeptFiles,
+    reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -4556,15 +4561,50 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
-  // A dismissed sync failure stays dismissed until it ends, across remounts.
+  const driveLimitNotice = useDriveLimitNotice({
+    workspaceId,
+    unavailable: syncStatus?.atomicPlacementUnavailable === true,
+    report: reportDriveLimit,
+  });
+  const revealRecoveryWorkspace = useCallback(() => {
+    const askedFor = workspaceId;
+    void bridge().revealWorkspaceFolder({ workspaceId: askedFor, recoveryCopies: true }).catch((error) => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportShellError("Could not show the recovery folder.", error);
+    });
+  }, [workspaceId, reportShellError]);
+  const retryFileRecovery = useCallback(() => {
+    const askedFor = workspaceId;
+    if (workspaceIdRef.current !== askedFor) return;
+    void bridge().retryFileRecovery({ workspaceId: askedFor }).then(() => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportRecoveryUnavailable(false, () => undefined, revealRecoveryWorkspace);
+    }).catch((error) => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportShellError("dohc could not retry file recovery.", error, retryFileRecovery, "file-recovery-unavailable");
+    });
+  }, [workspaceId, reportRecoveryUnavailable, revealRecoveryWorkspace, reportShellError]);
+  useEffect(() => {
+    if (syncStatus?.recoveryUnavailable === undefined) return;
+    reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
+  }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
+  const keptFilesNotice = useKeptFilesNotice({
+    workspaceId,
+    paths: syncStatus?.keptFiles,
+    report: reportKeptFiles,
+    openFolder: revealRecoveryWorkspace,
+  });
+  // A dismissed sync failure stays dismissed until it ends, and a dismissed
+  // drive limit for the session, across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
-      if (shellErrors.find((error) => error.id === id)?.kind === "cloud-sync") {
-        syncFailureNotice.noteDismissed();
-      }
+      const kind = shellErrors.find((error) => error.id === id)?.kind;
+      if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
+      if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
+      if (kind === "kept-files") keptFilesNotice.noteDismissed();
       dismissShellError(id);
     },
-    [dismissShellError, shellErrors, syncFailureNotice],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, syncFailureNotice],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
