@@ -18,6 +18,7 @@
 //! answered stale or refused, or they are not a Collection's own files. Send
 //! changes still offers everything not delivered.
 
+pub use dohc_engine_files::floor::collision_key;
 use std::collections::{BTreeMap, BTreeSet};
 
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome, hex_sha256};
@@ -499,24 +500,6 @@ fn covers_folder(folder: &str, granted: &crate::ShareGrant) -> bool {
 fn is_markdown(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() > 3 && bytes[bytes.len() - 3..].eq_ignore_ascii_case(b".md")
-}
-
-/// The relay's key for one path component
-/// (`services/sync-relay/src/pathCollisionKey.ts`): NFKC, folded lower,
-/// upper, then lower, without the trailing dots and spaces Windows drops.
-pub fn collision_key(name: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    let folded = name
-        .nfkc()
-        .collect::<String>()
-        .to_lowercase()
-        .to_uppercase()
-        .to_lowercase();
-    folded
-        .nfkc()
-        .collect::<String>()
-        .trim_end_matches(['.', ' '])
-        .to_owned()
 }
 
 /// Whether this replica has `<folder>/collection.yaml` on main, so the

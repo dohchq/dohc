@@ -1,3 +1,4 @@
+import { isDohcMetadataPath } from "./paths";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 
 // Local-first database rules. The on-disk .sqlite IS the user's canonical
@@ -32,7 +33,7 @@ export function sidecarBasePath(path: string): string | null {
 }
 
 function inDohc(path: string): boolean {
-  return path === ".dohc" || path.startsWith(".dohc/");
+  return isDohcMetadataPath(path);
 }
 
 export function classifyDatabaseFile(path: string): DatabaseFileKind {

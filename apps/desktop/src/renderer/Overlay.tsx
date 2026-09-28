@@ -10,6 +10,41 @@ import { useFocusReturn } from "./ui/focusReturn";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
 import { trapModalTabKey } from "./modalFocus";
 
+type PanelProps = Omit<HTMLAttributes<HTMLDivElement>, "children" | "onClick" | "tabIndex"> & {
+  "data-testid"?: string;
+};
+
+// The backdrop and panel alone, without the keyboard and stack behavior.
+// Overlay adds that; the states page renders this to show the scrim.
+export function OverlayFrame(props: {
+  appearance?: "standard" | "warning";
+  panelRef: RefObject<HTMLDivElement | null>;
+  panelProps?: PanelProps;
+  onBackdropClick?: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      data-dohc-modal="true"
+      className={props.appearance === "warning"
+        ? "fixed inset-0 z-50 grid place-items-center bg-scrim"
+        : "fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-scrim p-4 pt-24 backdrop-blur-[1.5px]"}
+      onClick={props.onBackdropClick}
+    >
+      <div
+        {...props.panelProps}
+        ref={props.panelRef}
+        tabIndex={-1}
+        data-focus-surface="dialog"
+        className={props.panelProps?.className ?? "dohc-pop-in"}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {props.children}
+      </div>
+    </div>
+  );
+}
+
 // Shared modal scaffold: dimmed backdrop that closes on click, with an inner
 // panel that swallows clicks. Used by the command palette, quick-open, new
 // file dialog, and cloud panel so close/backdrop behavior — and this keyboard behavior — stays identical everywhere.
@@ -18,10 +53,7 @@ export function Overlay(props: {
   children: ReactNode;
   appearance?: "standard" | "warning";
   panelRef?: RefObject<HTMLDivElement | null>;
-  panelProps?: Omit<
-    HTMLAttributes<HTMLDivElement>,
-    "children" | "onClick" | "tabIndex"
-  > & { "data-testid"?: string };
+  panelProps?: PanelProps;
 }) {
   const defaultPanelRef = useRef<HTMLDivElement>(null);
   const panelRef = props.panelRef ?? defaultPanelRef;
@@ -60,23 +92,13 @@ export function Overlay(props: {
   }, []);
 
   return (
-    <div
-      data-dohc-modal="true"
-      className={props.appearance === "warning"
-        ? "fixed inset-0 z-50 grid place-items-center bg-scrim"
-        : "fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-scrim p-4 pt-24 backdrop-blur-[1.5px]"}
-      onClick={props.onClose}
+    <OverlayFrame
+      appearance={props.appearance}
+      panelRef={panelRef}
+      panelProps={props.panelProps}
+      onBackdropClick={props.onClose}
     >
-      <div
-        {...props.panelProps}
-        ref={panelRef}
-        tabIndex={-1}
-        data-focus-surface="dialog"
-        className={props.panelProps?.className ?? "dohc-pop-in"}
-        onClick={(event) => event.stopPropagation()}
-      >
-        {props.children}
-      </div>
-    </div>
+      {props.children}
+    </OverlayFrame>
   );
 }
