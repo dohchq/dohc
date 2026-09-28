@@ -4,6 +4,11 @@ import type { SentencePart } from "./automationSentence";
 
 // Small parts the ⚡ panel and the builder share.
 
+/** How a schedule's next run reads, in this computer's time. */
+export const RUN_TIME: Intl.DateTimeFormatOptions = {
+  weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+};
+
 /** An automation's sentence: words, with formulas as code. */
 export function Sentence({ parts }: { parts: readonly SentencePart[] }) {
   return (

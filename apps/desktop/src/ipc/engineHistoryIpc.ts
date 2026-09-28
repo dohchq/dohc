@@ -26,7 +26,7 @@ type MomentAuthor = NonNullable<VersionedTextMomentSummary["author"]>;
 // automation on the moment's origin label.
 export interface EngineMomentAuthorNames {
   agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
-  automation(automationId: string): { name: string; collection: string } | null;
+  automation(automationId: string): { name: string; collection?: string } | null;
   named(author: Extract<MomentAuthor, {kind: "named"}>): string;
 }
 

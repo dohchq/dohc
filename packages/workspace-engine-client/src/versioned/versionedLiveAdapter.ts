@@ -23,8 +23,12 @@ import {
   type AutomationClaimSummary,
   type AutomationFailuresResult,
   type AutomationGroupSkipsResult,
+  type AutomationGetClaimParams,
+  type AutomationGetClaimResult,
   type AutomationListClaimsParams,
   type AutomationListClaimsResult,
+  type AutomationPruneHistoryParams,
+  type AutomationPruneHistoryResult,
   type AutomationPressParams,
   type AutomationPressResult,
   type AutomationReleaseParams,
@@ -1296,11 +1300,25 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsScheduleMarks, {});
   }
 
-  /** One automation's run history: its newest claims, newest first. */
+  /** One page of an automation's run history, newest first. */
   async listAutomationClaims(
     input: AutomationListClaimsParams,
   ): Promise<AutomationListClaimsResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsListClaims, input);
+  }
+
+  /** One claim in run history, by its id or by its automation and trigger key. */
+  async getAutomationClaim(
+    input: AutomationGetClaimParams,
+  ): Promise<AutomationGetClaimResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsGetClaim, input);
+  }
+
+  /** Expires one batch of done claims past 30 days, except those `keep` names. */
+  async pruneAutomationHistory(
+    input: AutomationPruneHistoryParams,
+  ): Promise<AutomationPruneHistoryResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsPruneHistory, input);
   }
 
   /**

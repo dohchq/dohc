@@ -2569,6 +2569,37 @@ CREATE INDEX materialization_displacements_state
     ON materialization_displacements(state, job_id);
 ";
 
+/// Run history keeps an automation's settled claims 30 days from when they
+/// last settled, and its newest failure. An expired claim that still keeps a
+/// trigger from running twice stays, marked `expired` and out of run
+/// history. A deleted claim's failures move to
+/// `automation_retired_failures`, so an automation's failure generation
+/// never goes down.
+const V2_AUTOMATION_RUN_RETENTION_DDL: &str = "\
+ALTER TABLE automation_claims ADD COLUMN expired INTEGER NOT NULL DEFAULT 0
+    CHECK (expired IN (0, 1));
+CREATE TABLE automation_retired_failures (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    failures      INTEGER NOT NULL CHECK (failures > 0),
+    PRIMARY KEY (workspace_id, automation_id)
+) STRICT;
+DROP INDEX idx_automation_claims_prunable;
+DROP INDEX idx_automation_claims_settled_facts;
+CREATE INDEX idx_automation_claims_expiring
+    ON automation_claims(workspace_id, updated_at_ms)
+    WHERE state IN ('done', 'failed') AND expired = 0;
+CREATE INDEX idx_automation_claims_failed
+    ON automation_claims(workspace_id, automation_id, updated_at_ms, claim_id)
+    WHERE state = 'failed' AND expired = 0;
+CREATE INDEX idx_automation_claims_expired_schedule_keys
+    ON automation_claims(workspace_id, automation_id)
+    WHERE expired = 1 AND change_kind = 'schedule' AND substr(trigger_key, 1, 9) = 'schedule:';
+CREATE INDEX idx_automation_claims_history
+    ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id)
+    WHERE expired = 0;
+";
+
 // A job references either content table. Keep the reference checks while
 // allowing text jobs to use the text blob already owned by their moment.
 const V2_MATERIALIZATION_TEXT_BLOBS_DDL: &str = "\
@@ -2761,6 +2792,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 22,
         id: "v2-automation-claim-live-cursor",
         sql: "ALTER TABLE automation_claims ADD COLUMN change_live_cursor INTEGER CHECK (change_live_cursor IS NULL OR change_live_cursor BETWEEN 1 AND 9007199254740991);",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 23,
+        id: "v2-automation-run-retention",
+        sql: V2_AUTOMATION_RUN_RETENTION_DDL,
         sets_user_version: None,
     },
     Migration {
@@ -3113,6 +3150,10 @@ mod tests {
             (
                 "v2-automation-claim-live-cursor",
                 "e0e03940b8d14b9e61ba21a9ea5d2d99410074802e43a5d0f593761d3a27c942",
+            ),
+            (
+                "v2-automation-run-retention",
+                "6adf05d0ee7187060acef8edd6ef82b1aaf482eeedd8c0e0c994c676b11a895a",
             ),
             (
                 "v2-materialization-text-blobs",

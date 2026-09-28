@@ -5,8 +5,9 @@ type AutomationAuthor = {
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
-  // Present only when the automation ran on this computer.
-  automation?: { automationId: string; collectionPath: string };
+  // Present only when the automation ran on this computer. Its Collection
+  // is null once this computer no longer has it.
+  automation?: { automationId: string; collectionPath: string | null };
 };
 
 // Until the Automations panel can open one automation, its Collection's
@@ -36,7 +37,8 @@ export function AutomationBadge(props: {
       : author.authorOwnerDisplayName
         ? `Ran on ${author.authorOwnerDisplayName}'s computer`
         : "Ran on another computer";
-  const openPath = author.automation && props.onOpenPath ? automationsFile(author.automation.collectionPath) : undefined;
+  const collectionPath = author.automation?.collectionPath ?? null;
+  const openPath = collectionPath !== null && props.onOpenPath ? automationsFile(collectionPath) : undefined;
   const markProps = {
     "data-testid": `${props.testIdPrefix}-automation-badge`,
     "data-chat-escape-local": "true",

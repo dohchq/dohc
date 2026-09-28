@@ -210,7 +210,10 @@ function buildCliRequest(
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
-        args: { cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath, automation: command.automation },
+        args: {
+          cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath, automation: command.automation,
+          ...(command.page === undefined ? {} : { page: command.page }),
+        },
       };
     case "automationRun":
       return {

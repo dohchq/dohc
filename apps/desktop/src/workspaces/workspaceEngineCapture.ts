@@ -668,7 +668,7 @@ export interface WorkspaceEngineCapture {
   runRelaySync<T>(
     task: (materializePage: MaterializeRelayPullPage) => Promise<T>,
   ): Promise<T>;
-  // Resolves when everything enqueued so far has been captured (tests).
+  // Resolves when everything enqueued so far has been captured.
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
   // written — the workspace shutdown chain awaits this so the last capture

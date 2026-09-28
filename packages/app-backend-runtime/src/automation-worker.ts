@@ -40,7 +40,7 @@ async function answer(request: AutomationWorkerRequest): Promise<void> {
   const { scope, items, spent, runId } = request;
   if (scope !== undefined) {
     prepared = undefined;
-    const taken = Object.keys(scope.bindings ?? {}).find(name => globals.has(name));
+    const taken = [...Object.keys(scope.bindings ?? {}), ...Object.keys(scope.unavailable ?? {})].find(name => globals.has(name));
     if (taken !== undefined) {
       return reply({ kind: "refused", message: `The step result name ${JSON.stringify(taken)} belongs to a JavaScript built-in. Bind it with another name.` });
     }

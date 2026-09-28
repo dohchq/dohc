@@ -634,7 +634,7 @@ type ChatActor =
 
 // The automation executor's claim on a message it writes. Stays on this computer.
 export interface ChatMessageAutomationInput {
-  // `collection:<collection path>#<automation id>`.
+  // `collection:<collection id>#<automation id>`.
   automationId: string;
   // One more than the depth of the change that triggered the automation.
   chainDepth: number;
@@ -644,7 +644,6 @@ export interface ChatMessageAutomationInput {
 // computer's automation wrote has an automation author but no `automation`.
 interface ChatMessageAutomation {
   automationId: string;
-  collectionPath: string;
 }
 
 interface LinkedChatFileRef {
@@ -1555,7 +1554,7 @@ export type ChangeAuthor =
   | { kind: "agent"; agentId: string; onBehalfOf: string; depth: number }
   // An automation's write, derived main-side from the claim the executor is
   // running, never from a request. automationId is the engine subscription
-  // id ("collection:<collection path>#<automation id>"), and depth is the
+  // id ("collection:<collection id>#<automation id>"), and depth is the
   // write's automation-chain depth: one greater than its trigger's.
   // onBehalfOf is the run's person, left out when it has none.
   | {

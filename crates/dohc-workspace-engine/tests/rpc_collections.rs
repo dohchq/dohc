@@ -1923,6 +1923,8 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
     const RESPONSE_CAP: usize = (8 * 1024 * 1024) - 64 * 1024;
     let response_with_empty_description = json!({
         "path": "at-limit",
+        // A captured file's object id: "object-" and 64 hex digits.
+        "objectId": format!("object-{}", "0".repeat(64)),
         "status": "valid",
         "reasons": [],
         "schema": {

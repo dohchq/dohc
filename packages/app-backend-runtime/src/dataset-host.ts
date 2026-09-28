@@ -67,6 +67,14 @@ export interface DatasetAuthority {
    * administration refuses it.
    */
   agent?: { depth: number };
+  /**
+   * The person the owner's or an automation's commit is made by or for, as
+   * the host's trusted context names them: the owner's person on the
+   * computer that made it, or the person whose change started the run.
+   * Provenance that grants nothing. A named caller is its own person, and a
+   * link caller never names one, so both refuse it.
+   */
+  person?: string;
 }
 export interface DatasetDataGrant { operationIds: string[]; discover: boolean; revision: number; revisionSha256: string }
 export interface DatasetHostOptions<Context> {
@@ -174,13 +182,19 @@ function agent(value: DatasetAuthority["agent"], caller: AppBackendCaller): Data
   if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 0 || value.depth > MAX_DECLARED_DEPTH) denied();
   return { depth: value.depth };
 }
-/** Who made a commit, from the authority the host derived. */
+function person(value: string | undefined, caller: AppBackendCaller): string | undefined {
+  if (value === undefined) return undefined;
+  if (caller.kind !== "owner" && caller.kind !== "automation") denied();
+  return text(value);
+}
+/** Who made a commit, and the person they made it for, from the authority the host derived. */
 function actor(authority: DatasetAuthority): DatasetActor {
-  if (authority.caller.kind === "automation") return { kind: "automation", automationId: authority.caller.automationId, depth: authority.chainDepth! };
+  const person = authority.person === undefined ? {} : { userId: authority.person };
+  if (authority.caller.kind === "automation") return { kind: "automation", automationId: authority.caller.automationId, depth: authority.chainDepth!, ...person };
   const app = authority.appId === undefined ? {} : { appId: authority.appId }, caller = authority.caller;
-  if (authority.agent) return { kind: "agent", depth: authority.agent.depth, ...app };
+  if (authority.agent) return { kind: "agent", depth: authority.agent.depth, ...app, ...person };
   if (caller.kind === "named") return { kind: "named", userId: caller.userId, ...app };
-  return caller.kind === "owner" ? { kind: "owner", ...app } : { kind: "link", ...app };
+  return caller.kind === "owner" ? { kind: "owner", ...app, ...person } : { kind: "link", ...app };
 }
 function scope(input: DatasetScope): DatasetScope { return { workspaceId: text(input.workspaceId), datasetId: text(input.datasetId) }; }
 function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
@@ -257,7 +271,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     const verified = { caller, principalKey: text(result.principalKey),
       appId: result.appId === undefined ? undefined : text(result.appId),
       authorityToken: result.authorityToken === undefined ? undefined : text(result.authorityToken, 1024),
-      chainDepth: chainDepth(result.chainDepth, caller), agent: agent(result.agent, caller) };
+      chainDepth: chainDepth(result.chainDepth, caller), agent: agent(result.agent, caller), person: person(result.person, caller) };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     // An automation acts for its Collection, never as an app.
     if (caller.kind === "automation" && through.kind !== "data") denied();
@@ -352,7 +366,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     /** For the trusted executor. Commits and presses claim through the host; deleting a dataset forgets its claims. */
     automationClaims: { subscribe: automations.subscribe, unsubscribe: automations.unsubscribe, subscriptions: automations.subscriptions,
       next: automations.next, settle: automations.settle, release: automations.release, retry: automations.retry,
-      claims: automations.claims, claim: automations.claim, failures: automations.failures, pressed: automations.pressed,
+      claims: automations.claims, claim: automations.claim, pruneHistory: automations.pruneHistory, failures: automations.failures, pressed: automations.pressed,
       /** Throws why this host cannot take a press of this button, as `press` would. */
       assertPressable(raw: DatasetScope & Pick<DatasetPressInput, "tableId" | "fieldId">): void { pressableHead(raw); },
       /**

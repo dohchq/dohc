@@ -1,8 +1,10 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
-import { checkAutomationReach } from "@dohc/automation-executor/automation-reach";
 import { createRegistryStore, type RegistryEntry } from "../workspaces/registryStore";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { checkAutomationReach, type ReachStep } from "@dohc/automation-executor/automation-reach";
+import { readSyncHistory, recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   createShareRosters,
@@ -97,7 +99,7 @@ describe("roster from the relay's listings", () => {
     });
     expect(listing.grants?.map((grant) => grant.grantId)).toEqual(["g-1", "g-2", "g-3", "g-4", "g-5", "g-6"]);
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
-    expect(reachRosterFor({ entry, localUserId: null, latest: listing, next: "" })).toEqual({
+    expect(reachRosterFor({ entry, localUserId: null, localPersonId: null, history: null, latest: listing, next: "" })).toEqual({
       kind: "owner", ownerUserId: "u-owner", grants: [
         { ...anaOnRoster, files: null, channel: { wireId: "wire-family", canPost: true } },
         { ...anaOnRoster, grantId: "g-2", files: { paths: ["Trip"], versionId: null, access: "view" }, channel: { wireId: "wire-trip", canPost: false } },
@@ -189,7 +191,7 @@ describe("roster from the relay's listings", () => {
     expect(await listed({ granted: [] }, [older])).toEqual({ grants: null, problem: { kind: "outdated-server" } });
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
     const stored = { version: 1, grants: null, problem: { kind: "outdated-server" } } as const;
-    expect(reachRosterFor({ entry: { ...entry, shareRoster: stored }, localUserId: null, latest: null, next: "" }))
+    expect(reachRosterFor({ entry: { ...entry, shareRoster: stored }, localUserId: null, localPersonId: null, history: null, latest: null, next: "" }))
       .toEqual({ kind: "unknown", problem: { kind: "outdated-server" } });
   });
 
@@ -229,7 +231,7 @@ describe("roster from the relay's listings", () => {
     const chat = { ...ana, selector: { kind: "chat" as const, channelWireId: "wire" }, access: "read-write" as const };
     expect(reachRosterFor({
       entry: { ...entry, shareRoster: { version: 1, grants: [], links: [], formerGrants: [{ grant: chat, automationsGeneration: 1 }] } },
-      localUserId: null, latest: null, next: "",
+      localUserId: null, localPersonId: null, history: null, latest: null, next: "",
     })).toEqual({ kind: "unknown", problem: { kind: "unchecked", next: "" } });
   });
 
@@ -245,7 +247,7 @@ describe("roster from the relay's listings", () => {
     // computer before this one pulled what she wrote.
     const listing = await listed({ granted: [row({ revokedAtMs: 9, automationsGeneration: 1 })] });
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
-    const roster = reachRosterFor({ entry, localUserId: null, latest: listing, next: "" });
+    const roster = reachRosterFor({ entry, localUserId: null, localPersonId: null, history: null, latest: listing, next: "" });
     expect(roster).toEqual({
       kind: "owner", ownerUserId: "u-owner", grants: [],
       formerEditors: [{ grantId: "g-1", generation: 1, holder: "person", recipientEmail: "ana@dohc.test", files: { paths: ["Trip"], versionId: null } }],
@@ -261,7 +263,7 @@ describe("roster from the relay's listings", () => {
   it("keeps a revoked recipient the relay has no email for as a person, not a link", async () => {
     const listing = await listed({ granted: [row({ revokedAtMs: 9, automationsGeneration: 1, recipientEmail: null })] });
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
-    expect(reachRosterFor({ entry, localUserId: null, latest: listing, next: "" })).toMatchObject({
+    expect(reachRosterFor({ entry, localUserId: null, localPersonId: null, history: null, latest: listing, next: "" })).toMatchObject({
       formerEditors: [{ grantId: "g-1", holder: "person", recipientEmail: null }],
     });
   });
@@ -352,10 +354,28 @@ describe("the roster the reach check reads", () => {
   const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first" };
 
   it("gives a workspace that does not sync only its owner, signed in or not", () => {
-    expect(reachRosterFor({ entry, localUserId: "u-local", latest: null, next: "" }))
+    expect(reachRosterFor({ entry, localUserId: "u-local", localPersonId: null, history: "never-synced", latest: null, next: "" }))
       .toEqual({ kind: "owner", ownerUserId: "u-local", grants: [] });
-    expect(reachRosterFor({ entry, localUserId: null, latest: null, next: "" }))
+    expect(reachRosterFor({ entry, localUserId: null, localPersonId: null, history: "never-synced", latest: null, next: "" }))
       .toEqual({ kind: "owner", ownerUserId: null, grants: [] });
+  });
+
+  it("names this computer's person by its own id for them only in a workspace that does not sync", () => {
+    expect(reachRosterFor({ entry, localUserId: null, localPersonId: "install-here", history: "never-synced", latest: null, next: "" }))
+      .toEqual({ kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] });
+    expect(reachRosterFor({
+      entry: { ...entry, remote, shareRoster: { version: 1, grants: [], links: [], formerGrants: [] } }, localUserId: null, localPersonId: "install-here", history: null, latest: null, next: "",
+    })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [], formerEditors: [] });
+  });
+
+  it("does not know who can edit a workspace that synced but has no server connection in the registry", () => {
+    const syncAgain = { kind: "unknown", problem: { kind: "unchecked", next: "Sync this workspace in Settings → Sync and sharing, then try again." } };
+    expect(reachRosterFor({ entry, localUserId: "u-owner", localPersonId: null, history: "synced", latest: null, next: "" })).toEqual(syncAgain);
+    // A record dohc cannot read or parse may say it synced.
+    expect(reachRosterFor({ entry, localUserId: "u-owner", localPersonId: null, history: "unknown", latest: null, next: "" })).toEqual(syncAgain);
+    // A folder with no record keeps its owner, as before the record existed.
+    expect(reachRosterFor({ entry, localUserId: "u-owner", localPersonId: null, history: "absent", latest: null, next: "" }))
+      .toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [] });
   });
 
   it("knows only the Collection itself on a collaborator's computer", () => {
@@ -363,7 +383,7 @@ describe("the roster the reach check reads", () => {
       shareId: "s-1", granterEmail: "owner@dohc.test", genericChatWritable: false,
       grantedSelector: { paths: ["Trip"], versionId: null, access: "edit" as const },
     };
-    expect(reachRosterFor({ entry: { ...entry, remote, shareView }, localUserId: "u-ana", latest: null, next: "" }))
+    expect(reachRosterFor({ entry: { ...entry, remote, shareView }, localUserId: "u-ana", localPersonId: null, history: null, latest: null, next: "" }))
       .toEqual({ kind: "shared-view" });
   });
 
@@ -371,8 +391,8 @@ describe("the roster the reach check reads", () => {
     const next = "Check your connection, then try again.";
     const unchecked = { kind: "unknown", problem: { kind: "unchecked", next } };
     const read = (shareRoster: unknown) =>
-      reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, latest: null, next });
-    expect(reachRosterFor({ entry: { ...entry, remote }, localUserId: null, latest: null, next })).toEqual(unchecked);
+      reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, localPersonId: null, history: null, latest: null, next });
+    expect(reachRosterFor({ entry: { ...entry, remote }, localUserId: null, localPersonId: null, history: null, latest: null, next })).toEqual(unchecked);
     expect(read({ version: 2, grants: [ana], links: [], formerGrants: [] })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster], formerEditors: [] });
     expect(read({ version: 2, grants: null, problem: { kind: "damaged-link" } }))
       .toEqual({ kind: "unknown", problem: { kind: "damaged-link" } });
@@ -391,7 +411,7 @@ describe("the roster the reach check reads", () => {
   it("makes each active link an editor of its own, and keeps a link that wrote automations directly and stopped editing", () => {
     const read = (links: unknown[]) => reachRosterFor({
       entry: { ...entry, remote, shareRoster: { version: 2, grants: [ana], links, formerGrants: [] } as RegistryEntry["shareRoster"] },
-      localUserId: null, latest: null, next: "",
+      localUserId: null, localPersonId: null, history: null, latest: null, next: "",
     });
     const onRoster = (grantId: string, access = "edit") =>
       ({ grantId, recipientUserId: null, recipientEmail: null, files: { paths: ["Trip"], versionId: null, access }, channel: null });
@@ -414,7 +434,7 @@ describe("the roster the reach check reads", () => {
   it("calls a copy saved before links were listed, or a link that names a person, unchecked", () => {
     const unchecked = { kind: "unknown", problem: { kind: "unchecked", next: "" } };
     const read = (shareRoster: unknown) =>
-      reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, latest: null, next: "" });
+      reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, localPersonId: null, history: null, latest: null, next: "" });
     expect(read({ version: 2, grants: [ana] })).toEqual(unchecked);
     expect(read({ version: 2, grants: [], formerGrants: [], links: [linkGrant("g-a", { grant: { ...linkGrant("g-a").grant, recipientUserId: "u-ana" } })] }))
       .toEqual(unchecked);
@@ -423,7 +443,7 @@ describe("the roster the reach check reads", () => {
 
   it("prefers a listing it learned but could not save", () => {
     expect(reachRosterFor({
-      entry: { ...entry, remote, shareRoster: { version: 1, grants: [ana], links: [], formerGrants: [] } }, localUserId: null, next: "",
+      entry: { ...entry, remote, shareRoster: { version: 1, grants: [ana], links: [], formerGrants: [] } }, localUserId: null, localPersonId: null, history: null, next: "",
       latest: { grants: null, problem: { kind: "unusable-listing" } },
     })).toEqual({ kind: "unknown", problem: { kind: "unusable-listing" } });
   });
@@ -472,7 +492,7 @@ describe("keeping the roster current", () => {
       list, logError, saveRoster,
       rosters: createShareRosters({
         findWorkspace: store.find, saveRoster, markRosterPulled, listRoster: list,
-        localUserId: async () => null, logError, nowMs: () => now,
+        localUserId: async () => null, localPersonId: async () => null, syncHistory: async () => "never-synced", logError, nowMs: () => now,
       }),
     };
   }
@@ -503,6 +523,21 @@ describe("keeping the roster current", () => {
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     expect(await r.cached(WORKSPACE)).toEqual(cached);
     expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks for this computer's own id for its person only for a workspace that does not sync, at every read", async () => {
+    store.register({ workspaceId: "w-local", rootPath: "/notes", kind: "personal", mode: "local-first" });
+    let proved = true;
+    const localPersonId = vi.fn(async (workspace: RegistryEntry) => (proved ? `install-for-${workspace.workspaceId}` : null));
+    const r = createShareRosters({
+      findWorkspace: store.find, saveRoster: store.setShareRoster, markRosterPulled: store.markShareRosterPulled,
+      listRoster: async () => answered({ grants: [], links: [], formerGrants: [] }), localUserId: async () => null, localPersonId, syncHistory: async () => "never-synced", logError: vi.fn(), nowMs: () => now,
+    });
+    expect(await r.forRun("w-local")).toEqual({ kind: "owner", ownerUserId: null, localPersonId: "install-for-w-local", grants: [] });
+    proved = false;
+    expect(await r.cached("w-local")).toEqual({ kind: "owner", ownerUserId: null, grants: [] });
+    await r.forRun(WORKSPACE);
+    expect(localPersonId.mock.calls.map(([workspace]) => workspace.workspaceId)).toEqual(["w-local", "w-local"]);
   });
 
   it("lists again before a run only when the last listing is older than a minute", async () => {
@@ -791,6 +826,63 @@ describe("keeping the roster current", () => {
     r.open("ws-local");
     expect(await r.forRun("ws-local")).toEqual({ kind: "owner", ownerUserId: null, grants: [] });
     expect(list).not.toHaveBeenCalled();
+  });
+});
+
+describe("a shared workspace forgotten and attached again", () => {
+  const trip = { path: "Trip", name: "Trip" };
+  // Steps Ana could have written into Trip/automations.yaml: one that acts
+  // as the owner, and one that changes a Collection only the owner can edit.
+  const steps: ReachStep[] = [
+    { kind: "personal", person: { userId: "u-owner", name: "you" } },
+    { kind: "change-records", collection: { path: "Budget", name: "Budget" } },
+    { kind: "change-records", collection: trip },
+  ];
+
+  it("stops a collaborator's steps until the workspace syncs again, then checks them against its grants", async () => {
+    const root = await createTestScratch("dohc-reattach-");
+    const store = createRegistryStore(join(await createTestScratch("dohc-reattach-registry-"), "workspaces.json"));
+    const listing = { grants: [ana], links: [], formerGrants: [] };
+    let now = 0;
+    const rosters = createShareRosters({
+      findWorkspace: store.find, saveRoster: store.setShareRoster, markRosterPulled: store.markShareRosterPulled,
+      listRoster: async () => ({ kind: "answered", listing }), localUserId: async () => "u-owner",
+      localPersonId: async () => null, syncHistory: (workspace) => readSyncHistory(workspace.rootPath), logError: vi.fn(), nowMs: () => now,
+    });
+    const check = async () => checkAutomationReach(await rosters.forRun(WORKSPACE), { id: "a", collection: trip, codeFiles: [], steps });
+
+    // Shared with Ana, who can edit Trip.
+    await mkdir(join(root, ".dohc"));
+    await recordNeverSynced(root);
+    store.register({ workspaceId: WORKSPACE, rootPath: root, kind: "personal", mode: "local-first" });
+    recordSynced(root);
+    store.setRemote(WORKSPACE, remote);
+    const shared = await check();
+    expect(shared.map((reach) => reach.allowed)).toEqual([false, false, true]);
+
+    // Forgotten, then attached again: the registry no longer names a server.
+    store.remove(WORKSPACE);
+    store.register({ workspaceId: WORKSPACE, rootPath: root, kind: "personal", mode: "local-first" });
+    const reason = "dohc could not check who can edit Trip. Sync this workspace in Settings → Sync and sharing, then try again.";
+    expect(await check()).toEqual(steps.map(() => ({ allowed: false, reason })));
+
+    // A record cut off mid-write, or one dohc cannot read, still stops them.
+    const record = join(root, ".dohc", "sync-history.json");
+    const synced = await readFile(record, "utf8");
+    await writeFile(record, synced.slice(0, 10));
+    expect(await check()).toEqual(steps.map(() => ({ allowed: false, reason })));
+    await rm(record);
+    await mkdir(record);
+    expect(await check()).toEqual(steps.map(() => ({ allowed: false, reason })));
+    await rm(record, { recursive: true });
+    await writeFile(record, synced);
+
+    // Synced again, the roster is listed again: until then it stays unknown.
+    store.setRemote(WORKSPACE, remote);
+    expect(await check()).toEqual(steps.map(() => expect.objectContaining({ allowed: false })));
+    now += SHARE_ROSTER_FRESH_MS;
+    // Ana is still an editor.
+    expect(await check()).toEqual(shared);
   });
 });
 

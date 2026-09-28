@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { parseExpressionAt, tokenizer, tokTypes, type Expression } from "acorn";
+import { parse, parseExpressionAt, tokenizer, tokTypes, type Expression } from "acorn";
 import {
   AUTOMATION_LIMITS,
   type AutomationFormula,
@@ -12,7 +12,13 @@ import {
   type JsonValue,
 } from "@dohc/app-backend-runtime/automation";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { automationTextParts, type Automation, type AutomationScheduleTrigger } from "@dohc/workspace-contracts/automations";
+import {
+  automationTextParts,
+  automationTextProblem,
+  type Automation,
+  type AutomationDiagnosticCode,
+  type AutomationScheduleTrigger,
+} from "@dohc/workspace-contracts/automations";
 import { RECORD_ID_FRONTMATTER_KEY, type CollectionRecord, type CollectionValue } from "@dohc/workspace-contracts/collection";
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
@@ -24,28 +30,30 @@ import {
   automationThreadId,
   automationWakeThreadId,
   cutText,
+  GROUP_READ_ONLY,
   type AutomationNotice,
   type ChatDirectory,
 } from "./automationChat";
 
-// What one run of a Collection automation does, worked out before anything
-// is written. The executor reads the trigger record and every Find, asks the
-// evaluator for every formula in one request, and turns the answers into a
-// plan: the record changes each step makes, in step order. The plan is saved
-// before the first write, so a run that stops part way resumes with the same
-// values instead of evaluating again.
+// What each step of a Collection automation run does, worked out when the
+// step starts. The executor checks the trigger and its conditions once, then
+// runs the steps in order. Each step reads what it needs as it is now, after
+// the steps before it landed, asks the evaluator for its formulas or its code,
+// and turns the answers into its effects. The step is saved before its first
+// effect, so a run that stops part way resumes with the same values instead of
+// evaluating the step again.
 //
 // In every formula, `record` is the record a step is about: the trigger
 // record, each record a Find checks, or each record a step changes among the
-// records a Find returned. `trigger.record` is always the trigger record.
-// Formulas read the records as they were when the run started. A record an
-// earlier step added reads as null, because it does not exist yet.
+// records a Find returned. `trigger.record` is always the trigger record, with
+// its values as the step read them. A Find's result keeps the records it
+// found; a later step reads their values again, and a later Find queries
+// again. A record an Add record step added reads with the values it has. A
+// step reads only the results of steps that ran before it.
 //
-// A code step runs in the same evaluator once the formulas before it have
-// answered, and the formulas after it read the value it returned. The
-// record changes it returns become the same effects as Set fields and Add
-// record steps, so the saved plan holds them: a run that resumes never
-// runs its code again.
+// The record changes a code step returns become the same effects as Set
+// fields and Add record steps, and its step is saved with them: a run that
+// resumes never runs that code again.
 
 type AutomationTrigger = Automation["when"];
 type AutomationStep = Automation["do"][number];
@@ -56,7 +64,8 @@ type AutomationValue = Extract<AutomationStep, { kind: "set" }>["values"][number
 export const COLLECTION_AUTOMATION_PREFIX = "collection:";
 const MAX_FINDS = 5;
 export const MAX_FOUND_RECORDS = 50;
-export const FIND_OVERFLOW_ERROR = `A Find matched more than ${MAX_FOUND_RECORDS} records. Narrow its condition, then try again.`;
+export const findOverflowError = (ordinal: number) =>
+  `The Find in step ${ordinal + 1} matched more than ${MAX_FOUND_RECORDS} records. Narrow its condition, then try again.`;
 // The field changes one run may plan. Every one is saved before and after it
 // lands, so a run stays small enough to resume and to undo.
 export const MAX_RUN_FIELD_WRITES = 200;
@@ -66,20 +75,26 @@ export const MAX_CODE_RECORD_CHANGES = MAX_FOUND_RECORDS;
 // is also checked against.
 const BEFORE_BINDING = "__dohc_before";
 
-export function collectionAutomationId(collectionPath: string, id: string): string {
-  return `${COLLECTION_AUTOMATION_PREFIX}${collectionPath}#${id}`;
+/**
+ * A Collection automation's engine id: its Collection's id, which a move
+ * keeps, and its own id in automations.yaml. A document Collection's id is
+ * the object id of its collection.yaml; a dataset Collection's is its
+ * dataset id.
+ */
+export function collectionAutomationId(collectionId: string, id: string): string {
+  return `${COLLECTION_AUTOMATION_PREFIX}${collectionId}#${id}`;
 }
 
-/** The Collection and automation an engine automation id names, or null. */
+/** The Collection id and automation id an engine automation id names, or null. */
 export function parseCollectionAutomationId(
   engineId: string,
-): { collectionPath: string; id: string } | null {
+): { collectionId: string; id: string } | null {
   if (!engineId.startsWith(COLLECTION_AUTOMATION_PREFIX)) return null;
   const rest = engineId.slice(COLLECTION_AUTOMATION_PREFIX.length);
-  // An automation id is a slug, so the last "#" ends the Collection path.
-  const hash = rest.lastIndexOf("#");
+  const hash = rest.indexOf("#");
   if (hash <= 0 || hash === rest.length - 1) return null;
-  return { collectionPath: rest.slice(0, hash), id: rest.slice(hash + 1) };
+  const collectionId = rest.slice(0, hash);
+  return /^[A-Za-z0-9_-]+$/u.test(collectionId) ? { collectionId, id: rest.slice(hash + 1) } : null;
 }
 
 /**
@@ -126,11 +141,11 @@ export function runNowSkippedFrom(claim: Pick<RunClaim, "trigger">): number | nu
 }
 
 /** A step with its position among all steps, counted depth first. */
-type OrderedStep =
+export type OrderedStep =
   | { ordinal: number; step: Exclude<AutomationStep, IfStep> }
   | { ordinal: number; step: IfStep; then: OrderedStep[]; otherwise: OrderedStep[] };
 
-function orderSteps(steps: readonly AutomationStep[], counter = { next: 0 }): OrderedStep[] {
+export function orderSteps(steps: readonly AutomationStep[], counter = { next: 0 }): OrderedStep[] {
   return steps.map((step): OrderedStep => {
     const ordinal = counter.next++;
     if (step.kind !== "if") return { ordinal, step };
@@ -158,7 +173,7 @@ function* everyStep(steps: readonly OrderedStep[]): Generator<OrderedStep> {
  * What a binding holds: the records a Find returned, the record an
  * add-record step adds, or the value a code step returned.
  */
-type Binding = { kind: "find" | "add" | "code"; ordinal: number; collection: string | null };
+export type Binding = { kind: "find" | "add" | "code"; ordinal: number; collection: string | null };
 
 function bindingsOf(steps: readonly OrderedStep[]): Map<string, Binding> {
   const bindings = new Map<string, Binding>();
@@ -192,13 +207,104 @@ function isFormula(value: AutomationValue): value is Extract<AutomationValue, { 
  * Why `source` is not exactly one JavaScript expression, or null when it
  * is. It only parses, so a formula that would loop costs nothing here.
  */
-export function expressionProblem(source: string): string | null {
+function expressionProblem(source: string): string | null {
   try {
     const { end } = parseExpressionAt(source, 0, { ecmaVersion: "latest", preserveParens: true });
     const next = tokenizer(source.slice(end), { ecmaVersion: "latest" }).getToken();
     return next.type === tokTypes.eof ? null : `Unexpected text at character ${end + next.start + 1}.`;
   } catch (error) {
     return error instanceof SyntaxError ? error.message.replace(/\s*\(\d+:\d+\)$/u, ".") : "This is not a formula.";
+  }
+}
+
+/** A JSON Pointer segment, as the file contract writes one. */
+const pointerKey = (key: string) => key.replaceAll("~", "~0").replaceAll("/", "~1");
+
+/**
+ * A syntax error at its JSON Pointer from the automation: a formula's, in
+ * the parser's words, or a message's, as the file contract's code.
+ */
+export type FormulaProblem = { path: string; problem: string } | { path: string; code: AutomationDiagnosticCode };
+
+/**
+ * The syntax error of every formula, condition, and message in an
+ * automation, at its JSON Pointer from the automation, such as
+ * "/do/1/do/0/set/Status": the path the file contract gives a problem
+ * there. An empty one is left to the builder, which asks for it.
+ */
+export function formulaProblems(automation: Automation): FormulaProblem[] {
+  const problems: FormulaProblem[] = [];
+  const add = (path: string, expression: string) => {
+    const problem = expression.trim() === "" ? null : expressionProblem(expression);
+    if (problem !== null) problems.push({ path, problem });
+  };
+  const values = (path: string, entries: ReadonlyArray<{ key: string; value: AutomationValue }>) => {
+    for (const { key, value } of entries) if (isFormula(value)) add(`${path}/${pointerKey(key)}`, value.expression);
+  };
+  const steps = (path: string, list: readonly AutomationStep[]) => list.forEach((step, index) => {
+    const at = `${path}/${index}`;
+    switch (step.kind) {
+      case "set":
+      case "add-record":
+        values(`${at}/${step.kind}`, step.values.map(({ field, value }) => ({ key: field, value })));
+        break;
+      case "invoke":
+        values(`${at}/input`, step.input);
+        break;
+      case "find":
+        add(`${at}/find`, step.condition);
+        break;
+      case "if":
+        add(`${at}/if`, step.if);
+        steps(`${at}/do`, step.do);
+        steps(`${at}/otherwise`, step.otherwise);
+        break;
+      case "run": {
+        const problem = step.code.trim() === "" ? null : codeProblem(step.code);
+        if (problem !== null) problems.push({ path: `${at}/run`, problem });
+        break;
+      }
+      case "run-file":
+        break;
+      default: {
+        // Every other step sends a message, whose {expressions} must parse.
+        const code = step.text.trim() === "" ? null : automationTextProblem(step.text);
+        if (code !== null) problems.push({ path: `${at}/${step.kind}`, code });
+        if (step.kind === "notify" || step.kind === "direct-message") {
+          values(`${at}/to`, step.to.map((value, key) => ({ key: String(key), value })));
+        }
+      }
+    }
+  });
+  const when = automation.when;
+  if (when.kind === "field-changed" && when.to !== null && isFormula(when.to)) add("/when/to", when.to.expression);
+  if (when.kind === "starts-matching") add("/when/starts-matching", when.condition);
+  if (automation.if !== null) add("/if", automation.if);
+  steps("/do", automation.do);
+  return problems;
+}
+
+/**
+ * Why a code step's source does not parse as the function the guest builds
+ * from it, a strict body with the parameter ctx, or null when it does. It
+ * only parses; the code never runs.
+ */
+function codeProblem(source: string): string | null {
+  try {
+    // The guest's body starts with "use strict" on its own line, so a line here is one less.
+    const wrapped = `(function (ctx) {"use strict";\n${source}\n})`;
+    const [statement, ...more] = parse(wrapped, { ecmaVersion: "latest", sourceType: "script" }).body;
+    // The one function must hold the whole source, so the source cannot close it early and add more.
+    const whole = more.length === 0 && statement?.type === "ExpressionStatement" &&
+      statement.expression.type === "FunctionExpression" && statement.expression.end === wrapped.length - 1;
+    return whole ? null : "The code ends the step's function early. Remove the extra closing brace.";
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) return "This is not code dohc can read.";
+    // An error past the source's end, such as a block it never closes, is on its last line.
+    const line = "loc" in error && typeof error.loc === "object" && error.loc !== null && "line" in error.loc && typeof error.loc.line === "number"
+      ? Math.min(error.loc.line - 1, source.split(/\r\n?|\n|\u2028|\u2029/u).length) : null;
+    const message = error.message.replace(/\s*\(\d+:\d+\)$/u, "");
+    return line === null || line < 1 ? `${message}.` : `${message} on line ${line}.`;
   }
 }
 
@@ -289,11 +395,6 @@ function readsTriggerRecord(expression: string): boolean {
   };
   if (!isOneExpression(expression)) return false;
   return visit(parseExpressionAt(expression, 0, { ecmaVersion: "latest" }));
-}
-
-/** The names one formula reads as variables. */
-function namesIn(expression: string): Set<string> {
-  return namesRead(parseExpressionAt(expression, 0, { ecmaVersion: "latest" }));
 }
 
 function findValue(node: Expression, condition: string): FindValue | null {
@@ -430,7 +531,7 @@ function noTriggerRecord(trigger: AutomationTrigger): string | null {
  */
 export function shapeProblem(
   automation: Automation,
-  findValues: (condition: string) => readonly FindValue[] | { problem: string },
+  findValues: (condition: string, ordinal: number) => readonly FindValue[] | { problem: string },
 ): string | null {
   const recordless = noTriggerRecord(automation.when);
   const steps = orderSteps(automation.do);
@@ -439,7 +540,7 @@ export function shapeProblem(
   let formulas = (automation.if === null ? 0 : 1) +
     (automation.when.kind === "field-changed" && automation.when.to?.kind === "formula" ? 1 : 0) +
     (automation.when.kind === "starts-matching" ? 2 : 0);
-  for (const { step } of everyStep(steps)) {
+  for (const { step, ordinal } of everyStep(steps)) {
     switch (step.kind) {
       case "wake-agent":
       case "post":
@@ -460,19 +561,13 @@ export function shapeProblem(
       case "find": {
         finds += 1;
         formulas += 1;
-        const values = findValues(step.condition);
+        const values = findValues(step.condition, ordinal);
         if ("problem" in values) return values.problem;
         if (recordless !== null && values.some((value) => value.kind === "trigger-field" ||
           (value.kind === "formula" && readsTriggerRecord(value.expression)))) {
           return recordless;
         }
-        for (const value of values) {
-          if (value.kind !== "formula") continue;
-          formulas += 1;
-          // It runs before the Find reads, so no step's results exist yet.
-          const bound = [...namesIn(value.expression)].find((name) => bindings.has(name));
-          if (bound !== undefined) return `A Find cannot compare with ${bound}, another step's result. Compare with a value, the message, or a formula.`;
-        }
+        formulas += values.filter((value) => value.kind === "formula").length;
         break;
       }
       case "if":
@@ -591,7 +686,7 @@ export function datasetSubscriptionFor(
 }
 
 /** A post to the direct message with `userId`, as the reach check reads it. */
-function directMessageReach(chat: ChatDirectory | null, userId: string): ReachStep {
+export function directMessageReach(chat: ChatDirectory | null, userId: string): ReachStep {
   const target = chat?.directMessage(userId);
   return {
     kind: "post",
@@ -706,18 +801,6 @@ export function fieldWritesOf(automation: Automation): Array<{ collection: strin
   return writes;
 }
 
-/** The Collection each Find reads, with its query, in step order. */
-export function findsOf(automation: Automation): Array<{ ordinal: number; collection: string | null; query: FindQuery }> {
-  const finds: Array<{ ordinal: number; collection: string | null; query: FindQuery }> = [];
-  for (const { ordinal, step } of everyStep(orderSteps(automation.do))) {
-    if (step.kind !== "find") continue;
-    const query = findQueryOf(step.condition);
-    if ("problem" in query) throw new Error(query.problem);
-    finds.push({ ordinal, collection: step.collection, query });
-  }
-  return finds;
-}
-
 function jsonValue(value: CollectionValue): JsonValue {
   if (typeof value === "bigint") return value.toString();
   if (Array.isArray(value)) return value.map(jsonValue);
@@ -739,11 +822,16 @@ export interface RunRecord {
   values: JsonObject;
 }
 
+/** Which record a step's result names, without its values: a later step reads them again. */
+export type RunRef = Pick<RunRecord, "id" | "key" | "path">;
+
 export function runRecordOf(record: CollectionRecord): RunRecord {
   const values: JsonObject = {};
   for (const entry of record.values) values[entry.field] = jsonValue(entry.value);
   return { id: record.id, path: record.path, values };
 }
+
+export const refOf = ({ id, key, path }: RunRecord): RunRef => (key === undefined ? { id, path } : { id, key, path });
 
 const recordScope = (record: RunRecord): JsonObject => ({ ...record.values, id: record.key ?? record.id });
 
@@ -803,38 +891,29 @@ function factValue(side: Fact["previous"]): { value: JsonValue } | null | "trunc
   return "truncated" in side ? "truncated" : { value: side.value };
 }
 
-/** What the read phase found: the trigger record and each Find's records. */
-export interface RunInputs {
+/** What every step of a run shares: its trigger, who or what started it, and where it sends. */
+export interface RunContext {
   automation: Automation;
   claim: RunClaim;
-  /** Null when the trigger record was removed. */
-  record: RunRecord | null;
-  found: ReadonlyMap<number, readonly RunRecord[]>;
-  /**
-   * Finds the run could not read, with why: a page with more matches, or a
-   * formula for a value that failed. The run fails only when one of their
-   * branches runs. A partial page must not enter the scope.
-   */
-  unreadFinds?: ReadonlyMap<number, { error: string; timedOut: boolean }>;
   /** The Group message that started the run, with its whole body; null for a record change. */
   message: JsonObject | null;
-  /** Where posts and direct messages go; null when the automation sends none. */
-  chat: ChatDirectory | null;
   /**
    * The person who pressed the button or made the record change, or null
    * when nobody is known. A Group message's person is its author instead.
    */
   person: AutomationScope["person"];
+  /** Where posts and direct messages go; null when the automation sends none. */
+  chat: ChatDirectory | null;
+  /** The time formulas read as `now`: when the change was claimed, or a schedule's due time. */
+  nowMs: number;
   /**
-   * The only keys of the trigger record formulas may read, when the run could
-   * not read the record's fields. A formula that reads another stops with an
+   * The only keys of the trigger record formulas may read, when the run cannot
+   * read the record's fields. A formula that reads another stops with an
    * error instead of reading nothing.
    */
   recordKeys?: string[];
-  /** Each code file the steps run, by the path its step names, as the run read it. */
-  codeFiles?: ReadonlyMap<string, string>;
-  /** Each record a code step asked to change, by codeRecordKey, as the run read it after the code ran. */
-  codeRecords?: ReadonlyMap<string, RunRecord>;
+  /** What the run's ids and idempotency keys derive from: the claim, and the run's key seed. */
+  key: { claimId: string; hash: string };
 }
 
 /** How a run finds a record a code step names by its Collection and id. */
@@ -843,10 +922,9 @@ export const codeRecordKey = (collection: string, id: string) => JSON.stringify(
 /**
  * Whether the claim's change is the one the trigger names, before any
  * formula runs. A formula `to:`, and a starts-matching condition, are
- * checked after evaluation.
+ * checked by conditionsRequest.
  */
-export function triggerMatches(inputs: RunInputs): boolean {
-  const { automation, claim, record } = inputs;
+export function triggerMatches(automation: Automation, claim: RunClaim, record: RunRecord | null): boolean {
   const { change } = claim;
   const trigger = automation.when;
   switch (trigger.kind) {
@@ -883,50 +961,38 @@ export function triggerMatches(inputs: RunInputs): boolean {
 /** Where each formula's answer goes. */
 type Slot =
   | { kind: "only-if" }
-  | { kind: "find"; ordinal: number }
   | { kind: "to" }
   | { kind: "matched-before" }
   | { kind: "matches" }
+  // The value a Find compares its filter at `index` with.
+  | { kind: "find"; ordinal: number; index: number }
   | { kind: "if"; ordinal: number }
   | { kind: "value"; ordinal: number; field: string }
-  // One answer per record a Find returned, in order.
+  // One answer per record the step changes, in order.
   | { kind: "values"; ordinal: number; field: string }
   // One key of an action's input.
   | { kind: "input"; ordinal: number; key: string }
   | { kind: "text"; ordinal: number }
   // A direct message's person that a formula names.
   | { kind: "person"; ordinal: number; index: number }
-  // A code step's answer. Later formulas read its output by `as`.
+  // A code step's answer. Later steps read its output by `as`.
   | { kind: "code"; ordinal: number; as: string | null };
 
 type Guards = NonNullable<AutomationFormula["when"]>;
-/** A code step to run, when its guards hold, like a formula's. */
-type CodeItem = { kind: "code"; source: string; when?: Guards };
+/** A code step to run. */
+type CodeItem = { kind: "code"; source: string };
 
 export interface EvaluationRequest {
   scope: AutomationScope;
-  /** Formulas and code steps in step order. Each guard names an earlier item. */
-  items: Array<AutomationFormula | CodeItem>;
+  /** Formulas, each guard naming an earlier one; or one code step. */
+  items: AutomationFormula[] | [CodeItem];
   slots: Slot[];
 }
 
-const SKIPPED: AutomationOutcome<JsonValue> = { ok: true, value: null };
-
-function guardHolds(guard: Guards[number], result: AutomationOutcome<JsonValue>): boolean {
-  return result.ok && ("truthy" in guard ? Boolean(result.value) === guard.truthy : isDeepStrictEqual(result.value, guard.equals));
-}
-
 /**
- * Evaluates a run's formulas and code steps in step order. The formulas
- * between two code steps go to the evaluator in one request, as a run
- * without code sends all of its formulas. Each code step runs alone once
- * the items before it have answered, so the formulas after it read the
- * value it returned by the name its step binds. The host decides each guard
- * on an item of an earlier request, as the evaluator decides the others. A
- * failure stops evaluation there, and the answers end with it. Every request
- * adds to `spent`, which the run shares with the request for its Finds'
- * values, so the run's evaluator budget is the same as for a run that sends
- * one request.
+ * Evaluates a request: its formulas in one evaluator request, or its one
+ * code step. Every request adds to `spent`, which every step of the run
+ * shares, so a run's evaluator budget does not grow with its steps.
  */
 export async function evaluateRequest(
   evaluator: AutomationFormulaEvaluator,
@@ -934,61 +1000,13 @@ export async function evaluateRequest(
   request: EvaluationRequest,
   spent: AutomationTimeSpent,
 ): Promise<AutomationOutcome<JsonValue>[] | "busy"> {
-  const { items, slots } = request;
-  const results: AutomationOutcome<JsonValue>[] = [];
-  const bindings: JsonObject = { ...request.scope.bindings };
-  const scope = () => ({ ...request.scope, bindings: { ...bindings } });
-  let start = 0;
-  while (start < items.length) {
-    let end = start;
-    while (end < items.length && items[end]!.kind !== "code") end += 1;
-    const batch: AutomationFormula[] = [];
-    const sent: number[] = [];
-    // Each item in this request by its place in it, and each guard as the
-    // request numbers it. Formulas that share a guard still share one.
-    const place = new Map<number, number>();
-    const renumbered = new Map<Guards[number], Guards[number]>();
-    for (let index = start; index < end; index += 1) {
-      const { when = [], ...formula } = items[index] as AutomationFormula;
-      const inRequest: Guards = [];
-      let holds = true;
-      for (const guard of when) {
-        const at = place.get(guard.index);
-        if (at === undefined) {
-          holds &&= guardHolds(guard, results[guard.index]!);
-          continue;
-        }
-        if (!renumbered.has(guard)) renumbered.set(guard, { ...guard, index: at });
-        inRequest.push(renumbered.get(guard)!);
-      }
-      if (!holds) {
-        results[index] = SKIPPED;
-        continue;
-      }
-      place.set(index, batch.length);
-      sent.push(index);
-      batch.push(inRequest.length > 0 ? { ...formula, when: inRequest } as AutomationFormula : formula as AutomationFormula);
-    }
-    if (batch.length > 0) {
-      const answers = await evaluator.evaluate(automationId, scope(), batch, spent);
-      if (answers === "busy") return "busy";
-      sent.forEach((index, at) => { results[index] = answers[at]!; });
-    }
-    if (end === items.length || results.some((result) => !result.ok)) break;
-    const code = items[end] as CodeItem;
-    const slot = slots[end]!;
-    if (!(code.when ?? []).every((guard) => guardHolds(guard, results[guard.index]!))) {
-      results[end] = SKIPPED;
-    } else {
-      const answer = await evaluator.runCode(automationId, scope(), code.source, spent);
-      if (answer === "busy") return "busy";
-      results[end] = answer as AutomationOutcome<JsonValue>;
-      if (!answer.ok) break;
-      if (slot.kind === "code" && slot.as !== null) bindings[slot.as] = answer.value.output ?? null;
-    }
-    start = end + 1;
+  const [first] = request.items;
+  if (first?.kind === "code") {
+    const answer = await evaluator.runCode(automationId, request.scope, first.source, spent);
+    return answer === "busy" ? "busy" : [answer as AutomationOutcome<JsonValue>];
   }
-  return results;
+  if (request.items.length === 0) return [];
+  return await evaluator.evaluate(automationId, request.scope, request.items as AutomationFormula[], spent);
 }
 
 function previousValues(claim: RunClaim): JsonObject {
@@ -1012,29 +1030,32 @@ function recordBefore(record: RunRecord, claim: RunClaim): JsonObject {
   return before;
 }
 
-/** One evaluator request for every formula in the run. `nowMs` is when the change was claimed, or a schedule's due time. */
-export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationRequest {
-  const { automation, claim, record, found } = inputs;
-  const items: EvaluationRequest["items"] = [];
+/** The value the trigger's field changed to: from the claim, or from the record when the claim left it out. */
+function changedTo(claim: RunClaim, field: string, record: RunRecord | null): JsonValue {
+  const fact = claim.change.fields.find((candidate) => candidate.field === field);
+  const next = fact ? factValue(fact.next) : "truncated";
+  return next === "truncated" ? (record?.values[field] ?? null) : (next?.value ?? null);
+}
+
+/**
+ * The formulas that decide whether a run goes ahead, checked once against
+ * the trigger record before the first step: a formula `to:`, a
+ * starts-matching condition before and after the change, and "Only if".
+ */
+export function conditionsRequest(ctx: RunContext, record: RunRecord | null): EvaluationRequest {
+  const { automation, claim } = ctx;
+  const items: AutomationFormula[] = [];
   const slots: Slot[] = [];
-  const findGuards: Guards = [];
-  const guarded = (when: Guards) => {
-    const guards = [...when, ...findGuards];
-    return guards.length ? { when: guards } : {};
-  };
   const add = (slot: Slot, source: string, when: Guards = []) => {
     const index = items.length;
     slots.push(slot);
-    items.push({ kind: "expression", source, ...guarded(when) });
+    items.push({ kind: "expression", source, ...(when.length > 0 ? { when: [...when] } : {}) });
     return index;
   };
   const conditions: Guards = [];
   const trigger = automation.when;
   if (trigger.kind === "field-changed" && trigger.to?.kind === "formula") {
-    const fact = claim.change.fields.find(candidate => candidate.field === trigger.field);
-    const next = fact ? factValue(fact.next) : "truncated";
-    const equals = next === "truncated" ? (record?.values[trigger.field] ?? null) : (next?.value ?? null);
-    conditions.push({ index: add({ kind: "to" }, trigger.to.expression), equals });
+    conditions.push({ index: add({ kind: "to" }, trigger.to.expression), equals: changedTo(claim, trigger.field, record) });
   }
   if (trigger.kind === "starts-matching" && claim.change.kind === "changed") {
     conditions.push({ index: add({ kind: "matched-before" }, `((record) => (${trigger.condition}\n))(${BEFORE_BINDING})`), truthy: false });
@@ -1042,69 +1063,40 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   } else if (trigger.kind === "starts-matching") {
     conditions.push({ index: add({ kind: "matches" }, trigger.condition), truthy: true });
   }
-  if (automation.if !== null) conditions.push({ index: add({ kind: "only-if" }, automation.if, conditions), truthy: true });
-  const steps = orderSteps(automation.do);
-  const bindings = bindingsOf(steps);
-  const addSteps = (entries: readonly OrderedStep[], when: Guards) => {
-    for (const entry of entries) {
-      const { ordinal, step } = entry;
-      if (step.kind === "find" && inputs.unreadFinds?.has(ordinal)) {
-        // An inactive Find returns null. Only an active unread Find stops later formulas.
-        const index = add({ kind: "find", ordinal }, "true", when);
-        findGuards.push({ index, truthy: false });
-      }
-      if ("then" in entry) {
-        const index = add({ kind: "if", ordinal }, entry.step.if, when);
-        addSteps(entry.then, [...when, { index, truthy: true }]);
-        addSteps(entry.otherwise, [...when, { index, truthy: false }]);
-        continue;
-      }
-      if (step.kind === "run" || step.kind === "run-file") {
-        const source = step.kind === "run" ? step.code : inputs.codeFiles?.get(step.file);
-        if (source === undefined) throw new Error(`dohc did not read the code file step ${ordinal + 1} runs.`);
-        slots.push({ kind: "code", ordinal, as: step.as });
-        items.push({ kind: "code", source, ...guarded(when) });
-        continue;
-      }
-      if (step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" || step.kind === "wake-agent") {
-        slots.push({ kind: "text", ordinal });
-        items.push({ kind: "text", parts: automationTextParts(step.text) ?? [{ kind: "text", text: step.text }], ...guarded(when) });
-        if (step.kind === "direct-message" || step.kind === "notify") {
-          step.to.forEach((person, index) => {
-            if (isFormula(person)) add({ kind: "person", ordinal, index }, person.expression, when);
-          });
-        }
-      }
-      if (step.kind === "invoke") {
-        for (const { key, value } of step.input) if (isFormula(value)) add({ kind: "input", ordinal, key }, value.expression, when);
-        continue;
-      }
-      if (step.kind !== "set" && step.kind !== "add-record") continue;
-      const records = step.kind === "set" && step.records !== null && bindings.get(step.records)?.kind === "find"
-        ? step.records
-        : null;
-      for (const { field, value } of step.values) {
-        if (!isFormula(value)) continue;
-        if (records === null) add({ kind: "value", ordinal, field }, value.expression, when);
-        else add({ kind: "values", ordinal, field }, `(${records}).map((record) => (${value.expression}\n))`, when);
-      }
-    }
-  };
-  addSteps(steps, conditions);
-  const bound: JsonObject = {};
-  for (const [name, binding] of bindings) {
-    if (binding.kind === "find" && inputs.unreadFinds?.has(binding.ordinal)) continue;
-    bound[name] = binding.kind === "find" ? (found.get(binding.ordinal) ?? []).map(recordScope) : null;
-  }
+  if (automation.if !== null) add({ kind: "only-if" }, automation.if, conditions);
+  const bindings: JsonObject = {};
   if (trigger.kind === "starts-matching" && claim.change.kind === "changed" && record) {
-    bound[BEFORE_BINDING] = recordBefore(record, claim);
+    bindings[BEFORE_BINDING] = recordBefore(record, claim);
   }
-  return { scope: runScope(inputs, nowMs, bound), items, slots };
+  // No step has run yet.
+  const unavailable = Object.fromEntries([...bindingsIn(automation)].map(([name, binding]) => [name,
+    `${name} is step ${binding.ordinal + 1}'s result, and steps run only once this automation's conditions hold. Check it in an If step instead.`]));
+  return { scope: runScope(ctx, record, bindings, unavailable), items, slots };
 }
 
-/** What every formula in a run sees, with `bindings` for the steps' results. */
-function runScope(inputs: FindValueInputs, nowMs: number, bindings: JsonObject): AutomationScope {
-  const { automation, claim, record, message, person } = inputs;
+/** Whether the run goes ahead once its conditions have answered, or why it failed. */
+export function conditionsHold(
+  ctx: RunContext,
+  record: RunRecord | null,
+  request: EvaluationRequest,
+  results: readonly AutomationOutcome<JsonValue>[],
+): "go" | "skip" | { error: string; timedOut: boolean } {
+  const answers = answersOf(request, results);
+  if ("error" in answers) return answers;
+  const { automation, claim } = ctx;
+  const trigger = automation.when;
+  if (trigger.kind === "field-changed" && trigger.to?.kind === "formula" &&
+    !isDeepStrictEqual(changedTo(claim, trigger.field, record), answers.get("to") ?? null)) {
+    return "skip";
+  }
+  if (trigger.kind === "starts-matching" && (!answers.get("matches") || answers.get("matched-before"))) return "skip";
+  if (automation.if !== null && !answers.get("only-if")) return "skip";
+  return "go";
+}
+
+/** What every formula in a run sees, with `bindings` for the earlier steps' results. */
+function runScope(ctx: RunContext, record: RunRecord | null, bindings: JsonObject, unavailable: Readonly<Record<string, string>> = {}): AutomationScope {
+  const { automation, claim, message, person, nowMs } = ctx;
   const trigger = automation.when;
   const triggerRecord = record ? recordScope(record) : null;
   const author = message && typeof message.authorUserId === "string" && typeof message.authorDisplayName === "string"
@@ -1137,50 +1129,208 @@ function runScope(inputs: FindValueInputs, nowMs: number, bindings: JsonObject):
     // A press, a record change or a Group message names the person who started it.
     person: person ?? author,
     bindings,
+    ...(Object.keys(unavailable).length > 0 ? { unavailable } : {}),
     now: localIsoTime(nowMs),
-    ...(inputs.recordKeys ? { recordKeys: inputs.recordKeys } : {}),
+    ...(ctx.recordKeys ? { recordKeys: ctx.recordKeys } : {}),
   };
 }
 
-/** What the formulas a Find compares with see: everything a run reads before its Finds. */
-export type FindValueInputs = Pick<RunInputs, "automation" | "claim" | "record" | "message" | "person" | "recordKeys">;
+/** An earlier step's result as a later step reads it. */
+export type Bound =
+  | { kind: "find"; records: readonly RunRecord[] }
+  | { kind: "add"; record: RunRecord | null }
+  | { kind: "code"; value: JsonValue };
 
-/** The key of the value a formula gives the filter at `index` of the Find at `ordinal`. */
-export function findValueKey(ordinal: number, index: number): string {
-  return `${ordinal}:${index}`;
+/** What one step reads, as it was when the step started. */
+export interface StepInputs {
+  /** The trigger record now; null when the run has none or it is gone. */
+  record: RunRecord | null;
+  /** Each earlier step's result the step reads, by the name its step binds. */
+  bound: ReadonlyMap<string, Bound>;
+  /** Each result of a step that has not run, with why the step cannot read it. */
+  unavailable: Readonly<Record<string, string>>;
+}
+
+// Built from entries, so a result named __proto__ is a name like any other.
+function boundScope(bound: ReadonlyMap<string, Bound>): JsonObject {
+  return Object.fromEntries([...bound].map(([name, value]): [string, JsonValue] => [name,
+    value.kind === "find" ? value.records.map(recordScope) : value.kind === "add" ? (value.record ? recordScope(value.record) : null) : value.value]));
 }
 
 /**
- * One evaluator request for the values Finds compare with that formulas
- * give, made before any Find reads. The formulas see the trigger record,
- * the message, the person, and `now`, and no step's results. `slots`
- * names each formula's Find and filter.
+ * The names a step's formulas read as variables, and the binding it changes
+ * records of, so the step reads again only the earlier results it uses.
+ * Code can read anything, so a code step reads every earlier result.
  */
-export function findValuesRequest(
-  inputs: FindValueInputs,
-  finds: ReadonlyArray<{ ordinal: number; values: readonly FindValue[] }>,
-  nowMs: number,
-): { scope: AutomationScope; formulas: AutomationFormula[]; slots: Array<{ ordinal: number; index: number }> } {
-  const formulas: AutomationFormula[] = [];
-  const slots: Array<{ ordinal: number; index: number }> = [];
-  for (const { ordinal, values } of finds) {
-    values.forEach((value, index) => {
-      if (value.kind !== "formula") return;
-      formulas.push({ kind: "expression", source: value.expression });
-      slots.push({ ordinal, index });
-    });
+export function namesUsed(step: AutomationStep): ReadonlySet<string> | "all" {
+  if (step.kind === "run" || step.kind === "run-file") return "all";
+  const sources: string[] = [];
+  const formulas = (values: readonly AutomationValue[]) => {
+    for (const value of values) if (isFormula(value)) sources.push(value.expression);
+  };
+  switch (step.kind) {
+    case "if":
+      sources.push(step.if);
+      break;
+    case "find":
+      sources.push(step.condition);
+      break;
+    case "set":
+    case "add-record":
+      formulas(step.values.map((entry) => entry.value));
+      break;
+    case "invoke":
+      formulas(step.input.map((entry) => entry.value));
+      break;
+    default:
+      for (const part of automationTextParts(step.text) ?? []) if (part.kind === "expression") sources.push(part.expression);
+      if (step.kind === "direct-message" || step.kind === "notify") formulas(step.to);
   }
-  // `record` means the record a Find checks, which no value can read, so
-  // these formulas reach the trigger record only as `trigger.record`.
-  const { record: _checked, ...scope } = runScope(inputs, nowMs, {});
-  return { scope, formulas, slots };
+  const names = new Set<string>();
+  // Every name, a function's own parameters too: reading one result too many
+  // costs a read, and one too few would leave it out. A formula that is not
+  // one expression fails when it runs, and says why.
+  for (const source of sources) {
+    if (isOneExpression(source)) for (const name of namesRead(parseExpressionAt(source, 0, { ecmaVersion: "latest" }))) names.add(name);
+  }
+  if (step.kind === "set" && step.records !== null) names.add(step.records);
+  return names;
 }
 
-/** The value a Find's filter compares with, once its formulas have answered. */
-export function filterValue(value: FindValue, record: RunRecord | null, computed: ReadonlyMap<string, JsonValue>, key: string): JsonValue {
-  if (value.kind === "literal") return value.value;
-  if (value.kind === "trigger-field") return record?.values[value.field] ?? null;
-  return computed.get(key) ?? null;
+/** An automation's bindings by name: which step makes each, as runs count steps. */
+export function bindingsIn(automation: Automation): ReadonlyMap<string, Binding> {
+  return bindingsOf(orderSteps(automation.do));
+}
+
+/**
+ * Each result the step at `ordinal` does not get, with why: the step that
+ * makes it comes later, or is in a branch this run did not take, or the
+ * step's formulas never name it, so it was not read. Reading one stops the
+ * formula or code with that text instead of reading nothing.
+ */
+export function unavailableTo(
+  ordinal: number,
+  bindings: ReadonlyMap<string, Binding>,
+  done: ReadonlySet<string>,
+  read: ReadonlySet<string> | "all",
+): Record<string, string> {
+  // Built from entries, so a result named __proto__ is a name like any other.
+  return Object.fromEntries([...bindings].flatMap(([name, binding]): Array<[string, string]> => {
+    const maker = `step ${binding.ordinal + 1}`;
+    if (done.has(name)) {
+      return read === "all" || read.has(name) ? [] : [[name, `${name} is ${maker}'s result, and a formula gets it only by naming it. Write ${name} in the formula.`]];
+    }
+    return [[name, binding.ordinal > ordinal
+      ? `${name} is ${maker}'s result, and ${maker} comes after step ${ordinal + 1}.`
+      : `${name} is ${maker}'s result, and ${maker} did not run.`]];
+  }));
+}
+
+/**
+ * One evaluator request for the values a Find compares fields with that
+ * formulas give. `record` means the record the Find checks, which no value
+ * can read, so these formulas reach the trigger record only as
+ * `trigger.record`. They read earlier steps' results.
+ */
+export function findRequest(ctx: RunContext, ordinal: number, inputs: StepInputs, values: readonly FindValue[]): EvaluationRequest {
+  const items: AutomationFormula[] = [];
+  const slots: Slot[] = [];
+  values.forEach((value, index) => {
+    if (value.kind !== "formula") return;
+    items.push({ kind: "expression", source: value.expression });
+    slots.push({ kind: "find", ordinal, index });
+  });
+  const { record: _checked, ...scope } = runScope(ctx, inputs.record, boundScope(inputs.bound), inputs.unavailable);
+  return { scope, items, slots };
+}
+
+/** The values a Find's filters compare with, once its formulas have answered. */
+export function filterValues(values: readonly FindValue[], record: RunRecord | null, answers: ReadonlyMap<string, JsonValue>): JsonValue[] {
+  return values.map((value, index) => {
+    if (value.kind === "literal") return value.value;
+    if (value.kind === "trigger-field") return record?.values[value.field] ?? null;
+    return answers.get(`find:${index}`) ?? null;
+  });
+}
+
+/**
+ * One evaluator request for a step's formulas, or its code: a run-file
+ * step's `source`, as the executor read it. Not for a Find: see findRequest.
+ */
+export function stepRequest(ctx: RunContext, entry: OrderedStep, inputs: StepInputs, source?: string): EvaluationRequest {
+  const items: AutomationFormula[] = [];
+  const slots: Slot[] = [];
+  const add = (slot: Slot, source: string) => {
+    slots.push(slot);
+    items.push({ kind: "expression", source });
+  };
+  const { ordinal, step } = entry;
+  const scope = runScope(ctx, inputs.record, boundScope(inputs.bound), inputs.unavailable);
+  if ("then" in entry) {
+    add({ kind: "if", ordinal }, entry.step.if);
+  } else if (step.kind === "run" || step.kind === "run-file") {
+    const code = step.kind === "run" ? step.code : source;
+    if (code === undefined) throw new Error(`dohc did not read the code file step ${ordinal + 1} runs.`);
+    return { scope, items: [{ kind: "code", source: code }], slots: [{ kind: "code", ordinal, as: step.as }] };
+  } else if (step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" || step.kind === "wake-agent") {
+    slots.push({ kind: "text", ordinal });
+    items.push({ kind: "text", parts: automationTextParts(step.text) ?? [{ kind: "text", text: step.text }] });
+    if (step.kind === "direct-message" || step.kind === "notify") {
+      step.to.forEach((person, index) => {
+        if (isFormula(person)) add({ kind: "person", ordinal, index }, person.expression);
+      });
+    }
+  } else if (step.kind === "invoke") {
+    for (const { key, value } of step.input) if (isFormula(value)) add({ kind: "input", ordinal, key }, value.expression);
+  } else if (step.kind === "set" || step.kind === "add-record") {
+    // A Set on the records a Find returned gives each record its own value.
+    const records = step.kind === "set" && step.records !== null && inputs.bound.get(step.records)?.kind === "find" ? step.records : null;
+    for (const { field, value } of step.values) {
+      if (!isFormula(value)) continue;
+      if (records === null) add({ kind: "value", ordinal, field }, value.expression);
+      else add({ kind: "values", ordinal, field }, `(${records}).map((record) => (${value.expression}\n))`);
+    }
+  }
+  return { scope, items, slots };
+}
+
+function slotKey(slot: Slot): string {
+  switch (slot.kind) {
+    case "value":
+    case "values":
+      return `${slot.kind}:${slot.field}`;
+    case "find":
+      return `find:${slot.index}`;
+    case "person":
+      return `person:${slot.index}`;
+    case "input":
+      return `input:${slot.key}`;
+    default:
+      return slot.kind;
+  }
+}
+
+/** Each formula's answer by its slot, or why one failed. */
+export function answersOf(
+  request: EvaluationRequest,
+  results: readonly AutomationOutcome<JsonValue>[],
+): Map<string, JsonValue> | { error: string; timedOut: boolean } {
+  const answers = new Map<string, JsonValue>();
+  let failure: { error: string; timedOut: boolean } | null = null;
+  for (const [index, slot] of request.slots.entries()) {
+    const result = results[index];
+    if (!result) return failure ?? { error: "The evaluator did not answer every formula.", timedOut: false };
+    if (result.ok) {
+      answers.set(slotKey(slot), result.value);
+      continue;
+    }
+    // A timeout counts toward switching the automation off, so another
+    // formula's failure in the same request never hides one.
+    const timedOut = result.error.code === "timeout";
+    if (failure === null || (timedOut && !failure.timedOut)) failure = { error: `${slotSubject(slot)} failed. ${result.error.message}`, timedOut };
+    if (timedOut) return failure;
+  }
+  return failure ?? answers;
 }
 
 export interface PlannedField {
@@ -1189,11 +1339,8 @@ export interface PlannedField {
   after: JsonValue;
 }
 
-/**
- * A record a step changes: one that exists, found again by its id before the
- * write, or the one an earlier step adds.
- */
-export type PlannedTarget = { recordId: string; collectionPath: string; path: string } | { addedBy: number };
+/** A record a step changes, found again by its id before the write. */
+export type PlannedTarget = { recordId: string; collectionPath: string; path: string };
 
 export type PlannedEffect =
   | { kind: "set"; target: PlannedTarget; fields: PlannedField[] }
@@ -1235,15 +1382,22 @@ export type PlannedEffect =
   /** A dataset action to run, by name, with its input as the formulas gave it. */
   | { kind: "invoke"; operation: string; input: JsonObject };
 
+/**
+ * What a completed step leaves for the steps after it: the records a Find
+ * returned, which branch an If took, or the value a code step returned. A
+ * record an Add record step added is known from what the run recorded.
+ */
+export type StepOutput =
+  | { kind: "find"; records: RunRef[] }
+  | { kind: "if"; branch: boolean }
+  | { kind: "code"; value: JsonValue };
+
+/** One step as planned: its effects, in order, and its result. */
 export interface PlannedStep {
   ordinal: number;
   effects: PlannedEffect[];
+  output?: StepOutput;
 }
-
-export type RunPlan =
-  | { kind: "skip" }
-  | { kind: "failed"; error: string; timedOut: boolean }
-  | { kind: "plan"; steps: PlannedStep[] };
 
 function slotSubject(slot: Slot): string {
   switch (slot.kind) {
@@ -1290,7 +1444,7 @@ function peopleOf(
   // Each person, and whether only a formula named them.
   const people = new Map<string, boolean>();
   for (const [index, person] of to.entries()) {
-    const value = isFormula(person) ? (answers.get(`person:${ordinal}:${index}`) ?? null) : person.value;
+    const value = isFormula(person) ? (answers.get(`person:${index}`) ?? null) : person.value;
     for (const userId of Array.isArray(value) ? value : [value]) {
       if (typeof userId !== "string" || userId.length === 0) {
         return `Step ${ordinal + 1} names a person that is not a person's id.`;
@@ -1313,7 +1467,7 @@ function messageBody(value: JsonValue): string | { problem: string } {
   return body;
 }
 
-/** The people the run's formulas named for direct messages, so only their conversations are read. */
+/** The people a step's formulas named for direct messages, so only their conversations are read. */
 export function formulaPeople(request: EvaluationRequest, results: readonly AutomationOutcome<JsonValue>[]): string[] {
   const people = new Set<string>();
   request.slots.forEach((slot, index) => {
@@ -1340,9 +1494,9 @@ export interface CodeChange {
 }
 
 /**
- * Every record change the run's code steps asked for, in step order: `set`
- * in `collectionPath`, then `records` as the code listed them. Or why the
- * changes break the code step contract.
+ * Every record change a code step asked for: `set` in `collectionPath`,
+ * then `records` as the code listed them. Or why the changes break the code
+ * step contract.
  */
 export function codeChangesOf(
   request: EvaluationRequest,
@@ -1380,325 +1534,231 @@ export function stepKey(claimId: string, hash: string, ordinal: number): string 
   return `${claimId}/${hash}/${ordinal}`;
 }
 
-/**
- * Turns the evaluator's answers into the run's plan: which branch each If
- * takes and the fields each step writes. A formula that failed fails the
- * run, and a condition that does not hold skips it.
- */
-export function planRun(
-  inputs: RunInputs,
-  request: EvaluationRequest,
-  results: readonly AutomationOutcome<JsonValue>[],
-  key: { claimId: string; hash: string },
-): RunPlan {
-  const answers = new Map<string, JsonValue>();
-  const slotKey = (slot: Slot) => {
-    switch (slot.kind) {
-      case "value":
-      case "values":
-        return `${slot.kind}:${slot.ordinal}:${slot.field}`;
-      case "if":
-      case "find":
-      case "text":
-      case "code":
-        return `${slot.kind}:${slot.ordinal}`;
-      case "person":
-        return `person:${slot.ordinal}:${slot.index}`;
-      case "input":
-        return `input:${slot.ordinal}:${slot.key}`;
-      default:
-        return slot.kind;
-    }
-  };
-  for (const [index, slot] of request.slots.entries()) {
-    const result = results[index];
-    if (!result) return { kind: "failed", error: "The evaluator did not answer every formula.", timedOut: false };
-    if (!result.ok) {
-      return {
-        kind: "failed",
-        error: `${slotSubject(slot)} failed. ${result.error.message}`,
-        timedOut: result.error.code === "timeout",
-      };
-    }
-    if (slot.kind === "find" && result.value) {
-      const unread = inputs.unreadFinds?.get(slot.ordinal);
-      return { kind: "failed", error: unread?.error ?? FIND_OVERFLOW_ERROR, timedOut: unread?.timedOut ?? false };
-    }
-    answers.set(slotKey(slot), result.value);
+/** How many field values a step's effects write, as the run's limit counts them. */
+export function fieldWriteCount(effects: ReadonlyArray<{ kind: string; fields?: readonly unknown[]; values?: readonly unknown[] }>): number {
+  let count = 0;
+  for (const effect of effects) {
+    if (effect.kind === "set" || effect.kind === "add" || effect.kind === "dataset-edit") count += effect.fields?.length ?? 0;
+    else if (effect.kind === "dataset-create") count += effect.values?.length ?? 0;
   }
-  const { automation, claim, record, found, chat } = inputs;
-  const trigger = automation.when;
-  if (trigger.kind === "field-changed" && trigger.to?.kind === "formula") {
-    const fact = claim.change.fields.find((candidate) => candidate.field === trigger.field);
-    const next = fact ? factValue(fact.next) : "truncated";
-    const value = next === "truncated" ? (record?.values[trigger.field] ?? null) : (next?.value ?? null);
-    if (!isDeepStrictEqual(value, answers.get("to") ?? null)) return { kind: "skip" };
-  }
-  if (trigger.kind === "starts-matching" && (!answers.get("matches") || answers.get("matched-before"))) {
-    return { kind: "skip" };
-  }
-  if (automation.if !== null && !answers.get("only-if")) return { kind: "skip" };
-  const codeChanges = codeChangesOf(request, results, claim.collectionPath);
-  if ("problem" in codeChanges) return { kind: "failed", error: codeChanges.problem, timedOut: false };
+  return count;
+}
 
-  const planned: PlannedStep[] = [];
-  const bindings = bindingsOf(orderSteps(automation.do));
-  const valueOf = (ordinal: number, field: string, value: AutomationValue): JsonValue =>
-    isFormula(value) ? (answers.get(`value:${ordinal}:${field}`) ?? null) : value.value;
-  // Each field's value once the effects planned so far have landed, by
-  // record id, so a later step on the same field expects what the earlier
-  // one wrote. A record the run adds starts with no fields.
-  const landed = new Map<string, Map<string, JsonValue>>();
-  const addedIds = new Map<number, string>();
-  let writes = 0;
-  // Records key on their path and id together: dataset records of two tables can share an id.
-  const keyOf = (target: RunRecord) => `${target.path}\u0000${target.id}`;
-  const fieldsFor = (
-    recordId: string,
-    initial: JsonObject,
-    values: ReadonlyArray<{ field: string; after: JsonValue }>,
-  ): PlannedField[] => {
-    const current = landed.get(recordId) ?? new Map<string, JsonValue>();
-    landed.set(recordId, current);
-    writes += values.length;
-    return values.map(({ field, after }) => {
-      const before = current.has(field) ? current.get(field)! : (initial[field] ?? null);
-      current.set(field, after);
-      return { field, before, after };
-    });
-  };
-  // A code step's changes as Set fields and Add record effects, in the
-  // order the code listed them. Changes to one record merge into one write,
-  // so each field keeps one idempotency key.
-  const planCode = (ordinal: number): string | null => {
-    const seed = stepKey(key.claimId, key.hash, ordinal);
-    const edits = new Map<string, { target: RunRecord; collectionPath: string; values: Map<string, JsonValue> }>();
-    const order: Array<PlannedEffect | { edit: string }> = [];
-    for (const [index, change] of codeChanges.filter((candidate) => candidate.ordinal === ordinal).entries()) {
-      const values = Object.entries(change.fields).map(([field, after]) => ({ field, after }));
-      if (change.action === "add") {
-        const recordId = derivedRecordId(`${seed}/${index}`);
-        fieldsFor(recordId, {}, values);
-        order.push({
-          kind: "add",
-          collectionPath: change.collection,
-          recordId,
-          name: `${automation.id}-${recordId.slice(4, 12)}`,
-          fields: values.map(({ field, after }) => ({ field, value: after })),
-        });
-        continue;
-      }
-      const target = change.id === null ? record : (inputs.codeRecords?.get(codeRecordKey(change.collection, change.id)) ?? null);
-      if (target === null) {
-        const starter = automation.when.kind === "schedule" ? "A schedule" : automation.when.kind === "group-message" ? "A Group message" : null;
-        return change.id === null
-          ? starter === null
-            ? `The code in step ${ordinal + 1} returned "set", but this run has no record to set fields on.`
-            : `The code in step ${ordinal + 1} returned "set", but ${starter.toLowerCase()} starts this automation, so it has no record to set fields on. Change records by id in "records" instead.`
-          : `The code in step ${ordinal + 1} changes record ${change.id}, which is not in ${change.collection}.`;
-      }
-      const edit = keyOf(target);
-      if (!edits.has(edit)) {
-        edits.set(edit, { target, collectionPath: change.collection, values: new Map() });
-        order.push({ edit });
-      }
-      for (const { field, after } of values) edits.get(edit)!.values.set(field, after);
+export const tooManyWritesError = (ordinal: number) =>
+  `Step ${ordinal + 1} would make this run change more than ${MAX_RUN_FIELD_WRITES} fields. Narrow its Find steps, or split it into smaller automations.`;
+
+/**
+ * Turns one step's answers into its effects and its result: which branch an
+ * If takes, the fields a step writes, the messages it sends. Each field's
+ * before value is what the step read when it started. `chat` names the
+ * people the step's formulas named; `codeRecords` are the records its code
+ * changes by id, as the step read them.
+ */
+export function planStep(
+  ctx: RunContext,
+  entry: OrderedStep,
+  inputs: StepInputs,
+  answers: ReadonlyMap<string, JsonValue>,
+  extra: { chat: ChatDirectory | null; codeChanges: readonly CodeChange[]; codeRecords: ReadonlyMap<string, RunRecord> },
+): { step: PlannedStep } | { problem: string } {
+  const { automation, claim, key } = ctx;
+  const { record } = inputs;
+  const { chat } = extra;
+  const { ordinal, step } = entry;
+  const done = (effects: PlannedEffect[], output?: StepOutput) => ({ step: { ordinal, effects, ...(output ? { output } : {}) } });
+  const seed = stepKey(key.claimId, key.hash, ordinal);
+  const valueOf = (field: string, value: AutomationValue): JsonValue =>
+    isFormula(value) ? (answers.get(`value:${field}`) ?? null) : value.value;
+  const set = (target: RunRecord, collectionPath: string, values: ReadonlyArray<{ field: string; after: JsonValue }>): PlannedEffect => ({
+    kind: "set",
+    target: { recordId: target.id, collectionPath, path: target.path },
+    fields: values.map(({ field, after }) => ({ field, before: target.values[field] ?? null, after })),
+  });
+  if ("then" in entry) return done([], { kind: "if", branch: Boolean(answers.get("if")) });
+  switch (step.kind) {
+    case "wake-agent": {
+      // Any change can wake the agent. The wake message carries the claim's
+      // depth plus one, and the agent's writes one more, so the chain stops
+      // at the cap like any other.
+      const body = messageBody(answers.get("text") ?? null);
+      if (typeof body !== "string") return { problem: `The message in step ${ordinal + 1} ${body.problem}` };
+      const effectId = `${seed}/wake`;
+      return done([{
+        kind: "wake",
+        effectId,
+        messageId: automationMessageId(effectId),
+        threadId: automationWakeThreadId(claim.automationId),
+        person: step.person,
+        body,
+      }]);
     }
-    planned.push({
-      ordinal,
-      effects: order.map((entry): PlannedEffect => {
-        if (!("edit" in entry)) return entry;
-        const { target, collectionPath, values } = edits.get(entry.edit)!;
-        return {
-          kind: "set",
-          target: { recordId: target.id, collectionPath, path: target.path },
-          fields: fieldsFor(entry.edit, target.values, [...values].map(([field, after]) => ({ field, after }))),
-        };
-      }),
-    });
-    return null;
-  };
-  const walk = (steps: readonly OrderedStep[]): string | null => {
-    for (const entry of steps) {
-      const { ordinal, step } = entry;
-      if ("then" in entry) {
-        const problem = walk(answers.get(`if:${ordinal}`) ? entry.then : entry.otherwise);
-        if (problem !== null) return problem;
-        continue;
+    case "notify": {
+      const text = answers.get("text") ?? null;
+      if (typeof text !== "string") return { problem: `The message in step ${ordinal + 1} is not text.` };
+      if (chat === null) return { problem: "dohc could not read who this workspace is shared with." };
+      const people = peopleOf(step.to, ordinal, answers);
+      if (typeof people === "string") return { problem: people };
+      const effects: PlannedEffect[] = [];
+      for (const [userId, byFormula] of people) {
+        const recipient = chat.noticeRecipient(userId);
+        if ("problem" in recipient) return { problem: recipient.problem };
+        effects.push({
+          kind: "notice",
+          name: recipient.name,
+          ...(byFormula ? { byFormula } : {}),
+          notice: {
+            noticeId: automationNoticeId(seed, userId),
+            kind: "automation-notify",
+            title: cutText(automation.name.trim(), NOTICE_TITLE_MAX_CHARS),
+            body: cutText(noticeText(text), NOTICE_BODY_MAX_CHARS),
+            target: {
+              // A notice for someone else names a path both can read.
+              path: record?.path ?? claim.collectionPath,
+              ...(record ? { record: record.id } : {}),
+              automation: claim.automationId,
+              run: claim.claimId,
+            },
+            recipientUserId: userId,
+          },
+        });
       }
-      if (step.kind === "wake-agent") {
-        // Any change can wake the agent. The wake message carries the
-        // claim's depth plus one, and the agent's writes one more, so the
-        // chain stops at the cap like any other.
-        const body = messageBody(answers.get(`text:${ordinal}`) ?? null);
-        if (typeof body !== "string") return `The message in step ${ordinal + 1} ${body.problem}`;
-        const effectId = `${stepKey(key.claimId, key.hash, ordinal)}/wake`;
-        planned.push({ ordinal, effects: [{
-          kind: "wake",
+      return done(effects);
+    }
+    case "post":
+    case "direct-message": {
+      const body = messageBody(answers.get("text") ?? null);
+      if (typeof body !== "string") return { problem: `The message in step ${ordinal + 1} ${body.problem}` };
+      if (chat === null) return { problem: "dohc could not read this workspace's chats." };
+      if (step.kind === "post") {
+        const group = chat.group(step.group);
+        if ("problem" in group) return { problem: group.problem };
+        if (group.readOnly) return { problem: GROUP_READ_ONLY };
+        const effectId = `${seed}/post`;
+        return done([{
+          kind: "message",
           effectId,
           messageId: automationMessageId(effectId),
-          threadId: automationWakeThreadId(claim.automationId),
-          person: step.person,
+          threadId: automationThreadId(effectId),
+          to: { kind: "group", channelId: group.channelId, lane: group.lane },
+          name: group.name,
+          channelWireId: group.wireId,
           body,
-        }] });
-        continue;
+        }]);
       }
-      if (step.kind === "notify") {
-        const text = answers.get(`text:${ordinal}`) ?? null;
-        if (typeof text !== "string") return `The message in step ${ordinal + 1} is not text.`;
-        if (chat === null) return "dohc could not read who this workspace is shared with.";
-        const people = peopleOf(step.to, ordinal, answers);
-        if (typeof people === "string") return people;
-        const seed = stepKey(key.claimId, key.hash, ordinal);
-        const effects: PlannedEffect[] = [];
-        for (const [userId, byFormula] of people) {
-          const recipient = chat.noticeRecipient(userId);
-          if ("problem" in recipient) return recipient.problem;
-          effects.push({
-            kind: "notice",
-            name: recipient.name,
-            ...(byFormula ? { byFormula } : {}),
-            notice: {
-              noticeId: automationNoticeId(seed, userId),
-              kind: "automation-notify",
-              title: cutText(automation.name.trim(), NOTICE_TITLE_MAX_CHARS),
-              body: cutText(noticeText(text), NOTICE_BODY_MAX_CHARS),
-              target: {
-                // A notice for someone else names a path both can read.
-                path: record?.path ?? claim.collectionPath,
-                ...(record ? { record: record.id } : {}),
-                automation: claim.automationId,
-                run: claim.claimId,
-              },
-              recipientUserId: userId,
-            },
-          });
-        }
-        planned.push({ ordinal, effects });
-        continue;
+      const people = peopleOf(step.to, ordinal, answers);
+      if (typeof people === "string") return { problem: people };
+      const effects: PlannedEffect[] = [];
+      for (const [userId, byFormula] of people) {
+        const target = chat.directMessage(userId);
+        if ("problem" in target) return { problem: target.problem };
+        const effectId = `${seed}/dm/${userId}`;
+        effects.push({
+          kind: "message",
+          effectId,
+          messageId: automationMessageId(effectId),
+          threadId: target.threadId,
+          to: { kind: "direct-message", userId, threadId: target.threadId },
+          name: target.name,
+          channelWireId: target.wireId,
+          body,
+          ...(byFormula ? { byFormula } : {}),
+        });
       }
-      if (step.kind === "post" || step.kind === "direct-message") {
-        const body = messageBody(answers.get(`text:${ordinal}`) ?? null);
-        if (typeof body !== "string") return `The message in step ${ordinal + 1} ${body.problem}`;
-        if (chat === null) return "dohc could not read this workspace's chats.";
-        const seed = stepKey(key.claimId, key.hash, ordinal);
-        const effects: PlannedEffect[] = [];
-        if (step.kind === "post") {
-          const group = chat.group(step.group);
-          if ("problem" in group) return group.problem;
-          const effectId = `${seed}/post`;
-          effects.push({
-            kind: "message",
-            effectId,
-            messageId: automationMessageId(effectId),
-            threadId: automationThreadId(effectId),
-            to: { kind: "group", channelId: group.channelId, lane: group.lane },
-            name: group.name,
-            channelWireId: group.wireId,
-            body,
-          });
-        } else {
-          const people = peopleOf(step.to, ordinal, answers);
-          if (typeof people === "string") return people;
-          for (const [userId, byFormula] of people) {
-            const target = chat.directMessage(userId);
-            if ("problem" in target) return target.problem;
-            const effectId = `${seed}/dm/${userId}`;
-            effects.push({
-              kind: "message",
-              effectId,
-              messageId: automationMessageId(effectId),
-              threadId: target.threadId,
-              to: { kind: "direct-message", userId, threadId: target.threadId },
-              name: target.name,
-              channelWireId: target.wireId,
-              body,
-              ...(byFormula ? { byFormula } : {}),
-            });
-          }
-        }
-        planned.push({ ordinal, effects });
-        continue;
-      }
-      if (step.kind === "invoke") {
-        const input: JsonObject = {};
-        for (const { key: name, value } of step.input) input[name] = isFormula(value) ? (answers.get(`input:${ordinal}:${name}`) ?? null) : value.value;
-        planned.push({ ordinal, effects: [{ kind: "invoke", operation: step.operation, input }] });
-        continue;
-      }
-      if (step.kind === "run" || step.kind === "run-file") {
-        const problem = planCode(ordinal);
-        if (problem !== null) return problem;
-      } else if (step.kind === "add-record") {
-        const recordId = derivedRecordId(stepKey(key.claimId, key.hash, ordinal));
-        addedIds.set(ordinal, recordId);
-        const values = step.values.map(({ field, value }) => ({ field, after: valueOf(ordinal, field, value) }));
-        fieldsFor(recordId, {}, values);
-        planned.push({
-          ordinal,
-          effects: [{
+      return done(effects);
+    }
+    case "invoke": {
+      const input: JsonObject = {};
+      for (const { key: name, value } of step.input) input[name] = isFormula(value) ? (answers.get(`input:${name}`) ?? null) : value.value;
+      return done([{ kind: "invoke", operation: step.operation, input }]);
+    }
+    case "run":
+    case "run-file": {
+      // The code's changes as Set fields and Add record effects, in the order
+      // the code listed them. Changes to one record merge into one write, so
+      // each field keeps one idempotency key.
+      const edits = new Map<string, { target: RunRecord; collectionPath: string; values: Map<string, JsonValue> }>();
+      const order: Array<PlannedEffect | { edit: string }> = [];
+      for (const [index, change] of extra.codeChanges.entries()) {
+        const values = Object.entries(change.fields).map(([field, after]) => ({ field, after }));
+        if (change.action === "add") {
+          const recordId = derivedRecordId(`${seed}/${index}`);
+          order.push({
             kind: "add",
-            collectionPath: step.collection ?? claim.collectionPath,
+            collectionPath: change.collection,
             recordId,
-            // Each run's record gets its own name, the same on every attempt.
             name: `${automation.id}-${recordId.slice(4, 12)}`,
             fields: values.map(({ field, after }) => ({ field, value: after })),
-          }],
-        });
-      } else if (step.kind === "set") {
-        const bound = step.records === null ? null : bindings.get(step.records) ?? null;
-        if (bound?.kind === "find") {
-          const records = found.get(bound.ordinal) ?? [];
-          const lists = new Map<string, JsonValue[]>();
-          for (const { field, value } of step.values) {
-            if (!isFormula(value)) continue;
-            const list = answers.get(`values:${ordinal}:${field}`);
-            if (!Array.isArray(list) || list.length !== records.length) {
-              return `The formula for "${field}" in step ${ordinal + 1} did not give one value for each record.`;
-            }
-            lists.set(field, list);
-          }
-          const collectionPath = bound.collection ?? claim.collectionPath;
-          planned.push({
-            ordinal,
-            effects: records.map((target, index) => ({
-              kind: "set",
-              target: { recordId: target.id, collectionPath, path: target.path },
-              fields: fieldsFor(keyOf(target), target.values, step.values.map(({ field, value }) => ({
-                field,
-                after: isFormula(value) ? (lists.get(field)![index] ?? null) : value.value,
-              }))),
-            })),
           });
-        } else if (bound?.kind === "add") {
-          const recordId = addedIds.get(bound.ordinal);
-          if (recordId === undefined) return `Step ${ordinal + 1} changes a record that no earlier step added.`;
-          planned.push({
-            ordinal,
-            effects: [{
-              kind: "set",
-              target: { addedBy: bound.ordinal },
-              fields: fieldsFor(recordId, {}, step.values.map(({ field, value }) => ({ field, after: valueOf(ordinal, field, value) }))),
-            }],
-          });
-        } else {
-          if (record === null) return "The record was removed, so the automation has no record to change.";
-          planned.push({
-            ordinal,
-            effects: [{
-              kind: "set",
-              target: { recordId: record.id, collectionPath: claim.collectionPath, path: record.path },
-              fields: fieldsFor(keyOf(record), record.values, step.values.map(({ field, value }) => ({ field, after: valueOf(ordinal, field, value) }))),
-            }],
-          });
+          continue;
         }
+        const target = change.id === null ? record : (extra.codeRecords.get(codeRecordKey(change.collection, change.id)) ?? null);
+        if (target === null) {
+          const starter = automation.when.kind === "schedule" ? "A schedule" : automation.when.kind === "group-message" ? "A Group message" : null;
+          return { problem: change.id === null
+            ? starter === null
+              ? `The code in step ${ordinal + 1} returned "set", but this run has no record to set fields on.`
+              : `The code in step ${ordinal + 1} returned "set", but ${starter.toLowerCase()} starts this automation, so it has no record to set fields on. Change records by id in "records" instead.`
+            : `The code in step ${ordinal + 1} changes record ${change.id}, which is not in ${change.collection}.` };
+        }
+        // Records key on their path and id together: dataset records of two tables can share an id.
+        const edit = `${target.path}\u0000${target.id}`;
+        if (!edits.has(edit)) {
+          edits.set(edit, { target, collectionPath: change.collection, values: new Map() });
+          order.push({ edit });
+        }
+        for (const { field, after } of values) edits.get(edit)!.values.set(field, after);
       }
-      if (writes > MAX_RUN_FIELD_WRITES) {
-        return `This run would change more than ${MAX_RUN_FIELD_WRITES} fields. Narrow its Find steps, or split it into smaller automations.`;
-      }
+      const output: StepOutput | undefined = step.as === null ? undefined : { kind: "code", value: codeOutput(answers.get("code") ?? null) };
+      return done(order.map((entry): PlannedEffect => {
+        if (!("edit" in entry)) return entry;
+        const { target, collectionPath, values } = edits.get(entry.edit)!;
+        return set(target, collectionPath, [...values].map(([field, after]) => ({ field, after })));
+      }), output);
     }
-    return null;
-  };
-  const problem = walk(orderSteps(automation.do));
-  return problem === null ? { kind: "plan", steps: planned } : { kind: "failed", error: problem, timedOut: false };
+    case "add-record": {
+      const recordId = derivedRecordId(seed);
+      return done([{
+        kind: "add",
+        collectionPath: step.collection ?? claim.collectionPath,
+        recordId,
+        // Each run's record gets its own name, the same on every attempt.
+        name: `${automation.id}-${recordId.slice(4, 12)}`,
+        fields: step.values.map(({ field, value }) => ({ field, value: valueOf(field, value) })),
+      }]);
+    }
+    case "set": {
+      const bound = step.records === null ? null : inputs.bound.get(step.records);
+      const binding = step.records === null ? null : bindingsIn(automation).get(step.records);
+      const collectionPath = binding?.collection ?? claim.collectionPath;
+      if (bound === undefined || bound?.kind === "code") return { problem: `Step ${ordinal + 1} changes records that no earlier step found or added.` };
+      if (bound?.kind === "find") {
+        const lists = new Map<string, JsonValue[]>();
+        for (const { field, value } of step.values) {
+          if (!isFormula(value)) continue;
+          const list = answers.get(`values:${field}`);
+          if (!Array.isArray(list) || list.length !== bound.records.length) {
+            return { problem: `The formula for "${field}" in step ${ordinal + 1} did not give one value for each record.` };
+          }
+          lists.set(field, list);
+        }
+        return done(bound.records.map((target, index) => set(target, collectionPath, step.values.map(({ field, value }) => ({
+          field,
+          after: isFormula(value) ? (lists.get(field)![index] ?? null) : value.value,
+        })))));
+      }
+      const target = bound === null ? record : bound.record;
+      // A record an earlier step added and someone removed since has nothing to change.
+      if (target === null && bound !== null) return done([]);
+      if (target === null) return { problem: "The record was removed, so the automation has no record to change." };
+      return done([set(target, collectionPath, step.values.map(({ field, value }) => ({ field, after: valueOf(field, value) })))]);
+    }
+    default:
+      // A Find is planned by the executor, which queries its records.
+      throw new Error(`Step ${ordinal + 1} is not planned here.`);
+  }
+}
+
+// What a code step returned for later steps to read, as its binding.
+function codeOutput(answer: JsonValue): JsonValue {
+  return answer !== null && typeof answer === "object" && !Array.isArray(answer) ? ((answer as CodeStepReturn).output ?? null) : null;
 }

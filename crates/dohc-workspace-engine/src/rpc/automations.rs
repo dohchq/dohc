@@ -6,6 +6,8 @@ use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use dohc_engine_domain::AutomationChangeKind;
 use dohc_engine_domain::AutomationClaim;
+use dohc_engine_domain::AutomationClaimCursor;
+use dohc_engine_domain::AutomationClaimLookup;
 use dohc_engine_domain::AutomationFailure;
 use dohc_engine_domain::AutomationFieldFacts;
 use dohc_engine_domain::AutomationGroupHandover;
@@ -187,6 +189,50 @@ struct AutomationReleaseParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AutomationListClaimsParams {
     automation_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    before: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    limit: Option<i64>,
+}
+
+// A claim by its id, or by the trigger key it claimed under.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationGetClaimParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    claim_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    automation_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationPruneHistoryParams {
+    keep: Vec<String>,
+    now_ms: Option<i64>,
+}
+
+/// The claims a page of run history holds when the caller names no limit.
+const AUTOMATION_CLAIM_PAGE_DEFAULT: i64 = 20;
+
+/// A run history cursor on the wire: `<created ms>:<claim id>`.
+fn automation_claim_cursor_json(cursor: &AutomationClaimCursor) -> String {
+    format!("{}:{}", cursor.created_at_ms, cursor.claim_id)
+}
+
+fn parse_automation_claim_cursor(cursor: &str) -> Result<AutomationClaimCursor, WireError> {
+    cursor
+        .split_once(':')
+        .and_then(|(created_at_ms, claim_id)| {
+            Some(AutomationClaimCursor {
+                created_at_ms: created_at_ms.parse().ok()?,
+                claim_id: claim_id.to_owned(),
+            })
+        })
+        .filter(|cursor| !cursor.claim_id.is_empty())
+        .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "automation-claim-cursor-invalid"))
 }
 
 #[derive(Deserialize)]
@@ -510,8 +556,8 @@ impl EngineService {
         Ok(json!({ "aheadAtMs": skips.ahead_at_ms, "lateAtMs": skips.late_at_ms }))
     }
 
-    /// One automation's run history: its newest claims in every state,
-    /// newest first, without field facts.
+    /// One page of an automation's run history: its claims in every state,
+    /// newest first, without field facts, and the cursor of the next page.
     pub(super) async fn automations_list_claims(
         &self,
         ctx: &RequestContext,
@@ -519,18 +565,87 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: AutomationListClaimsParams = parse(params)?;
+        let before = params
+            .before
+            .as_deref()
+            .map(parse_automation_claim_cursor)
+            .transpose()?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let claims = Self::read_under_ctx(
+        let page = Self::read_under_ctx(
             &cancellation,
             "automations.listClaims",
-            open.actor
-                .automation_claims(open.workspace_id.clone(), params.automation_id),
+            open.actor.automation_claims(
+                open.workspace_id.clone(),
+                params.automation_id,
+                before,
+                params.limit.unwrap_or(AUTOMATION_CLAIM_PAGE_DEFAULT),
+            ),
         )
         .await?;
         Ok(json!({
-            "claims": claims.iter().map(automation_claim_json).collect::<Vec<_>>(),
+            "claims": page.claims.iter().map(automation_claim_json).collect::<Vec<_>>(),
+            "next": page.next.as_ref().map(automation_claim_cursor_json),
         }))
+    }
+
+    /// One claim in run history, by its id or by its automation and trigger
+    /// key, however old: `{ claim }`, null when history has none.
+    pub(super) async fn automations_get_claim(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationGetClaimParams = parse(params)?;
+        let lookup = match (params.claim_id, params.automation_id, params.key) {
+            (Some(claim_id), None, None) => AutomationClaimLookup::Id(claim_id),
+            (None, Some(automation_id), Some(key)) => {
+                AutomationClaimLookup::Key { automation_id, key }
+            }
+            _ => {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "automation-get-claim-names-one-claim",
+                ));
+            }
+        };
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let claim = Self::read_under_ctx(
+            &cancellation,
+            "automations.getClaim",
+            open.actor
+                .automation_claim(open.workspace_id.clone(), lookup),
+        )
+        .await?;
+        Ok(json!({ "claim": claim.as_ref().map(automation_claim_json) }))
+    }
+
+    /// Expire the workspace's done claims past 30 days, one batch, except
+    /// those `keep` names: `{ pruned, more }`. Call again while `more`.
+    pub(super) async fn automations_prune_history(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationPruneHistoryParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let pruned = Self::read_under_ctx(
+            &cancellation,
+            "automations.pruneHistory",
+            open.actor.automation_prune_history(
+                open.workspace_id.clone(),
+                params.keep,
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({ "pruned": pruned.pruned, "more": pruned.more }))
     }
 
     pub(super) async fn automations_settle(

@@ -861,7 +861,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
         .expect("gen");
     let stamp = ChatMessageAutomation {
-        automation_id: "collection:Trip/Tasks#stamp".to_owned(),
+        automation_id: "collection:object-tasks#stamp".to_owned(),
         chain_depth: 1,
     };
     let automated =
@@ -905,62 +905,62 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         ),
         (
             automated("m1", named("other:hello/triage", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
             automated("m1", named("collection:Trip/Tasks", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
             automated("m1", named("collection:#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
-            automated("m1", named("collection:Trip/Tasks#", 1)),
-            "automation id must be collection:<path>#<id>",
+            automated("m1", named("collection:object-tasks#", 1)),
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
-            automated("m1", named(" collection:Trip/Tasks#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            automated("m1", named(" collection:object-tasks#stamp", 1)),
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
-            automated("m1", named("collection:Trip/Tasks#stamp", 0)),
+            automated("m1", named("collection:object-tasks#stamp", 0)),
             "automation chain depth is invalid",
         ),
         (
             automated("m1", named("collection:../Secrets#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
             automated("m1", named("collection:Trip/../../etc#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
             automated("m1", named("collection:/etc/Tasks#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
             automated("m1", named("collection:C:/Users/Tasks#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
             automated("m1", named("collection:c:Tasks#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
             automated("m1", named("collection:Trip\\Tasks#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
             automated("m1", named("collection:Trip//Tasks#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
             automated("m1", named("collection:./Tasks#stamp", 1)),
-            "automation id must be collection:<path>#<id>",
+            "automation id must be collection:<collection id>#<id>",
         ),
         (
-            automated("m1", named("collection:Trip/Tasks#stamp", 65)),
+            automated("m1", named("collection:object-tasks#stamp", 65)),
             "automation chain depth is invalid",
         ),
     ];
@@ -988,7 +988,6 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
     assert_eq!(opening.author_kind, ChatActorKind::Automation);
     assert_eq!(opening.author_owner_display_name.as_deref(), Some("Ice"));
     assert_eq!(opening.automation, Some(stamp.clone()));
-    assert_eq!(stamp.collection_path(), "Trip/Tasks");
     // Like an agent's message, it stays unread for the person.
     assert_eq!(
         chats
@@ -1166,15 +1165,6 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             "{payload}"
         );
     }
-
-    // Only a leading drive letter is refused: a folder name may hold a colon.
-    let colon = StartChannelThread {
-        body: "Hi".to_owned(),
-        ..automated("m-colon", named("collection:Trip/Budget: Q3#stamp", 1))
-    };
-    LinkedChatStore::new(&mut store)
-        .start_channel_thread(&colon, &NO_FAULTS)
-        .expect("a folder name may hold a colon");
 }
 
 #[test]
