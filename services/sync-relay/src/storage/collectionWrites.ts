@@ -567,7 +567,7 @@ function validateContent(storage: StorageContext, workspaceId: string, write: Co
         ? null
         : texts.get(change.basedOnBlobSha256)?.text ?? priorText(storage, workspaceId, change.basedOnBlobSha256);
       if (changesPersonalStep(before, after)) {
-        throw refusal(`${change.afterPath} changes an automation with a personal step; send it as a proposal`);
+        throw refusal(`${change.afterPath} changes an automation with a personal step`);
       }
     } else {
       const record = text(change, MAX_COLLECTION_RECORD_BYTES);

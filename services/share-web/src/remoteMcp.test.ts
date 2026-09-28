@@ -151,6 +151,7 @@ it.each([
   const names = (await client.listTools()).tools.map(tool => tool.name);
   expect(names.includes("dohc_post_discussion")).toBe(comment);
   expect(names.includes("dohc_edit_document")).toBe(edit);
+  expect(names.includes("dohc_write_collection_files")).toBe(access === "edit" && version === null);
   if (edit) expect(await client.callTool({name: "dohc_edit_document", arguments: {path: "doc.md", find: "old", replacement: "new"}})).toMatchObject({isError: true, structuredContent: {ok: false, outcome: "not-applied"}});
 });
 
@@ -285,7 +286,10 @@ it.each([
   if (versionId !== null) {
     expect(summary).toContain("pinned version");
     expect(summary).toContain("Editing is unavailable on this link.");
-  } else if (access === "edit") expect(summary).toContain("Editing pauses while the workspace is offline");
+  } else if (access === "edit") {
+    expect(summary).toContain("Editing pauses while the workspace is offline");
+    expect(summary).toContain("You can change a Collection's collection.yaml and automations.yaml here.");
+  }
   expect(result.content).toContainEqual({type: "text", text: JSON.stringify(result.structuredContent)});
   expect(f.calls.every(call => ["/sync/link-exchange", "/sync/link/share"].includes(new URL(call.url).pathname))).toBe(true);
 });
