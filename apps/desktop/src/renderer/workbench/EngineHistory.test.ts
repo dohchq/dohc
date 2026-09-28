@@ -61,6 +61,17 @@ describe("engineMomentSourceLabel", () => {
       .toBe("ana@example.com (Edit)");
     expect(engineMomentSourceLabel(moment({ id: "served", origin: "sync" }))).toBe("Sync");
   });
+  it("labels an Edit link's file write apart from an app submission, and names no person", () => {
+    const principalId = "3f9a2c1d-7b4e-4c55-9d0a-1e2f3a4b5c6d";
+    const link = engineMomentSourceLabel(moment({
+      id: "link", origin: "sync", linkAuthor: {kind: "link", grantId: "grant-1", grantGeneration: 2, principalId},
+    }));
+    expect(link).toBe("Edit link · holder 3f9a2c1d");
+    const submission = engineMomentSourceLabel(moment({
+      id: "public", origin: "sync", publicAuthor: {kind: "public", principalId, grantId: "grant-1"},
+    }));
+    expect(submission).not.toBe(link);
+  });
   it("labels a public principal without inventing an agent identity", () => {
     expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "holder-2", grantId: "grant-1"}}))).toBe("Link holder holder-2");
   });

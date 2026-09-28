@@ -4,6 +4,7 @@ import {
 } from "@dohc/security-contract";
 import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
 import type {
+  SyncRelayGrantedShareRow,
   SyncRelayShareWithGrantRow,
   SyncRelayShareGrantRow,
   SyncRelayLinkInventoryRow,
@@ -80,7 +81,7 @@ export function createShareSummaries(
   };
 
   const grantedShareSummary = async (
-    row: SyncRelayShareWithGrantRow,
+    row: SyncRelayGrantedShareRow,
   ): Promise<Record<string, unknown>> => {
     const { share, grant } = row;
     // A pending invite has no recipient user id yet; surface the addressed
@@ -98,6 +99,7 @@ export function createShareSummaries(
       recipientUserId: grant.principalUserId,
       recipientEmail,
       revokedAtMs: grant.revokedAtMs,
+      automationsGeneration: row.automationsGeneration,
       ...(selector && grant.status === "active" && grant.revokedAtMs === null && grant.parentGrantId === null &&
         (grant.principalKind === "user" || grant.principalKind === "email")
         ? namedBrowserInvitation(grant.grantId, selector, grant.access) : {}),
@@ -228,6 +230,7 @@ export function createShareSummaries(
       revokedAtMs: grant.revokedAtMs,
       lastUsedAtMs: row.lastUsedAtMs,
       urlIssuedAtMs: row.urlIssuedAtMs,
+      automationsGeneration: row.automationsGeneration,
       dependents: await Promise.all(row.dependents.map(dependentGrantSummary)),
     };
   };

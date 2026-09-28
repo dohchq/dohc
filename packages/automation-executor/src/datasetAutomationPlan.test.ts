@@ -4,7 +4,6 @@ import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts
 import { chatDirectoryOf } from "./automationChat";
 import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
 import {
-  DATASET_WAKE_NEEDS_BUTTON,
   datasetAutomationProblem,
   datasetEffectKey,
   datasetFieldWritesOf,
@@ -57,6 +56,40 @@ function automation(steps: string, when = "field-changed: Status"): Automation {
 }
 
 describe("dataset automation steps", () => {
+  it("treats an explicit self destination like an omitted destination", () => {
+    const omitted = automation("      - add-record:\n          Status: Open\n        operation: invoices.create\n      - find: 'record.Status == \"Open\"'\n        as: found\n        operation: invoices.list\n");
+    const explicit: Automation = { ...omitted, do: omitted.do.map((step) => step.kind === "add-record" || step.kind === "find" ? { ...step, collection: "Budget" } : step) };
+    expect(datasetStepsOf(explicit, generated)).toEqual(datasetStepsOf(omitted, generated));
+    const elsewhere: Automation = { ...explicit, do: explicit.do.map((step) => step.kind === "add-record" ? { ...step, collection: "Elsewhere" } : step) };
+    expect(datasetAutomationProblem(elsewhere, generated)).toContain("only its own records");
+    expect(datasetAutomationProblem(explicit, authored)).toContain("written or changed outside dohc");
+  });
+
+  it("does not borrow a read from another table with the same field ID", () => {
+    const other = { ...twoTables, tables: twoTables.tables.map((table) => table.tableId === REFUNDS
+      ? { ...table, fields: table.fields.map((field) => field.fieldId === REFUND_STATUS ? { ...field, fieldId: STATUS } : field) }
+      : table), operations: twoTables.operations.map((operation) => operation.tableId === REFUNDS ? { ...operation, fieldIds: [STATUS] } : operation) };
+    const add = automation("      - add-record:\n          Status: Open\n        operation: refunds.create\n", "field-changed: Status\n      table: Invoices");
+    const steps = datasetReachSteps(add, { path: "Budget", name: "Budget" }, { definition: other, generated: true }, { workspaceId: "workspace", grants: [] }, null)!;
+    expect(steps.find((step) => step.kind === "dataset-field" && step.tableId === REFUNDS && step.field.fieldId === STATUS)).toMatchObject({ reads: [] });
+  });
+
+  it.each(["Acme Inc.", "Aux", "Notes: Q1", "Trailing "])("allows omitted and exact self destinations in %s", (path) => {
+    const rules = { ...generated, definition: { ...definition, schemaPath: `${path}/schema.sql` } };
+    const omitted = automation("      - add-record: {Status: Open}\n        operation: invoices.create\n      - find: 'true'\n        as: found\n        operation: invoices.list\n");
+    expect(datasetAutomationProblem(omitted, rules)).toBeNull();
+    const explicit = { ...omitted, do: omitted.do.map((step) => step.kind === "add-record" || step.kind === "find" ? { ...step, collection: path } : step) };
+    expect(datasetAutomationProblem(explicit, rules)).toBeNull();
+  });
+
+  it.each(["budget", "Budget/"])("rejects a differently spelled self destination %s", (path) => {
+    for (const step of ["add-record: {Status: Open}\n        operation: invoices.create", "find: 'true'\n        as: found\n        operation: invoices.list"]) {
+      const base = automation(`      - ${step}\n`);
+      const plan = { ...base, do: base.do.map((entry) => entry.kind === "add-record" || entry.kind === "find" ? { ...entry, collection: path } : entry) };
+      expect(datasetAutomationProblem(plan, generated)).toContain("only its own records");
+    }
+  });
+
   // Each chat step alone, then inside an If, then in its otherwise branch.
   const everywhere = (chat: Automation["do"], base: Automation["do"]) => [chat, [{ kind: "if" as const, if: "true", do: chat, otherwise: [] }],
     [{ kind: "if" as const, if: "false", do: base, otherwise: chat }]];
@@ -77,17 +110,19 @@ describe("dataset automation steps", () => {
     }
   });
 
-  it("wakes an agent from a button, a schedule, or a Group message, since a commit does not say whether a person or an agent made it", () => {
+  it.each([
+    "record-added: null", "record-changed: null", "record-removed: null", "field-changed: Status",
+    'starts-matching: record.Status == "Done"', "button: Ask", "{schedule: day, timezone: UTC}", "group-message: Team",
+  ])("allows a wake on every supported trigger, including both branches: %s", (when) => {
     const wake = automation("      - wake-agent: Review this\n        person: user_ana\n").do;
-    const changed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
-    for (const steps of everywhere(wake, changed.do)) {
-      expect(datasetAutomationProblem({ ...changed, do: steps }, generated)).toBe(DATASET_WAKE_NEEDS_BUTTON);
-    }
-    const pressed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n", "button: Ask");
-    for (const steps of everywhere(wake, pressed.do)) expect(datasetAutomationProblem({ ...pressed, do: steps }, generated)).toBeNull();
-    for (const when of ["{schedule: day, timezone: UTC}", "group-message: Team"]) {
-      const started = automation("      - notify: Done\n        to: [user_ana]\n", when);
-      for (const steps of everywhere(wake, started.do)) expect(datasetAutomationProblem({ ...started, do: steps }, generated)).toBeNull();
+    const started = automation("      - notify: Done\n        to: [user_ana]\n", when);
+    for (const steps of everywhere(wake, started.do)) {
+      expect(datasetAutomationProblem({ ...started, do: steps }, generated)).toBeNull();
+      if (started.when.kind === "starts-matching") {
+        expect(datasetAutomationProblem({ ...started, do: steps }, authored)).toContain("cannot read a record to check a condition");
+      } else {
+        expect(datasetAutomationProblem({ ...started, do: steps }, authored)).toBeNull();
+      }
     }
   });
 
@@ -199,6 +234,16 @@ describe("dataset automation steps", () => {
       step.kind === "if" ? names(step.do) : "operation" in step ? [step.operation] : []);
     // invoices.edit is reversible and wins over the narrower invoices.status.
     expect(names(pinned.do)).toEqual(["invoices.edit", "invoices.edit", null]);
+  });
+
+  it("pins a Find only to a read in its trigger's table, where another table's read fits too", () => {
+    const readable: DatasetDefinition = {
+      ...twoTables,
+      operations: [...twoTables.operations, { ...operation(24, "refunds.list", "read", [REFUND_STATUS]), tableId: REFUNDS }],
+    };
+    const find = (table: string) => automation("      - find: 'true'\n        as: all\n", `field-changed: Status\n      table: ${table}`);
+    expect(pinDatasetOperations(find("Invoices"), { definition: readable, generated: true }).do[0]).toMatchObject({ operation: "invoices.list" });
+    expect(pinDatasetOperations(find("Refunds"), { definition: readable, generated: true }).do[0]).toMatchObject({ operation: "refunds.list" });
   });
 
   it("pins an Add record only to a create in its own table, and names another table's that fits", () => {

@@ -143,6 +143,7 @@ function harness(
   };
   const onError = vi.fn();
   const ipc = createEngineYDocSessionIpc({
+    localPersonId: () => "person-local",
     sessionFor: () =>
       retired
         ? undefined
@@ -572,6 +573,7 @@ describe("engine Y.Doc IPC adapter", () => {
       captureAvailable = true;
     });
     const ipc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
       acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
@@ -644,6 +646,7 @@ describe("engine Y.Doc IPC adapter", () => {
       }),
     };
     const ipc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
       acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
@@ -890,6 +893,7 @@ describe("engine Y.Doc IPC adapter", () => {
       return captureReady.promise;
     });
     const ipc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
       sessionFor: () => rendererSession(() => generation),
       acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
@@ -1119,6 +1123,7 @@ describe("engine Y.Doc IPC adapter", () => {
       }),
     };
     const ipc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
       acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
@@ -1215,6 +1220,7 @@ describe("engine Y.Doc IPC adapter", () => {
         }),
       };
       const ipc = createEngineYDocSessionIpc({
+        localPersonId: () => "person-local",
         sessionFor: () => rendererSession(),
         acquireWorkspace: workspaceAuthority,
         captureFor: () => capture,
@@ -1258,6 +1264,7 @@ describe("engine Y.Doc IPC adapter", () => {
       }),
     };
     const ipc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
       acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
@@ -1301,6 +1308,7 @@ describe("engine Y.Doc IPC adapter", () => {
       release: vi.fn(),
     };
     const ipc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
       acquireWorkspace: () => authority,
       captureFor: () => (captureAvailable ? capture : null),

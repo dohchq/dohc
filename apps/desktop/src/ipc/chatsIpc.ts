@@ -104,11 +104,14 @@ function chatAttachmentForIpc(
   };
 }
 
-function automationForIpc(automation: NonNullable<ChatMessage["automation"]>) {
-  return { automationId: automation.automationId, collectionPath: automation.collectionPath };
+/** Where the automation with this id keeps its Collection now, or null when this computer has none. */
+export type AutomationCollectionOf = (automationId: string) => string | null;
+
+function automationForIpc(automation: NonNullable<ChatMessage["automation"]>, collectionOf: AutomationCollectionOf) {
+  return { automationId: automation.automationId, collectionPath: collectionOf(automation.automationId) };
 }
 
-export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
+export function chatMessageForIpc(message: ChatMessage, collectionOf: AutomationCollectionOf): ChatMessageRecord {
   return {
     id: message.id,
     threadId: message.threadId,
@@ -122,7 +125,7 @@ export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
     ...(message.origin ? { origin: message.origin } : {}),
     body: message.body,
     createdAtMs: message.createdAtMs,
-    ...(message.automation ? { automation: automationForIpc(message.automation) } : {}),
+    ...(message.automation ? { automation: automationForIpc(message.automation, collectionOf) } : {}),
     attachments: message.attachments.map(chatAttachmentForIpc),
   };
 }
@@ -171,6 +174,8 @@ export function registerChatsIpcHandlers<
     ): Promise<ChatBookmark>;
   };
   notifyRenderer(input: { workspaceId: string }): void;
+  /** Where each automation that wrote a message in this workspace keeps its Collection now. */
+  automationCollectionOf(workspaceId: string): AutomationCollectionOf;
   // A group is a folder. Main creates it when the group is created.
   ensureGroupFolder(workspace: RegistryEntry, folderPath: string): Promise<void>;
 }) {
@@ -180,7 +185,7 @@ export function registerChatsIpcHandlers<
     currentCredentials, chatRelayIdentityFor, syncWorkspaceSharedChannels,
     syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
     withRendererWorkspaceOperation, activeEngineFileIndex, activity, desktopChatBookmarks,
-    notifyRenderer, ensureGroupFolder,
+    notifyRenderer, ensureGroupFolder, automationCollectionOf,
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
@@ -293,7 +298,7 @@ export function registerChatsIpcHandlers<
               ...mention.attachment,
               pathHint: currentPath,
             }),
-            message: chatMessageForIpc(mention.message),
+            message: chatMessageForIpc(mention.message, automationCollectionOf(workspace.workspaceId)),
             thread: chatThreadForIpc(mention.thread),
             ...(mention.channel
               ? {
@@ -428,7 +433,7 @@ export function registerChatsIpcHandlers<
       threadId: input.threadId,
     });
     return ListChatMessagesResult.parse({
-      messages: messages.map(chatMessageForIpc),
+      messages: messages.map((message) => chatMessageForIpc(message, automationCollectionOf(workspace.workspaceId))),
     });
   });
 
@@ -461,7 +466,7 @@ export function registerChatsIpcHandlers<
           input.fileReferences,
         ),
     });
-    return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
+    return SendChatMessageResult.parse({ message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId)) });
   });
 
   registerHandler(CHANNELS.listChatThreadDecisions, async (event, payload) => {
@@ -553,6 +558,7 @@ export function registerChatsIpcHandlers<
 
   function channelThreadForIpc(
     summary: ChannelThreadSummary,
+    collectionOf: AutomationCollectionOf,
     reactionViewer?: {
       viewerAuthorId: string;
       localFallbackAuthorId: string;
@@ -576,7 +582,7 @@ export function registerChatsIpcHandlers<
             ...(summary.openingMessage.authorUserId ? { authorUserId: summary.openingMessage.authorUserId } : {}),
             createdAtMs: summary.openingMessage.createdAtMs,
             bodySnippet: summary.openingMessage.bodySnippet,
-            ...(summary.openingMessage.automation ? { automation: automationForIpc(summary.openingMessage.automation) } : {}),
+            ...(summary.openingMessage.automation ? { automation: automationForIpc(summary.openingMessage.automation, collectionOf) } : {}),
             reactions: reactionViewer
               ? reactionsForViewer(openingReactions, reactionViewer)
               : openingReactions,
@@ -814,7 +820,7 @@ export function registerChatsIpcHandlers<
     return ListPersonalChatFeedResult.parse({
       ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
       items: page.items.map((item) => ({
-        message: chatMessageForIpc(item.message),
+        message: chatMessageForIpc(item.message, automationCollectionOf(workspace.workspaceId)),
         thread: chatThreadForIpc(item.thread),
         viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
         // An automation is neither a person nor an agent to follow.
@@ -841,10 +847,10 @@ export function registerChatsIpcHandlers<
             }
           : {}),
         ...(item.parentMessage
-          ? { parentMessage: chatMessageForIpc(item.parentMessage) }
+          ? { parentMessage: chatMessageForIpc(item.parentMessage, automationCollectionOf(workspace.workspaceId)) }
           : {}),
         ...(item.openingMessage
-          ? { openingMessage: chatMessageForIpc(item.openingMessage) }
+          ? { openingMessage: chatMessageForIpc(item.openingMessage, automationCollectionOf(workspace.workspaceId)) }
           : {}),
         reactions: reactionsForViewer(item.reactions.map(chatReactionForIpc), {
           viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
@@ -961,7 +967,7 @@ export function registerChatsIpcHandlers<
     });
     return ListChannelThreadsResult.parse({
       threads: threads.map((thread) =>
-        channelThreadForIpc(thread, {
+        channelThreadForIpc(thread, automationCollectionOf(workspace.workspaceId), {
           viewerAuthorId,
           localFallbackAuthorId,
         }),
@@ -997,8 +1003,8 @@ export function registerChatsIpcHandlers<
         lastReadSequence: 1,
         unreadCount: 0,
         openDecisionCount: 0,
-      }),
-      message: chatMessageForIpc(started.message),
+      }, automationCollectionOf(workspace.workspaceId)),
+      message: chatMessageForIpc(started.message, automationCollectionOf(workspace.workspaceId)),
       viewerAuthorId:
         started.message.authorUserId ?? localReactorFallbackId(),
     });

@@ -192,9 +192,16 @@ fn parsed_moment_author(raw: &str) -> Value {
         let valid = object.len() == 3 && bounded_ids(&["principalId", "grantId"]);
         return if valid { value } else { corrupt() };
     }
-    if object.get("kind").and_then(Value::as_str) == Some("named") {
+    // A direct write names its grant and generation, and either the named
+    // recipient's user or the link's principal.
+    let direct_write_ids = match object.get("kind").and_then(Value::as_str) {
+        Some("named") => Some(["userId", "grantId"]),
+        Some("link") => Some(["grantId", "principalId"]),
+        _ => None,
+    };
+    if let Some(ids) = direct_write_ids {
         let valid = object.len() == 4
-            && bounded_ids(&["userId", "grantId"])
+            && bounded_ids(&ids)
             && object
                 .get("grantGeneration")
                 .and_then(Value::as_i64)
@@ -518,6 +525,31 @@ mod relay_author_tests {
             assert_eq!(
                 parsed_moment_author(&malformed.to_string()),
                 json!({"corrupt":true})
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_link_author_and_refuses_incomplete_or_mixed_shapes() {
+        let author =
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder"});
+        assert_eq!(parsed_moment_author(&author.to_string()), author);
+        for malformed in [
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2}),
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":""}),
+            json!({"kind":"link", "grantId":"", "grantGeneration":2, "principalId":"holder"}),
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":0, "principalId":"holder"}),
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":"2", "principalId":"holder"}),
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"p".repeat(501)}),
+            // A claimed name never rides a link author, and neither does a user.
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder", "displayName":"Ana"}),
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder", "userId":"ana"}),
+            json!({"kind":"link", "userId":"ana", "grantId":"grant", "grantGeneration":2}),
+        ] {
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true}),
+                "{malformed}"
             );
         }
     }

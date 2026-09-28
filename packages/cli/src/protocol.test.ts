@@ -12,7 +12,9 @@ describe("moment author results", () => {
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },
-  ])("keeps a $kind author without a declared principal", (author) => {
+    { kind: "named", userId: "user_ana", grantId: "grant", grantGeneration: 2 },
+    { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" },
+  ])("keeps a $kind author", (author) => {
     const result = {
       changes: [{
         id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
@@ -21,6 +23,18 @@ describe("moment author results", () => {
       count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
     };
     expect(parseCliResult("moments", result)).toEqual(result);
+  });
+
+  it("refuses a link author that claims a person", () => {
+    const author = { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", userId: "user_ana" };
+    const result = {
+      changes: [{
+        id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
+        path: "tasks/a.md", versionId: "main", fileCount: 1, author,
+      }],
+      count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
+    };
+    expect(() => parseCliResult("moments", result)).toThrow();
   });
 });
 
@@ -238,6 +252,20 @@ describe("collection result schemas", () => {
     expect(
       parseCliResult("collectionSetFields", { ok: false, reason: "refused" }),
     ).toEqual({ ok: false, reason: "refused" });
+  });
+
+  it("parses a run's dataset changes with the versions and deletes Undo reads", () => {
+    const rules = { datasetId: "d", revision: 2, revisionSha256: "r" };
+    const run = {
+      run: "atc_1", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2,
+      trigger: { kind: "changed", recordId: "a", by: "human", sharedAuthor: null, depth: 0 }, definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+      steps: [{ step: 1, changes: [
+        { kind: "dataset-edit", rules, operationId: "edit", tableId: "t", recordId: "a", expectedVersion: 1, version: 2, fields: [] },
+        { kind: "dataset-created", rules, operationId: "create", tableId: "t", recordId: 7, version: 1, deletes: ["delete"] },
+      ] }],
+      failedStep: null, startsOver: false,
+    };
+    expect(parseCliResult("automationRun", { ok: true, run })).toEqual({ ok: true, run });
   });
 
   it("refuses a result that does not match the verb", () => {

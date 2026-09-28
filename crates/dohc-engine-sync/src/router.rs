@@ -115,7 +115,7 @@ pub fn apply_replication_envelope(
         .starts_with(crate::moment_apply::COLLECTION_FILE_ORIGIN_PREFIX)
         && envelope.op_kind != "moment.append"
     {
-        // Only a moment.append passes the named author's path check, so no
+        // Only a moment.append passes the direct-write author's path check, so no
         // other operation, such as a conflict resolution, may use this origin.
         return plain(crate::apply_envelope_with(
             store,

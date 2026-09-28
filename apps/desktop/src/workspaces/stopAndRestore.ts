@@ -1,11 +1,12 @@
 import { posix } from "node:path";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
-import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
+import { definitionHash } from "@dohc/automation-executor/automation-plan";
+import { sendsMessages } from "@dohc/automation-executor/collection-automation-run";
 
 // Stop and restore (ADR 0013): after the owner stops a person they shared
-// with, put back each file that person wrote directly, from the relay's
-// ledger of their direct writes. A file goes back to its version before the
+// with, or ends an Edit share link, put back each file it wrote directly,
+// from the relay's ledger of its direct writes. A file goes back to its version before the
 // person's first direct write, through the same restore as History, so each
 // keeps Undo. A file anyone else changed after that first write is listed
 // for the owner to check, never overwritten, and the restore checks again,
@@ -13,7 +14,9 @@ import { collectionAutomationId, definitionHash } from "@dohc/automation-executo
 // Collection the person created goes, unless anyone else's files remain in
 // it once the person's are gone.
 // Runs of the automation definitions the person wrote are undone where this
-// computer's run history holds them.
+// computer's run history holds them. What cannot be undone is said, never
+// hidden: messages those automations sent, changes Undo leaves, and runs
+// another computer's history holds.
 
 const SCHEMA_FILE = "collection.yaml";
 const AUTOMATIONS_FILE = "automations.yaml";
@@ -60,8 +63,8 @@ export interface StopAndRestoreDependencies {
   /** Removes a workspace folder only when it is empty. */
   removeEmptyFolder(path: string): Promise<void>;
   undoRuns(
-    definitions: ReadonlyArray<{ automationId: string; definitionHash: string }>,
-  ): Promise<{ undone: number; left: number }>;
+    definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
+  ): Promise<{ undone: number; left: number; kept: number; errorMessage: string | null }>;
 }
 
 export type StopAndRestoreOutcome =
@@ -72,6 +75,12 @@ export type StopAndRestoreOutcome =
       review: ReviewFile[];
       runsUndone: number;
       runsLeft: number;
+      /** Changes the undone runs made that stay as they are. */
+      runChangesKept: number;
+      /** They wrote automations; this computer undoes only the runs it holds. */
+      wroteAutomations: boolean;
+      /** An automation they wrote posts, messages, notifies, or wakes an agent, which no Undo takes back. */
+      sendsMessages: boolean;
       /** What stopped the restore part way; everything above it happened. */
       errorMessage: string | null;
     };
@@ -101,12 +110,15 @@ function sameContent(left: Content, right: Content): boolean {
   return left.text === right.text;
 }
 
-/** The valid automations in an automations.yaml text, as "<engine id> <definition hash>". */
-function definitionsIn(collectionPath: string, text: string | null): Set<string> {
+/**
+ * The valid automations in an automations.yaml text, by "<definition hash>
+ * <automation id>", each with whether it sends messages.
+ */
+function definitionsIn(text: string | null): Map<string, boolean> {
   const parsed = text === null ? null : parseAutomationsFile(text);
-  if (parsed?.status !== "read") return new Set();
-  return new Set(parsed.entries.flatMap((entry) => entry.status === "valid"
-    ? [`${collectionAutomationId(collectionPath, entry.automation.id)} ${definitionHash(entry.automation)}`]
+  if (parsed?.status !== "read") return new Map();
+  return new Map(parsed.entries.flatMap((entry) => entry.status === "valid"
+    ? [[`${definitionHash(entry.automation)} ${entry.automation.id}`, sendsMessages(entry.automation)] as const]
     : []));
 }
 
@@ -171,20 +183,22 @@ export async function restoreDirectWrites(
 
   // The automations the person wrote: in each of their writes, each
   // definition the file held after it and not before it.
-  const definitions: Array<{ automationId: string; definitionHash: string }> = [];
+  const definitions: Array<{ collectionPath: string; id: string; definitionHash: string }> = [];
   const seen = new Set<string>();
+  let messages = false;
   for (const entry of written) {
     if (posix.basename(entry.first.path) !== AUTOMATIONS_FILE) continue;
     for (const file of entry.all) {
       const moment = entry.moments.get(file.momentId)!;
       const folder = posix.dirname(file.path);
-      const before = definitionsIn(folder, moment.payload.before?.text ?? null);
-      for (const key of definitionsIn(folder, moment.payload.after.text)) {
-        if (before.has(key) || seen.has(key)) continue;
-        seen.add(key);
+      const before = definitionsIn(moment.payload.before?.text ?? null);
+      for (const [key, sends] of definitionsIn(moment.payload.after.text)) {
+        if (before.has(key) || seen.has(`${folder}/${key}`)) continue;
+        seen.add(`${folder}/${key}`);
+        messages ||= sends;
         // The hash has no spaces; an automation id may.
-        const split = key.lastIndexOf(" ");
-        definitions.push({ automationId: key.slice(0, split), definitionHash: key.slice(split + 1) });
+        const split = key.indexOf(" ");
+        definitions.push({ collectionPath: folder, id: key.slice(split + 1), definitionHash: key.slice(0, split) });
       }
     }
   }
@@ -192,7 +206,11 @@ export async function restoreDirectWrites(
   restorable.sort((left, right) => restoreOrder(left.entry) - restoreOrder(right.entry));
   const restored: RestoreReceipt[] = [];
   const outcome = () => ({ status: "restored" as const, restored, review: [...review.values()].sort((left, right) => left.path.localeCompare(right.path)) });
-  let runs = { undone: 0, left: 0 };
+  let runs = { undone: 0, left: 0, kept: 0 };
+  const done = (errorMessage: string | null) => ({
+    ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, runChangesKept: runs.kept,
+    wroteAutomations: definitions.length > 0, sendsMessages: messages, errorMessage,
+  });
   try {
     for (const { entry, head } of restorable) {
       const folder = posix.dirname(entry.first.path);
@@ -222,9 +240,13 @@ export async function restoreDirectWrites(
       restored.push(result.receipt);
       if (isCreatedSchema(entry)) await dependencies.removeEmptyFolder(folder);
     }
-    if (definitions.length > 0) runs = await dependencies.undoRuns(definitions);
+    if (definitions.length > 0) {
+      const undone = await dependencies.undoRuns(definitions);
+      runs = undone;
+      if (undone.errorMessage !== null) return done(undone.errorMessage);
+    }
   } catch (error) {
-    return { ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, errorMessage: error instanceof Error ? error.message : String(error) };
+    return done(error instanceof Error ? error.message : String(error));
   }
-  return { ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, errorMessage: null };
+  return done(null);
 }
