@@ -13,7 +13,11 @@ import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   definitionHash,
   evaluationRequest,
+  filterValue,
+  FIND_OVERFLOW_ERROR,
   findsOf,
+  findValueKey,
+  findValuesRequest,
   formulaPeople,
   MAX_FOUND_RECORDS,
   planRun,
@@ -25,6 +29,8 @@ import {
   type PlannedEffect,
   type PlannedField,
   type PlannedStep,
+  type FindValue,
+  type FindValueInputs,
   type RunInputs,
   type RunRecord,
 } from "./automationPlan";
@@ -445,6 +451,41 @@ export async function checkPlannedMessages(
   return sendChat === null ? { outcome: { kind: "wait", reason: "engine" } } : { chat: sendChat };
 }
 
+/**
+ * The values Finds compare with that formulas give, by findValueKey, and
+ * the Finds whose formula failed, which read nothing: the run fails only if
+ * one of their branches runs. Waits while the evaluator is busy. Only a run
+ * whose Finds use formulas asks the evaluator.
+ */
+export async function evaluateFindValues(
+  evaluator: AutomationFormulaEvaluator,
+  inputs: FindValueInputs,
+  finds: ReadonlyArray<{ ordinal: number; values: readonly FindValue[] }>,
+  nowMs: number,
+): Promise<{ values: Map<string, JsonValue>; failed: Map<number, { error: string; timedOut: boolean }> } | { outcome: CollectionAutomationRunOutcome }> {
+  const request = findValuesRequest(inputs, finds, nowMs);
+  const values = new Map<string, JsonValue>();
+  const failedFinds = new Map<number, { error: string; timedOut: boolean }>();
+  if (request.formulas.length === 0) return { values, failed: failedFinds };
+  const results = await evaluator.evaluate(inputs.claim.automationId, request.scope, request.formulas);
+  if (results === "busy") return { outcome: { kind: "wait", reason: "busy" } };
+  for (const [position, { ordinal, index }] of request.slots.entries()) {
+    const result = results[position];
+    if (!result) return { outcome: failed("The evaluator did not answer every formula.") };
+    if (result.ok) {
+      values.set(findValueKey(ordinal, index), result.value);
+      continue;
+    }
+    // A timeout counts toward switching the automation off, so another
+    // formula's failure in the same Find never hides one.
+    const timedOut = result.error.code === "timeout";
+    if (failedFinds.get(ordinal)?.timedOut !== true && (timedOut || !failedFinds.has(ordinal))) {
+      failedFinds.set(ordinal, { error: `The Find in step ${ordinal + 1} failed. ${result.error.message}`, timedOut });
+    }
+  }
+  return { values, failed: failedFinds };
+}
+
 async function plan(
   dependencies: CollectionAutomationRunDependencies,
   input: CollectionAutomationRunInput,
@@ -453,6 +494,17 @@ async function plan(
 ): Promise<{ kind: "plan"; steps: PlannedStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
   const { claim, automation } = input;
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
+  let message: RunInputs["message"] = null;
+  if (claim.change.kind === "message") {
+    const got = await groupMessage(dependencies, claim, automation, chat);
+    if ("outcome" in got) return stop(got.outcome);
+    message = got.message;
+  }
+  const pressedBy = claim.change.kind === "button" ? claim.change.onBehalfOf : null;
+  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
+  // Formulas read `now` as the time of the change, or a schedule's due
+  // time, so every attempt plans the same values.
+  const nowMs = scheduleDueAt(claim) ?? claim.createdAtMs;
   const read = await dependencies.withReads(async (reads) => {
     let record: RunRecord | null = null;
     // A claim with no record (a message or a schedule) reads none.
@@ -471,14 +523,19 @@ async function plan(
         throw error;
       }
     }
+    const finds = findsOf(automation);
+    const computed = await evaluateFindValues(dependencies.evaluator, { automation, claim, record, message, person },
+      finds.map(({ ordinal, query }) => ({ ordinal, values: query.match === "all" ? [] : [query.value] })), nowMs);
+    if ("outcome" in computed) return { removed: false, stopped: computed.outcome } as const;
     const found = new Map<number, RunRecord[]>();
-    const truncatedFinds = new Set<number>();
-    for (const find of findsOf(automation)) {
+    const unreadFinds = new Map(computed.failed);
+    for (const find of finds) {
+      if (unreadFinds.has(find.ordinal)) continue;
       const { query } = find;
       const filter = query.match === "all" ? undefined : {
         field: query.field,
         operator: query.operator,
-        value: query.value.kind === "literal" ? query.value.value : (record?.values[query.value.field] ?? null),
+        value: filterValue(query.value, record, computed.values, findValueKey(find.ordinal, 0)),
       };
       const result = await reads.queryCollectionRecords({
         collectionPath: find.collection ?? claim.collectionPath,
@@ -487,28 +544,19 @@ async function plan(
       });
       if (result.nextCursor !== null) {
         // The planner refuses this Find only if its branch runs. Never bind a partial page.
-        truncatedFinds.add(find.ordinal);
+        unreadFinds.set(find.ordinal, { error: FIND_OVERFLOW_ERROR, timedOut: false });
       } else {
         found.set(find.ordinal, result.records.map(runRecordOf));
       }
     }
-    return { removed: false, record, found, truncatedFinds } as const;
+    return { removed: false, stopped: null, record, found, unreadFinds } as const;
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.removed) return stop({ kind: "skipped" });
-  let message: RunInputs["message"] = null;
-  if (claim.change.kind === "message") {
-    const read = await groupMessage(dependencies, claim, automation, chat);
-    if ("outcome" in read) return stop(read.outcome);
-    message = read.message;
-  }
-  const pressedBy = claim.change.kind === "button" ? claim.change.onBehalfOf : null;
-  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
-  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds, message, chat, person };
+  if (read.stopped !== null) return stop(read.stopped);
+  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, unreadFinds: read.unreadFinds, message, chat, person };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
-  // Formulas read `now` as the time of the change, or a schedule's due
-  // time, so every attempt plans the same values.
-  const request = evaluationRequest(inputs, scheduleDueAt(claim) ?? claim.createdAtMs);
+  const request = evaluationRequest(inputs, nowMs);
   const results = request.formulas.length === 0
     ? []
     : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);

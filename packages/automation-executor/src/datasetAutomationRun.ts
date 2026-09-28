@@ -3,7 +3,7 @@ import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
-import type { DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
+import type { DatasetColumnFieldType, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-contracts/relay";
@@ -11,6 +11,9 @@ import {
   definitionDigest,
   definitionHash,
   evaluationRequest,
+  filterValue,
+  FIND_OVERFLOW_ERROR,
+  findValueKey,
   formulaPeople,
   MAX_FOUND_RECORDS,
   planRun,
@@ -30,6 +33,7 @@ import {
   applyChatEffect,
   checkPlannedMessages,
   DEADLINE_ERROR,
+  evaluateFindValues,
   groupChangedOutcome,
   groupMessage,
   newRun,
@@ -147,6 +151,7 @@ export interface DatasetAutomationRunInput {
 }
 
 const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
+const listFormat = new Intl.ListFormat("en", { type: "conjunction" });
 const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped" };
 
 function errorText(error: unknown): string {
@@ -185,6 +190,43 @@ function runRecordOf(row: Row, datasetId: string, table: DatasetTable, readable:
     if (Object.hasOwn(row.values, field.fieldId) && readable.has(field.fieldId)) values[field.name] = row.values[field.fieldId] ?? null;
   }
   return { id: String(row.id), key: row.id, path: datasetRecordKey(datasetId, table.tableId, row.id), values };
+}
+
+// What a field holds, as a Find's refusal names it, and the values its read
+// compares it with. The read checks the rest, such as a select's options.
+const FIELD_HOLDS: Partial<Record<DatasetColumnFieldType, { holds: string; accepts: (value: JsonValue) => boolean }>> = {
+  number: { holds: "a number", accepts: (value) => typeof value === "number" && Number.isFinite(value) },
+  checkbox: { holds: "true or false", accepts: (value) => typeof value === "boolean" },
+  text: { holds: "text", accepts: (value) => typeof value === "string" },
+  date: { holds: "a date", accepts: (value) => typeof value === "string" },
+  url: { holds: "a link", accepts: (value) => typeof value === "string" },
+  select: { holds: "a choice", accepts: (value) => typeof value === "string" },
+};
+
+function kindOfValue(value: JsonValue): string {
+  if (value === null) return "nothing";
+  if (Array.isArray(value)) return "a list";
+  switch (typeof value) {
+    case "number": return "a number";
+    case "boolean": return "true or false";
+    case "string": return "text";
+    default: return "an object";
+  }
+}
+
+/**
+ * Why a Find's read would refuse the value a formula gave one of its
+ * fields, or null. The Find then reads nothing, and the run fails only if
+ * its branch runs.
+ */
+function findValueProblem(ordinal: number, field: DatasetTable["fields"][number], value: JsonValue): string | null {
+  if (field.type === "button") return null;
+  const step = `The Find in step ${ordinal + 1}`;
+  if (value === null) return field.required ? `${step} compares ${field.name}, which every record fills in, with nothing.` : null;
+  const expected = FIELD_HOLDS[field.type];
+  if (expected === undefined || expected.accepts(value)) return null;
+  const hint = field.type === "number" && typeof value === "string" ? " Wrap the value in Number()." : "";
+  return `${step} compares ${field.name}, ${expected.holds}, with ${kindOfValue(value)}.${hint}`;
 }
 
 /** One invocation as this run's automation, with the automation caller. */
@@ -369,6 +411,14 @@ async function plan(
       return stop(failed(changedSincePressed(name ?? "This button")));
     }
   }
+  let message: RunInputs["message"] = null;
+  if (held.source === "engine" && held.claim.change.kind === "message") {
+    const got = await groupMessage(dependencies, held.claim, automation, chat);
+    if ("outcome" in got) return stop(got.outcome);
+    message = got.message;
+  }
+  const pressedBy = held.source === "dataset" ? datasetPresser(held.claim) : null;
+  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
   const read = await dependencies.withHost(async (host) => {
     const steps = datasetStepsOf(automation, datasetRules);
     const rules: Rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
@@ -403,41 +453,54 @@ async function plan(
         record = { id: String(recordId), key: recordId, path: datasetRecordKey(rules.datasetId, steps.trigger.table.tableId, recordId), values: {} };
       }
     }
+    const computed = await evaluateFindValues(dependencies.evaluator, { automation, claim: runClaim, record, message, person },
+      [...steps.finds].map(([ordinal, filters]) => ({ ordinal, values: filters.map((filter) => filter.value) })),
+      scheduleDueAt(runClaim) ?? claim.createdAtMs);
+    if ("outcome" in computed) return { skipped: false, stopped: computed.outcome } as const;
     const found = new Map<number, RunRecord[]>();
-    const truncatedFinds = new Set<number>();
+    const unreadFinds = new Map(computed.failed);
     for (const [ordinal, filters] of steps.finds) {
+      if (unreadFinds.has(ordinal)) continue;
       const { operation, table } = steps.steps.get(ordinal)!;
-      const fieldId = (name: string) => table.fields.find((field) => field.name === name)!.fieldId;
-      const query = {
-        limit: MAX_FOUND_RECORDS,
-        filters: filters.map(({ field, value }) => ({
-          fieldId: fieldId(field),
-          value: value.kind === "literal" ? value.value : (record?.values[value.field] ?? null),
-        })),
-      };
-      const result = await invoke(host, context, rules, operation.operationId, query, READ_KEY, signal);
+      const compared = filters.map(({ field, value }, index) => ({
+        field: table.fields.find((candidate) => candidate.name === field)!,
+        formula: value.kind === "formula",
+        value: filterValue(value, record, computed.values, findValueKey(ordinal, index)),
+      }));
+      // A value a formula gave that the read would refuse fails this Find
+      // alone, as a formula that failed does.
+      const problem = compared.map(({ field, formula, value }) => (formula ? findValueProblem(ordinal, field, value) : null))
+        .find((found): found is string => found !== null);
+      if (problem !== undefined) {
+        unreadFinds.set(ordinal, { error: problem, timedOut: false });
+        continue;
+      }
+      const query = { limit: MAX_FOUND_RECORDS, filters: compared.map(({ field, value }) => ({ fieldId: field.fieldId, value })) };
+      let result: DatasetInvocationResult;
+      try {
+        result = await invoke(host, context, rules, operation.operationId, query, READ_KEY, signal);
+      } catch (error) {
+        // The read checks more than the type, such as a select's options.
+        if (!isAppBackendRuntimeError(error) || error.refusal.code !== "invalid_input" || !compared.some(({ formula }) => formula)) throw error;
+        const names = listFormat.format(compared.filter(({ formula }) => formula).map(({ field }) => field.name));
+        unreadFinds.set(ordinal, { error: `The Find in step ${ordinal + 1} compares ${names} with a value this Collection does not accept.`, timedOut: false });
+        continue;
+      }
       const rows = rowsOf(result);
       const page = result.result;
       if (page !== null && typeof page === "object" && !Array.isArray(page) && page.nextCursor != null) {
         // The planner refuses this Find only if its branch runs. Never bind a partial page.
-        truncatedFinds.add(ordinal);
+        unreadFinds.set(ordinal, { error: FIND_OVERFLOW_ERROR, timedOut: false });
       } else {
         found.set(ordinal, rows.map((row) => remember(row, table)));
       }
     }
-    return { skipped: false, runClaim, record, found, truncatedFinds, steps, rules, versions } as const;
+    return { skipped: false, stopped: null, runClaim, record, found, unreadFinds, steps, rules, versions } as const;
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.skipped) return stop({ kind: "skipped" });
-  let message: RunInputs["message"] = null;
-  if (held.source === "engine" && held.claim.change.kind === "message") {
-    const got = await groupMessage(dependencies, held.claim, automation, chat);
-    if ("outcome" in got) return stop(got.outcome);
-    message = got.message;
-  }
-  const pressedBy = held.source === "dataset" ? datasetPresser(held.claim) : null;
-  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
-  const inputs: RunInputs = { person, message, chat, automation, claim: read.runClaim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds,
+  if (read.stopped !== null) return stop(read.stopped);
+  const inputs: RunInputs = { person, message, chat, automation, claim: read.runClaim, record: read.record, found: read.found, unreadFinds: read.unreadFinds,
     // Without a read, the record is its id: a formula that reads a field stops instead of reading nothing.
     ...(datasetRules.generated ? {} : { recordKeys: ["id"] }) };
   if (!datasetRules.generated) {

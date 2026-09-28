@@ -9,7 +9,9 @@ import {
   evaluationRequest,
   fieldWritesOf,
   expressionProblem,
+  FIND_OVERFLOW_ERROR,
   findQueryOf,
+  findValuesRequest,
   localIsoTime,
   runNowSkippedFrom,
   operationsOf,
@@ -89,12 +91,36 @@ describe("find conditions", () => {
     expect(findQueryOf("(true)")).toEqual({ match: "all" });
   });
 
+  it("compares with a formula that does not read the record it checks, such as a number a message names", () => {
+    expect(findQueryOf("record.ID == message.body.slice(6)")).toEqual({
+      match: "field", field: "ID", operator: "equals", value: { kind: "formula", expression: "message.body.slice(6)" },
+    });
+    expect(findQueryOf("contains(record.Tags, lower(person.name))")).toMatchObject({ operator: "contains", value: { kind: "formula", expression: "lower(person.name)" } });
+    expect(findQueryOf("record.Status == today()")).toMatchObject({ value: { kind: "formula", expression: "today()" } });
+    // The record a Find checks is no value to compare with, even as a property name's neighbor.
+    for (const condition of ["record.Status == record.Other", "record.Status == ({ record }).record.Other", "record.Due == dateAdd(record.Start, 3)"]) {
+      expect(findQueryOf(condition), condition).toEqual({ problem: expect.stringContaining("A Find can check one field") });
+    }
+    expect(findQueryOf("record.Owner == message.record")).toMatchObject({ value: { kind: "formula", expression: "message.record" } });
+  });
+
+  it("works out a Find's formulas in one request before it reads, where the trigger record is only trigger.record", () => {
+    const definition = automation("id: a\nname: A\nwhen: record-added\ndo: [{find: 'true', as: all}]");
+    const request = findValuesRequest(inputs(definition), [
+      { ordinal: 0, values: [{ kind: "trigger-field", field: "Status" }] },
+      { ordinal: 2, values: [{ kind: "literal", value: 1 }, { kind: "formula", expression: "trigger.record.Count + 1" }] },
+    ], 0);
+    expect(request.formulas).toEqual([{ kind: "expression", source: "trigger.record.Count + 1" }]);
+    expect(request.slots).toEqual([{ ordinal: 2, index: 1 }]);
+    expect(request.scope).not.toHaveProperty("record");
+    expect(request.scope).toMatchObject({ trigger: { record: { Status: "Done", Count: 2 } }, bindings: {} });
+  });
+
   it("refuses a condition the query cannot run, instead of scanning the Collection", () => {
     for (const condition of [
       'record.Status == "Doing" && record.Points > 3',
       "record.Points > 3",
       'record?.Status == "Doing"',
-      "record.Status == today()",
       'record.Status == "a"), ("b"',
     ]) {
       expect(findQueryOf(condition)).toEqual({ problem: expect.stringContaining("A Find can check one field") });
@@ -143,12 +169,22 @@ describe("what the executor can run", () => {
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/table/);
     const scheduled = (step: string) => automation(`id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [${step}]`);
     expect(unsupportedReason(scheduled("{find: 'true', as: all}"))).toBeNull();
-    expect(unsupportedReason(scheduled("{find: 'record.Owner == trigger.record.Owner', as: mine}"))).toMatch(/cannot compare with trigger.record/);
+    expect(unsupportedReason(scheduled("{find: 'record.Owner == trigger.record.Owner', as: mine}"))).toMatch(/cannot compare with trigger\.record/);
+    // A formula built on the trigger record has none to read either.
+    for (const find of ["{find: 'record.Owner == trigger.record.Owner + \"\"', as: mine}", "{find: 'record.Owner == lower(trigger[\"record\"].Owner)', as: mine}", "{find: 'record.Owner == trigger[`record`].Owner', as: mine}"]) {
+      expect(unsupportedReason(scheduled(find)), find).toMatch(/cannot compare with trigger\.record/);
+      expect(unsupportedReason(fromGroup(find)), find).toMatch(/cannot compare with trigger\.record/);
+      expect(unsupportedReason(withStep(find)), find).toBeNull();
+    }
     expect(unsupportedReason(fromGroup("{find: 'record.Owner == \"ana\"', as: hers}"))).toBeNull();
     expect(unsupportedReason(fromGroup("{find: 'contains(record.Tags, trigger.record.Tag)', as: tagged}")))
       .toBe("A Group message starts this automation, so a Find cannot compare with trigger.record. Compare with a value instead.");
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {group-message: Team}\ndo: [{post: Hi, group: Team}]")))
       .toBeNull();
+    // A Find's formula runs before the Find reads, so no step's result exists yet.
+    expect(unsupportedReason(fromGroup("{find: 'record.ID == message.body.slice(6)', as: done}"))).toBeNull();
+    expect(unsupportedReason(withStep("{find: 'true', as: all}, {find: 'record.Owner == all[0].Owner', as: same}")))
+      .toBe("A Find cannot compare with all, another step's result. Compare with a value, the message, or a formula.");
     const finds = Array.from({ length: 6 }, (_, index) => `{find: 'true', as: f${index}}`).join(", ");
     expect(unsupportedReason(withStep(finds))).toMatch(/at most 5 Find steps/);
   });
@@ -287,7 +323,7 @@ describe("plans", () => {
       "    otherwise: [{set: {Note: '=\"fallback\"'}}]",
       "  - set: {Seen: '=true'}",
     ].join("\n"));
-    const run = inputs(definition, { found: new Map([[1, [task]]]), truncatedFinds: new Set([1]) });
+    const run = inputs(definition, { found: new Map([[1, [task]]]), unreadFinds: new Map([[1, { error: FIND_OVERFLOW_ERROR, timedOut: false }]]) });
     const request = evaluationRequest(run, 0);
     expect(request.scope.bindings).not.toHaveProperty("items");
     expect(request.formulas.map(formula => formula.when ?? [])).toEqual([
@@ -308,7 +344,7 @@ describe("plans", () => {
       "id: find", "name: Find", "when: record-added", "if: items.length > 50", "do:",
       "  - find: 'true'", "    as: items", "  - set: {Seen: true}",
     ].join("\n"));
-    const run = inputs(definition, { found: new Map([[0, [task]]]), truncatedFinds: new Set([0]) });
+    const run = inputs(definition, { found: new Map([[0, [task]]]), unreadFinds: new Map([[0, { error: FIND_OVERFLOW_ERROR, timedOut: false }]]) });
     const request = evaluationRequest(run, 0);
     const evaluator = createAutomationEvaluator();
     try {

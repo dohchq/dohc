@@ -13,6 +13,7 @@ import {
   datasetReachSteps,
   datasetStepsOf,
   pinDatasetOperations,
+  type DatasetRules,
 } from "./datasetAutomationPlan";
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
@@ -202,6 +203,11 @@ describe("dataset automation steps", () => {
       { field: "Status", value: { kind: "literal", value: "Open" } },
       { field: "Notes", value: { kind: "trigger-field", field: "Notes" } },
     ]);
+    expect(datasetFindOf('record.Notes == message.body.slice(6) && record.Status == "Open"')).toEqual([
+      { field: "Notes", value: { kind: "formula", expression: "message.body.slice(6)" } },
+      { field: "Status", value: { kind: "literal", value: "Open" } },
+    ]);
+    expect(datasetFindOf("record.Notes == record.Status")).toHaveProperty("problem");
     expect(datasetFindOf('record.Status == "Open" || record.Notes == ""')).toHaveProperty("problem");
     expect(datasetFindOf('contains(record.Notes, "x")')).toHaveProperty("problem");
   });
@@ -300,6 +306,22 @@ describe("dataset automations with no trigger record", () => {
     // One whose operations do not resolve has no steps reach could vouch for.
     const gone = automation("      - add-record:\n          Status: New\n        operation: invoices.gone\n", SCHEDULE);
     expect(datasetReachSteps(gone, budget, generated, grants, null)).toBeNull();
+  });
+
+  it.each([SCHEDULE, GROUP])("runs an action, and refuses an input that uses trigger.record: %s", (when) => {
+    const invoking = (input: string) => automation(`      - invoke: invoices.markPaid
+        input:
+          note: '${input}'
+`, when);
+    const actions: DatasetRules = { definition: { ...definition, operations: [...definition.operations,
+      { ...operation(30, "invoices.markPaid", "action", [STATUS]) }] }, generated: false };
+    expect(datasetAutomationProblem(invoking("=message.body"), actions)).toBeNull();
+    // A formula that does not parse fails when it runs, as on any trigger.
+    expect(datasetAutomationProblem(invoking("=message.body + "), actions)).toBeNull();
+    expect(datasetAutomationProblem(invoking("=trigger.record.Status + \"\""), actions))
+      .toMatch(/^A (schedule|Group message) starts this automation, so an action's input cannot use trigger\.record\./);
+    expect(datasetReachSteps(invoking("Paid"), budget, actions, grants, null)!
+      .flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : [])).toEqual(["invoices.markPaid"]);
   });
 
   it("adds records with no operation named only when the dataset has one table", () => {

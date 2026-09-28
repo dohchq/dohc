@@ -23,7 +23,7 @@ import {
 import { definitionDigest, definitionHash, stepKey } from "./automationPlan";
 import type { ReachRoster, RosterGrant } from "./automationReach";
 import { createAutomationRunStore } from "./automationRunStore";
-import { GROUP_CHANGED_ERROR } from "./collectionAutomationRun";
+import { evaluateFindValues, GROUP_CHANGED_ERROR } from "./collectionAutomationRun";
 import { datasetEffectKey } from "./datasetAutomationPlan";
 import {
   ACCESS_NARROWED_ERROR,
@@ -294,6 +294,68 @@ describe("a Group message on a dataset", () => {
     expect(await attempt([{ ...TEAM, id: "team-2", wireId: "team-2-wire" }], new AbortController().signal))
       .toEqual({ kind: "failed", error: GROUP_CHANGED_ERROR, timedOut: false });
     expect(spy.notices).toHaveLength(1);
+  });
+});
+
+describe("a Find's formulas", () => {
+  it("keeps a timed-out formula's failure when another formula in the same Find fails after it", async () => {
+    const evaluated = await evaluateFindValues({
+      evaluate: async () => [
+        { ok: false as const, error: { code: "timeout" as const, message: "It ran out of time." } },
+        { ok: false as const, error: { code: "runtime" as const, message: "It threw." } },
+        { ok: true as const, value: "Open" },
+      ],
+    }, { automation, claim: { automationId: "collection:Budget#close", claimId: "c", createdAtMs: 1, collectionPath: "Budget", change: { kind: "added", fields: [], fieldsOmitted: 0 } }, record: null, message: null, person: null }, [
+      { ordinal: 0, values: [{ kind: "formula", expression: "a()" }, { kind: "formula", expression: "b()" }] },
+      { ordinal: 1, values: [{ kind: "formula", expression: "\"Open\"" }] },
+    ], 1);
+    expect(evaluated).toEqual({
+      values: new Map([["1:0", "Open"]]),
+      failed: new Map([[0, { error: "The Find in step 1 failed. It ran out of time.", timedOut: true }]]),
+    });
+  });
+
+  it("reads nothing for a value the field would refuse, and names the mismatch", async () => {
+    const COUNT = id(20);
+    const table = definition.tables[0]!;
+    const counted: DatasetDefinition = {
+      ...definition,
+      tables: [{ ...table, fields: [...table.fields, { fieldId: COUNT, name: "Count", sqlColumn: "count", type: "number", required: false, unique: false }] }],
+      operations: definition.operations.map((operation) => operation.operationId === LIST ? { ...operation, fieldIds: [STATUS, COUNT] } : operation),
+    };
+    const named = automationFrom(`  - id: named
+    name: Named
+    when: {group-message: Team}
+    do:
+      - find: record.Count == message.body.slice(6)
+        as: found
+        operation: invoices.list
+      - set:
+          Status: Closed
+        records: found
+        operation: invoices.edit
+`);
+    const claim: AutomationClaim = {
+      claimId: "atc_named", automationId: "collection:Budget#named", trigger: { key: "message:m1" }, recordId: null, collectionPath: "Budget",
+      depth: 0, state: "running", attempts: 1, run: 1, createdAtMs: 5, updatedAtMs: 5,
+      change: {
+        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, fields: [], fieldsOmitted: 0,
+        message: { id: "m1", threadId: "t1", groupId: TEAM.id, lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 5, body: "/done 12", authorUserId: "user-ana" },
+      },
+    };
+    const script = host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } });
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    // The Find's formula gives "12", and the Find's guard is true.
+    const evaluate = async (_id: string, _scope: AutomationScope, formulas: readonly { kind: string; source?: string }[]) =>
+      formulas.map((formula) => ({ ok: true as const, value: formula.source === "true" ? true : "12" }));
+    expect(await runWithRoster({
+      withHost: async (work) => await work({ ...script.surface, revision: () => ({ ...revision, definition: counted }) }),
+      evaluator: { evaluate }, store, nowMs: () => 1, personName: (userId) => userId, ...chatSpy().dependencies,
+    }, {
+      held: { source: "engine", claim, datasetId: definition.datasetId }, automation: named, collection: { path: "Budget", name: "Budget" },
+      roster: { kind: "owner", ownerUserId: "user-owner", grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
+    })).toEqual({ kind: "failed", error: "The Find in step 1 compares Count, a number, with text. Wrap the value in Number().", timedOut: false });
+    expect(script.sent).toEqual([]);
   });
 });
 

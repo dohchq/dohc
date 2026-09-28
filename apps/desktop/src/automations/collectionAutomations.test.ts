@@ -3471,6 +3471,56 @@ describe("Collection automations that a Group message starts", () => {
     expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
   });
 
+  it("finds the record a message names with a formula, and changes it", async () => {
+    const done = [
+      "  - id: task",
+      "    name: Finish a task",
+      "    when: {group-message: Trip, starts-with: /done}",
+      "    do:",
+      "      - find: record.Title == message.body.slice(6)",
+      "        as: named",
+      "      - set: {Status: Done}",
+      "        records: named",
+    ].join("\n");
+    const w = await world({ channels: [TRIP], automations: { Tasks: done } });
+    const tickets = w.addRecord("Tasks", "tickets", { Title: "Buy tickets", Status: "Open" });
+    const bags = w.addRecord("Tasks", "bags", { Title: "Pack the bags", Status: "Open" });
+    const claim = messageClaim(w, { body: "/done Buy tickets" });
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(tickets)).toMatchObject({ Status: "Done" });
+    expect(w.fieldsOf(bags)).toMatchObject({ Status: "Open" });
+  });
+
+  it("fails on a Find's formula only when the Find's branch runs", async () => {
+    const parsed = [
+      "  - id: task",
+      "    name: Finish a task",
+      "    when: {group-message: Trip}",
+      "    do:",
+      "      - if: 'message.body.startsWith(\"/done \")'",
+      "        do:",
+      "          - find: record.Title == JSON.parse(message.body.slice(6)).title",
+      "            as: named",
+      "          - set: {Status: Done}",
+      "            records: named",
+      "        otherwise:",
+      "          - add-record: {Title: '=message.body'}",
+    ].join("\n");
+    const w = await world({ channels: [TRIP], automations: { Tasks: parsed } });
+    const hello = messageClaim(w, { body: "/hello" });
+    await w.executor.open();
+    await w.settledClaim(hello);
+    expect(hello.state).toBe("done");
+    expect(added(w)).toEqual([{ Title: "/hello" }]);
+    const broken = messageClaim(w, { id: "m2", body: "/done not json" });
+    broken.trigger = { key: "message:m2" };
+    await w.settledClaim(broken);
+    expect(broken).toMatchObject({ state: "failed", error: expect.stringMatching(/^The Find in step 2 failed\./) });
+  });
+
   it("reads a body its claim carried truncated", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task }, messageBodies: { m1: "/task Pack the bags" } });
     const claim = messageClaim(w, { body: { truncated: true, bytes: 70_000 } });

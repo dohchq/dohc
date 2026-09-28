@@ -1664,3 +1664,104 @@ ${steps}`;
     await f.executor.dispose();
   });
 });
+
+describe("a Find that compares with a value from the message", () => {
+  // A message in Team for the automation `done`, run to its end.
+  const sendTo = async (f: Awaited<ReturnType<typeof world>>, claimId: string, body: string) => {
+    const claim = engineClaim(claimId, "pending", Date.now(), "collection:Budget#done");
+    claim.trigger = { key: `message:${claimId}` };
+    claim.change = {
+      kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, fields: [], fieldsOmitted: 0,
+      message: { id: claimId, threadId: "t", groupId: "team", lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 1, body, authorUserId: "u-ana" },
+    };
+    f.engineClaims.push(claim);
+    f.executor.notifyClaimed();
+    await f.until(() => claim.state === "done" || claim.state === "failed");
+    return claim;
+  };
+
+  it.each([
+    ["record.Paid == message.body.slice(6)", "The Find in step 2 compares Paid, true or false, with text."],
+    ['record["Finished on"] == message.body.slice(6)', "The Find in step 2 compares Finished on with a value this Collection does not accept."],
+  ])("fails on a value its read refuses only when the Find's branch runs: %s", async (condition, error) => {
+    const f = await world({ groups: true });
+    await f.writeAutomations(`  - id: done
+    name: Close the named invoice
+    when: {group-message: Team}
+    do:
+      - if: 'message.body.startsWith("/done ")'
+        do:
+          - find: '${condition.replaceAll("'", "''")}'
+            as: named
+            operation: invoices.list
+        otherwise:
+          - add-record:
+              Notes: '=message.body'
+            operation: invoices.create
+`);
+    await f.executor.open();
+    expect(await sendTo(f, "atc_hello", "/hello")).toMatchObject({ state: "done" });
+    expect(await sendTo(f, "atc_done", "/done soon")).toMatchObject({ state: "failed", error });
+    await f.executor.dispose();
+  });
+
+  it("fails on a Find's formula only when the Find's branch runs, on a dataset Collection", async () => {
+    const f = await world({ groups: true });
+    await f.writeAutomations(`  - id: done
+    name: Close the named invoice
+    when: {group-message: Team}
+    do:
+      - if: 'message.body.startsWith("/done ")'
+        do:
+          - find: record.Notes == JSON.parse(message.body.slice(6)).id
+            as: named
+            operation: invoices.list
+          - set:
+              Status: Closed
+            records: named
+            operation: invoices.status
+        otherwise:
+          - add-record:
+              Notes: '=message.body'
+            operation: invoices.create
+`);
+    await f.executor.open();
+    const send = (claimId: string, body: string) => sendTo(f, claimId, body);
+    expect(await send("atc_hello", "/hello")).toMatchObject({ state: "done" });
+    expect((await f.records()).map((row) => row.values[NOTES])).toEqual(["/hello"]);
+    expect(await send("atc_broken", "/done not json")).toMatchObject({ state: "failed", error: expect.stringMatching(/^The Find in step 2 failed\./) });
+    await f.executor.dispose();
+  });
+
+  it("finds the invoice a message names, on a dataset Collection, and closes it", async () => {
+    const f = await world({ groups: true });
+    await f.writeAutomations(`  - id: done
+    name: Close the named invoice
+    when: {group-message: Team, starts-with: /done}
+    do:
+      - find: record.Notes == message.body.slice(6) && record.Status == "Open"
+        as: named
+        operation: invoices.list
+      - set:
+          Status: Closed
+        records: named
+        operation: invoices.status
+`);
+    await f.executor.open();
+    const { id: first } = await f.create({ [NOTES]: "12" });
+    const { id: second } = await f.create({ [NOTES]: "13" });
+    const claim = engineClaim("atc_done", "pending", Date.now(), "collection:Budget#done");
+    claim.trigger = { key: "message:m-done" };
+    claim.change = {
+      kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, fields: [], fieldsOmitted: 0,
+      message: { id: "m-done", threadId: "t", groupId: "team", lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 1, body: "/done 12", authorUserId: "u-ana" },
+    };
+    f.engineClaims.push(claim);
+    f.executor.notifyClaimed();
+    await f.until(() => claim.state === "done" || claim.state === "failed");
+    expect(claim).toMatchObject({ state: "done" });
+    expect((await f.record(first))?.values[STATUS]).toBe("Closed");
+    expect((await f.record(second))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+});
