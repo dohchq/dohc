@@ -297,7 +297,7 @@ async function world(options: {
           const created: AutomationClaim = {
             claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `schedule:${due}` },
             recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
-            change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+            change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, fields: [], fieldsOmitted: 0 },
             state: "pending", attempts: 0, run: 1, createdAtMs: due + 1_000, updatedAtMs: 0,
           };
           claims.set(created.claimId, created);
@@ -318,7 +318,7 @@ async function world(options: {
       const created: AutomationClaim = {
         claimId: `atc_claim${claimCount}`, automationId, trigger: { key },
         recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
-        change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+        change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, fields: [], fieldsOmitted: 0 },
         state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 12), updatedAtMs: 0,
       };
       claims.set(created.claimId, created);
@@ -344,7 +344,7 @@ async function world(options: {
           claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `press:${pressId}` },
           recordId, collectionPath: record.collection, depth: by.kind === "agent" ? by.depth : 0,
           change: {
-            kind: "button", authorOriginId: by.kind === "agent" ? by.originId : null, actorKind: by.kind, onBehalfOf: pressedBy, fields: [], fieldsOmitted: 0,
+            kind: "button", authorOriginId: by.kind === "agent" ? by.originId : null, actorKind: by.kind, onBehalfOf: pressedBy, sharedAuthor: null, fields: [], fieldsOmitted: 0,
           },
           state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 2, 0), updatedAtMs: 0,
         };
@@ -565,7 +565,7 @@ async function world(options: {
       claimId: `atc_claim${claimCount}`, automationId, trigger: { historyId: claimCount },
       recordId: record.id, collectionPath: record.collection, depth: 0,
       change: {
-        kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null,
+        kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null,
         fields: [{ field: "Status", historyId: claimCount, previous: { value: "Doing" }, next: { value: "Done" } }],
         fieldsOmitted: 0, ...change,
       },
@@ -1811,7 +1811,7 @@ describe("Collection automations", () => {
       claimId: claim.claimId,
       state: "failed",
       error: "The record is open in a live session elsewhere.",
-      trigger: { kind: "changed", recordId: task.id, by: "agent", depth: 0 },
+      trigger: { kind: "changed", recordId: task.id, by: "agent", sharedAuthor: null, depth: 0 },
       steps: [{ step: 1, writes: [{ kind: "field", recordId: task.id, path: task.path, field: "Count", before: 0, after: 1 }] }],
       failedStep: 2,
       startsOver: false,
@@ -1825,6 +1825,20 @@ describe("Collection automations", () => {
     await w.executor.retry({ automationId: "collection:Tasks#two", claimId: claim.claimId, startOver: false });
     await w.until(() => claim.state === "done");
     expect(await w.executor.run("collection:Tasks#two", claim.claimId)).toMatchObject({ failedStep: null, startsOver: false, steps: [{ step: 1 }, { step: 2 }] });
+  });
+
+  it("keeps the Edit link a live change came through in run history, and fills no person from it", async () => {
+    const note = "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: '=person == null ? trigger.author.kind : person.name'}}]\n";
+    const w = await world({ automations: { Tasks: note } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 0 });
+    const link = { kind: "link" as const, grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" };
+    const claim = w.claim("collection:Tasks#note", task, { actorKind: null, sharedAuthor: link });
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(task).Note).toBe("link");
+    const [listed] = await w.executor.runs("collection:Tasks#note");
+    expect(listed!.trigger).toEqual({ kind: "changed", recordId: task.id, by: null, sharedAuthor: link, depth: 0 });
   });
 
   const ITEMS = "  - id: tick\n    name: Tick\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {Count: '=record.Count + 1'}\n        records: items\n";

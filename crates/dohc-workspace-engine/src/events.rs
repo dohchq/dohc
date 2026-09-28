@@ -250,6 +250,7 @@ mod tests {
                 collection_path: "tasks".to_owned(),
                 depth: 1,
                 change: dohc_engine_domain::AutomationChange {
+                    shared_author: None,
                     kind: dohc_engine_domain::AutomationChangeKind::Changed,
                     author_origin_id: Some("agent-editor".to_owned()),
                     actor_kind: Some(dohc_engine_domain::ChangeActorKind::Agent),
@@ -270,6 +271,7 @@ mod tests {
                 collection_path: "tasks".to_owned(),
                 depth: 0,
                 change: dohc_engine_domain::AutomationChange {
+                    shared_author: None,
                     kind: dohc_engine_domain::AutomationChangeKind::Added,
                     author_origin_id: None,
                     actor_kind: None,
@@ -311,6 +313,7 @@ mod tests {
                     "authorOriginId": "agent-editor",
                     "actorKind": "agent",
                     "onBehalfOf": "user:ice",
+                    "sharedAuthor": null,
                 },
                 "state": "pending",
                 "attempts": 0,
@@ -332,6 +335,7 @@ mod tests {
                 "authorOriginId": null,
                 "actorKind": null,
                 "onBehalfOf": null,
+                "sharedAuthor": null,
             }),
             "an undeclared actor travels as nulls"
         );
@@ -346,6 +350,7 @@ mod tests {
             "x".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_BYTES)
         );
         let facts = dohc_engine_domain::CollectionRecordApplyFacts {
+            shared_author: None,
             collection_path: "tasks".to_owned(),
             record_id: "rec_a".to_owned(),
             created: true,

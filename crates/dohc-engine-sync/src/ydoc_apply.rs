@@ -1725,7 +1725,7 @@ pub fn reconcile_local_resulting_head_in_tx(
             now_ms,
             true,
         )? {
-            LineageFold::Folded(facts) => Ok(facts),
+            LineageFold::Folded(facts) => Ok(facts.map(|facts| *facts)),
             LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
                 tx,
                 workspace_id,
@@ -1757,8 +1757,8 @@ pub(crate) enum LineageFold {
     /// The lineage holds no content: the file alone carries the text.
     NoContent,
     /// The lineage holds the text now, with the record fields its append
-    /// changed, if any.
-    Folded(Option<dohc_engine_domain::CollectionRecordApplyFacts>),
+    /// changed, if any. Boxed, since the facts dwarf the empty variant.
+    Folded(Option<Box<dohc_engine_domain::CollectionRecordApplyFacts>>),
 }
 
 /// Finalize an imported file mutation without creating a second CRDT edit.
@@ -2032,7 +2032,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     // expectation so the next session does not refuse ConflictStaleTarget
     // over the very state the user just chose.
     settle_ydoc_marker_to_text(tx, key, path, chosen_text, now_ms)?;
-    Ok(LineageFold::Folded(record_facts))
+    Ok(LineageFold::Folded(record_facts.map(Box::new)))
 }
 
 fn settle_ydoc_marker_to_text(
@@ -3595,6 +3595,7 @@ mod merge_drained_tests {
 
     fn facts(record_id: &str) -> dohc_engine_domain::CollectionRecordApplyFacts {
         dohc_engine_domain::CollectionRecordApplyFacts {
+            shared_author: None,
             collection_path: "tasks".to_owned(),
             record_id: record_id.to_owned(),
             created: false,

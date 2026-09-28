@@ -27,6 +27,7 @@ import {
   isInvalidInputRefusal,
   type AutomationClaim,
   type AutomationClaimSummary,
+  type SharedChangeAuthor,
   type AutomationGroupRelayRecord,
   type AutomationPressActor,
   type AutomationReleaseGroupsResult,
@@ -443,6 +444,11 @@ export interface CollectionAutomationTrigger {
   recordId: string | null;
   /** Null when the change did not say. */
   by: "human" | "agent" | "automation" | null;
+  /**
+   * The person the owner shared with, or the Edit share link, the relay
+   * accepted the change from. A link names its grant, never a person.
+   */
+  sharedAuthor: SharedChangeAuthor | null;
   depth: number;
 }
 
@@ -2400,7 +2406,13 @@ export class CollectionAutomations {
     const engine = await this.withLiveEngine(async (live) => ({
       claims: (await live.listAutomationClaims({ automationId })).claims.map((claim) => ({
         ...claim,
-        trigger: { kind: claim.change.kind, recordId: claim.recordId, by: claim.change.actorKind, depth: claim.depth },
+        trigger: {
+          kind: claim.change.kind,
+          recordId: claim.recordId,
+          by: claim.change.actorKind,
+          sharedAuthor: claim.change.sharedAuthor,
+          depth: claim.depth,
+        },
       })),
       failure: withFailure ? failureOf((await live.listAutomationFailures()).failures) : null,
     }));
@@ -2413,6 +2425,7 @@ export class CollectionAutomations {
           kind: claim.fact?.kind ?? null,
           recordId: claim.fact === null ? null : String(claim.fact.recordId),
           by: datasetActorKind(claim),
+          sharedAuthor: null,
           depth: claim.depth,
         },
       })),

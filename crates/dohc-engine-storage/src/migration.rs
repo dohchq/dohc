@@ -2689,6 +2689,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
         sets_user_version: None,
     },
+    // Who the relay accepted a claimed live change from, when that was a
+    // person the owner shared with or an Edit share link. Null for every
+    // other claim.
+    Migration {
+        ordinal: 21,
+        id: "v2-automation-claim-shared-author",
+        sql: "ALTER TABLE automation_claims ADD COLUMN change_author_json TEXT CHECK (change_author_json IS NULL OR json_valid(change_author_json));",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -3026,6 +3035,10 @@ mod tests {
                 "v2-materialization-displacements",
                 "2887eaf2ca3af9e0361b7dce143eddaf80e94c60dfaf46bcb2b29443c735a36b",
             ),
+            (
+                "v2-automation-claim-shared-author",
+                "8533e507bf0a0d99971e20ce73e57068b076986b2088166c144a0345aa03e7ae",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3061,16 +3074,58 @@ mod tests {
         );
     }
 
+    /// Where a migration sits in the shipped list, so an upgrade test runs
+    /// everything before it however many migrations come after.
+    fn migration_index(id: &str) -> usize {
+        BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == id)
+            .expect("a shipped migration")
+    }
+
+    #[test]
+    fn a_claim_from_before_shared_authors_reads_none_and_a_new_one_must_be_json() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-automation-claim-shared-author");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let insert = |conn: &Connection, claim_id: &str| {
+            conn.execute(
+                "INSERT INTO automation_claims (workspace_id, claim_id, automation_id, trigger_history_id, \
+                 record_id, collection_path, depth, state, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', ?1, 'collection:tasks#stamp', ?2, 'rec', 'tasks', 0, 'pending', 1, 1)",
+                rusqlite::params![claim_id, claim_id.len() as i64],
+            )
+        };
+        insert(&conn, "atc_old").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let author: Option<String> = conn
+            .query_row(
+                "SELECT change_author_json FROM automation_claims WHERE claim_id = 'atc_old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(author, None, "a claim from before names no shared author");
+        insert(&conn, "atc_newer").unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE automation_claims SET change_author_json = 'not json' WHERE claim_id = 'atc_newer'",
+                [],
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn relay_identity_claim_migration_preserves_existing_identity() {
         let dir = tempdir();
         let path = dir.join("engine.db");
         let mut conn = open_bare(&path);
         let ctx = MigrationContext::current(1_000);
-        let before = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == "v2-sync-identity-claim-state")
-            .expect("the identity claim migration ships");
+        let before = migration_index("v2-sync-identity-claim-state");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('ws','origin','epoch','stream',1)", []).unwrap();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
