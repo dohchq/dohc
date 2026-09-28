@@ -170,10 +170,11 @@ const isOn = (entry: AutomationEntry | null): boolean | null =>
  * Who made a change, as History names them. A person the work was shared
  * with is their relay user id. The owner's own edits and their agents'
  * carry no person, so they are the owner, made on one of the owner's
- * computers. An automation's change is dohc's, and a public link's names
- * nobody.
+ * computers. An automation's change is dohc's. An Edit link's change is the
+ * link's, whose holder is not a person dohc can notify, and a public link's
+ * names nobody.
  */
-type ChangeAuthor = { kind: "person"; userId: string } | { kind: "dohc" } | { kind: "nobody" };
+type ChangeAuthor = { kind: "person"; userId: string } | { kind: "link" } | { kind: "dohc" } | { kind: "nobody" };
 function authorOf(author: MomentAuthor | undefined, ownerUserId: string): ChangeAuthor {
   switch (author?.kind) {
     case undefined:
@@ -183,6 +184,8 @@ function authorOf(author: MomentAuthor | undefined, ownerUserId: string): Change
       return { kind: "person", userId: author.userId };
     case "automation":
       return { kind: "dohc" };
+    case "link":
+      return { kind: "link" };
     case "public":
       return { kind: "nobody" };
   }
@@ -251,20 +254,23 @@ export async function whoChangedLast(
 export async function whoSwitchedOff(
   history: AutomationsFileHistory,
   input: { path: string; id: string; ownerUserId: string },
-): Promise<{ switchedOffBy: string; lastChangedBy: string; contentHash: string } | null> {
+): Promise<{ switchedOffBy: SwitchedOffBy; lastChangedBy: string; contentHash: string } | null> {
   const changes = entryChanges(history, input);
   for await (const { before, after, author, text } of changes) {
     if (isOn(before) !== true || isOn(after) !== false) continue;
-    if (author.kind !== "person") return null;
+    if (author.kind !== "person" && author.kind !== "link") return null;
     const lastChangedBy = await lastPersonIn(changes);
     return lastChangedBy === null ? null : {
-      switchedOffBy: author.userId,
+      switchedOffBy: author.kind === "person" ? { kind: "person", userId: author.userId } : { kind: "link" },
       lastChangedBy,
       contentHash: createHash("sha256").update(text).digest("hex"),
     };
   }
   return null;
 }
+
+/** Who switched an automation off: a person, or someone holding an Edit link. */
+export type SwitchedOffBy = { kind: "person"; userId: string } | { kind: "link" };
 
 export interface SwitchedOffNotice {
   workspaceId: string;
@@ -285,14 +291,14 @@ export function switchedOffNotice(input: {
   workspaceId: string;
   switched: AutomationSwitchedOff;
   path: string;
-  switchedOffBy: string;
+  switchedOffBy: SwitchedOffBy;
   lastChangedBy: string;
   contentHash: string;
   /** The name the notice shows for the person who switched it off. */
   switcherName: string;
 }): SwitchedOffNotice | null {
   const { workspaceId, switched, switchedOffBy, lastChangedBy } = input;
-  if (switchedOffBy === lastChangedBy) return null;
+  if (switchedOffBy.kind === "person" && switchedOffBy.userId === lastChangedBy) return null;
   const digest = createHash("sha256")
     .update(JSON.stringify([workspaceId, switched.automationId, input.contentHash]))
     .digest("hex");
@@ -314,16 +320,18 @@ export function switchedOffNotice(input: {
  * The name a switch-off notice shows for who did it. The owner shows by
  * the name they chose. A person the work was shared with shows by email
  * only to the owner, who shared with that email; anyone else sees
- * "Someone".
+ * "Someone". Someone holding an Edit link shows as that, to everyone.
  */
 export function switcherNameFor(input: {
-  switchedOffBy: string;
+  switchedOffBy: SwitchedOffBy;
   recipient: string;
   ownerUserId: string;
   ownerName: string | null;
   emailOf(userId: string): string | null;
 }): string {
-  if (input.switchedOffBy === input.ownerUserId) return input.ownerName ?? "The workspace owner";
+  const by = input.switchedOffBy;
+  if (by.kind === "link") return "Someone with an Edit link";
+  if (by.userId === input.ownerUserId) return input.ownerName ?? "The workspace owner";
   if (input.recipient !== input.ownerUserId) return "Someone";
-  return input.emailOf(input.switchedOffBy) ?? "Someone you shared with";
+  return input.emailOf(by.userId) ?? "Someone you shared with";
 }

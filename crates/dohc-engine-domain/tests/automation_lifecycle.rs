@@ -511,6 +511,8 @@ fn a_pruned_added_claim_keeps_its_key() {
         .write_with(&NoFaults, |tx| {
             for seq in 0..limit {
                 let facts = dohc_engine_domain::CollectionRecordApplyFacts {
+                    shared_author: None,
+                    live_cursor: None,
                     collection_path: "tasks".to_owned(),
                     record_id: ALPHA.to_owned(),
                     created: false,

@@ -362,10 +362,21 @@ export interface SyncRelayShareWithGrantRow {
   grant: SyncRelayShareGrantRow;
 }
 
+// A grant the owner gave, with the newest grant generation at which it wrote
+// a Collection's automations.yaml directly (ADR 0013), or null.
+export interface SyncRelayGrantedShareRow extends SyncRelayShareWithGrantRow {
+  automationsGeneration: number | null;
+}
+
 export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
   dependents: SyncRelayShareGrantRow[];
   lastUsedAtMs: number | null;
   urlIssuedAtMs: number | null;
+  // The newest grant generation at which the link wrote a Collection's
+  // automations.yaml directly (ADR 0013), or null when it never did. The
+  // owner's reach check keeps such a link as a former editor once it ends,
+  // and a later editing period writes under a newer generation.
+  automationsGeneration: number | null;
 }
 
 export interface SyncRelayLinkInventoryCursor {
@@ -584,6 +595,7 @@ export interface SyncRelayStorage {
   releaseAutomationHost(input: import("./automationHosts").AutomationHostReleaseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   takeOverAutomationHost(input: import("./automationHosts").AutomationHostTakeOverInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   readAutomationGroupHandover(input: import("./automationHosts").AutomationGroupHandoverInput): { generation: number | null; groups: Record<string, unknown> | null };
+  authorizeLinkCollectionWrite(input: Parameters<typeof import("./collectionWrites").authorizeLinkCollectionWrite>[1]): import("../shareAuthorization").AuthorizedShareAction;
   commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
   readOwnerCollectionWrites(input: import("./ownerCollectionWrites").OwnerCollectionWritesInput): import("./ownerCollectionWrites").OwnerCollectionWritesPage;
   recordAutomationPress(input: import("./automationPresses").RecordAutomationPressInput): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;
@@ -924,7 +936,7 @@ export interface SyncRelayStorage {
     shareId: string,
     recipientUserId: string,
   ): SyncRelayShareGrantRow[];
-  listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[];
+  listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[];
   listLinkGrantsByWorkspace(
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,

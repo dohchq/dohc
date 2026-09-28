@@ -573,6 +573,8 @@ describe("automations wire schemas", () => {
       authorOriginId: "agent-editor",
       actorKind: "agent",
       onBehalfOf: "user:ice",
+      sharedAuthor: null,
+      liveCursor: null,
     },
     state: "pending",
     attempts: 1,
@@ -673,6 +675,32 @@ describe("automations wire schemas", () => {
     ).toBeNull();
   });
 
+  it("decodes the person or Edit link a live change came through, and nothing else in its place", () => {
+    const link = { kind: "link", grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" };
+    const named = { kind: "named", userId: "user-ana", grantId: "grant-ana", grantGeneration: 1 };
+    for (const sharedAuthor of [link, named]) {
+      const claim = { ...summary, change: { ...summary.change, sharedAuthor } };
+      expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim)).toEqual(claim);
+    }
+    for (const sharedAuthor of [
+      { ...link, userId: "user-ana" },
+      { kind: "link", grantId: "grant-link", grantGeneration: 2 },
+      { kind: "owner", principalId: "owner" },
+    ]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, { ...summary, change: { ...summary.change, sharedAuthor } }))
+        .toThrow(ProtocolShapeError);
+    }
+  });
+
+  it("decodes the live journal cursor a live change came in, and nothing but a whole number", () => {
+    const claim = { ...summary, change: { ...summary.change, liveCursor: 41 } };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim)).toEqual(claim);
+    for (const liveCursor of [1.5, "41", undefined]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, { ...summary, change: { ...summary.change, liveCursor } }))
+        .toThrow(ProtocolShapeError);
+    }
+  });
+
   it("decodes a history-keyed failed claim from settle and retry without facts", () => {
     const failed = {
       ...summary,
@@ -682,6 +710,8 @@ describe("automations wire schemas", () => {
         authorOriginId: null,
         actorKind: null,
         onBehalfOf: null,
+        sharedAuthor: null,
+        liveCursor: null,
       },
       state: "failed",
       error: "handler threw",
@@ -820,7 +850,7 @@ describe("automations wire schemas", () => {
       ...summary,
       automationId: "collection:Invoices#mark-paid",
       trigger: { key: "press:press-1" },
-      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada" },
+      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada", sharedAuthor: null, liveCursor: null },
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: false, claim: pressed }),
@@ -840,7 +870,7 @@ describe("automations wire schemas", () => {
       automationId: mark.automationId,
       trigger: { key: "schedule:2000" },
       recordId: null,
-      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null },
+      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null },
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [due], mark }),

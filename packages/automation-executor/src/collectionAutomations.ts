@@ -27,6 +27,7 @@ import {
   isInvalidInputRefusal,
   type AutomationClaim,
   type AutomationClaimSummary,
+  type SharedChangeAuthor,
   type AutomationGroupRelayRecord,
   type AutomationPressActor,
   type AutomationReleaseGroupsResult,
@@ -88,7 +89,7 @@ import {
 } from "./datasetAutomationPlan";
 import { datasetPresser, datasetRecordExists, runDatasetAutomation, type DatasetRunClaim, type DatasetRunHost } from "./datasetAutomationRun";
 import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
-import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
+import { nextReachVerdict, reachVerdictKey, sameReachVerdict, type StoredReachVerdict } from "./reachVerdicts";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
 import type { GroupMessagesSkipped } from "./groupMessagesNotice";
 import {
@@ -443,6 +444,11 @@ export interface CollectionAutomationTrigger {
   recordId: string | null;
   /** Null when the change did not say. */
   by: "human" | "agent" | "automation" | null;
+  /**
+   * The person the owner shared with, or the Edit share link, the relay
+   * accepted the change from. A link names its grant, never a person.
+   */
+  sharedAuthor: SharedChangeAuthor | null;
   depth: number;
 }
 
@@ -1420,9 +1426,12 @@ export class CollectionAutomations {
         const steps = this.reachSteps(collectionPath, automation);
         checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps }).forEach((reach, index) => {
           const step = reachStepId(steps[index]!, index);
+          // A former link's evidence is part of what Allow answers now.
+          const accounted = reach.allowed ? (reach.formerStops ?? []).map((stop) => stop.evidence).sort() : [];
           this.verdicts.set(reachVerdictKey(automationId, hash, step), {
             automationId, definitionHash: hash, step,
             ...(reach.allowed ? { verdict: "held", stoppedFor: null } : { verdict: "stopped", stoppedFor: reach.person ?? null }),
+            ...(accounted.length === 0 ? {} : { accountedLinks: accounted }),
             seq: ++this.verdictSeq,
           });
         });
@@ -2303,17 +2312,33 @@ export class CollectionAutomations {
    * history under one of these definitions, as Undo on each would, newest
    * first as run history lists them, so each field goes back in turn. A
    * claim's runs under other definitions stay. `left` counts the runs Undo
-   * refused, such as one still running.
+   * refused, such as one still running. `kept` counts the changes undone
+   * runs made that stay as they are: dataset records and actions Undo cannot
+   * reverse, and fields someone changed since or whose record is gone.
+   * A failure part way stops there and answers what went before, with it.
    */
   async undoRunsOf(
     definitions: ReadonlyArray<{ automationId: string; definitionHash: string }>,
     trash: (path: string) => Promise<void>,
-  ): Promise<{ undone: number; left: number }> {
+  ): Promise<{ undone: number; left: number; kept: number; errorMessage: string | null }> {
     const hashes = new Map<string, Set<string>>();
     for (const { automationId, definitionHash: hash } of definitions) {
       hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
     }
-    const result = { undone: 0, left: 0 };
+    const result = { undone: 0, left: 0, kept: 0 };
+    try {
+      await this.undoEachRun(hashes, trash, result);
+    } catch (error) {
+      return { ...result, errorMessage: error instanceof Error ? error.message : String(error) };
+    }
+    return { ...result, errorMessage: null };
+  }
+
+  private async undoEachRun(
+    hashes: ReadonlyMap<string, ReadonlySet<string>>,
+    trash: (path: string) => Promise<void>,
+    result: { undone: number; left: number; kept: number },
+  ): Promise<void> {
     for (const [automationId, wanted] of hashes) {
       // A dataset's runs are in its host's ledger, which may not be open yet.
       const parsed = parseCollectionAutomationId(automationId);
@@ -2325,10 +2350,14 @@ export class CollectionAutomations {
           .filter((run) => wanted.has(run.definitionHash));
         if (runs.length === 0 || runs.every((run) => run.undo === "done")) continue;
         const undone = await this.undo({ automationId, claimId: claim.claimId }, trash, wanted);
-        result[undone.status === "undone" ? "undone" : "left"] += 1;
+        if (undone.status !== "undone") {
+          result.left += 1;
+          continue;
+        }
+        result.undone += 1;
+        result.kept += undone.kept + undone.irreversible + undone.actions + undone.changedSince + undone.missing;
       }
     }
-    return result;
   }
 
   /** The name an engine automation id's automation has in its file, or null. */
@@ -2377,7 +2406,13 @@ export class CollectionAutomations {
     const engine = await this.withLiveEngine(async (live) => ({
       claims: (await live.listAutomationClaims({ automationId })).claims.map((claim) => ({
         ...claim,
-        trigger: { kind: claim.change.kind, recordId: claim.recordId, by: claim.change.actorKind, depth: claim.depth },
+        trigger: {
+          kind: claim.change.kind,
+          recordId: claim.recordId,
+          by: claim.change.actorKind,
+          sharedAuthor: claim.change.sharedAuthor,
+          depth: claim.depth,
+        },
       })),
       failure: withFailure ? failureOf((await live.listAutomationFailures()).failures) : null,
     }));
@@ -2390,6 +2425,7 @@ export class CollectionAutomations {
           kind: claim.fact?.kind ?? null,
           recordId: claim.fact === null ? null : String(claim.fact.recordId),
           by: datasetActorKind(claim),
+          sharedAuthor: null,
           depth: claim.depth,
         },
       })),
@@ -2830,7 +2866,7 @@ export class CollectionAutomations {
           const previous = this.verdicts.get(key);
           const next = nextReachVerdict(previous, reach, automation.enabled);
           if (next.verdict === "held") held = true;
-          if (previous?.verdict === next.verdict && previous.stoppedFor === next.stoppedFor && previous.narrowed === next.narrowed) return;
+          if (sameReachVerdict(previous, next)) return;
           this.verdicts.set(key, { automationId, definitionHash: hash, step, ...next, seq: ++this.verdictSeq });
         });
       }
@@ -3385,7 +3421,7 @@ export class CollectionAutomations {
       const key = reachVerdictKey(input.automationId, input.definitionHash, step, id);
       const previous = this.verdicts.get(key);
       const next = nextReachVerdict(previous, reach, true);
-      if (previous?.verdict !== next.verdict || previous.stoppedFor !== next.stoppedFor) {
+      if (!sameReachVerdict(previous, next)) {
         this.verdicts.set(key, {
           automationId: input.automationId, definitionHash: input.definitionHash, step,
           recipient: { id, name, action }, ...next, seq: ++this.verdictSeq,

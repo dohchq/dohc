@@ -1006,14 +1006,46 @@ const automationClaimFields = {
 };
 
 /**
+ * A person the owner shared with, or an Edit share link, that the relay
+ * accepted a live-shared record's change from. A link is its grant, never a
+ * person's account.
+ */
+const SharedChangeAuthorSchema = Schema.Union([
+  mutableStruct({
+    kind: Schema.Literal("named"),
+    userId: Schema.String,
+    grantId: Schema.String,
+    grantGeneration: Schema.Int,
+  }),
+  mutableStruct({
+    kind: Schema.Literal("link"),
+    grantId: Schema.String,
+    grantGeneration: Schema.Int,
+    principalId: Schema.String,
+  }),
+]);
+export type SharedChangeAuthor = typeof SharedChangeAuthorSchema.Type;
+
+/**
  * The change a claim runs for and who made it, named as record history
  * names them. Each author field is null when the write did not declare it.
+ * `sharedAuthor` names who the relay accepted a live-shared change from,
+ * when that was a person the owner shared with or an Edit share link.
  */
 const automationChangeFields = {
   kind: Schema.Literals(["added", "changed", "removed", "message", "button", "schedule"]),
   authorOriginId: NullableString,
   actorKind: Schema.NullOr(Schema.Literals(["human", "agent", "automation"])),
+  /**
+   * The person the change was made by or for: who pressed a button, who
+   * wrote a message, or who made a record change or had an agent or
+   * automation make it. For a live-shared change, the person the relay
+   * accepted it from; an Edit share link names no one.
+   */
   onBehalfOf: NullableString,
+  sharedAuthor: Schema.NullOr(SharedChangeAuthorSchema),
+  /** The relay's live journal cursor of the frame a live-shared change came in; null for any other change. */
+  liveCursor: NullableInt,
 };
 
 /**

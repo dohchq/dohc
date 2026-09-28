@@ -285,6 +285,8 @@ pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
             "authorOriginId": claim.change.author_origin_id,
             "actorKind": claim.change.actor_kind.map(|kind| kind.as_str()),
             "onBehalfOf": claim.change.on_behalf_of,
+            "sharedAuthor": claim.change.shared_author,
+            "liveCursor": claim.change.live_cursor,
         },
         "state": claim.state.as_str(),
         "attempts": claim.attempts,

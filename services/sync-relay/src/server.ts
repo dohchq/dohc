@@ -18,7 +18,10 @@ import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   createCollectionWriteRateLimiter,
   createCollectionWriteRoutes,
+  createLinkCollectionWriteAdmission,
+  createLinkCollectionWriteRoute,
   type CollectionWriteRoute,
+  type LinkCollectionWriteAdmission,
   readOwnerCollectionWrites,
   type OwnerCollectionWriteRoute,
 } from "./collectionWriteRoutes";
@@ -155,6 +158,8 @@ export interface CreateSyncRelayHandlerOptions {
   publicEditRelease?: PublicEditRelease;
   // Rate limit for direct writes to a Collection's own files under Edit.
   collectionWriteRateLimiter?: TokenBucketLimiter;
+  // Link direct-write bodies the relay holds in memory at once.
+  linkCollectionWriteAdmission?: LinkCollectionWriteAdmission;
   linkExchangeRateLimiter?: TokenBucketLimiter;
   linkExchangeGlobalRateLimiter?: TokenBucketLimiter;
   linkExchangeGrantRateLimiter?: TokenBucketLimiter;
@@ -195,6 +200,7 @@ type SyncRelayRoute =
   | LinkReadRoute
   | { route: "link-discussion" }
   | { route: "link-discussion-activity" }
+  | { route: "link-collection-writes" }
   | { route: "workspaces" }
   | NoticeRoute
   | AutomationHostRoute
@@ -242,6 +248,7 @@ export function createSyncRelayHandler({
   namedBrowserSessionLimits,
   publicEditRelease: releaseInput,
   collectionWriteRateLimiter = createCollectionWriteRateLimiter(),
+  linkCollectionWriteAdmission = createLinkCollectionWriteAdmission(),
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
   linkExchangeGlobalRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY, LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1),
   linkExchangeGrantRateLimiter = new TokenBucketLimiter(LINK_GRANT_READ_BUCKET_CAPACITY, LINK_GRANT_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
@@ -552,6 +559,17 @@ export function createSyncRelayHandler({
     if (!capability) throw invalidLinkCapability();
     return {capabilityToken, capability};
   };
+  const respondToLinkCollectionWrites = linkKey ? createLinkCollectionWriteRoute({
+    storage,
+    rateLimiter: collectionWriteRateLimiter,
+    admission: linkCollectionWriteAdmission,
+    linkKey,
+    publicEditRelease,
+    requireLinkCapability,
+    nowMs,
+    newId,
+    discussionActivity,
+  }) : null;
   const requireLinkRead = (
     request: Request,
     capabilityRateLimiter: TokenBucketLimiter,
@@ -722,6 +740,10 @@ export function createSyncRelayHandler({
       }
       if (route.route === "link-discussion-activity") {
         return await respondToLinkDiscussionActivity(request);
+      }
+      if (route.route === "link-collection-writes") {
+        if (!respondToLinkCollectionWrites) throw notFound();
+        return await respondToLinkCollectionWrites(request);
       }
       if (route.route === "share-discussion") {
         return await respondToShareDiscussion(request, route.shareId);
@@ -966,7 +988,7 @@ export function createSyncRelayHandler({
     const result = await dispatch(request);
     const path = new URL(request.url).pathname;
     if (!/^\/sync\/link(?:[/-]|$)/.test(path) || result.status < 400) return result;
-    return normalizeLinkRefusal(result);
+    return normalizeLinkRefusal(result, path);
   };
   return Object.assign(handle, {
     resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
@@ -982,7 +1004,7 @@ export function streamsRequestBody(url: URL, method: string): boolean {
   try {
     const route = parseRoute({ url: url.href });
     return (route.route === "dataset" && route.action === "import" && method === "POST") ||
-      route.route === "share-collection-writes";
+      route.route === "share-collection-writes" || route.route === "link-collection-writes";
   } catch { return false; }
 }
 
@@ -1019,6 +1041,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts[2] === "current") return { route: "link-current" };
     if (parts[2] === "log") return { route: "link-log" };
     if (parts[2] === "discussion") return { route: "link-discussion" };
+    if (parts[2] === "collection-writes") return { route: "link-collection-writes" };
   }
   if (
     parts.length === 4 &&
