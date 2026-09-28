@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 use crate::collections::{
     ChangeActorKind, CollectionFieldChangeFact, CollectionRecordApplyFacts,
-    CollectionRecordLifecycle, CollectionRecordLifecycleKind, field_fact_value,
+    CollectionRecordLifecycle, CollectionRecordLifecycleKind, SharedChangeAuthor, field_fact_value,
     indexed_record_fields, moment_author_attribution, parent_path,
 };
 use crate::error::DomainError;
@@ -278,12 +278,15 @@ pub struct AutomationGroupMessage<'a> {
 /// The change a claim runs for and who made it, named as record history
 /// names them: the author origin, and the declared actor kind and the
 /// principal it acted for. Each is `None` when the write did not declare it.
+/// `shared_author` is the person the owner shared with, or the Edit share
+/// link, the relay accepted the change from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationChange {
     pub kind: AutomationChangeKind,
     pub author_origin_id: Option<String>,
     pub actor_kind: Option<ChangeActorKind>,
     pub on_behalf_of: Option<String>,
+    pub shared_author: Option<SharedChangeAuthor>,
 }
 
 /// One side of a changed field on a claim.
@@ -508,7 +511,7 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 const CLAIM_COLUMNS: &str = "claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
      trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
      created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of, run, \
-     trigger_moment_order, trigger_key";
+     trigger_moment_order, trigger_key, change_author_json";
 
 fn claim_from_row(
     row: &rusqlite::Row<'_>,
@@ -533,7 +536,18 @@ fn claim_from_row(
     let run: i64 = row.get(17)?;
     let trigger_moment_order: Option<i64> = row.get(18)?;
     let trigger_key: Option<String> = row.get(19)?;
+    let change_author_json: Option<String> = row.get(20)?;
     let claim = (|| {
+        let shared_author = change_author_json
+            .map(|json| {
+                serde_json::from_str::<SharedChangeAuthor>(&json)
+                    .ok()
+                    .filter(SharedChangeAuthor::is_valid)
+                    .ok_or(DomainError::StateCorrupt {
+                        reason: "automation claim shared author is not a known author",
+                    })
+            })
+            .transpose()?;
         let actor_kind = actor_kind
             .map(|kind| {
                 ChangeActorKind::parse(&kind).ok_or(DomainError::StateCorrupt {
@@ -579,6 +593,7 @@ fn claim_from_row(
                 author_origin_id,
                 actor_kind,
                 on_behalf_of,
+                shared_author,
             },
             state: AutomationClaimState::parse(&state)?,
             attempts,
@@ -1007,6 +1022,7 @@ fn decide_group_message(
             author_origin_id: message.automation_id.map(str::to_owned),
             actor_kind: ChangeActorKind::parse(message.author_kind),
             on_behalf_of: message.author_user_id.map(str::to_owned),
+            shared_author: None,
         },
         // A stopped chain never runs, so its claim keeps no message.
         fields: AutomationFieldFacts {
@@ -1807,6 +1823,20 @@ fn insert_claims(
     } else {
         (AutomationClaimState::Pending, None)
     };
+    let shared_author_json =
+        match &claimed.change.shared_author {
+            Some(author) if author.is_valid() => Some(serde_json::to_string(author).map_err(
+                |_| DomainError::InvalidInput {
+                    reason: "automation claim shared author does not serialize",
+                },
+            )?),
+            Some(_) => {
+                return Err(DomainError::InvalidInput {
+                    reason: "automation claim shared author is not valid",
+                });
+            }
+            None => None,
+        };
     let mut inserted = Vec::new();
     for automation_id in automation_ids {
         let claim_id = mint_claim_id()?;
@@ -1817,9 +1847,9 @@ fn insert_claims(
                   trigger_history_id, trigger_moment_order, record_id, collection_path, depth, \
                   state, attempts, error, created_at_ms, updated_at_ms, change_kind, \
                   author_origin_id, actor_kind, on_behalf_of, change_fields_json, \
-                  change_fields_omitted, trigger_key, message_json) \
+                  change_fields_omitted, trigger_key, message_json, change_author_json) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?13, ?14, \
-                         ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     workspace_id,
                     claim_id,
@@ -1842,6 +1872,7 @@ fn insert_claims(
                     claimed.fields.omitted,
                     key,
                     message_json,
+                    shared_author_json,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -1948,6 +1979,7 @@ pub fn claim_automation_triggers_in_tx(
                 .attribution
                 .as_ref()
                 .and_then(|attribution| attribution.on_behalf_of.clone()),
+            shared_author: facts.shared_author.clone(),
         },
         // A stopped chain never runs, so its claim keeps no facts.
         fields: if chain_stopped {
@@ -2174,6 +2206,8 @@ fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (Auto
         on_behalf_of: attribution
             .as_ref()
             .and_then(|attribution| attribution.on_behalf_of.clone()),
+        // A moment a claim is made from was committed on this computer.
+        shared_author: None,
     };
     (
         change,
@@ -2545,6 +2579,7 @@ pub fn press_automation_in_tx(
                     author_origin_id,
                     actor_kind: Some(actor_kind),
                     on_behalf_of: Some(pressed_by.clone()),
+                    shared_author: None,
                 },
                 fields: AutomationFieldFacts::default(),
                 chain_stopped: depth >= AUTOMATION_CHAIN_DEPTH_CAP,
@@ -2691,6 +2726,7 @@ pub fn claim_automation_schedule_in_tx(
                         author_origin_id: None,
                         actor_kind: None,
                         on_behalf_of: None,
+                        shared_author: None,
                     },
                     fields: AutomationFieldFacts::default(),
                     chain_stopped: false,
@@ -2779,6 +2815,7 @@ pub fn claim_automation_run_now_in_tx(
             author_origin_id: None,
             actor_kind: None,
             on_behalf_of: None,
+            shared_author: None,
         },
         fields: AutomationFieldFacts::default(),
         chain_stopped: false,

@@ -793,6 +793,8 @@ export interface RunClaim {
     fieldsOmitted: number;
     /** Who made the change, when that is known; left out when it is not. */
     actorKind?: AutomationClaim["change"]["actorKind"];
+    /** The person the owner shared with, or the Edit share link, the relay accepted it from; left out when none. */
+    sharedAuthor?: AutomationClaim["change"]["sharedAuthor"];
   };
 }
 
@@ -1125,6 +1127,9 @@ function runScope(inputs: FindValueInputs, nowMs: number, bindings: JsonObject):
           change: claim.change.kind,
           fields: claim.change.fields.map((fact) => fact.field),
           record: triggerRecord,
+          // Who the relay accepted a live-shared change from. A link is its
+          // grant and never a person, so it names no `person` below.
+          author: claim.change.sharedAuthor ?? null,
         },
     // A press or Group message names the person who started it.
     person: person ?? author,

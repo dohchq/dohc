@@ -321,6 +321,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     assert_eq!(
         claim.change,
         AutomationChange {
+            shared_author: None,
             kind: AutomationChangeKind::Changed,
             author_origin_id: Some("agent-editor".to_owned()),
             actor_kind: Some(ChangeActorKind::Agent),

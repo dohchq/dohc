@@ -936,11 +936,18 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
 ]);
 // The change a run is for. `kind` is null for a dataset run that failed
 // before it could carry its change; `by` is null when the change did not say.
+// A person the owner shared with, or an Edit share link, the relay accepted
+// the change from. A link is its grant, never a person's account.
+const automationSharedAuthorSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("named"), userId: z.string().min(1), grantId: z.string().min(1), grantGeneration: z.number().int().positive() }).strict(),
+  z.object({ kind: z.literal("link"), grantId: z.string().min(1), grantGeneration: z.number().int().positive(), principalId: z.string().min(1) }).strict(),
+]);
 const automationTriggerSchema = z
   .object({
     kind: z.enum(["added", "changed", "removed", "message", "button", "schedule"]).nullable(),
     recordId: z.string().nullable(),
     by: z.enum(["human", "agent", "automation"]).nullable(),
+    sharedAuthor: automationSharedAuthorSchema.nullable(),
     depth: z.number().int().nonnegative(),
   })
   .strict();

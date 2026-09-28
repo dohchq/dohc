@@ -18,8 +18,8 @@ use dohc_engine_domain::{
     ChatMessageAutomation, ChatThreadLane, CollectionFieldChangeFact, CollectionRecordApplyFacts,
     DispatchClaim, DomainError, LinkedChatStore, MAX_AUTOMATION_FIELD_FACTS_BYTES,
     MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES, MAX_AUTOMATION_SUBSCRIPTION_FIELDS,
-    MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES, NoFaults, SendMessage, StartChannelThread,
-    TxnOutcome, claim_automation_triggers_in_tx, claim_group_message_in_tx,
+    MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES, NoFaults, SendMessage, SharedChangeAuthor,
+    StartChannelThread, TxnOutcome, claim_automation_triggers_in_tx, claim_group_message_in_tx,
     claim_next_pending_automation, list_automation_claims, list_automation_failures,
     moment_author_attribution, moment_author_json, read_automation_group_skips,
     reclaim_running_automations, release_automation_claim, release_automation_groups,
@@ -74,6 +74,7 @@ fn facts(
     depth: Option<u32>,
 ) -> CollectionRecordApplyFacts {
     CollectionRecordApplyFacts {
+        shared_author: None,
         collection_path: collection_path.to_owned(),
         record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         created: false,
@@ -457,6 +458,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
     assert_eq!(
         claims[0].change,
         AutomationChange {
+            shared_author: None,
             kind: AutomationChangeKind::Changed,
             author_origin_id: Some("agent-editor".to_owned()),
             actor_kind: Some(ChangeActorKind::Agent),
@@ -506,6 +508,58 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
             .get("previous"),
         Some(&json!({ "truncated": true, "bytes": big.len() }))
     );
+}
+
+#[test]
+fn a_claim_keeps_the_person_or_link_the_relay_accepted_its_change_from() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    assert!(subscribe(&mut store, "collection:tasks#stamp", "tasks"));
+    let link = SharedChangeAuthor::Link {
+        grant_id: "grant-link".to_owned(),
+        grant_generation: 2,
+        principal_id: "holder-1".to_owned(),
+    };
+    let named = SharedChangeAuthor::Named {
+        user_id: "user-ana".to_owned(),
+        grant_id: "grant-ana".to_owned(),
+        grant_generation: 1,
+    };
+    for (origin_seq, author) in [(1, link), (2, named)] {
+        let mut applied = field_change(origin_seq, &["status"]);
+        applied.shared_author = Some(author.clone());
+        let claims = claim_for(&mut store, WS, &applied, 10 + origin_seq);
+        assert_eq!(claims[0].change.shared_author.as_ref(), Some(&author));
+        let (served, _) = claim_next_pending_automation(
+            &mut store,
+            WS,
+            "collection:",
+            20 + origin_seq,
+            &NO_FAULTS,
+        )
+        .expect("claim next")
+        .expect("the claim is pending");
+        assert_eq!(
+            served.change.shared_author,
+            Some(author),
+            "it survives the ledger"
+        );
+    }
+    // A shared author with a missing or unbounded id never reaches the ledger.
+    let mut applied = field_change(3, &["status"]);
+    applied.shared_author = Some(SharedChangeAuthor::Link {
+        grant_id: "grant-link".to_owned(),
+        grant_generation: 0,
+        principal_id: "holder-1".to_owned(),
+    });
+    let refused = store.write_with(&NO_FAULTS, |tx| {
+        claim_automation_triggers_in_tx(tx, WS, &applied, 40)
+    });
+    assert!(
+        matches!(refused, Err(DomainError::InvalidInput { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(claim_rows(&store, WS), 2);
 }
 
 #[test]
@@ -1466,6 +1520,7 @@ fn a_group_message_claims_each_matching_subscription_once() {
     assert_eq!(
         claim.change,
         AutomationChange {
+            shared_author: None,
             kind: AutomationChangeKind::Message,
             author_origin_id: None,
             actor_kind: Some(ChangeActorKind::Human),
