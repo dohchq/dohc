@@ -4620,3 +4620,69 @@ fn every_read_answers_for_a_degraded_collection() {
     assert_eq!(record.collection.status, CollectionSchemaStatus::Degraded);
     assert_eq!(record.record.values[0].value, json!("survives"));
 }
+
+/// A Collection is named by its schema file's object id, which a move keeps,
+/// so the automations that belong to it keep their ids.
+#[test]
+fn a_moved_collection_keeps_its_schema_object_id() {
+    let (_scratch, mut store) = fresh_store();
+    write_text_for_object(
+        &mut store,
+        "trip/collection.yaml",
+        "fields:\n  Title:\n    type: text\n",
+        "trip-schema",
+        "trip-schema-write",
+        2,
+    )
+    .expect("trip schema");
+    let reconcile = |store: &mut EngineStore| {
+        store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+            })
+            .expect("reconcile collections");
+    };
+    reconcile(&mut store);
+    let listed = store
+        .read_with(|conn| list_collections(conn, WORKSPACE_ID, MAX_COLLECTION_QUERY_LIMIT, None))
+        .expect("list collections");
+    assert_eq!(listed.collections.len(), 1);
+    assert_eq!(listed.collections[0].path, "trip");
+    assert_eq!(listed.collections[0].object_id, "trip-schema");
+
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                from_path: "trip/collection.yaml".to_owned(),
+                to_path: "voyage/collection.yaml".to_owned(),
+                moment_id: "move-trip".to_owned(),
+                request_id: None,
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3,
+            },
+            &NoFaults,
+        )
+        .expect("move the schema");
+    reconcile(&mut store);
+    let listed = store
+        .read_with(|conn| list_collections(conn, WORKSPACE_ID, MAX_COLLECTION_QUERY_LIMIT, None))
+        .expect("list moved collections");
+    assert_eq!(
+        listed
+            .collections
+            .iter()
+            .map(|collection| (collection.path.as_str(), collection.object_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("voyage", "trip-schema")]
+    );
+    let details = store
+        .read_with(|conn| get_collection(conn, WORKSPACE_ID, "voyage"))
+        .expect("get moved collection")
+        .expect("moved collection");
+    assert_eq!(details.object_id, "trip-schema");
+}

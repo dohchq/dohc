@@ -379,7 +379,7 @@ fn a_local_apply_claims_once_per_subscribed_automation_and_replay_dedupes() {
             "a synced-lineage change keys on its replication coordinate"
         );
         assert_eq!(claim.state, AutomationClaimState::Pending);
-        assert_eq!(claim.collection_path, "tasks");
+        assert_eq!(claim.collection_path.as_deref(), Some("tasks"));
         assert_eq!(claim.depth, 0);
     }
 
@@ -1349,8 +1349,8 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
 // ------------------------------------------------------- Group messages
 
 const GROUP: &str = "gen-1";
-const TASK: &str = "collection:Trip/Tasks#task";
-const ALL: &str = "collection:Trip/Tasks#all";
+const TASK: &str = "collection:object-tasks#task";
+const ALL: &str = "collection:object-tasks#all";
 
 fn open_group(scratch: &ScratchDir) -> EngineStore {
     let mut store = open_store(scratch);
@@ -1560,7 +1560,7 @@ fn a_group_message_claims_each_matching_subscription_once() {
         }
     );
     assert_eq!(claim.record_id, None);
-    assert_eq!(claim.collection_path, "Trip/Tasks");
+    assert_eq!(claim.collection_path, None);
     assert_eq!(claim.depth, 0);
     assert_eq!(
         claim.change,

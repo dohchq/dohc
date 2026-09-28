@@ -134,7 +134,7 @@ describe("automation notices", () => {
   it("asks once to allow a step that reaches more only because an editor left", async () => {
     const hold = {
       automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef",
-      step: "0", seq: 4, collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test",
+      step: "0", seq: 4, collection: "Trip", collectionPath: "Projects/Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test",
     };
     const onAllowAutomationHold = vi.fn();
     renderNotices({ automationHolds: [hold], onAllowAutomationHold });
@@ -150,8 +150,8 @@ describe("automation notices", () => {
 
   it("names every automation a share stopped in one notice, and dismisses them together", async () => {
     const stop = (automation: string, name: string, target: string, action: "change" | "find") => ({
-      automationId: `collection:Projects/Trip#${automation}`, automationName: name, definitionHash: "0123456789abcdef",
-      step: "0", seq: 4, collection: "Trip", target, action, stoppedFor: "ana@dohc.test",
+      automationId: `collection:object-trip#${automation}`, automationName: name, definitionHash: "0123456789abcdef",
+      step: "0", seq: 4, collection: "Trip", collectionPath: "Projects/Trip", target, action, stoppedFor: "ana@dohc.test",
     });
     const onDismissAutomationStops = vi.fn();
     const spend = stop("spend", "Spend", "Budget", "change");
@@ -168,7 +168,7 @@ describe("automation notices", () => {
     const stops = [
       spend,
       stop("log", "Log", "Archive", "find"),
-      { ...stop("tidy", "Tidy", "Budget", "change"), automationId: "collection:Home/Trip#tidy" },
+      { ...stop("tidy", "Tidy", "Budget", "change"), automationId: "collection:object-home-trip#tidy", collectionPath: "Home/Trip" },
       stop("sum", "Sum", "Budget", "change"),
     ];
     renderNotices({ automationStops: stops, onDismissAutomationStops });
@@ -189,7 +189,7 @@ describe("automation notices", () => {
   it("names the Group whose messages a held automation would start from", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#task", automationName: "Add a task", definitionHash: "0123456789abcdef",
-      step: "0", seq: 7, collection: "Trip", target: "Planning", action: "read", stoppedFor: "bob@dohc.test",
+      step: "0", seq: 7, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "read", stoppedFor: "bob@dohc.test",
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#task-0");
@@ -201,7 +201,7 @@ describe("automation notices", () => {
   it("names the Group a held post would post in", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
-      step: "1", seq: 5, collection: "Trip", target: "Planning", action: "post", stoppedFor: null,
+      step: "1", seq: 5, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "post", stoppedFor: null,
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-1");
@@ -211,7 +211,7 @@ describe("automation notices", () => {
   it("names the person a held notice would go to", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
-      step: "2", seq: 6, collection: "Trip", target: "ana@dohc.test", action: "notify", stoppedFor: null,
+      step: "2", seq: 6, collection: "Trip", collectionPath: "Projects/Trip", target: "ana@dohc.test", action: "notify", stoppedFor: null,
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-2");
@@ -1937,7 +1937,7 @@ describe("notices sent to you", () => {
 it("names the chat permission that stopped a step", async () => {
   renderNotices({ automationStops: [{
     automationId: "collection:Tasks#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
-    step: "0", seq: 1, collection: "Tasks", target: "Trip", action: "post", stoppedFor: "ana@dohc.test",
+    step: "0", seq: 1, collection: "Tasks", collectionPath: "Tasks", target: "Trip", action: "post", stoppedFor: "ana@dohc.test",
   }] });
   await userEvent.click(screen.getByTestId("notice-center-toggle"));
   expect((await screen.findByTestId("notice-automation-stops")).textContent).toContain("ana@dohc.test cannot post in Trip.");

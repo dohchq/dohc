@@ -233,7 +233,7 @@ export type AutomationClaimNextParams = WorkspaceJsonObject & {
   /**
    * Serve only claims whose automation id starts with this. The Collection
    * executor drains "collection:" (ids
-   * "collection:<collection path>#<automation id>").
+   * "collection:<collection id>#<automation id>").
    */
   automationIdPrefix: string;
 };
@@ -264,7 +264,7 @@ export type AutomationListClaimsParams = WorkspaceJsonObject & {
 export type AutomationPressParams = WorkspaceJsonObject & {
   /** The pressing window's id for the press. Send the same id again after a lost reply. */
   pressId: string;
-  /** The Collection automation the button runs: "collection:<path>#<id>". */
+  /** The Collection automation the button runs: "collection:<collection id>#<id>". */
   automationId: string;
   recordId: string;
   /**
@@ -287,7 +287,7 @@ export type AutomationPressActor =
 
 /** Mirrors AutomationRunNowParams in crates/dohc-workspace-engine. */
 export type AutomationRunNowParams = WorkspaceJsonObject & {
-  /** The Collection automation to run: "collection:<path>#<id>". */
+  /** The Collection automation to run: "collection:<collection id>#<id>". */
   automationId: string;
   /** The skipped-run notice whose Run now this is. One claim per notice. */
   noticeId: string;
@@ -296,7 +296,7 @@ export type AutomationRunNowParams = WorkspaceJsonObject & {
 
 /** Mirrors AutomationClaimScheduleParams in crates/dohc-workspace-engine. */
 export type AutomationClaimScheduleParams = WorkspaceJsonObject & {
-  /** The Collection automation the schedule runs: "collection:<path>#<id>". */
+  /** The Collection automation the schedule runs: "collection:<collection id>#<id>". */
   automationId: string;
   /** The scheduler's hash of the schedule. A new hash starts a new mark. */
   scheduleHash: string;
@@ -769,6 +769,7 @@ const CollectionSchemaSchema = mutableStruct({
 
 const CollectionSummarySchema = mutableStruct({
   path: Schema.String,
+  objectId: Schema.String,
   status: Schema.Literals(["valid", "degraded"]),
   reasons: Schema.mutable(Schema.Array(CollectionSchemaReasonSchema)),
   omittedReasons: Schema.optionalKey(Schema.Int),
@@ -776,6 +777,7 @@ const CollectionSummarySchema = mutableStruct({
 
 const CollectionDetailsSchema = mutableStruct({
   path: Schema.String,
+  objectId: Schema.String,
   status: Schema.Literals(["valid", "degraded"]),
   reasons: Schema.mutable(Schema.Array(CollectionSchemaReasonSchema)),
   schema: CollectionSchemaSchema,
@@ -966,7 +968,11 @@ const automationClaimFields = {
   ]),
   /** The record the claim runs on; null for a message or a schedule. */
   recordId: Schema.NullOr(Schema.NonEmptyString),
-  collectionPath: Schema.NonEmptyString,
+  /**
+   * The Collection the changed record was in. A claim that names its
+   * automation, a press, a due time, a Run now, or a Group message, has none.
+   */
+  collectionPath: Schema.NullOr(Schema.NonEmptyString),
   depth: Schema.Int,
   state: Schema.Literals(["pending", "running", "done", "failed"]),
   /**

@@ -70,7 +70,10 @@ export function engineMomentSourceLabel(
 ): string {
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
   if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
-  if (moment.automationAuthor) return `${moment.automationAuthor.name} in ${moment.automationAuthor.collection}`;
+  if (moment.automationAuthor) {
+    const { name, collection } = moment.automationAuthor;
+    return collection === undefined ? name : `${name} in ${collection}`;
+  }
   if (moment.namedAuthor) return moment.namedAuthor.label;
   return moment.agentAuthorName !== undefined
     ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })

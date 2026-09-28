@@ -951,7 +951,7 @@ describe("notices for another person", () => {
 
 
 describe("automation notices reach the people involved", () => {
-  const AUTOMATION = "collection:trip/tasks#stamp";
+  const AUTOMATION = "collection:object-tasks#stamp";
   const failure = (generation: number, claimId = "atc_1") => ({
     automationId: AUTOMATION, claimId, neverStarted: false, chainStopped: false,
     error: "The record is open elsewhere", updatedAtMs: 1_000, generation, datasetInstance: null,
@@ -960,7 +960,7 @@ describe("automation notices reach the people involved", () => {
     generation: number,
     options: { replaces?: ReturnType<typeof failure>; startedBy?: string; claimId?: string } = {},
   ) => ({
-    failure: failure(generation, options.claimId), name: "Stamp the finish date",
+    failure: failure(generation, options.claimId), name: "Stamp the finish date", collectionPath: "trip/tasks",
     startedBy: options.startedBy ?? null, replaces: options.replaces ?? null,
   });
   const sender = (store: NoticeStore, installId: string, extra: { throughShare?: boolean; lastChangedBy?: string } = {}) => ({

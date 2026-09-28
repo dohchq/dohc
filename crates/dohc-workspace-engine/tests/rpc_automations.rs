@@ -1191,7 +1191,7 @@ fn claimed_events(
 /// it. `chats.messages.get` reads the whole message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn group_messages_written_here_claim_through_rpc() {
-    const TASK: &str = "collection:Trip/Tasks#task";
+    const TASK: &str = "collection:object-tasks#task";
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let service = Arc::new(EngineService::new());
@@ -1280,7 +1280,7 @@ async fn group_messages_written_here_claim_through_rpc() {
     assert_eq!(claimed.len(), 1, "{claimed:?}");
     assert_eq!(claimed[0]["trigger"], json!({ "key": "message:m1" }));
     assert_eq!(claimed[0]["recordId"], Value::Null);
-    assert_eq!(claimed[0]["collectionPath"], json!("Trip/Tasks"));
+    assert_eq!(claimed[0]["collectionPath"], Value::Null);
     assert_eq!(claimed[0]["workspaceId"], json!(WORKSPACE_ID));
 
     let send = async |id: &mut u64, message_id: &str, body: &str| {
@@ -1522,7 +1522,7 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
     let pressed = &answer["claim"];
     assert_eq!(pressed["trigger"], json!({ "key": "press:press-1" }));
     assert_eq!(pressed["recordId"], json!("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"));
-    assert_eq!(pressed["collectionPath"], json!("Invoices"));
+    assert_eq!(pressed["collectionPath"], Value::Null);
     assert_eq!(pressed["depth"], json!(0));
     assert_eq!(
         pressed["change"],

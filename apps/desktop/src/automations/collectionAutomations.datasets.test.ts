@@ -40,7 +40,9 @@ const sha256 = (text: string | Uint8Array) => createHash("sha256").update(text).
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 const OWNER: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [] };
 const UNKNOWN: ReachRoster = { kind: "unknown", problem: { kind: "unchecked", next: "dohc checks again when the server answers." } };
-const AUTOMATION = "collection:Budget#close-paid";
+// A dataset Collection's automations are named by its dataset id.
+const BUDGET = id(1);
+const AUTOMATION = `collection:${BUDGET}#close-paid`;
 const TABLE = id(2), PAID = id(4), STATUS = id(5), NOTES = id(6), FINISHED = id(7), MARK_PAID = id(8), REFUND = id(9);
 const LIST = id(10), CREATE = id(11), EDIT = id(12), STATUS_ONLY = id(13);
 const { definition, files } = generateDatasetSources({
@@ -584,6 +586,7 @@ describe("Collection automations on a dataset", () => {
     expect(f.failureReports).toEqual([{
       failure: expect.objectContaining({ automationId: AUTOMATION, error: sentence, generation: 1, chainStopped: false, datasetInstance: expect.any(String) }),
       name: expect.any(String),
+      collectionPath: "Budget",
       startedBy: null,
       replaces: null,
     }]);
@@ -670,8 +673,7 @@ describe("Collection automations on a dataset", () => {
   it("names the dataset a Collection folder holds, opening a closed host, and none for a document folder", async () => {
     const f = await world({ hostOpen: false });
     await f.executor.open();
-    const folder = AUTOMATION.slice("collection:".length, AUTOMATION.lastIndexOf("#"));
-    await expect(f.executor.datasetIn(folder)).resolves.toBe(definition.datasetId);
+    await expect(f.executor.datasetIn("Budget")).resolves.toBe(definition.datasetId);
     expect(f.opened).toContain(true);
     await expect(f.executor.datasetIn("Notes")).resolves.toBeNull();
     await f.executor.dispose();
@@ -995,7 +997,7 @@ describe("Collection automations on a dataset", () => {
     if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
     const hash = definitionHash(summary.automations[0].automation);
     const trash = async () => { throw new Error("A dataset's added records stay."); };
-    await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: hash }], trash)).resolves.toMatchObject({ undone: 1, left: 0, errorMessage: null });
+    await expect(f.executor.undoRunsOf([{ collectionPath: "Budget", id: "close-paid", definitionHash: hash }], trash)).resolves.toMatchObject({ undone: 1, left: 0, errorMessage: null });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     expect(await f.executor.runs(AUTOMATION)).toEqual([expect.objectContaining({ undone: true })]);
     await f.executor.dispose();
@@ -1021,7 +1023,7 @@ describe("Collection automations on a dataset", () => {
 
 describe("pressing a button on a dataset record", () => {
   const PRESSER = "user-ana";
-  const BUTTON_AUTOMATION = "collection:Budget#mark-paid";
+  const BUTTON_AUTOMATION = `collection:${BUDGET}#mark-paid`;
   const markPaid = (step = "      - set:\n          Status: '=\"Paid by \" + person.name + \" with \" + trigger.field'\n        operation: invoices.status\n", button = "Mark paid") => `  - id: mark-paid
     name: Mark paid
     when:
@@ -1075,12 +1077,12 @@ ${step}`;
     await expect(press(f, { recordId: invoice, pressId: pressId(25) })).rejects.toThrow("changed");
     const pressed = await press(f, { recordId: invoice, pressId: pressId(20), confirmed: ["invoices.settle"] });
     if (pressed.busy) throw new Error("The press ran.");
-    await f.until(() => f.settled.length === 1 && f.host.automations.claims("collection:Budget#watch")[0]?.state === "done");
+    await f.until(() => f.settled.length === 1 && f.host.automations.claims(`collection:${BUDGET}#watch`)[0]?.state === "done");
     expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "done", error: null }]);
     expect((await f.record(invoice))?.values[STATUS]).toBe(`Settled by ${BUTTON_AUTOMATION}: pressed`);
     // History names the automation behind the action's commit.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ operation: "invoices.settle", automation: { automationId: BUTTON_AUTOMATION, depth: 1 } });
-    expect(f.host.automations.claims("collection:Budget#watch")).toEqual([expect.objectContaining({ state: "done", depth: 1 })]);
+    expect(f.host.automations.claims(`collection:${BUDGET}#watch`)).toEqual([expect.objectContaining({ state: "done", depth: 1 })]);
     expect(f.notices).toEqual([expect.objectContaining({ body: "Status changed" })]);
     expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([expect.objectContaining({ claimId: pressed.claimId })]);
     await f.executor.dispose();
@@ -1119,6 +1121,7 @@ ${step}`;
       withRendererWorkspaceOperation: async () => { throw new Error("No window presses here."); },
       readText: async () => null,
       buttonFields: async () => [],
+      collectionId: async () => { throw new Error("No shared view presses here."); },
       recordAt: async () => null,
       describeDataset: async () => { throw new Error("The CLI describes the dataset itself."); },
       pressedBy: async () => PRESSER,
@@ -1433,7 +1436,7 @@ ${step}`;
 function engineClaim(claimId: string, state: AutomationClaim["state"], createdAtMs: number, automationId = AUTOMATION): AutomationClaim {
   return {
     claimId, automationId, trigger: { key: `schedule:${createdAtMs}` }, recordId: null,
-    collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
+    collectionPath: null, depth: 0,
     state, attempts: state === "pending" ? 0 : 1, run: 1, createdAtMs, updatedAtMs: createdAtMs, ...(state === "failed" ? { error: "Not yet." } : {}),
     change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
   };
@@ -1524,7 +1527,7 @@ describe("dataset automation claims in both ledgers", () => {
     const summary = await f.executor.automationsIn("Budget");
     if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
     const trash = async () => { throw new Error("A dataset's added records stay."); };
-    await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: definitionHash(summary.automations[0].automation) }], trash))
+    await expect(f.executor.undoRunsOf([{ collectionPath: "Budget", id: "close-paid", definitionHash: definitionHash(summary.automations[0].automation) }], trash))
       .resolves.toMatchObject({ undone: 1, left: 0, errorMessage: null });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     await f.executor.dispose();
@@ -1594,7 +1597,7 @@ describe("dataset automation claims in both ledgers", () => {
 });
 
 describe("schedules on a dataset Collection", () => {
-  const SWEEP = "collection:Budget#sweep";
+  const SWEEP = `collection:${BUDGET}#sweep`;
   const sweep = (steps: string) => `  - id: sweep
     name: Sweep paid invoices
     when: {schedule: day, timezone: UTC}
@@ -1648,8 +1651,8 @@ ${steps}`;
     // The schedule's edit declares depth 1, so the record change it starts claims at depth 1 and runs.
     expect(f.host.history({ datasetId: definition.datasetId }).entries.find((entry) => entry.automation?.automationId === SWEEP))
       .toMatchObject({ automation: { depth: 1 } });
-    await f.until(() => f.host.automations.claims("collection:Budget#note-closed")[0]?.state === "done");
-    expect(f.host.automations.claims("collection:Budget#note-closed")).toMatchObject([{ depth: 1 }]);
+    await f.until(() => f.host.automations.claims(`collection:${BUDGET}#note-closed`)[0]?.state === "done");
+    expect(f.host.automations.claims(`collection:${BUDGET}#note-closed`)).toMatchObject([{ depth: 1 }]);
     expect((await f.record(paid))?.values[NOTES]).toBe("closed");
     await f.executor.dispose();
   });
@@ -1719,15 +1722,15 @@ ${steps}`;
     await f.executor.dispose();
   });
 
-  it("keeps a due time waiting, without draining again, while the store opens and still holds no such dataset", async () => {
+  it("keeps a due time waiting, without draining again, while its approved dataset's folder does not name it", async () => {
     const f = await world();
-    await mkdir(join(f.root, "Elsewhere"));
-    await writeFile(join(f.root, "Elsewhere", "dataset.json"), JSON.stringify({ datasetId: id(98) }));
-    await writeFile(join(f.root, "Elsewhere", "automations.yaml"), `version: 1\nautomations:\n${sweep(closeFound)}`);
+    await f.writeAutomations(sweep(closeFound));
+    const descriptor = join(f.root, "Budget", "dataset.json");
+    await writeFile(descriptor, JSON.stringify({ ...JSON.parse(await readFile(descriptor, "utf8")), datasetId: id(98) }));
     await f.executor.open();
-    f.engineClaims.push(engineClaim("atc_elsewhere", "pending", due, "collection:Elsewhere#sweep"));
+    f.engineClaims.push(engineClaim("atc_budget", "pending", due, SWEEP));
     f.executor.notifyClaimed();
-    await f.until(() => f.engineClaims[0]!.attempts === 0 && f.opened.filter((open) => open).length >= 2);
+    await f.until(() => f.engineClaims[0]!.attempts === 0 && f.served() >= 1);
     // The index it asked for has run, and nothing wakes the claim again.
     const settle = async () => {
       await f.executor.automationsIn("Budget");
@@ -1742,24 +1745,22 @@ ${steps}`;
     await f.executor.dispose();
   });
 
-  it("runs a waiting due time once its folder's descriptor is fixed, and settles one whose descriptor is removed", async () => {
+  it("runs a waiting due time once its folder's descriptor is fixed, and settles one whose dataset this store does not hold", async () => {
     const f = await world();
     await f.writeAutomations(sweep(closeFound));
     const descriptor = join(f.root, "Budget", "dataset.json");
     const fixed = await readFile(descriptor, "utf8");
     await writeFile(descriptor, JSON.stringify({ ...JSON.parse(fixed), datasetId: id(98) }));
-    await mkdir(join(f.root, "Elsewhere"));
-    await writeFile(join(f.root, "Elsewhere", "dataset.json"), JSON.stringify({ datasetId: id(97) }));
-    await writeFile(join(f.root, "Elsewhere", "automations.yaml"), `version: 1\nautomations:\n${sweep(closeFound)}`);
     await f.executor.open();
     const { id: paid } = await f.create({ [PAID]: true });
-    f.engineClaims.push(engineClaim("atc_budget", "pending", due, SWEEP), engineClaim("atc_elsewhere", "pending", due + 1, "collection:Elsewhere#sweep"));
+    // A due time of a dataset the store never approved names no Collection
+    // here, so it settles; the approved one waits for its descriptor.
+    f.engineClaims.push(engineClaim("atc_budget", "pending", due, SWEEP), engineClaim("atc_elsewhere", "pending", due + 1, `collection:${id(97)}#sweep`));
     f.executor.notifyClaimed();
-    await f.until(() => f.engineClaims.every((claim) => claim.state === "pending" && claim.attempts === 0) && f.served() >= 2);
+    await f.until(() => f.engineClaims[0]!.state === "pending" && f.engineClaims[0]!.attempts === 0 && f.engineClaims[1]!.state === "done");
     await f.executor.idle();
     await writeFile(descriptor, fixed);
-    await rm(join(f.root, "Elsewhere", "dataset.json"));
-    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/dataset.json" }, { operation: "delete", path: "Elsewhere/dataset.json" }]);
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/dataset.json" }]);
     await f.until(() => f.engineClaims.every((claim) => claim.state === "done"));
     expect((await f.record(paid))?.values[STATUS]).toBe("Closed");
     await f.executor.dispose();
@@ -1783,16 +1784,16 @@ ${steps}`;
     await mkdir(join(f.root, "Elsewhere"));
     await writeFile(join(f.root, "Elsewhere", "dataset.json"), JSON.stringify({ datasetId: id(98) }));
     await f.executor.open();
-    expect(await f.executor.runNowRefusal("collection:Elsewhere#sweep"))
-      .toBe("This computer does not keep Elsewhere's records. Run it from the computer that keeps them.");
+    const elsewhere = "This computer does not keep this automation's Collection. Run it from the computer that keeps it.";
+    expect(await f.executor.runNowRefusal(`collection:${id(98)}#sweep`)).toBe(elsewhere);
     expect(await f.executor.runNowRefusal(SWEEP)).toBeNull();
-    expect(await f.executor.runNowRefusal("collection:Tasks#stamp")).toBeNull();
+    expect(await f.executor.runNowRefusal("collection:Tasks#stamp"), "nor a document Collection it does not have").toBe(elsewhere);
     await f.executor.dispose();
   });
 });
 
 describe("Group messages on a dataset Collection", () => {
-  const FROM_TEAM = "collection:Budget#from-team";
+  const FROM_TEAM = `collection:${BUDGET}#from-team`;
   const fromTeam = (steps: string) => `  - id: from-team
     name: From Team
     when:
@@ -1863,7 +1864,7 @@ ${steps}`;
     await f.executor.open();
     // An automation's post at depth 3 starts this one; its record is at depth 4.
     expect(await runMessage(f, messageClaim("atc_deep", { depth: 3, authorKind: "automation" }))).toMatchObject({ state: "done" });
-    expect(f.host.automations.claims("collection:Budget#log-new")).toMatchObject([{ state: "failed", error: "chain-stopped", depth: 4 }]);
+    expect(f.host.automations.claims(`collection:${BUDGET}#log-new`)).toMatchObject([{ state: "failed", error: "chain-stopped", depth: 4 }]);
     expect((await f.records()).map((row) => row.values[STATUS])).toEqual(["New"]);
     await f.executor.dispose();
   });
@@ -1883,7 +1884,7 @@ ${steps}`;
 describe("a Find that compares with a value from the message", () => {
   // A message in Team for the automation `done`, run to its end.
   const sendTo = async (f: Awaited<ReturnType<typeof world>>, claimId: string, body: string) => {
-    const claim = engineClaim(claimId, "pending", Date.now(), "collection:Budget#done");
+    const claim = engineClaim(claimId, "pending", Date.now(), `collection:${BUDGET}#done`);
     claim.trigger = { key: `message:${claimId}` };
     claim.change = {
       kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
@@ -1965,7 +1966,7 @@ describe("a Find that compares with a value from the message", () => {
     await f.executor.open();
     const { id: first } = await f.create({ [NOTES]: "12" });
     const { id: second } = await f.create({ [NOTES]: "13" });
-    const claim = engineClaim("atc_done", "pending", Date.now(), "collection:Budget#done");
+    const claim = engineClaim("atc_done", "pending", Date.now(), `collection:${BUDGET}#done`);
     claim.trigger = { key: "message:m-done" };
     claim.change = {
       kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,

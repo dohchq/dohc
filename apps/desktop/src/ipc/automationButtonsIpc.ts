@@ -161,6 +161,8 @@ export function registerAutomationButtonsIpc<
   readText(rootPath: string, relativePath: string): Promise<TextFile | null>;
   /** The Button fields the engine's schema for this Collection names, in schema order. */
   buttonFields(operation: Operation, collectionPath: string): Promise<string[]>;
+  /** A Collection's id as this workspace's engine lists it: the object id of its collection.yaml. */
+  collectionId(operation: Operation, collectionPath: string): Promise<string>;
   /** The record a file is, in the nearest document Collection that holds it, or null. */
   recordAt(operation: Operation, path: string): Promise<{ collectionPath: string; record: CollectionRecord } | null>;
   /** The dataset as the host describes it to this window's person. */
@@ -171,7 +173,7 @@ export function registerAutomationButtonsIpc<
    * Sends a shared view's press to the relay, which records it for this
    * person's own grant and carries it to the owner's computer.
    */
-  relayPress(operation: Operation, input: { pressId: string; automationId: string; definitionHash: string; recordId: string }): Promise<void>;
+  relayPress(operation: Operation, input: { pressId: string; automationId: string; collectionPath: string; definitionHash: string; recordId: string }): Promise<void>;
   pressWindows: PressWindows<Sender>;
 }): {
   pressNamed(input: NamedPress, caller: PressCaller<Operation>): Promise<NamedPressResult>;
@@ -208,7 +210,8 @@ export function registerAutomationButtonsIpc<
     }
     if (access === "press") return await operation.state.collectionAutomations.buttons(collectionPath, fields);
     const file = await sharedAutomations(operation, collectionPath);
-    return fields.map((field) => ({ field, state: relayedButtonState(file, collectionPath, field, nameOf(collectionPath)) }));
+    const collectionId = await dependencies.collectionId(operation, collectionPath);
+    return fields.map((field) => ({ field, state: relayedButtonState(file, collectionId, field, nameOf(collectionPath)) }));
   }
 
   registerHandler(CHANNELS.listRecordButtons, async (event, payload) => {
@@ -273,9 +276,10 @@ export function registerAutomationButtonsIpc<
           throw new Error(`${input.field} is not a button in ${nameOf(input.collectionPath)}.`);
         }
         const file = await sharedAutomations(operation, input.collectionPath);
-        const target = relayedButtonTarget(file, input.collectionPath, input.field, nameOf(input.collectionPath));
+        const collectionId = await dependencies.collectionId(operation, input.collectionPath);
+        const target = relayedButtonTarget(file, collectionId, input.field, nameOf(input.collectionPath));
         if ("state" in target) throw new Error(target.state.reason);
-        await dependencies.relayPress(operation, { pressId: input.pressId, ...target, recordId: input.recordId });
+        await dependencies.relayPress(operation, { pressId: input.pressId, ...target, collectionPath: input.collectionPath, recordId: input.recordId });
         return { kind: "relayed" as const };
       }
       const pressed = await operation.state.collectionAutomations.press(

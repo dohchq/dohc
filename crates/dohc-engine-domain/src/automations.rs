@@ -43,7 +43,9 @@ pub const AUTOMATION_CHAIN_STOPPED: &str = "chain-stopped";
 pub const MAX_AUTOMATION_ERROR_BYTES: usize = 4096;
 
 /// The namespace every automation id lives in: Collection automations are
-/// `collection:<collection path>#<automation id>`. The Collection executor
+/// `collection:<collection id>#<automation id>`, where the Collection id is
+/// its schema file's object id or its dataset's id, so a Collection keeps
+/// its automations' ids when it moves. The Collection executor
 /// drains this namespace, so a subscription outside it would claim work
 /// nothing ever runs.
 pub const AUTOMATION_ID_NAMESPACE: &str = "collection:";
@@ -172,7 +174,7 @@ pub struct AutomationSubscription {
 /// automations registers these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationGroupSubscription {
-    /// `collection:<collection path>#<automation id>`.
+    /// `collection:<collection id>#<automation id>`.
     pub automation_id: String,
     /// The Group's channel id on this computer.
     pub channel_id: String,
@@ -407,7 +409,10 @@ pub struct AutomationClaim {
     pub trigger: AutomationTrigger,
     /// The changed record. A message claim has none.
     pub record_id: Option<String>,
-    pub collection_path: String,
+    /// The Collection the changed record was in. A claim that names its
+    /// automation, a press, a due time, a Run now, or a Group message, has
+    /// none: the executor finds the Collection from the automation id.
+    pub collection_path: Option<String>,
     /// The triggering change's chain depth (0 for an unattributed or
     /// human-authored trigger). The handler's own writes declare depth + 1.
     pub depth: u32,
@@ -529,7 +534,9 @@ fn claim_from_row(
     let trigger_origin_seq: Option<i64> = row.get(3)?;
     let trigger_history_id: Option<i64> = row.get(4)?;
     let record_id: Option<String> = row.get(5)?;
+    // A claim with no Collection path stores an empty one.
     let collection_path: String = row.get(6)?;
+    let collection_path = (!collection_path.is_empty()).then_some(collection_path);
     let depth: i64 = row.get(7)?;
     let state: String = row.get(8)?;
     let attempts: i64 = row.get(9)?;
@@ -730,27 +737,23 @@ pub fn subscribe_automation_in_tx(
     Ok(changed == 1)
 }
 
-/// The Collection path of a Collection automation id,
-/// `collection:<path>#<automation id>`. The path must name a folder inside
-/// the workspace, because the renderer opens files under it. The rule is the
-/// bridge's `isSafeRelativePath`: relative, with no drive letter, no empty,
-/// `.`, or `..` segment, and no backslash. A colon elsewhere is a folder
-/// name.
-pub fn collection_automation_path(automation_id: &str) -> Option<&str> {
-    let (path, local) = automation_id
-        .strip_prefix("collection:")?
-        .rsplit_once('#')?;
-    let canonical = !local.is_empty()
-        && !path.contains('\\')
-        && !matches!(path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
-        && path
-            .split('/')
-            .all(|segment| !matches!(segment, "" | "." | ".."));
-    (canonical
+/// Whether an id names a Collection automation,
+/// `collection:<collection id>#<automation id>`. A Collection id is an
+/// object id or a dataset id: letters, digits, `-`, and `_`, never a path.
+pub fn is_collection_automation_id(automation_id: &str) -> bool {
+    automation_id
+        .strip_prefix(AUTOMATION_ID_NAMESPACE)
+        .and_then(|rest| rest.split_once('#'))
+        .is_some_and(|(collection, local)| {
+            !collection.is_empty()
+                && collection
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                && !local.is_empty()
+        })
         && automation_id.len() <= MAX_IDENTIFIER_BYTES
         && automation_id.trim() == automation_id
-        && !automation_id.chars().any(char::is_control))
-    .then_some(path)
+        && !automation_id.chars().any(char::is_control)
 }
 
 /// A Group subscription's channel id, once it names a Collection automation,
@@ -761,9 +764,9 @@ fn group_subscription_channel(
     workspace_id: &str,
     subscription: &AutomationGroupSubscription,
 ) -> Result<String, DomainError> {
-    if collection_automation_path(&subscription.automation_id).is_none() {
+    if !is_collection_automation_id(&subscription.automation_id) {
         return Err(DomainError::InvalidInput {
-            reason: "A Group subscription belongs to a Collection automation, collection:<path>#<id>.",
+            reason: "A Group subscription belongs to a Collection automation, collection:<collection id>#<id>.",
         });
     }
     let channel_id =
@@ -1015,16 +1018,12 @@ fn decide_group_message(
         _ => 0,
     };
     let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
-    let collection_path =
-        collection_automation_path(watch.automation_id).ok_or(DomainError::StateCorrupt {
-            reason: "Group subscription automation id has no Collection path",
-        })?;
     let claimed = ClaimedChange {
         trigger: AutomationTrigger::Key {
             key: format!("message:{}", message.message_id),
         },
         record_id: None,
-        collection_path,
+        collection_path: None,
         depth,
         change: AutomationChange {
             kind: AutomationChangeKind::Message,
@@ -1528,7 +1527,7 @@ fn validate_group_handover(handover: &AutomationGroupHandover) -> Result<(), Dom
         return Err(invalid());
     }
     for automation in &handover.automations {
-        if collection_automation_path(&automation.automation_id).is_none() {
+        if !is_collection_automation_id(&automation.automation_id) {
             return Err(invalid());
         }
         if automation.decided.iter().any(|(message_id, _)| {
@@ -1783,7 +1782,7 @@ fn subscriptions_wanting(
 struct ClaimedChange<'a> {
     trigger: AutomationTrigger,
     record_id: Option<&'a str>,
-    collection_path: &'a str,
+    collection_path: Option<&'a str>,
     depth: u32,
     change: AutomationChange,
     fields: AutomationFieldFacts,
@@ -1875,7 +1874,7 @@ fn insert_claims(
                     history_id,
                     moment_order,
                     claimed.record_id,
-                    claimed.collection_path,
+                    claimed.collection_path.unwrap_or_default(),
                     i64::from(claimed.depth),
                     state.as_str(),
                     error,
@@ -1899,7 +1898,7 @@ fn insert_claims(
                 automation_id: (*automation_id).to_owned(),
                 trigger: claimed.trigger.clone(),
                 record_id: claimed.record_id.map(str::to_owned),
-                collection_path: claimed.collection_path.to_owned(),
+                collection_path: claimed.collection_path.map(str::to_owned),
                 depth: claimed.depth,
                 change: claimed.change.clone(),
                 state,
@@ -1983,7 +1982,7 @@ pub fn claim_automation_triggers_in_tx(
     let claimed = ClaimedChange {
         trigger,
         record_id: Some(&facts.record_id),
-        collection_path: &facts.collection_path,
+        collection_path: Some(&facts.collection_path),
         depth,
         change: AutomationChange {
             kind: AutomationChangeKind::Changed,
@@ -2385,7 +2384,7 @@ pub fn claim_record_lifecycle_in_tx(
                     moment_order: moment.moment_order,
                 },
                 record_id: Some(&record.record_id),
-                collection_path: &record.collection_path,
+                collection_path: Some(&record.collection_path),
                 depth,
                 change,
                 // A stopped chain never runs, so its claim keeps no facts.
@@ -2429,7 +2428,7 @@ pub struct AutomationPress {
     /// The pressing window's id for this press. A press sent again after a
     /// lost reply carries the same id.
     pub press_id: String,
-    /// The automation the button runs: `collection:<collection path>#<id>`.
+    /// The automation the button runs: `collection:<collection id>#<id>`.
     pub automation_id: String,
     pub record_id: String,
     /// The person who pressed. The run acts for them.
@@ -2466,9 +2465,12 @@ pub enum AutomationPressed {
 
 /// The Collection path of the Collection automation a button or schedule
 /// runs.
-fn button_or_schedule_collection(automation_id: &str) -> Result<&str, DomainError> {
-    collection_automation_path(automation_id).ok_or(DomainError::InvalidInput {
-        reason: "Buttons and schedules run Collection automations, collection:<path>#<id>.",
+fn button_or_schedule_automation(automation_id: &str) -> Result<(), DomainError> {
+    if is_collection_automation_id(automation_id) {
+        return Ok(());
+    }
+    Err(DomainError::InvalidInput {
+        reason: "Buttons and schedules run Collection automations, collection:<collection id>#<id>.",
     })
 }
 
@@ -2495,7 +2497,7 @@ pub fn press_automation_in_tx(
     press: &AutomationPress,
     now_ms: i64,
 ) -> Result<AutomationPressed, DomainError> {
-    let collection_path = button_or_schedule_collection(&press.automation_id)?;
+    button_or_schedule_automation(&press.automation_id)?;
     let press_id = normalize_automation_identifier(&press.press_id, "Button press id is invalid.")?;
     let record_id =
         normalize_automation_identifier(&press.record_id, "Button record id is invalid.")?;
@@ -2595,7 +2597,7 @@ pub fn press_automation_in_tx(
             let claimed = ClaimedChange {
                 trigger: AutomationTrigger::Key { key },
                 record_id: Some(record_id.as_str()),
-                collection_path,
+                collection_path: None,
                 depth,
                 change: AutomationChange {
                     kind: AutomationChangeKind::Button,
@@ -2693,7 +2695,7 @@ pub fn claim_automation_schedule_in_tx(
     schedule: &AutomationScheduleClaim,
     now_ms: i64,
 ) -> Result<AutomationScheduleClaimed, DomainError> {
-    let collection_path = button_or_schedule_collection(&schedule.automation_id)?;
+    button_or_schedule_automation(&schedule.automation_id)?;
     let schedule_hash =
         normalize_automation_identifier(&schedule.schedule_hash, "Schedule hash is invalid.")?;
     if schedule.run.len() > MAX_AUTOMATION_SCHEDULE_RUNS {
@@ -2743,7 +2745,7 @@ pub fn claim_automation_schedule_in_tx(
                         key: format!("schedule:{due_ms}"),
                     },
                     record_id: None,
-                    collection_path,
+                    collection_path: None,
                     depth: 0,
                     change: AutomationChange {
                         kind: AutomationChangeKind::Schedule,
@@ -2808,7 +2810,7 @@ pub fn claim_automation_run_now_in_tx(
     notice_id: &str,
     now_ms: i64,
 ) -> Result<AutomationRunNow, DomainError> {
-    let collection_path = button_or_schedule_collection(automation_id)?;
+    button_or_schedule_automation(automation_id)?;
     let notice_id = normalize_automation_identifier(notice_id, "Notice id is invalid.")?;
     let key = format!("run-now:{notice_id}");
     let existing: Option<String> = conn
@@ -2833,7 +2835,7 @@ pub fn claim_automation_run_now_in_tx(
     let claimed = ClaimedChange {
         trigger: AutomationTrigger::Key { key },
         record_id: None,
-        collection_path,
+        collection_path: None,
         depth: 0,
         change: AutomationChange {
             kind: AutomationChangeKind::Schedule,

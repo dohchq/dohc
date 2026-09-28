@@ -391,6 +391,9 @@ pub enum FieldValueValidation {
 #[serde(rename_all = "camelCase")]
 pub struct CollectionSummary {
     pub path: String,
+    /// The object id of its schema file. It names the Collection wherever
+    /// the Collection moves.
+    pub object_id: String,
     pub status: CollectionSchemaStatus,
     pub reasons: Vec<CollectionSchemaReason>,
 }
@@ -399,6 +402,7 @@ pub struct CollectionSummary {
 #[serde(rename_all = "camelCase")]
 pub struct CollectionDetails {
     pub path: String,
+    pub object_id: String,
     pub status: CollectionSchemaStatus,
     pub reasons: Vec<CollectionSchemaReason>,
     pub schema: CollectionSchema,
@@ -4686,17 +4690,26 @@ fn collection_summary_for_version(
     }
     let stored = conn
         .query_row(
-            "SELECT schema_status,degradation_reasons_json FROM collections \
-             WHERE workspace_id=?1 AND version_id=?2 AND collection_path=?3",
+            "SELECT c.schema_status,c.degradation_reasons_json,s.object_id FROM collections c \
+             JOIN snapshots s ON s.workspace_id=c.workspace_id \
+               AND s.version_id=c.version_id AND s.path=c.schema_path \
+             WHERE c.workspace_id=?1 AND c.version_id=?2 AND c.collection_path=?3",
             params![workspace_id, version_id, collection_path],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(crate::DomainError::sql_corrupt)?;
     stored
-        .map(|(status, reasons)| {
+        .map(|(status, reasons, object_id)| {
             Ok(CollectionSummary {
                 path: collection_path.to_owned(),
+                object_id,
                 status: stored_schema_status(&status)?,
                 reasons: stored_schema_reasons(&reasons)?,
             })
@@ -4735,10 +4748,12 @@ pub fn list_collections(
     let version_id = active_version_id(conn, workspace_id)?;
     let mut statement = conn
         .prepare(
-            "SELECT collection_path,schema_status,degradation_reasons_json FROM collections \
-             WHERE workspace_id=?1 AND version_id=?2 \
-               AND (?3 IS NULL OR collection_path>?3) \
-             ORDER BY collection_path LIMIT ?4",
+            "SELECT c.collection_path,c.schema_status,c.degradation_reasons_json,s.object_id \
+             FROM collections c JOIN snapshots s ON s.workspace_id=c.workspace_id \
+               AND s.version_id=c.version_id AND s.path=c.schema_path \
+             WHERE c.workspace_id=?1 AND c.version_id=?2 \
+               AND (?3 IS NULL OR c.collection_path>?3) \
+             ORDER BY c.collection_path LIMIT ?4",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
     let rows = statement
@@ -4754,6 +4769,7 @@ pub fn list_collections(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
@@ -4762,9 +4778,10 @@ pub fn list_collections(
         .map_err(crate::DomainError::sql_corrupt)?;
     let mut collections = rows
         .into_iter()
-        .map(|(path, status, reasons)| {
+        .map(|(path, status, reasons, object_id)| {
             Ok(CollectionSummary {
                 path,
+                object_id,
                 status: stored_schema_status(&status)?,
                 reasons: stored_schema_reasons(&reasons)?,
             })
@@ -4806,6 +4823,7 @@ pub fn get_collection(
         })?;
     Ok(Some(CollectionDetails {
         path: summary.path,
+        object_id: summary.object_id,
         status: summary.status,
         reasons: summary.reasons,
         schema,
@@ -6873,7 +6891,7 @@ mod tests {
                    PRIMARY KEY (workspace_id, version_id, collection_path));\
                  CREATE TABLE snapshots(\
                    workspace_id TEXT, version_id TEXT, path TEXT, blob_sha256 TEXT NOT NULL,\
-                   PRIMARY KEY (workspace_id, version_id, path));\
+                   object_id TEXT NOT NULL, PRIMARY KEY (workspace_id, version_id, path));\
                  CREATE TABLE blobs(sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);\
                  CREATE TABLE collection_records(\
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
@@ -6902,7 +6920,7 @@ mod tests {
         // A filtered or sorted page reads the schema for its button fields.
         connection
             .execute(
-                "INSERT INTO snapshots VALUES (?1, 'main', 'schema.yaml', 'differential-schema')",
+                "INSERT INTO snapshots VALUES (?1, 'main', 'schema.yaml', 'differential-schema', 'schema-object')",
                 [WORKSPACE],
             )
             .expect("schema snapshot");

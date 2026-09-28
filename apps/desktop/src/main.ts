@@ -1277,14 +1277,15 @@ function collectionAutomationsOf(workspaceId: string): CollectionAutomations | u
 
 // A Collection automation that wrote a moment, as History shows it: its
 // name from the workspace's automations.yaml as this computer read it, or
-// its id when the file no longer has it, and the Collection it belongs to.
-// Any other automation keeps the moment's origin label.
-function automationAuthor(workspaceId: string, automationId: string): { name: string; collection: string } | null {
+// its id when the file no longer has it, and the Collection it belongs to
+// now. Any other automation keeps the moment's origin label.
+function automationAuthor(workspaceId: string, automationId: string): { name: string; collection?: string } | null {
   const parsed = parseCollectionAutomationId(automationId);
   if (parsed === null) return null;
+  const located = collectionAutomationsOf(workspaceId)?.locate(automationId) ?? null;
   return {
     name: collectionAutomationsOf(workspaceId)?.automationName(automationId) ?? parsed.id,
-    collection: posix.basename(parsed.collectionPath),
+    ...(located === null ? {} : { collection: posix.basename(located.collectionPath) }),
   };
 }
 
@@ -3377,7 +3378,7 @@ async function sendSwitchedOffNotice(workspaceId: string, switched: AutomationSw
 // on any other computer, which does not keep who changed what.
 async function automationLastChangedBy(workspaceId: string, automationId: string): Promise<string | null> {
   const history = ownerHistory(workspaceId);
-  const parsed = parseCollectionAutomationId(automationId);
+  const parsed = collectionAutomationsOf(workspaceId)?.locate(automationId) ?? null;
   if (history === null || parsed === null) return null;
   return await whoChangedLast(history.capture, {
     path: `${parsed.collectionPath}/automations.yaml`, id: parsed.id, ownerUserId: history.ownerUserId,
@@ -3635,7 +3636,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     heldClaim: async (press) => {
       const executor = collectionAutomationsOf(workspaceId);
       if (!executor) throw new Error("This workspace was closed.");
-      return await executor.relayedClaim({ automationId: press.automationId, definitionHash: press.definitionHash, pressId: press.hostPressId });
+      return await executor.relayedClaim({ automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, pressId: press.hostPressId });
     },
     press: async (input, watch) => {
       const executor = collectionAutomationsOf(workspaceId);
@@ -3644,7 +3645,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     },
     notifyFailure: async ({ press, field, outcome, error }) => {
       const button = (field ?? "A button").slice(0, 80);
-      const collectionPath = press.automationId.slice("collection:".length, press.automationId.lastIndexOf("#"));
+      const { collectionPath } = press;
       await noticeStore().postNotice({
         workspaceId,
         noticeId: `automation-press:${press.hostPressId}`,
@@ -3701,6 +3702,8 @@ function createCollectionAutomationsFor(
       });
     },
     pathExists: (path) => lstat(join(rootPath, path)).then(() => true, () => false),
+    // A watcher batch reaches the executor before the engine records it.
+    recorded: async () => { await activity.engineCaptureFor(workspaceId)?.flush(); },
     roster: () => shareRosters.forRun(workspaceId),
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
@@ -3925,6 +3928,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
       return automations;
     };
     return {
+      automationIdAt: async (collectionPath, id) => (await opened()).automationIdAt(collectionPath, id),
       runs: async (automationId) => (await opened()).runs(automationId),
       run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
       retry: (input) => retryAutomationRun({
@@ -5434,6 +5438,11 @@ function registerIpcHandlers(): void {
       if (details === null) throw new Error("The workspace engine is not running.");
       return details.schema.fields.flatMap((field) => (field.type === "button" ? [field.name] : []));
     },
+    collectionId: async (operation, collectionPath) => {
+      const details = await withEngineAdapter(operation.workspace, (engine) => engine.getCollection({ collectionPath }));
+      if (details === null) throw new Error("The workspace engine is not running.");
+      return details.objectId;
+    },
     describeDataset: async (sender, workspaceId, datasetId) => {
       const described = await datasetHandler(sender, { action: "describe", workspaceId, datasetId });
       if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
@@ -5621,6 +5630,10 @@ function registerIpcHandlers(): void {
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
     activity, desktopChatBookmarks, notifyRenderer,
+    automationCollectionOf: (workspaceId) => {
+      const executor = collectionAutomationsOf(workspaceId);
+      return (automationId) => executor?.locate(automationId)?.collectionPath ?? null;
+    },
     ensureGroupFolder: async (workspace, folderPath) => {
       await createFolder(workspace.rootPath, folderPath);
     },

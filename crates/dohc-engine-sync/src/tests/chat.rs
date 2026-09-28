@@ -1436,7 +1436,7 @@ fn applied_claims(
     }
 }
 
-/// Subscribe `collection:Trip/Tasks#task` to the imported Group's messages
+/// Subscribe `collection:object-tasks#task` to the imported Group's messages
 /// that start with `/task`.
 fn subscribe_imported_group(engine: &mut EngineStore) {
     let channel_id: String = engine
@@ -1455,7 +1455,7 @@ fn subscribe_imported_group(engine: &mut EngineStore) {
         &dohc_engine_domain::AutomationGroupWatch {
             generation: 0,
             subscriptions: vec![dohc_engine_domain::AutomationGroupSubscription {
-                automation_id: "collection:Trip/Tasks#task".to_owned(),
+                automation_id: "collection:object-tasks#task".to_owned(),
                 channel_id,
                 starts_with: Some("/task".to_owned()),
             }],
@@ -1513,7 +1513,7 @@ fn an_applied_group_message_claims_once_however_it_arrives() {
     );
     let claims = applied_claims(apply_chat_envelope(&mut engine, &member, &NoFaults));
     assert_eq!(claims.len(), 1);
-    assert_eq!(claims[0].automation_id, "collection:Trip/Tasks#task");
+    assert_eq!(claims[0].automation_id, "collection:object-tasks#task");
     assert_eq!(
         claims[0].trigger,
         AutomationTrigger::Key {

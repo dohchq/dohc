@@ -24,8 +24,8 @@ const definition: DatasetDefinition = {
 const rules = { datasetId: definition.datasetId, revision: 2, revisionSha256: "r".repeat(64) };
 const revision = { ...rules, definitionSha256: "", schemaSha256: "", operationsSha256: "", definition } satisfies DatasetRevision;
 const run = (operationId: string): StoredRun => ({
-  version: 2, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, updatedAtMs: 1,
-  plan: null, created: [], replans: [], undoRequests: [], readableFields: null, datasetId: null, superseded: false, undo: null, settled: true, compacted: false, outcome: { state: "done" },
+  version: 3, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, updatedAtMs: 1,
+  plan: null, created: [], replans: [], undoRequests: [], readableFields: null, collections: [], datasetId: null, superseded: false, undo: null, settled: true, compacted: false, outcome: { state: "done" },
   applied: [{ ordinal: 0, writes: [
     { kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId: "a", version: 2,
       fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }] },

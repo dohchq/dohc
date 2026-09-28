@@ -100,6 +100,7 @@ function fixture(options: {
       return text === undefined ? null : { text, truncated: false, contentHash: "hash" };
     },
     buttonFields,
+    collectionId: async (_operation, collectionPath) => collectionPath.replaceAll("/", "-"),
     relayPress,
     recordAt,
     describeDataset,
@@ -244,7 +245,7 @@ describe("pressing a button", () => {
     const collectionPath = shareView.grantedSelector.paths[0] === "Billing" ? "Billing/Invoices" : "Invoices";
     const f = fixture({ shareView, files: { [`${collectionPath}/automations.yaml`]: PAID_FILE } });
     await expect(f.press({ collectionPath })).resolves.toEqual({ busy: false, relayed: true });
-    expect(f.relayPress).toHaveBeenCalledWith(expect.anything(), { pressId: PRESS_ID, automationId: `collection:${collectionPath}#paid`, definitionHash: expect.stringMatching(/^[0-9a-f]{16}$/), recordId: "Invoices/12.md" });
+    expect(f.relayPress).toHaveBeenCalledWith(expect.anything(), { pressId: PRESS_ID, automationId: `collection:${collectionPath.replaceAll("/", "-")}#paid`, collectionPath, definitionHash: expect.stringMatching(/^[0-9a-f]{16}$/), recordId: "Invoices/12.md" });
     expect(f.executor.press).not.toHaveBeenCalled();
   });
 

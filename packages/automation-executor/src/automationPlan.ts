@@ -66,20 +66,26 @@ export const MAX_CODE_RECORD_CHANGES = MAX_FOUND_RECORDS;
 // is also checked against.
 const BEFORE_BINDING = "__dohc_before";
 
-export function collectionAutomationId(collectionPath: string, id: string): string {
-  return `${COLLECTION_AUTOMATION_PREFIX}${collectionPath}#${id}`;
+/**
+ * A Collection automation's engine id: its Collection's id, which a move
+ * keeps, and its own id in automations.yaml. A document Collection's id is
+ * the object id of its collection.yaml; a dataset Collection's is its
+ * dataset id.
+ */
+export function collectionAutomationId(collectionId: string, id: string): string {
+  return `${COLLECTION_AUTOMATION_PREFIX}${collectionId}#${id}`;
 }
 
-/** The Collection and automation an engine automation id names, or null. */
+/** The Collection id and automation id an engine automation id names, or null. */
 export function parseCollectionAutomationId(
   engineId: string,
-): { collectionPath: string; id: string } | null {
+): { collectionId: string; id: string } | null {
   if (!engineId.startsWith(COLLECTION_AUTOMATION_PREFIX)) return null;
   const rest = engineId.slice(COLLECTION_AUTOMATION_PREFIX.length);
-  // An automation id is a slug, so the last "#" ends the Collection path.
-  const hash = rest.lastIndexOf("#");
+  const hash = rest.indexOf("#");
   if (hash <= 0 || hash === rest.length - 1) return null;
-  return { collectionPath: rest.slice(0, hash), id: rest.slice(hash + 1) };
+  const collectionId = rest.slice(0, hash);
+  return /^[A-Za-z0-9_-]+$/u.test(collectionId) ? { collectionId, id: rest.slice(hash + 1) } : null;
 }
 
 /**

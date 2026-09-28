@@ -45,7 +45,7 @@ export async function sendFailureNotices(
   report: AutomationFailureReport,
 ): Promise<void> {
   const { notices, computer } = dependencies;
-  const notice = automationFailedNotice({ workspaceId, computer, failure: report.failure, name: report.name });
+  const notice = automationFailedNotice({ workspaceId, computer, failure: report.failure, name: report.name, collectionPath: report.collectionPath });
   await notices.postNotice(notice);
   if (report.replaces !== null) {
     await notices.withdraw(automationFailedNoticeId({ workspaceId, installId: computer.installId, failure: report.replaces }));
