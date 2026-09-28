@@ -12,7 +12,13 @@ import {
   type JsonValue,
 } from "@dohc/app-backend-runtime/automation";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { automationTextParts, type Automation, type AutomationScheduleTrigger } from "@dohc/workspace-contracts/automations";
+import {
+  automationTextParts,
+  automationTextProblem,
+  type Automation,
+  type AutomationDiagnosticCode,
+  type AutomationScheduleTrigger,
+} from "@dohc/workspace-contracts/automations";
 import { RECORD_ID_FRONTMATTER_KEY, type CollectionRecord, type CollectionValue } from "@dohc/workspace-contracts/collection";
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
@@ -200,7 +206,7 @@ function isFormula(value: AutomationValue): value is Extract<AutomationValue, { 
  * Why `source` is not exactly one JavaScript expression, or null when it
  * is. It only parses, so a formula that would loop costs nothing here.
  */
-export function expressionProblem(source: string): string | null {
+function expressionProblem(source: string): string | null {
   try {
     const { end } = parseExpressionAt(source, 0, { ecmaVersion: "latest", preserveParens: true });
     const next = tokenizer(source.slice(end), { ecmaVersion: "latest" }).getToken();
@@ -208,6 +214,69 @@ export function expressionProblem(source: string): string | null {
   } catch (error) {
     return error instanceof SyntaxError ? error.message.replace(/\s*\(\d+:\d+\)$/u, ".") : "This is not a formula.";
   }
+}
+
+/** A JSON Pointer segment, as the file contract writes one. */
+const pointerKey = (key: string) => key.replaceAll("~", "~0").replaceAll("/", "~1");
+
+/**
+ * A syntax error at its JSON Pointer from the automation: a formula's, in
+ * the parser's words, or a message's, as the file contract's code.
+ */
+export type FormulaProblem = { path: string; problem: string } | { path: string; code: AutomationDiagnosticCode };
+
+/**
+ * The syntax error of every formula, condition, and message in an
+ * automation, at its JSON Pointer from the automation, such as
+ * "/do/1/do/0/set/Status": the path the file contract gives a problem
+ * there. An empty one is left to the builder, which asks for it.
+ */
+export function formulaProblems(automation: Automation): FormulaProblem[] {
+  const problems: FormulaProblem[] = [];
+  const add = (path: string, expression: string) => {
+    const problem = expression.trim() === "" ? null : expressionProblem(expression);
+    if (problem !== null) problems.push({ path, problem });
+  };
+  const values = (path: string, entries: ReadonlyArray<{ key: string; value: AutomationValue }>) => {
+    for (const { key, value } of entries) if (isFormula(value)) add(`${path}/${pointerKey(key)}`, value.expression);
+  };
+  const steps = (path: string, list: readonly AutomationStep[]) => list.forEach((step, index) => {
+    const at = `${path}/${index}`;
+    switch (step.kind) {
+      case "set":
+      case "add-record":
+        values(`${at}/${step.kind}`, step.values.map(({ field, value }) => ({ key: field, value })));
+        break;
+      case "invoke":
+        values(`${at}/input`, step.input);
+        break;
+      case "find":
+        add(`${at}/find`, step.condition);
+        break;
+      case "if":
+        add(`${at}/if`, step.if);
+        steps(`${at}/do`, step.do);
+        steps(`${at}/otherwise`, step.otherwise);
+        break;
+      case "run":
+      case "run-file":
+        break;
+      default: {
+        // Every other step sends a message, whose {expressions} must parse.
+        const code = step.text.trim() === "" ? null : automationTextProblem(step.text);
+        if (code !== null) problems.push({ path: `${at}/${step.kind}`, code });
+        if (step.kind === "notify" || step.kind === "direct-message") {
+          values(`${at}/to`, step.to.map((value, key) => ({ key: String(key), value })));
+        }
+      }
+    }
+  });
+  const when = automation.when;
+  if (when.kind === "field-changed" && when.to !== null && isFormula(when.to)) add("/when/to", when.to.expression);
+  if (when.kind === "starts-matching") add("/when/starts-matching", when.condition);
+  if (automation.if !== null) add("/if", automation.if);
+  steps("/do", automation.do);
+  return problems;
 }
 
 /** True when `source` is exactly one JavaScript expression, so it can sit inside another. */

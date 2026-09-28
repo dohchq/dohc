@@ -4587,17 +4587,16 @@ export type ListAutomationTargetsPayload = z.infer<typeof ListAutomationTargetsP
 export type ListAutomationTargetsResult = { collections: CollectionAutomationTarget[] } | { status: "unavailable" };
 
 // The builder checks a draft the way saving would: what the file contract
-// refuses, and each formula's syntax error or null. Formulas are one
-// expression each, as the file stores them; only their syntax is checked.
+// refuses, and the syntax error of each formula and message in it, at its
+// JSON Pointer from the automation. Only syntax is checked; nothing runs.
 export const CheckCollectionAutomationPayload = z.object({
   workspaceId: WORKSPACE_ID,
   automation: z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value)),
-  formulas: z.array(z.string().max(2_000)).max(500),
 });
 export type CheckCollectionAutomationPayload = z.infer<typeof CheckCollectionAutomationPayload>;
 export type CheckCollectionAutomationResult = {
   diagnostics: AutomationDiagnostic[];
-  formulaProblems: Array<string | null>;
+  formulaProblems: Array<{ path: string; problem: string } | { path: string; code: AutomationDiagnostic["code"] }>;
 };
 
 // Undo for a finished run, as the person who clicked it. `deletes` is null

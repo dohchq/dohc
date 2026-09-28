@@ -16,8 +16,8 @@ import {
   definitionHash,
   evaluateRequest,
   fieldWritesOf,
-  expressionProblem,
   filterValues,
+  formulaProblems,
   findQueryOf,
   findRequest,
   localIsoTime,
@@ -252,11 +252,52 @@ describe("schedule claims", () => {
   });
 });
 describe("a formula's syntax, for the builder", () => {
+  const syntax = (automation: Partial<Automation>) => formulaProblems({
+    id: "a", name: "A", enabled: true, when: { kind: "record-added", table: null }, if: null, do: [], ...automation,
+  });
+
   it("parses without running, so a loop costs nothing, and names what is wrong", () => {
-    expect(expressionProblem('record.Status == "Done"')).toBeNull();
-    expect(expressionProblem("(() => { while (true) {} })()")).toBeNull();
-    expect(expressionProblem("record.Status ==")).toBe("Unexpected token.");
-    expect(expressionProblem("1 2")).toBe("Unexpected text at character 3.");
+    expect(syntax({ if: 'record.Status == "Done"' })).toEqual([]);
+    expect(syntax({ if: "(() => { while (true) {} })()" })).toEqual([]);
+    expect(syntax({ if: "record.Status ==" })).toEqual([{ path: "/if", problem: "Unexpected token." }]);
+    expect(syntax({ if: "1 2" })).toEqual([{ path: "/if", problem: "Unexpected text at character 3." }]);
+  });
+
+  it("finds every formula at the path the file contract gives it, inside If branches too, and leaves empty ones", () => {
+    const bad = { kind: "formula" as const, expression: "1 +" };
+    expect(syntax({
+      when: { kind: "field-changed", field: "Status", to: bad, table: null },
+      if: " ",
+      do: [
+        { kind: "set", values: [{ field: "a/b~c", value: bad }, { field: "Ok", value: { kind: "formula", expression: "1" } }], records: null, operation: null },
+        { kind: "if", if: "1 +", do: [
+          { kind: "find", condition: "1 +", collection: null, as: "found", operation: null },
+        ], otherwise: [
+          { kind: "invoke", operation: "a.b", input: [{ key: "id", value: bad }] },
+          { kind: "notify", text: "Hi {record.Title", to: [{ kind: "literal", value: "ana" }, bad] },
+          { kind: "post", text: "Hi {record.Title} {{ok}}", group: "Trip" },
+          { kind: "wake-agent", text: "{record?.of / 2}", person: "owner" },
+          { kind: "add-record", values: [{ field: "Title", value: bad }], collection: null, as: null, operation: null },
+        ] },
+      ],
+    }).map(({ path }) => path)).toEqual([
+      "/when/to",
+      "/do/0/set/a~1b~0c",
+      "/do/1/if",
+      "/do/1/do/0/find",
+      "/do/1/otherwise/0/input/id",
+      "/do/1/otherwise/1/notify",
+      "/do/1/otherwise/1/to/1",
+      "/do/1/otherwise/3/wake-agent",
+      "/do/1/otherwise/4/add-record/Title",
+    ]);
+    expect(syntax({ do: [{ kind: "notify", text: "Hi {1 +}", to: [{ kind: "literal", value: "ana" }] }] }))
+      .toEqual([{ path: "/do/0/notify", code: "invalid-template" }]);
+    expect(syntax({ do: [{ kind: "post", text: "{record?.of / 2}", group: "Trip" }] }))
+      .toEqual([{ path: "/do/0/post", code: "optional-chain-needs-parentheses" }]);
+    expect(syntax({ when: { kind: "starts-matching", condition: "a ==", table: null } })).toEqual([
+      { path: "/when/starts-matching", problem: "Unexpected token." },
+    ]);
   });
 });
 

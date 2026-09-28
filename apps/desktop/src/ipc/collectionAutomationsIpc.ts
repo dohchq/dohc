@@ -40,7 +40,7 @@ import {
   type WriteWorkspaceTextPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
-import { expressionProblem } from "@dohc/automation-executor/automation-plan";
+import { formulaProblems } from "@dohc/automation-executor/automation-plan";
 import { AUTOMATIONS_FILE_NAME, type CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 
 // The ⚡ panel's view of a Collection's automations. Main parses, checks,
@@ -154,14 +154,15 @@ export function registerCollectionAutomationsIpc<
     assertTrustedSender(event);
     const input = CheckCollectionAutomationPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<CheckCollectionAutomationResult> => {
-      let diagnostics: CheckCollectionAutomationResult["diagnostics"];
       try {
         const written = writeAutomationsFile([{ status: "valid", automation: input.automation }]);
-        diagnostics = written.status === "refused" ? written.diagnostics : [];
+        return {
+          diagnostics: written.status === "refused" ? written.diagnostics : [],
+          formulaProblems: formulaProblems(input.automation),
+        };
       } catch {
-        diagnostics = [{ code: "changed-on-reread", path: "/automations/0" }];
+        return { diagnostics: [{ code: "changed-on-reread", path: "/automations/0" }], formulaProblems: [] };
       }
-      return { diagnostics, formulaProblems: input.formulas.map(expressionProblem) };
     });
   });
 

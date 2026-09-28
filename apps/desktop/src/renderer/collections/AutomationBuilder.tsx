@@ -1,10 +1,10 @@
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, ArrowDown, ArrowUp, Clock, Info, Plus, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
 import type { AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
-import type { ListAutomationTargetsResult } from "../../ipc/bridgeContract";
+import type { CheckCollectionAutomationResult, ListAutomationTargetsResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
@@ -18,6 +18,7 @@ import {
   literalFor,
   literalText,
   MAX_NAME_LENGTH,
+  MAX_STEPS,
   numberValue,
   reachPlaces,
   valueKindOf,
@@ -41,9 +42,10 @@ import {
 } from "./automationSentence";
 
 // The builder: When, Only if, and Do, with choices instead of formulas, and
-// a formula wherever a person wants one. Steps the builder cannot edit yet,
-// such as Find and If, stay as they are and read as their sentence; the
-// file edits them. Save runs the file contract's check through main first,
+// a formula wherever a person wants one. An If holds its own Do and
+// Otherwise steps, which edit like the automation's. Steps the builder
+// cannot edit yet, such as Find, stay as they are and read as their
+// sentence; the file edits them. Save runs the file contract's check through main first,
 // so it never writes what the parser would refuse, and the panel writes the
 // whole list over the content it read.
 
@@ -98,20 +100,33 @@ const DIAGNOSTIC_SENTENCES: Partial<Record<AutomationDiagnostic["code"], string>
   "too-many-steps": "An automation can have at most 25 steps.",
   "if-too-deep": "If steps can sit at most three deep.",
   "unexpected-formula-marker": "Only a value can be a formula, so this cannot start with =.",
+  "unknown-binding": "No step before this one in its list names that result. Move this step after the step that names it.",
+  "duplicate-value": "Another step already uses this name.",
+  "invalid-template": "Check each {expression} in the message: close its brace and fix its formula. To write a brace itself, type {{ or }}.",
+  "optional-chain-needs-parentheses": "Put parentheses around an expression with ?. before a /, as in {(record?.of) / 2}.",
+  "invalid-binding-name": "A result name starts with a letter or _, then uses only letters, digits, and _. It cannot be a formula name such as today.",
+  "invalid-time": "Write the time as HH:MM on a 24-hour clock, or :MM past each hour.",
+  "invalid-timezone": "Choose a time zone by its name, such as Europe/London.",
+  "invalid-path": "Write the path inside the workspace, with / between folders and no .. or leading /.",
 };
 
-/** Where a file contract diagnostic belongs in the builder, and what it says. */
-function diagnosticProblem(diagnostic: AutomationDiagnostic): [string, string] {
-  const path = diagnostic.path.replace(/^\/automations\/0/u, "");
-  const step = /^\/do\/(\d+)/u.exec(path);
-  const key = step ? `do/${step[1]}` : path.startsWith("/when") ? "when" : path.startsWith("/if") ? "if" : "save";
-  return [key, DIAGNOSTIC_SENTENCES[diagnostic.code] ?? `dohc cannot save this: ${diagnostic.code} at ${path || "/"}.`];
-}
+/** What a file contract code means for a person building an automation. */
+const unsaved = (code: AutomationDiagnostic["code"]) => DIAGNOSTIC_SENTENCES[code] ?? "dohc cannot save this step. Check its values.";
 
-/** Why a part cannot be saved yet, beside the part. */
-function Problem({ text }: { text: string | null }) {
-  if (text === null) return null;
-  return <p role="alert" className="m-0 mt-1 text-[11px] leading-snug text-danger">{text}</p>;
+/** Why a part cannot be saved yet, and the id of the text its control points to. */
+type Shown = { id: string; text: string } | null;
+
+/** What marks a control whose part cannot be saved yet, for assistive technology. */
+const invalid = (shown: Shown) => (shown === null ? {} : { "aria-invalid": true, "aria-describedby": shown.id });
+
+/**
+ * Why a part cannot be saved yet, beside the part. Its control points here
+ * with aria-describedby; a refused Save announces how many there are, so
+ * each one does not interrupt while the person types.
+ */
+function Problem({ shown }: { shown: Shown }) {
+  if (shown === null) return null;
+  return <p id={shown.id} data-problem className="m-0 mt-1 text-[11px] leading-snug text-danger">{shown.text}</p>;
 }
 
 /** A field of a Collection. While the Collection's fields load, `fields` is null. */
@@ -121,6 +136,7 @@ function FieldSelect(props: {
   value: string;
   collection: string;
   focusKey?: string;
+  problem: Shown;
   onChange: (field: string) => void;
 }) {
   const listed = props.fields?.some((field) => field.name === props.value) ?? false;
@@ -133,6 +149,7 @@ function FieldSelect(props: {
         value={props.value}
         onChange={(event) => props.onChange(event.target.value)}
         className={selectClass}
+        {...invalid(props.problem)}
       >
         {props.value === "" ? <option value="" disabled>Choose a field</option> : null}
         {listed || props.value === "" ? null : <option value={props.value}>{props.value}</option>}
@@ -143,6 +160,7 @@ function FieldSelect(props: {
           {props.value} is not a field in {props.collection}.
         </StatusLine>
       )}
+      <Problem shown={props.problem} />
     </>
   );
 }
@@ -157,9 +175,11 @@ function LiteralInput(props: {
   type: CollectionFieldType | null;
   options: readonly string[];
   text: string;
+  problem?: Shown;
   onChange: (value: AutomationValue) => void;
 }) {
   const { type, text } = props;
+  const aria = invalid(props.problem ?? null);
   if (type === "select" || type === "multi-select") {
     return (
       <select
@@ -167,6 +187,7 @@ function LiteralInput(props: {
         value={text}
         onChange={(event) => props.onChange(literalFor("select", event.target.value))}
         className={selectClass}
+        {...aria}
       >
         {props.options.includes(text) ? null : <option value={text}>{text}</option>}
         {props.options.map((option) => <option key={option} value={option}>{option}</option>)}
@@ -180,6 +201,7 @@ function LiteralInput(props: {
         value={text === "true" ? "true" : "false"}
         onChange={(event) => props.onChange(literalFor(type, event.target.value))}
         className={selectClass}
+        {...aria}
       >
         <option value="true">Checked</option>
         <option value="false">Unchecked</option>
@@ -194,6 +216,7 @@ function LiteralInput(props: {
       value={text}
       onChange={(event) => props.onChange(literalFor(type, event.target.value))}
       className={inputClass}
+      {...aria}
     />
   );
 }
@@ -208,11 +231,13 @@ function ValueInput(props: {
   field: FieldDefinition | undefined;
   value: AutomationValue | null;
   allowAny?: boolean;
-  problem: string | null;
+  problem: Shown;
   onChange: (value: AutomationValue | null) => void;
 }) {
   const type: CollectionFieldType | null = props.field?.type ?? null;
   const kind = valueKindOf(props.value);
+  // The problem is with what was typed, so the input that holds it says so.
+  const aria = invalid(props.problem);
   const formula = kind === "formula" && props.value?.kind === "formula" ? (
     <input
       aria-label={`${props.label}, formula`}
@@ -221,6 +246,7 @@ function ValueInput(props: {
       placeholder='dateAdd(today(), 3, "days")'
       onChange={(event) => props.onChange({ kind: "formula", expression: event.target.value })}
       className={formulaClass}
+      {...aria}
     />
   ) : null;
   if (props.field?.type === "select") {
@@ -240,6 +266,7 @@ function ValueInput(props: {
             else props.onChange({ kind: "literal", value: next.slice("option:".length) });
           }}
           className={selectClass}
+          {...(formula === null ? aria : {})}
         >
           {props.allowAny ? <option value="any">Any value</option> : null}
           {kind === "value" && !options.includes(text) ? <option value={current}>{text}</option> : null}
@@ -248,7 +275,7 @@ function ValueInput(props: {
           <option value="formula">Formula</option>
         </select>
         {formula}
-        <Problem text={props.problem} />
+        <Problem shown={props.problem} />
       </div>
     );
   }
@@ -286,6 +313,7 @@ function ValueInput(props: {
             value: [...event.target.selectedOptions].map((option) => option.value),
           })}
           className={selectClass}
+          {...aria}
         >
           {props.field.options.map((option) => <option key={option} value={option}>{option}</option>)}
         </select>
@@ -295,10 +323,11 @@ function ValueInput(props: {
           type={type}
           options={[]}
           text={literalText(props.value)}
+          problem={props.problem}
           onChange={props.onChange}
         />
       ) : formula}
-      <Problem text={props.problem} />
+      <Problem shown={props.problem} />
     </div>
   );
 }
@@ -313,7 +342,7 @@ function ValueInput(props: {
 function ActionValueInput(props: {
   label: string;
   value: AutomationValue;
-  problem: string | null;
+  problem: Shown;
   onChange: (value: AutomationValue) => void;
 }) {
   const { value } = props;
@@ -337,9 +366,10 @@ function ActionValueInput(props: {
           spellCheck={false}
           onChange={(event) => props.onChange(text ? { kind: "literal", value: event.target.value } : { kind: "formula", expression: event.target.value })}
           className={text ? inputClass : formulaClass}
+          {...invalid(props.problem)}
         />
       </div>
-      <Problem text={props.problem} />
+      <Problem shown={props.problem} />
     </div>
   );
 }
@@ -356,23 +386,115 @@ function ToValue({ children }: { children: ReactNode }) {
 // A step or row keeps its key while the draft changes, so React keeps its
 // controls and focus can follow it.
 interface Row { key: number; value: FieldValue }
+type Branch = "do" | "otherwise";
 interface StepEntry {
   key: number;
   step: AutomationStep;
   rows: Row[];
   /** The saved automation's reach verdict for this step, until it is edited. */
   verdict: string | null;
+  /** An If's Do and Otherwise steps, which the draft holds instead of the step's own lists; null for any other step. */
+  branches: Record<Branch, StepEntry[]> | null;
 }
+/** A list of steps: the automation's own, or an If's Do or Otherwise. */
+type ListId = "do" | `${number}/${Branch}`;
 
 let nextKey = 0;
 const newKey = () => (nextKey += 1);
 const blankRow = (): Row => ({ key: newKey(), value: { field: "", value: { kind: "literal", value: "" } } });
 
-function entryOf(step: AutomationStep, verdict: string | null): StepEntry {
+function entryOf(step: AutomationStep, verdict: string | null, branches: StepEntry["branches"] = null): StepEntry {
   // An action's input shows as rows too: each row's field is the input's key.
   const values = step.kind === "set" || step.kind === "add-record" ? step.values
     : step.kind === "invoke" ? step.input.map(({ key, value }) => ({ field: key, value })) : [];
-  return { key: newKey(), step, rows: values.map((value) => ({ key: newKey(), value })), verdict };
+  return { key: newKey(), step, rows: values.map((value) => ({ key: newKey(), value })), verdict, branches };
+}
+
+/**
+ * Entries for `steps`, each with its saved verdict. `first` is the place of
+ * the list's first verdict among the automation's, which counts an If's
+ * steps after the If and before the steps that follow it.
+ */
+function entriesOf(steps: readonly AutomationStep[], reach: Reach | null, first: number): StepEntry[] {
+  let next = first;
+  return reachPlaces(steps, first).map((places, index) => {
+    const step = steps[index]!;
+    const start = next;
+    next += places.length;
+    if (step.kind !== "if") return entryOf(step, verdictOf(places, reach));
+    return entryOf(step, null, {
+      do: entriesOf(step.do, reach, start),
+      otherwise: entriesOf(step.otherwise, reach, start + reachPlaces(step.do).flat().length),
+    });
+  });
+}
+
+/** Each entry in reading order, with the list that holds it and its number among all steps. */
+function entriesInOrder(entries: readonly StepEntry[]) {
+  const all: Array<{ entry: StepEntry; list: readonly StepEntry[]; listId: ListId; index: number; number: number }> = [];
+  const walk = (list: readonly StepEntry[], listId: ListId) => list.forEach((entry, index) => {
+    all.push({ entry, list, listId, index, number: all.length + 1 });
+    if (entry.branches === null) return;
+    walk(entry.branches.do, `${entry.key}/do`);
+    walk(entry.branches.otherwise, `${entry.key}/otherwise`);
+  });
+  walk(entries, "do");
+  return all;
+}
+
+/** `entries` with the list `id` changed by `change`. */
+function changeList(entries: StepEntry[], id: ListId, change: (list: StepEntry[]) => StepEntry[], here: ListId = "do"): StepEntry[] {
+  if (here === id) return change(entries);
+  return entries.map((entry) => (entry.branches === null ? entry : {
+    ...entry,
+    branches: {
+      do: changeList(entry.branches.do, id, change, `${entry.key}/do`),
+      otherwise: changeList(entry.branches.otherwise, id, change, `${entry.key}/otherwise`),
+    },
+  }));
+}
+
+const listProblem = (id: ListId) => `list:${id}`;
+
+// File contract codes about a field's or an action input's name, not its value.
+const NAME_CODES: ReadonlySet<AutomationDiagnostic["code"]> = new Set(["duplicate-key", "reserved-field-name", "reserved-input-key"]);
+
+/**
+ * Where a JSON Pointer from the automation lands in the builder: the key of
+ * the part that shows its problem, and the name of an action input or field
+ * the part does not show on its own. `edits` says which steps show rows, and
+ * `part` which of a row's controls the problem is about.
+ */
+function placeOf(
+  path: string,
+  entries: readonly StepEntry[],
+  edits: (entry: StepEntry) => boolean,
+  part: "field" | "value" = "value",
+): { key: string; name: string | null } {
+  const parts = path.split("/").slice(1).map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+  const [head, option] = parts;
+  if (head === "name") return { key: "name", name: null };
+  if (head === "if") return { key: "if", name: null };
+  if (head === "when") {
+    const key = option === "to" ? "when/to" : option === "field-changed" ? "when/field" : option === "starts-matching" ? "when/condition" : "when";
+    return { key, name: null };
+  }
+  if (head !== "do") return { key: "save", name: null };
+  let list = entries;
+  let listId: ListId = "do";
+  for (let at = 1; ; at += 2) {
+    const entry = list[Number(parts[at])];
+    if (entry === undefined) return { key: listProblem(listId), name: null };
+    const [kind, name] = [parts[at + 1], parts[at + 2]];
+    if (entry.branches !== null && (kind === "do" || kind === "otherwise")) {
+      list = entry.branches[kind];
+      listId = `${entry.key}/${kind}`;
+      continue;
+    }
+    if (name === undefined || (kind !== "set" && kind !== "add-record" && kind !== "input")) return { key: `step-${entry.key}`, name: null };
+    const row = edits(entry) ? entry.rows.find(({ value }) => value.field === name) : undefined;
+    return row === undefined ? { key: `step-${entry.key}`, name } : { key: `row-${row.key}/${part}`, name: null };
+  }
 }
 
 type InvokeStep = Extract<AutomationStep, { kind: "invoke" }>;
@@ -382,45 +504,18 @@ function editableAction(step: AutomationStep, table: AutomationTable | null): In
   return step.kind === "invoke" && table !== null ? step : null;
 }
 
-/** Each step's saved verdict as one sentence, or null when it may run. */
-function verdictsOf(automation: Automation, reach: Reach | null): Array<string | null> {
-  if (reach === null || reach.kind !== "checked") return automation.do.map(() => null);
-  return reachPlaces(automation.do, automation.when.kind === "group-message" ? 1 : 0).map((places) => {
-    for (const place of places) {
-      const verdict = reach.steps[place];
-      if (verdict?.verdict === "stopped") return verdict.reason;
-      if (verdict?.verdict === "held") {
-        const reached = automationReachCopy(verdict);
-        return `This step can now ${reached}, and waits for someone who can edit this Collection to allow it.`;
-      }
+/** A step's saved verdict, from its places among the automation's verdicts, as one sentence; or null when it may run. */
+function verdictOf(places: readonly number[], reach: Reach | null): string | null {
+  if (reach === null || reach.kind !== "checked") return null;
+  for (const place of places) {
+    const verdict = reach.steps[place];
+    if (verdict?.verdict === "stopped") return verdict.reason;
+    if (verdict?.verdict === "held") {
+      const reached = automationReachCopy(verdict);
+      return `This step can now ${reached}, and waits for someone who can edit this Collection to allow it.`;
     }
-    return null;
-  });
-}
-
-/** Every formula in an automation, for the syntax check. */
-function formulasOf(automation: Automation): string[] {
-  const formulas: string[] = [];
-  const add = (expression: string) => {
-    if (expression.trim() !== "") formulas.push(expression);
-  };
-  const when = automation.when;
-  if (when.kind === "field-changed" && when.to?.kind === "formula") add(when.to.expression);
-  if (when.kind === "starts-matching") add(when.condition);
-  if (automation.if !== null) add(automation.if);
-  for (const step of automation.do) {
-    for (const { expression } of actionFormulas(step)) add(expression);
-    if (step.kind !== "set" && step.kind !== "add-record") continue;
-    for (const { value } of step.values) if (value.kind === "formula") add(value.expression);
   }
-  return formulas;
-}
-
-/** The input formulas of a step's actions, inside If branches too. The builder shows action steps as they are in the file. */
-function actionFormulas(step: AutomationStep): Array<{ key: string; expression: string }> {
-  if (step.kind === "if") return [...step.do, ...step.otherwise].flatMap(actionFormulas);
-  if (step.kind !== "invoke") return [];
-  return step.input.flatMap(({ key, value }) => (value.kind === "formula" ? [{ key, expression: value.expression }] : []));
+  return null;
 }
 
 /** A trigger of `kind`, watching the table the current one names, or else `own`: this Collection's dataset table, or null. */
@@ -456,6 +551,8 @@ function editableStep(step: AutomationStep, table: AutomationTable | null): SetS
   return table === null || (step.collection === null && (step.operation === null || table.operations.has(step.operation))) ? step : null;
 }
 
+const BRANCH_LABELS: Record<Branch, string> = { do: "Do", otherwise: "Otherwise" };
+
 type ConditionMode = "always" | "rows" | "formula";
 interface ConditionEntry { key: number; row: ConditionRow }
 
@@ -471,14 +568,13 @@ interface Draft {
 
 function draftOf(automation: Automation, reach: Reach | null): Draft {
   const rows = automation.if === null ? [] : (conditionRows(automation.if) ?? []);
-  const verdicts = verdictsOf(automation, reach);
   return {
     name: automation.name,
     when: automation.when,
     conditionMode: automation.if === null ? "always" : rows.length > 0 ? "rows" : "formula",
     conditionFormula: automation.if ?? "",
     rows: rows.map((row) => ({ key: newKey(), row })),
-    steps: automation.do.map((step, index) => entryOf(step, verdicts[index] ?? null)),
+    steps: entriesOf(automation.do, reach, automation.when.kind === "group-message" ? 1 : 0),
   };
 }
 
@@ -515,6 +611,7 @@ export function AutomationBuilder(props: {
 }) {
   const { workspaceId, collectionPath, table, onError } = props;
   const isNew = props.automation.id === "";
+  const problemIds = useId();
   const [draft, setDraft] = useState(() => draftOf(props.automation, props.reach));
   const [attempted, setAttempted] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -524,8 +621,11 @@ export function AutomationBuilder(props: {
   const [checked, setChecked] = useState<{
     key: string;
     diagnostics: AutomationDiagnostic[];
-    formulas: ReadonlyMap<string, string>;
+    formulaProblems: CheckCollectionAutomationResult["formulaProblems"];
   } | null>(null);
+  // Counts Saves that found a problem, each of which moves focus to the first one shown and says how many there are.
+  const [refused, setRefused] = useState(0);
+  const [announced, setAnnounced] = useState("");
   // Answers for another workspace or Collection, or after the builder
   // closes, change nothing here.
   const scope = useRequestSequence([workspaceId, collectionPath]);
@@ -561,6 +661,15 @@ export function AutomationBuilder(props: {
         to: { kind: "literal" as const, value: numberValue(typeOf(collectionPath, draft.when.field), draft.when.to.value) ?? draft.when.to.value },
       }
     : draft.when;
+  const stepOf = ({ step, rows, branches }: StepEntry): AutomationStep => {
+    if (step.kind === "if" && branches !== null) return { ...step, do: branches.do.map(stepOf), otherwise: branches.otherwise.map(stepOf) };
+    const action = editableAction(step, table);
+    if (action) return { ...action, input: rows.map(({ value: entry }) => ({ key: entry.field, value: entry.value })) };
+    const editable = editableStep(step, table);
+    // A step nobody edited stays as the file holds it, such as a number field's "001".
+    if (editable === null || JSON.stringify(rows.map(({ value }) => value)) === JSON.stringify(editable.values)) return step;
+    return { ...editable, values: numbered(targetOf(step), rows) };
+  };
   const automation: Automation = {
     ...props.automation,
     name: draft.name,
@@ -570,13 +679,12 @@ export function AutomationBuilder(props: {
       : draft.conditionMode === "rows"
         ? conditionFormula(draft.rows.map(({ row }) => ({ ...row, value: rowValue(row) })))
         : draft.conditionFormula,
-    do: draft.steps.map(({ step, rows }) => {
-      const action = editableAction(step, table);
-      if (action) return { ...action, input: rows.map(({ value: entry }) => ({ key: entry.field, value: entry.value })) };
-      const editable = editableStep(step, table);
-      return editable ? { ...editable, values: numbered(targetOf(step), rows) } : step;
-    }),
+    do: draft.steps.map(stepOf),
   };
+  const ordered = entriesInOrder(draft.steps);
+  const full = ordered.length >= MAX_STEPS;
+  const placedByKey = new Map(ordered.map((placed) => [placed.entry.key, placed]));
+  const edits = (entry: StepEntry) => editableAction(entry.step, table) !== null || editableStep(entry.step, table) !== null;
   const dirty = JSON.stringify(automation) !== JSON.stringify(props.baseline);
   // What Save writes: a draft without a name takes its sentence, and a new
   // one an id from its name. Main checks exactly this.
@@ -611,7 +719,7 @@ export function AutomationBuilder(props: {
 
   // The fields of each other Collection a step adds records to.
   const targetPaths = useMemo(
-    () => [...new Set(draft.steps.flatMap(({ step }) => (step.kind === "add-record" && step.collection !== null ? [step.collection] : [])))],
+    () => [...new Set(entriesInOrder(draft.steps).flatMap(({ entry: { step } }) => (step.kind === "add-record" && step.collection !== null ? [step.collection] : [])))],
     [draft.steps],
   );
   useEffect(() => {
@@ -631,17 +739,8 @@ export function AutomationBuilder(props: {
 
   /** Main's check of this exact automation: what the file contract refuses, and each formula's syntax. */
   const check = async (target: Automation, key: string) => {
-    const formulas = formulasOf(target);
-    const result = await bridge().checkCollectionAutomation({ workspaceId, automation: target, formulas });
-    const answer = {
-      key,
-      diagnostics: result.diagnostics,
-      formulas: new Map(formulas.flatMap((formula, index) => {
-        const problem = result.formulaProblems[index];
-        return problem ? [[formula, `This formula has a syntax error. ${problem}`] as const] : [];
-      })),
-    };
-    return answer;
+    const result = await bridge().checkCollectionAutomation({ workspaceId, automation: target });
+    return { key, diagnostics: result.diagnostics, formulaProblems: result.formulaProblems };
   };
   // Checked a moment after the person stops typing, so a formula's syntax
   // error shows as it happens.
@@ -660,10 +759,9 @@ export function AutomationBuilder(props: {
 
   // What keeps the draft from saving, keyed by the part it belongs to.
   const problems = new Map<string, string>();
-  const syntaxErrors = checked?.key === automationKey ? checked.formulas : new Map<string, string>();
+  const current = checked?.key === automationKey ? checked : null;
   const formulaProblem = (key: string, expression: string) => {
     if (expression.trim() === "") problems.set(key, "Write a formula.");
-    else if (syntaxErrors.has(expression)) problems.set(key, syntaxErrors.get(expression)!);
   };
   if (automation.when.kind === "field-changed") {
     if (automation.when.field === "") problems.set("when/field", "Choose a field.");
@@ -671,65 +769,84 @@ export function AutomationBuilder(props: {
   }
   if (automation.when.kind === "starts-matching") formulaProblem("when/condition", automation.when.condition);
   if (automation.if !== null && draft.conditionMode === "formula") formulaProblem("if", automation.if);
-  draft.rows.forEach(({ row }, index) => {
+  draft.rows.forEach(({ key, row }) => {
     if (typeOf(collectionPath, row.field) === "number" && typeof rowValue(row) !== "number") {
-      problems.set(`if/${index}`, "Enter a number.");
+      problems.set(`if/${key}`, "Enter a number.");
     }
   });
-  if (draft.steps.length === 0) problems.set("do", "Add a step.");
-  draft.steps.forEach(({ step, rows }, index) => {
+  if (draft.steps.length === 0) problems.set(listProblem("do"), "Add a step.");
+  for (const { entry: { key, step, rows, branches } } of ordered) {
+    if (branches !== null && branches.do.length === 0) problems.set(listProblem(`${key}/do`), "Add a step.");
     const action = editableAction(step, table);
     if (action !== null) {
       const seen = new Set<string>();
-      rows.forEach(({ value: entry }, row) => {
-        if (entry.field.trim() === "") problems.set(`do/${index}/${row}/field`, "Name this input.");
-        else if (seen.has(entry.field)) problems.set(`do/${index}/${row}/field`, `${entry.field} is in this step twice.`);
+      rows.forEach(({ key: row, value: entry }) => {
+        if (entry.field.trim() === "") problems.set(`row-${row}/field`, "Name this input.");
+        else if (seen.has(entry.field)) problems.set(`row-${row}/field`, `${entry.field} is in this step twice.`);
         seen.add(entry.field);
-        if (entry.value.kind === "formula") formulaProblem(`do/${index}/${row}/value`, entry.value.expression);
+        if (entry.value.kind === "formula") formulaProblem(`row-${row}/value`, entry.value.expression);
       });
-      return;
-    }
-    // An action inside an If is not edited here, so its syntax error shows on the step.
-    for (const { key, expression } of actionFormulas(step)) {
-      const error = syntaxErrors.get(expression);
-      if (error !== undefined && !problems.has(`do/${index}`)) problems.set(`do/${index}`, error.replace(/^This formula/u, `The formula for ${key}`));
+      continue;
     }
     const editable = editableStep(step, table);
-    if (editable === null) return;
-    if (rows.length === 0) problems.set(`do/${index}/values`, editable.kind === "set" ? "Add a field to set." : "Add a field.");
+    if (editable === null) continue;
+    if (rows.length === 0) problems.set(`step-${key}/values`, editable.kind === "set" ? "Add a field to set." : "Add a field.");
     if (editable.kind === "set" && automation.when.kind === "record-removed") {
-      problems.set(`do/${index}`, "A removed record has no fields to set. Choose another trigger, or remove this step.");
+      problems.set(`step-${key}`, "A removed record has no fields to set. Choose another trigger, or remove this step.");
     }
     const seen = new Set<string>();
     const collection = targetOf(step);
-    rows.forEach(({ value: entry }, row) => {
-      if (entry.field === "") problems.set(`do/${index}/${row}/field`, "Choose a field.");
-      else if (seen.has(entry.field)) problems.set(`do/${index}/${row}/field`, `${entry.field} is in this step twice.`);
+    rows.forEach(({ key: row, value: entry }) => {
+      if (entry.field === "") problems.set(`row-${row}/field`, "Choose a field.");
+      else if (seen.has(entry.field)) problems.set(`row-${row}/field`, `${entry.field} is in this step twice.`);
       seen.add(entry.field);
-      if (entry.value.kind === "formula") formulaProblem(`do/${index}/${row}/value`, entry.value.expression);
+      if (entry.value.kind === "formula") formulaProblem(`row-${row}/value`, entry.value.expression);
       if (entry.value.kind === "literal" && typeOf(collection, entry.field) === "number" &&
         numberValue("number", entry.value.value) === undefined) {
-        problems.set(`do/${index}/${row}/value`, "Enter a number.");
+        problems.set(`row-${row}/value`, "Enter a number.");
       }
     });
-  });
-  // What main's check found that the builder did not: shown once the person tries to save.
-  if (checked?.key === automationKey) {
-    for (const diagnostic of checked.diagnostics) {
-      const [key, sentence] = diagnosticProblem(diagnostic);
-      if (!problems.has(key)) problems.set(key, sentence);
-    }
   }
-  const syntaxSentences = new Set(syntaxErrors.values());
   // A syntax error shows as the person types; the rest once they try to save.
-  const problem = (key: string): string | null => {
-    const text = problems.get(key) ?? null;
-    return text !== null && (attempted || syntaxSentences.has(text)) ? text : null;
+  const syntaxKeys = new Set<string>();
+  for (const found of current?.formulaProblems ?? []) {
+    const { key, name } = placeOf(found.path, draft.steps, edits);
+    if (problems.has(key)) continue;
+    problems.set(key, "code" in found ? unsaved(found.code)
+      : `${name === null ? "This formula" : `The formula for ${name}`} has a syntax error. ${found.problem}`);
+    syntaxKeys.add(key);
+  }
+  // What main's check found that the builder did not: shown once the person tries to save.
+  for (const diagnostic of current?.diagnostics ?? []) {
+    const path = diagnostic.path.replace(/^\/automations\/0/u, "");
+    const { key } = placeOf(path, draft.steps, edits, NAME_CODES.has(diagnostic.code) ? "field" : "value");
+    if (!problems.has(key)) problems.set(key, unsaved(diagnostic.code));
+  }
+  const problem = (key: string): Shown => {
+    const text = problems.get(key);
+    return text !== undefined && (attempted || syntaxKeys.has(key)) ? { id: `${problemIds}${key.replace(/[^\w-]/gu, "_")}`, text } : null;
   };
+  // A Save that found a problem moves focus to the first one on screen:
+  // the control it describes, or else the first control of its step.
+  useEffect(() => {
+    if (refused === 0) return;
+    const all = form.current?.querySelectorAll<HTMLElement>("[data-problem]") ?? [];
+    const shown = all[0];
+    if (!shown) return;
+    // A space that comes and goes changes the text, so a second refusal with the same count is announced too.
+    setAnnounced(`${all.length === 1 ? "1 problem. It is focused." : `${all.length} problems. The first is focused.`}${refused % 2 === 0 ? " " : ""}`);
+    const control = form.current?.querySelector<HTMLElement>(`[aria-describedby="${shown.id}"]`) ??
+      shown.closest("[data-step]")?.querySelector<HTMLElement>("input, select, textarea, button:not(:disabled)");
+    control?.focus();
+  }, [refused]);
 
   const save = async (): Promise<boolean> => {
     setAttempted(true);
-    if (problems.size > 0) return false;
+    const refuse = () => {
+      setRefused((count) => count + 1);
+      return false;
+    };
+    if (problems.size > 0) return refuse();
     // Never write what the file contract refuses: check this exact draft.
     let answer = checked?.key === automationKey ? checked : null;
     if (answer === null) {
@@ -746,40 +863,343 @@ export function AutomationBuilder(props: {
       if (!scope.isCurrent(epoch)) return false;
       setChecked(answer);
     }
-    if (answer.diagnostics.length > 0 || answer.formulas.size > 0) return false;
+    if (answer.diagnostics.length > 0 || answer.formulaProblems.length > 0) return refuse();
     props.onSave(candidate);
     return true;
   };
 
+  const setSteps = (id: ListId, change: (list: StepEntry[]) => StepEntry[]) =>
+    setDraft((current) => ({ ...current, steps: changeList(current.steps, id, change) }));
   const setStep = (key: number, change: (entry: StepEntry) => StepEntry) =>
-    setDraft((current) => ({
-      ...current,
-      steps: current.steps.map((entry) => (entry.key === key ? { ...change(entry), verdict: null } : entry)),
-    }));
+    setSteps(placedByKey.get(key)!.listId, (list) => list.map((entry) => (entry.key === key ? { ...change(entry), verdict: null } : entry)));
   const moveStep = (key: number, by: -1 | 1) => {
-    const index = draft.steps.findIndex((entry) => entry.key === key);
+    const { list, listId, index } = placedByKey.get(key)!;
     const to = index + by;
     // Focus stays on the arrow that moved it, or the other one at an edge.
-    const edge = to === 0 || to === draft.steps.length - 1;
-    focusAfter(`step-${key}-${edge ? (by === -1 ? "down" : "up") : by === -1 ? "up" : "down"}`, () => setDraft((current) => {
-      const steps = [...current.steps];
+    const edge = to === 0 || to === list.length - 1;
+    focusAfter(`step-${key}-${edge ? (by === -1 ? "down" : "up") : by === -1 ? "up" : "down"}`, () => setSteps(listId, (current) => {
+      const steps = [...current];
       const [moved] = steps.splice(index, 1);
       if (moved) steps.splice(to, 0, moved);
-      return { ...current, steps };
+      return steps;
     }));
   };
   const removeStep = (key: number) => {
-    const index = draft.steps.findIndex((entry) => entry.key === key);
-    const neighbor = draft.steps[index + 1] ?? draft.steps[index - 1];
-    focusAfter(neighbor ? `step-${neighbor.key}-remove` : "add-step", () =>
-      setDraft((current) => ({ ...current, steps: current.steps.filter((entry) => entry.key !== key) })));
+    const { list, listId, index } = placedByKey.get(key)!;
+    const neighbor = list[index + 1] ?? list[index - 1];
+    focusAfter(neighbor ? `step-${neighbor.key}-remove` : `add-${listId}`, () =>
+      setSteps(listId, (current) => current.filter((entry) => entry.key !== key)));
   };
-  const addStep = (step: AutomationStep) => {
+  const addStep = (id: ListId, step: AutomationStep) => {
     const entry = entryOf(step, null);
-    focusAfter(`step-${entry.key}-first`, () => setDraft((current) => ({ ...current, steps: [...current.steps, entry] })));
+    focusAfter(`step-${entry.key}-first`, () => setSteps(id, (current) => [...current, entry]));
   };
   const setRows = (key: number, rows: Row[]) => setStep(key, (entry) => ({ ...entry, rows }));
   const newCondition = (): ConditionEntry => ({ key: newKey(), row: { field: props.fields[0]?.name ?? "", operator: "is", value: "" } });
+
+  /** One step: its controls, or its sentence where the builder cannot edit it yet. */
+  const stepItem = ({ entry, list, listId, index, number }: (typeof ordered)[number]): ReactNode => {
+    const { key, step, rows } = entry;
+    const editable = editableStep(step, table);
+    const action = editableAction(step, table);
+    const chosen = action === null ? undefined : table?.actions.find((candidate) => candidate.name === action.operation);
+    // This table's actions, and the one the step runs when the file names another table's.
+    const offered = (table?.actions ?? []).filter((candidate) => candidate.table === table?.name || candidate === chosen);
+    const targetPath = targetOf(step);
+    const targetStopped = step.kind === "add-record" && targetPath !== collectionPath
+      ? (targets?.find((target) => target.path === targetPath)?.stopped ?? null)
+      : null;
+    const fields = schemas.get(targetPath) ?? null;
+    return (
+      <div key={key} data-step data-testid={`builder-step-${number - 1}`} className={listId === "do" ? "rounded-lg border border-line bg-bg p-2" : "py-0.5"}>
+        <div className="mb-1.5 flex items-center gap-1">
+          <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
+            {editable?.kind === "set" ? "Set fields"
+            : editable?.kind === "add-record" ? "Add a record"
+            : action !== null ? "Run an action"
+            : step.kind === "run" || step.kind === "run-file" ? "Run code"
+            : step.kind === "if" ? "If"
+            : `Step ${number}`}
+          </span>
+          <IconButton
+            aria-label={`Move step ${number} up`}
+            title="Move up"
+            data-focus={`step-${key}-up`}
+            disabled={index === 0}
+            onClick={() => moveStep(key, -1)}
+          >
+            <ArrowUp size={13} aria-hidden />
+          </IconButton>
+          <IconButton
+            aria-label={`Move step ${number} down`}
+            title="Move down"
+            data-focus={`step-${key}-down`}
+            disabled={index === list.length - 1}
+            onClick={() => moveStep(key, 1)}
+          >
+            <ArrowDown size={13} aria-hidden />
+          </IconButton>
+          <IconButton
+            aria-label={`Remove step ${number}`}
+            title="Remove"
+            data-focus={`step-${key}-remove`}
+            onClick={() => removeStep(key)}
+          >
+            <Trash2 size={13} aria-hidden />
+          </IconButton>
+        </div>
+        {targetStopped !== null ? (
+          <StatusLine tone="warning" icon={AlertTriangle} label="Out of reach">{targetStopped}</StatusLine>
+        ) : entry.verdict !== null ? (
+          <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">{entry.verdict}</StatusLine>
+        ) : null}
+        {table !== null && props.addsStay && editable?.kind === "add-record" ? (
+          <StatusLine tone="muted" icon={Info} label="Undo keeps records">
+            Undo keeps the records this step adds. This Collection has no delete action available to the automation.
+          </StatusLine>
+        ) : null}
+        {/* Anyone who can write the dataset, through an app too, can start a dataset's automation. */}
+        {table !== null && step.kind === "wake-agent" ? (
+          <StatusLine tone="muted" icon={Info} label="Others can start this">
+            Changes other people make can start this step, and their text reaches your agent as data.
+          </StatusLine>
+        ) : null}
+        {action !== null ? (
+          <div className="flex flex-col gap-2">
+            <select
+              aria-label={`Step ${number}, action`}
+              data-focus={`step-${key}-first`}
+              value={action.operation}
+              onChange={(event) => setStep(key, (current) => ({ ...current, step: { ...action, operation: event.target.value } }))}
+              className={selectClass}
+            >
+              {chosen === undefined ? <option value={action.operation}>{action.operation}</option> : null}
+              {offered.map((candidate) => <option key={candidate.name} value={candidate.name}>
+                {candidate.table === table?.name ? candidate.label : `${candidate.label} (${candidate.table})`}
+              </option>)}
+            </select>
+            {chosen !== undefined && !chosen.reversible ? (
+              <p className="m-0 text-[12px] text-muted">{chosen.label} can't be undone.</p>
+            ) : null}
+            {rows.map(({ key: rowKey, value: row }, rowIndex) => {
+              const name = row.field || `input ${rowIndex + 1}`;
+              const replace = (value: FieldValue) =>
+                setRows(key, rows.map((current) => (current.key === rowKey ? { key: rowKey, value } : current)));
+              return (
+                <div key={rowKey} className="flex items-start gap-1">
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <input
+                      aria-label={`Step ${number}, input ${rowIndex + 1} name`}
+                      data-focus={`row-${rowKey}-first`}
+                      value={row.field}
+                      spellCheck={false}
+                      placeholder="id"
+                      onChange={(event) => replace({ field: event.target.value, value: row.value })}
+                      className={`${inputClass} font-mono text-[12px]`}
+                      {...invalid(problem(`row-${rowKey}/field`))}
+                    />
+                    <Problem shown={problem(`row-${rowKey}/field`)} />
+                    <ToValue>
+                      <ActionValueInput
+                        label={`Step ${number}, ${name}`}
+                        value={row.value}
+                        problem={problem(`row-${rowKey}/value`)}
+                        onChange={(value) => replace({ field: row.field, value })}
+                      />
+                    </ToValue>
+                  </div>
+                  <IconButton
+                    aria-label={`Remove ${name} from step ${number}`}
+                    title="Remove"
+                    data-focus={`row-${rowKey}-remove`}
+                    onClick={() => {
+                      const neighbor = rows[rowIndex + 1] ?? rows[rowIndex - 1];
+                      focusAfter(neighbor ? `row-${neighbor.key}-remove` : `step-${key}-add-field`, () =>
+                        setRows(key, rows.filter((current) => current.key !== rowKey)));
+                    }}
+                  >
+                    <Trash2 size={13} aria-hidden />
+                  </IconButton>
+                </div>
+              );
+            })}
+            <SecondaryButton
+              size="compact"
+              className="flex items-center gap-1 self-start"
+              data-focus={`step-${key}-add-field`}
+              onClick={() => {
+                const row = blankRow();
+                focusAfter(`row-${row.key}-first`, () => setRows(key, [...rows, row]));
+              }}
+            >
+              <Plus size={12} aria-hidden />
+              Add input
+            </SecondaryButton>
+          </div>
+        ) : step.kind === "run" ? (
+          // Code reads here as the file holds it. People change it in the file.
+          <pre
+            aria-label={`Step ${number}, code`}
+            tabIndex={0}
+            className="m-0 max-h-48 overflow-auto whitespace-pre rounded bg-panel-2 px-2 py-1.5 font-mono text-[11px] leading-snug text-ink"
+          >
+            {step.code}
+          </pre>
+        ) : step.kind === "run-file" ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded bg-panel-2 px-1 font-mono text-[11px] text-ink" title={step.file}>{step.file}</code>
+            <SecondaryButton size="compact" onClick={() => props.onOpenFile(`${collectionPath}/${step.file}`)}>Open file</SecondaryButton>
+          </div>
+        ) : entry.branches !== null && step.kind === "if" ? (
+          // The If's own condition reads as the file wrote it; its steps edit here.
+          <div className="flex flex-col gap-2">
+            <p className="m-0 break-words text-[12px] leading-snug text-muted">
+              <Sentence parts={[{ kind: "code", text: step.if }]} />
+            </p>
+            {(["do", "otherwise"] as const).map((branch) => (
+              <div
+                key={branch}
+                role="group"
+                aria-label={`Step ${number}, ${BRANCH_LABELS[branch]}`}
+                className="flex flex-col gap-2 border-l border-line pl-2"
+              >
+                <span className="text-[11px] font-medium text-muted">{BRANCH_LABELS[branch]}</span>
+                {stepList(`${key}/${branch}`, entry.branches![branch])}
+              </div>
+            ))}
+          </div>
+        ) : editable === null ? (
+          <p className="m-0 break-words text-[12px] leading-snug text-muted">
+            <Sentence parts={stepParts(step)} />
+          </p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {editable.kind === "add-record" ? (
+              <select
+                aria-label={`Step ${number}, Collection`}
+                data-focus={`step-${key}-first`}
+                value={targetPath}
+                onChange={(event) => setStep(key, (current) => ({
+                  ...current,
+                  step: { ...editable, collection: event.target.value === collectionPath ? null : event.target.value },
+                }))}
+                className={selectClass}
+              >
+                <option value={collectionPath}>{own}</option>
+                {targetStopped !== null ? <option value={targetPath}>{collectionName(targetPath)}</option> : null}
+                {reachable.map((target) => <option key={target.path} value={target.path}>{target.name}</option>)}
+              </select>
+            ) : null}
+            {rows.map(({ key: rowKey, value: row }, rowIndex) => {
+              const field = fields?.find((candidate) => candidate.name === row.field);
+              const name = row.field || `field ${rowIndex + 1}`;
+              const replace = (value: FieldValue) =>
+                setRows(key, rows.map((current) => (current.key === rowKey ? { key: rowKey, value } : current)));
+              return (
+                <div key={rowKey} className="flex items-start gap-1">
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <FieldSelect
+                      label={`Step ${number}, field ${rowIndex + 1}`}
+                      fields={fields}
+                      value={row.field}
+                      collection={targetPath === collectionPath ? own : collectionName(targetPath)}
+                      focusKey={rowIndex === 0 && editable.kind === "set" ? `step-${key}-first` : `row-${rowKey}-first`}
+                      problem={problem(`row-${rowKey}/field`)}
+                      onChange={(next) => replace({
+                        field: next,
+                        value: defaultValueFor(fields?.find((candidate) => candidate.name === next)),
+                      })}
+                    />
+                    <ToValue>
+                      <ValueInput
+                        label={`Step ${number}, ${name}`}
+                        field={field}
+                        value={row.value}
+                        problem={problem(`row-${rowKey}/value`)}
+                        onChange={(value) => replace({ field: row.field, value: value ?? { kind: "literal", value: null } })}
+                      />
+                    </ToValue>
+                  </div>
+                  <IconButton
+                    aria-label={`Remove ${name} from step ${number}`}
+                    title="Remove"
+                    data-focus={`row-${rowKey}-remove`}
+                    onClick={() => {
+                      const neighbor = rows[rowIndex + 1] ?? rows[rowIndex - 1];
+                      focusAfter(neighbor ? `row-${neighbor.key}-remove` : `step-${key}-add-field`, () =>
+                        setRows(key, rows.filter((current) => current.key !== rowKey)));
+                    }}
+                  >
+                    <Trash2 size={13} aria-hidden />
+                  </IconButton>
+                </div>
+              );
+            })}
+            <SecondaryButton
+              size="compact"
+              className="flex items-center gap-1 self-start"
+              data-focus={`step-${key}-add-field`}
+              onClick={() => {
+                const row = blankRow();
+                focusAfter(rows.length === 0 && editable.kind === "set" ? `step-${key}-first` : `row-${row.key}-first`, () => setRows(key, [...rows, row]));
+              }}
+            >
+              <Plus size={12} aria-hidden />
+              Add field
+            </SecondaryButton>
+            <Problem shown={problem(`step-${key}/values`)} />
+          </div>
+        )}
+        <Problem shown={problem(`step-${key}`)} />
+      </div>
+    );
+  };
+  /** A list of steps, and the buttons that add a step to its end. */
+  const stepList = (listId: ListId, list: readonly StepEntry[]): ReactNode => (
+    <>
+      {list.map((entry) => stepItem(placedByKey.get(entry.key)!))}
+      <Problem shown={problem(listProblem(listId))} />
+      <div className="flex flex-wrap gap-1.5">
+        <SecondaryButton
+          size="compact"
+          className="flex items-center gap-1"
+          data-focus={`add-${listId}`}
+          aria-describedby={problem(listProblem(listId))?.id}
+          disabled={full}
+          onClick={() => addStep(listId, { kind: "set", values: [blankRow().value], records: null, operation: null })}
+        >
+          <Plus size={12} aria-hidden />
+          Set fields
+        </SecondaryButton>
+        <SecondaryButton
+          size="compact"
+          className="flex items-center gap-1"
+          disabled={full}
+          onClick={() => addStep(listId, { kind: "add-record", values: [blankRow().value], collection: null, as: null, operation: null })}
+        >
+          <Plus size={12} aria-hidden />
+          Add a record
+        </SecondaryButton>
+        {table !== null && table.actions.some((candidate) => candidate.table === table.name) ? (
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1"
+            disabled={full}
+            onClick={() => addStep(listId, {
+              kind: "invoke",
+              operation: table.actions.find((candidate) => candidate.table === table.name)!.name,
+              // The action reads its record itself, so it takes the record's id.
+              input: draft.when.kind === "record-removed" ? [] : [{ key: "id", value: { kind: "formula", expression: "record.id" } }],
+            })}
+          >
+            <Plus size={12} aria-hidden />
+            Run an action
+          </SecondaryButton>
+        ) : null}
+      </div>
+      {full ? <p className="m-0 text-[12px] text-muted">An automation holds at most {MAX_STEPS} steps. Remove a step to add another.</p> : null}
+    </>
+  );
 
   const trigger = draft.when;
   const builderTrigger = builderTriggerOf(trigger);
@@ -811,7 +1231,9 @@ export function AutomationBuilder(props: {
           placeholder={sentenceText(automationSentence({ ...automation, name: "" }))}
           onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
           className={`${inputClass} font-medium`}
+          {...invalid(problem("name"))}
         />
+        <Problem shown={problem("name")} />
         {props.cannotRun ? (
           <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">{props.cannotRun}</StatusLine>
         ) : waiting ? (
@@ -836,9 +1258,9 @@ export function AutomationBuilder(props: {
                 fields={props.fields}
                 value={trigger.field}
                 collection={own}
+                problem={problem("when/field")}
                 onChange={(field) => setWhen({ kind: "field-changed", field, to: null, table: trigger.table })}
               />
-              <Problem text={problem("when/field")} />
               <ToValue>
                 <ValueInput
                   label="Changes to"
@@ -859,11 +1281,12 @@ export function AutomationBuilder(props: {
                 placeholder='record.Status == "Blocked"'
                 onChange={(event) => setWhen({ ...trigger, condition: event.target.value })}
                 className={formulaClass}
+                {...invalid(problem("when/condition"))}
               />
-              <Problem text={problem("when/condition")} />
+              <Problem shown={problem("when/condition")} />
             </>
           ) : null}
-          <Problem text={problem("when")} />
+          <Problem shown={problem("when")} />
         </section>
 
         <section aria-label="Only if" className="flex flex-col gap-1.5">
@@ -903,6 +1326,7 @@ export function AutomationBuilder(props: {
                         value={row.field}
                         collection={own}
                         focusKey={`condition-${key}-first`}
+                        problem={null}
                         onChange={(name) => replace({ ...row, field: name, value: "" })}
                       />
                       <select
@@ -920,12 +1344,13 @@ export function AutomationBuilder(props: {
                         type={field?.type ?? null}
                         options={field?.type === "select" || field?.type === "multi-select" ? field.options : []}
                         text={row.value === null ? "" : String(row.value)}
+                        problem={problem(`if/${key}`)}
                         onChange={(value) => replace({
                           ...row,
                           value: value.kind === "literal" && !Array.isArray(value.value) ? value.value : null,
                         })}
                       />
-                      <Problem text={problem(`if/${index}`)} />
+                      <Problem shown={problem(`if/${key}`)} />
                     </div>
                     <IconButton
                       aria-label={`Remove condition ${index + 1}`}
@@ -964,282 +1389,20 @@ export function AutomationBuilder(props: {
               placeholder='record.Priority == "High"'
               onChange={(event) => setDraft((current) => ({ ...current, conditionFormula: event.target.value }))}
               className={formulaClass}
+              {...invalid(problem("if"))}
             />
           ) : null}
-          <Problem text={problem("if")} />
+          <Problem shown={problem("if")} />
         </section>
 
         <section aria-label="Do" className="flex flex-col gap-2">
           <SectionLabel>Do</SectionLabel>
-          {draft.steps.map((entry, index) => {
-            const { key, step, rows } = entry;
-            const editable = editableStep(step, table);
-            const action = editableAction(step, table);
-            const chosen = action === null ? undefined : table?.actions.find((candidate) => candidate.name === action.operation);
-            // This table's actions, and the one the step runs when the file names another table's.
-            const offered = (table?.actions ?? []).filter((candidate) => candidate.table === table?.name || candidate === chosen);
-            const targetPath = targetOf(step);
-            const targetStopped = step.kind === "add-record" && targetPath !== collectionPath
-              ? (targets?.find((target) => target.path === targetPath)?.stopped ?? null)
-              : null;
-            const fields = schemas.get(targetPath) ?? null;
-            return (
-              <div key={key} data-testid={`builder-step-${index}`} className="rounded-lg border border-line bg-bg p-2">
-                <div className="mb-1.5 flex items-center gap-1">
-                  <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
-                    {editable?.kind === "set" ? "Set fields"
-                      : editable?.kind === "add-record" ? "Add a record"
-                      : action !== null ? "Run an action"
-                      : step.kind === "run" || step.kind === "run-file" ? "Run code"
-                      : `Step ${index + 1}`}
-                  </span>
-                  <IconButton
-                    aria-label={`Move step ${index + 1} up`}
-                    title="Move up"
-                    data-focus={`step-${key}-up`}
-                    disabled={index === 0}
-                    onClick={() => moveStep(key, -1)}
-                  >
-                    <ArrowUp size={13} aria-hidden />
-                  </IconButton>
-                  <IconButton
-                    aria-label={`Move step ${index + 1} down`}
-                    title="Move down"
-                    data-focus={`step-${key}-down`}
-                    disabled={index === draft.steps.length - 1}
-                    onClick={() => moveStep(key, 1)}
-                  >
-                    <ArrowDown size={13} aria-hidden />
-                  </IconButton>
-                  <IconButton
-                    aria-label={`Remove step ${index + 1}`}
-                    title="Remove"
-                    data-focus={`step-${key}-remove`}
-                    onClick={() => removeStep(key)}
-                  >
-                    <Trash2 size={13} aria-hidden />
-                  </IconButton>
-                </div>
-                {targetStopped !== null ? (
-                  <StatusLine tone="warning" icon={AlertTriangle} label="Out of reach">{targetStopped}</StatusLine>
-                ) : entry.verdict !== null ? (
-                  <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">{entry.verdict}</StatusLine>
-                ) : null}
-                {table !== null && props.addsStay && editable?.kind === "add-record" ? (
-                  <StatusLine tone="muted" icon={Info} label="Undo keeps records">
-                    Undo keeps the records this step adds. This Collection has no delete action available to the automation.
-                  </StatusLine>
-                ) : null}
-                {action !== null ? (
-                  <div className="flex flex-col gap-2">
-                    <select
-                      aria-label={`Step ${index + 1}, action`}
-                      data-focus={`step-${key}-first`}
-                      value={action.operation}
-                      onChange={(event) => setStep(key, (current) => ({ ...current, step: { ...action, operation: event.target.value } }))}
-                      className={selectClass}
-                    >
-                      {chosen === undefined ? <option value={action.operation}>{action.operation}</option> : null}
-                      {offered.map((candidate) => <option key={candidate.name} value={candidate.name}>
-                        {candidate.table === table?.name ? candidate.label : `${candidate.label} (${candidate.table})`}
-                      </option>)}
-                    </select>
-                    {chosen !== undefined && !chosen.reversible ? (
-                      <p className="m-0 text-[12px] text-muted">{chosen.label} can't be undone.</p>
-                    ) : null}
-                    {rows.map(({ key: rowKey, value: row }, rowIndex) => {
-                      const name = row.field || `input ${rowIndex + 1}`;
-                      const replace = (value: FieldValue) =>
-                        setRows(key, rows.map((current) => (current.key === rowKey ? { key: rowKey, value } : current)));
-                      return (
-                        <div key={rowKey} className="flex items-start gap-1">
-                          <div className="flex min-w-0 flex-1 flex-col gap-1">
-                            <input
-                              aria-label={`Step ${index + 1}, input ${rowIndex + 1} name`}
-                              data-focus={`row-${rowKey}-first`}
-                              value={row.field}
-                              spellCheck={false}
-                              placeholder="id"
-                              onChange={(event) => replace({ field: event.target.value, value: row.value })}
-                              className={`${inputClass} font-mono text-[12px]`}
-                            />
-                            <Problem text={problem(`do/${index}/${rowIndex}/field`)} />
-                            <ToValue>
-                              <ActionValueInput
-                                label={`Step ${index + 1}, ${name}`}
-                                value={row.value}
-                                problem={problem(`do/${index}/${rowIndex}/value`)}
-                                onChange={(value) => replace({ field: row.field, value })}
-                              />
-                            </ToValue>
-                          </div>
-                          <IconButton
-                            aria-label={`Remove ${name} from step ${index + 1}`}
-                            title="Remove"
-                            data-focus={`row-${rowKey}-remove`}
-                            onClick={() => {
-                              const neighbor = rows[rowIndex + 1] ?? rows[rowIndex - 1];
-                              focusAfter(neighbor ? `row-${neighbor.key}-remove` : `step-${key}-add-field`, () =>
-                                setRows(key, rows.filter((current) => current.key !== rowKey)));
-                            }}
-                          >
-                            <Trash2 size={13} aria-hidden />
-                          </IconButton>
-                        </div>
-                      );
-                    })}
-                    <SecondaryButton
-                      size="compact"
-                      className="flex items-center gap-1 self-start"
-                      data-focus={`step-${key}-add-field`}
-                      onClick={() => {
-                        const row = blankRow();
-                        focusAfter(`row-${row.key}-first`, () => setRows(key, [...rows, row]));
-                      }}
-                    >
-                      <Plus size={12} aria-hidden />
-                      Add input
-                    </SecondaryButton>
-                  </div>
-                ) : step.kind === "run" ? (
-                  // Code reads here as the file holds it. People change it in the file.
-                  <pre
-                    aria-label={`Step ${index + 1}, code`}
-                    tabIndex={0}
-                    className="m-0 max-h-48 overflow-auto whitespace-pre rounded bg-panel-2 px-2 py-1.5 font-mono text-[11px] leading-snug text-ink"
-                  >
-                    {step.code}
-                  </pre>
-                ) : step.kind === "run-file" ? (
-                  <div className="flex min-w-0 items-center gap-2">
-                    <code className="min-w-0 flex-1 truncate rounded bg-panel-2 px-1 font-mono text-[11px] text-ink" title={step.file}>{step.file}</code>
-                    <SecondaryButton size="compact" onClick={() => props.onOpenFile(`${collectionPath}/${step.file}`)}>Open file</SecondaryButton>
-                  </div>
-                ) : editable === null ? (
-                  <p className="m-0 break-words text-[12px] leading-snug text-muted">
-                    <Sentence parts={stepParts(step)} />
-                  </p>
-                ) : (
-                  <div className="flex flex-col gap-2">
-                    {editable.kind === "add-record" ? (
-                      <select
-                        aria-label={`Step ${index + 1}, Collection`}
-                        data-focus={`step-${key}-first`}
-                        value={targetPath}
-                        onChange={(event) => setStep(key, (current) => ({
-                          ...current,
-                          step: { ...editable, collection: event.target.value === collectionPath ? null : event.target.value },
-                        }))}
-                        className={selectClass}
-                      >
-                        <option value={collectionPath}>{own}</option>
-                        {targetStopped !== null ? <option value={targetPath}>{collectionName(targetPath)}</option> : null}
-                        {reachable.map((target) => <option key={target.path} value={target.path}>{target.name}</option>)}
-                      </select>
-                    ) : null}
-                    {rows.map(({ key: rowKey, value: row }, rowIndex) => {
-                      const field = fields?.find((candidate) => candidate.name === row.field);
-                      const name = row.field || `field ${rowIndex + 1}`;
-                      const replace = (value: FieldValue) =>
-                        setRows(key, rows.map((current) => (current.key === rowKey ? { key: rowKey, value } : current)));
-                      return (
-                        <div key={rowKey} className="flex items-start gap-1">
-                          <div className="flex min-w-0 flex-1 flex-col gap-1">
-                            <FieldSelect
-                              label={`Step ${index + 1}, field ${rowIndex + 1}`}
-                              fields={fields}
-                              value={row.field}
-                              collection={targetPath === collectionPath ? own : collectionName(targetPath)}
-                              focusKey={rowIndex === 0 && editable.kind === "set" ? `step-${key}-first` : `row-${rowKey}-first`}
-                              onChange={(next) => replace({
-                                field: next,
-                                value: defaultValueFor(fields?.find((candidate) => candidate.name === next)),
-                              })}
-                            />
-                            <Problem text={problem(`do/${index}/${rowIndex}/field`)} />
-                            <ToValue>
-                              <ValueInput
-                                label={`Step ${index + 1}, ${name}`}
-                                field={field}
-                                value={row.value}
-                                problem={problem(`do/${index}/${rowIndex}/value`)}
-                                onChange={(value) => replace({ field: row.field, value: value ?? { kind: "literal", value: null } })}
-                              />
-                            </ToValue>
-                          </div>
-                          <IconButton
-                            aria-label={`Remove ${name} from step ${index + 1}`}
-                            title="Remove"
-                            data-focus={`row-${rowKey}-remove`}
-                            onClick={() => {
-                              const neighbor = rows[rowIndex + 1] ?? rows[rowIndex - 1];
-                              focusAfter(neighbor ? `row-${neighbor.key}-remove` : `step-${key}-add-field`, () =>
-                                setRows(key, rows.filter((current) => current.key !== rowKey)));
-                            }}
-                          >
-                            <Trash2 size={13} aria-hidden />
-                          </IconButton>
-                        </div>
-                      );
-                    })}
-                    <SecondaryButton
-                      size="compact"
-                      className="flex items-center gap-1 self-start"
-                      data-focus={`step-${key}-add-field`}
-                      onClick={() => {
-                        const row = blankRow();
-                        focusAfter(`row-${row.key}-first`, () => setRows(key, [...rows, row]));
-                      }}
-                    >
-                      <Plus size={12} aria-hidden />
-                      Add field
-                    </SecondaryButton>
-                    <Problem text={problem(`do/${index}/values`)} />
-                  </div>
-                )}
-                <Problem text={problem(`do/${index}`)} />
-              </div>
-            );
-          })}
-          <Problem text={problem("do")} />
-          <div className="flex flex-wrap gap-1.5">
-            <SecondaryButton
-              size="compact"
-              className="flex items-center gap-1"
-              data-focus="add-step"
-              onClick={() => addStep({ kind: "set", values: [blankRow().value], records: null, operation: null })}
-            >
-              <Plus size={12} aria-hidden />
-              Set fields
-            </SecondaryButton>
-            <SecondaryButton
-              size="compact"
-              className="flex items-center gap-1"
-              onClick={() => addStep({ kind: "add-record", values: [blankRow().value], collection: null, as: null, operation: null })}
-            >
-              <Plus size={12} aria-hidden />
-              Add a record
-            </SecondaryButton>
-            {table !== null && table.actions.some((candidate) => candidate.table === table.name) ? (
-              <SecondaryButton
-                size="compact"
-                className="flex items-center gap-1"
-                onClick={() => addStep({
-                  kind: "invoke",
-                  operation: table.actions.find((candidate) => candidate.table === table.name)!.name,
-                  // The action reads its record itself, so it takes the record's id.
-                  input: draft.when.kind === "record-removed" ? [] : [{ key: "id", value: { kind: "formula", expression: "record.id" } }],
-                })}
-              >
-                <Plus size={12} aria-hidden />
-                Run an action
-              </SecondaryButton>
-            ) : null}
-          </div>
+          {stepList("do", draft.steps)}
         </section>
       </fieldset>
 
-      <Problem text={problem("save")} />
+      <Problem shown={problem("save")} />
+      <p role="status" className="sr-only">{announced}</p>
       <div className="flex justify-end gap-2 border-t border-line pt-3">
         <SecondaryButton size="compact" onClick={props.onCancel}>Cancel</SecondaryButton>
         <PrimaryButton type="submit" size="compact" disabled={props.saving || checking || props.readOnly}>Save</PrimaryButton>
