@@ -133,11 +133,11 @@ function contextFor(
         return session;
       },
       // The engine writes the file with its author on the moment.
-      async writeAuthoredTextFile(absolutePath, text, author, options) {
+      async writeAuthoredFile(absolutePath, text, author, options) {
         authoredWrites.push({ path: absolutePath, author });
         await mkdir(join(absolutePath, ".."), { recursive: true });
         await writeFile(absolutePath, text, { flag: options?.createOnly ? "wx" : "w" });
-        return { resolvedAbsolutePath: absolutePath };
+        return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
       },
     },
     workspaceRoot: root,
@@ -451,7 +451,7 @@ describe("setCollectionRecordFields", () => {
           controller.abort();
           return session;
         },
-        writeAuthoredTextFile: vi.fn(),
+        writeAuthoredFile: vi.fn(),
       },
     });
 
@@ -639,7 +639,7 @@ describe("createCollectionRecord", () => {
     const context = contextFor(root, session, engine.overrides);
     const recordId = derivedRecordId("failed-create");
     const failure = new Error("engine write failed");
-    context.capture.writeAuthoredTextFile = async (path, text) => {
+    context.capture.writeAuthoredFile = async (path, text) => {
       await mkdir(join(path, ".."), { recursive: true });
       await writeFile(path, text);
       throw failure;

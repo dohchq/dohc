@@ -1,3 +1,4 @@
+import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
@@ -320,7 +321,7 @@ import {
   WorkspaceActivityState,
 } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
-import { AuthoredTextChangedError, probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
+import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
@@ -398,7 +399,6 @@ import {
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
   writeWorkspaceText,
-  withOrderedWorkspaceTextPath,
 } from "./workspaces/workspaceAssets";
 import {
   createShareViewFiles,
@@ -3619,21 +3619,15 @@ function createCollectionAutomationsFor(
       }),
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
     writeText: async (path, text, expectedContentHash, automationId) => {
-      const capture = activity.engineCaptureFor(workspaceId);
-      // A shared view keeps no History, so it writes the way it always does.
-      if (!capture || findWorkspace(workspaceId)?.shareView !== undefined) {
-        return await writeWorkspaceText(rootPath, path, text, expectedContentHash);
-      }
-      // In the editor's own order for the file, so neither save overwrites the other.
-      return await withOrderedWorkspaceTextPath(rootPath, path, async () => {
-        try {
-          await capture.writeAuthoredTextFile(join(rootPath, path), text,
-            { kind: "automation", automationId, onBehalfOf: "local", depth: 1 }, { expectedContentHash });
-          return { status: "written" as const };
-        } catch (error) {
-          if (error instanceof AuthoredTextChangedError) return { status: "conflict" as const };
-          throw error;
-        }
+      return withPhysicalWorkspaceOperation(workspaceId, async operation => {
+        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+        const capture = activity.engineCaptureFor(workspaceId);
+        if (!capture) throw new Error(captureRefusal("Automations"));
+        const result = await writeWorkspaceFilesAs(operation, [{ path, contentBase64: Buffer.from(text).toString("base64"), expectedSha256: expectedContentHash }],
+          { kind: "automation", automationId, onBehalfOf: "local", depth: 1 }, { capture });
+        if (result.ok) return { status: "written" as const };
+        if (result.currentSha256 !== undefined) return { status: "conflict" as const };
+        throw new Error(result.reason);
       });
     },
     pathExists: (path) => lstat(join(rootPath, path)).then(() => true, () => false),

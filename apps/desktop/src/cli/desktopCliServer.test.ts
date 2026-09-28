@@ -1,4 +1,6 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { parseCliResult, type CliFileWrite } from "@dohc/cli/protocol";
+import { createTestScratch } from "../workspaces/testTemp";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -54,7 +56,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     listVersions: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listVersions"]>(
       async () => ({ versions: [], activeVersionId: "main" })),
     // Writes the file as the capture chain does, refusing one that exists.
-    writeAuthoredTextFile: vi.fn<Capture["writeAuthoredTextFile"]>(async (absolutePath, text, _author, options) => {
+    writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(async (absolutePath, text, _author, options) => {
       await mkdir(dirname(absolutePath), { recursive: true });
       try {
         await writeFile(absolutePath, text, { flag: options?.createOnly ? "wx" : "w" });
@@ -62,7 +64,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         throw new VersionedTextStoreError("target-path-exists", "File already exists");
       }
-      return { resolvedAbsolutePath: absolutePath };
+      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
     }),
   };
   const requestWorkspace = vi.fn(async (_root: string, _id: string, method: string, _input: unknown) =>
@@ -341,7 +343,7 @@ describe("desktop CLI workspace context", () => {
     const opened = vi.fn(async () => session);
     f.dependencies.collectionEditContextFor = async (operation, signal) => {
       operation.assertCurrent(); admitted.push(operation.workspace.attachmentId);
-      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
+      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal };
     };
     const context = await f.create().openCliWorkspace(f.workspace);
@@ -420,10 +422,9 @@ describe("desktop CLI workspace context", () => {
         .resolves.toEqual({ path: "notes/new.md" });
       expect(documentMarkdown(Y.encodeStateAsUpdate(created.get("notes/new.md")!))).toBe("# New\n\nFirst line.");
       expect(edit.mock.calls[0]![0]).toMatchObject({ workspaceId: "workspace", path: "notes/new.md", origin });
-      // An agent that gave no name is not invented one; a named agent is
-      // the file's author in History.
-      const write = vi.mocked(f.capture.writeAuthoredTextFile);
-      expect(write.mock.calls[0]).toEqual([join(root, "notes/new.md"), "", null, { createOnly: true }]);
+      // Unnamed agents still get agent attribution.
+      const write = vi.mocked(f.capture.writeAuthoredFile);
+      expect(write.mock.calls[0]).toEqual([join(root, "notes/new.md"), "", { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" }, { createOnly: true }]);
       await context.documents!.create({ path: "named.md", markdown: "Hi.", origin: { ...origin, actorOriginId: "Codex" } });
       expect(write.mock.calls[1]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "local" });
       // During a run an automation started, the file names the run's depth,
@@ -474,7 +475,7 @@ describe("desktop CLI workspace context", () => {
     const opened = vi.fn();
     f.dependencies.collectionEditContextFor = async (operation, signal): Promise<CollectionRecordEditContext> => {
       entered.release(); await held.promise; operation.assertCurrent();
-      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
+      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal };
     };
     const context = await f.create().openCliWorkspace(f.workspace);
@@ -572,4 +573,64 @@ describe("desktop CLI server callbacks", () => {
     ]);
     expect(debugLog).toHaveBeenCalledWith("[desktop] CLI server: listening");
   });
+});
+
+
+describe("raw fileWrite socket requests", () => {
+  async function setup() {
+    const root = await createTestScratch("dohc-cli-file-write-");
+    const f = fixture(root);
+    await f.create().startDesktopCliServer();
+    const invoke = async (files: CliFileWrite[], actor = "agent", agent?: string) => {
+      const line = await handleCliRequestLine(JSON.stringify({
+        token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+        args: { cwd: root, actor, agent, requestId: "raw", files },
+      }), "a".repeat(64), f.options());
+      const transport = cliTransportResponseSchema.parse(JSON.parse(line));
+      return transport.ok ? parseCliResult("fileWrite", transport.result) : { ok: false, reason: transport.error };
+    };
+    return { ...f, invoke };
+  }
+  it("refuses a human actor and a shared view before capture", async () => {
+    const f = await setup();
+    const files = [{ path: "plain.txt", contentBase64: "bmV3" }];
+    expect(await f.invoke(files, "human")).toMatchObject({ ok: false, reason: expect.stringContaining('actor "agent"') });
+    f.options().listWorkspaces = () => [{ ...f.workspace, readOnly: true }];
+    expect(await f.invoke(files)).toMatchObject({ ok: false, reason: expect.stringContaining("read-only") });
+    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+  it.each(["../escape.txt", ".env", "plain.md", "plain.markdown", "scene.excalidraw"])("refuses %s without MCP checks", async path => {
+    const f = await setup();
+    expect(await f.invoke([{ path, contentBase64: "bmV3" }])).toMatchObject({ ok: false });
+    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+  it.each([undefined, "Client name"])("records the %s handshake name at the run depth", async agent => {
+    const f = await setup();
+    vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
+    expect(await f.invoke([{ path: "plain.txt", contentBase64: "bmV3" }], "agent", agent)).toEqual({ ok: true, written: ["plain.txt"] });
+    expect(f.capture.writeAuthoredFile.mock.calls[0]?.[2]).toEqual({ kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "local", depth: 4 });
+  });
+  it("enforces byte limits and base64 validation without MCP", async () => {
+    const f = await setup();
+    expect(await f.invoke([{ path: "large.txt", contentBase64: Buffer.alloc(10 * 1024 * 1024, 97).toString("base64") }])).toMatchObject({ ok: true });
+    f.capture.writeAuthoredFile.mockClear();
+    expect(await f.invoke([{ path: "large.txt", contentBase64: Buffer.alloc(10 * 1024 * 1024 + 1).toString("base64") }])).toMatchObject({ ok: false, reason: expect.stringContaining("10 MiB") });
+    expect(await f.invoke([{ path: "large.txt", contentBase64: "!!!" }])).toMatchObject({ ok: false, reason: expect.stringContaining("base64") });
+    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+  it("refuses excluded paths and aliases through raw requests", async () => {
+    const f = await setup();
+    await mkdir(join(f.workspace.rootPath, ".dohc"), { recursive: true });
+    await writeFile(join(f.workspace.rootPath, ".dohc/files.toml"), '[[rule]]\npath = "hidden.txt"\ntracked = false\n');
+    for (const name of ["hidden.txt", ".env", "notes.md", "scene.excalidraw"]) {
+      await writeFile(join(f.workspace.rootPath, name), "original");
+      const alias = name.replaceAll(".", "_") + ".txt";
+      await symlink(join(f.workspace.rootPath, name), join(f.workspace.rootPath, alias));
+      expect(await f.invoke([{ path: alias, contentBase64: "bmV3" }])).toMatchObject({ ok: false });
+      expect(await readFile(join(f.workspace.rootPath, name), "utf8")).toBe("original");
+    }
+    expect(await f.invoke([{ path: "hidden.txt", contentBase64: "bmV3" }])).toMatchObject({ ok: false });
+    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+
 });

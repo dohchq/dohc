@@ -397,7 +397,8 @@ async function world(options: {
       };
       return session as unknown as WorkspaceEngineYDocProviderSession;
     },
-    async writeAuthoredTextFile(absolutePath, text, author, writeOptions) {
+    async writeAuthoredFile(absolutePath, content, author, writeOptions) {
+      const text = typeof content === "string" ? content : Buffer.from(content).toString("utf8");
       if (failures.authoredWrite > 0) {
         failures.authoredWrite -= 1;
         throw new Error("dohc could not write the record file.");
@@ -412,7 +413,7 @@ async function world(options: {
       await writeFile(absolutePath, text.replace(requested, id), { flag: writeOptions?.createOnly ? "wx" : "w" });
       records.set(id, { id, path, collection: dirname(path).replaceAll("\\", "/"), doc: new Y.Doc() });
       queueMicrotask(() => { for (const listener of settleListeners) listener([path]); });
-      return { resolvedAbsolutePath: absolutePath };
+      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
     },
   };
 

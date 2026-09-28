@@ -336,29 +336,29 @@ describe("workspace engine IPC registrations", () => {
     expect(h.notify).not.toHaveBeenCalled();
   });
 
-  it("maps engine authors using the current local display name", async () => {
+  it("uses Settings only for dohc runs and handshake names for other agents", async () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue({
-      moments: ["local", "Pat"].map((onBehalfOf, index) => ({
+      moments: [{ agentId: "agent", agentRunId: "run-1" }, { agentId: "Pat" }, { agentId: "dohc-mcp" }].map((identity, index) => ({
         id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
-        author: { kind: "agent", agentId: "agent", onBehalfOf },
+        author: { kind: "agent", onBehalfOf: "local", ...identity },
       })),
       nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
     });
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
-      moments: [{ agentAuthorName: "You" }, { agentAuthorName: "Pat" }],
+      moments: [{ agentAuthorName: "You" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
     });
     h.displayName.mockReturnValue("ice@example.com");
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
-      moments: [{ agentAuthorName: "ice@example.com" }, { agentAuthorName: "Pat" }],
+      moments: [{ agentAuthorName: "ice@example.com" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
     });
     h.capture.readMoment.mockResolvedValue({
       protected: false,
       moment: {
         id: "detail", workspaceId: "workspace", versionId: "main", objectId: "object",
         path: "notes/a.md", recordedAtMs: 1, operation: "write", metadata: { origin: "local-file" },
-        author: { kind: "agent", agentId: "agent", onBehalfOf: "local" },
+        author: { kind: "agent", agentId: "agent", onBehalfOf: "local", agentRunId: "run-1" },
         payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
       },
     });

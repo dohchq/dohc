@@ -507,6 +507,15 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
+  it("refuses a fileWrite envelope larger than 14 MiB before opening the workspace", async () => {
+    if (!server) throw new Error("This test requires the CLI socket.");
+    const opened = calls.openWorkspace;
+    const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+      args: { cwd: workspaceRoot, actor: "agent", requestId: "oversized", files: [{ path: "large.txt", contentBase64: "A".repeat(14 * 1024 * 1024) }] } });
+    expect(response).toMatchObject({ ok: false, error: "dohc: CLI request exceeds 14 MiB. Split the files into smaller batches." });
+    expect(calls.openWorkspace).toBe(opened);
+  });
+
   it("routes app publication through the authenticated owning workspace without renderer access", async () => {
     let accepted: unknown;
     context.appPublication = async request => { accepted = request; return { kind: "cancelled" }; };
@@ -1474,7 +1483,7 @@ describe("CLI socket server", () => {
       replacement: "Appended.",
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
     // An agent that names itself is recorded under that name, and one that
-    // does not stays an agent with no name.
+    // does not uses the unnamed agent label.
     const agent = { actorKind: "agent", onBehalfOf: "local", depth: 0 };
     expect(edits).toEqual([
       {
@@ -1485,7 +1494,7 @@ describe("CLI socket server", () => {
       {
         path: "notes/plan.md",
         edit: { find: undefined, replacement: "Appended." },
-        origin: { attribution: agent },
+        origin: { actorOriginId: "dohc-mcp", attribution: agent },
       },
     ]);
   });
@@ -1562,7 +1571,7 @@ describe("CLI socket server", () => {
     expect(authors).toEqual([
       woken,
       woken,
-      { attribution },
+      { actorOriginId: "dohc-mcp", attribution },
       { actorOriginId: "claude-code", attribution },
       woken,
       { kind: "local", label: "Sam" },

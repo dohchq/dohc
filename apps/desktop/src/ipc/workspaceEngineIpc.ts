@@ -144,14 +144,10 @@ export function createWorkspaceEngineIpc<
     // Engine history + linked Chats (PR 0M-5). Workspaces read their
     // timeline from engine moments; every handler resolves the workspace via
     // requireWorkspace and rejects when the engine capture is not attached.
-    // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,
-    // unit-tested); main only injects how authors read below. An agent takes
-    // the display-name rule the chat rail uses: AgentIntegration stamps
-    // onBehalfOf "local" for local runs, which use the configured agent name,
-    // and other labels display as stored. An automation reads as main names it.
+    // Runs dohc started use the Settings name. Other agents use their handshake label.
     function authorNames(workspaceId: string): EngineMomentAuthorNames {
       return {
-        agent: (author) => author.onBehalfOf === "local" ? localAgentDisplayName() : author.onBehalfOf,
+        agent: (author) => author.agentRunId && author.onBehalfOf === "local" ? localAgentDisplayName() : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
         named: (author) => namedAuthorLabel(workspaceId, author),
       };

@@ -9,8 +9,8 @@ const automation = { kind: "automation", automationId: "automation", depth: 4 } 
 
 for (const author of [agent, automation]) {
   // @ts-expect-error Captured writes require the author principal.
-  capture.writeAuthoredTextFile("C:/workspace/note.md", "text", author);
-  capture.writeAuthoredTextFile("C:/workspace/note.md", "text", { ...author, onBehalfOf: "local" });
+  capture.writeAuthoredFile("C:/workspace/note.md", "text", author);
+  capture.writeAuthoredFile("C:/workspace/note.md", "text", { ...author, onBehalfOf: "local" });
 }
 
 // @ts-expect-error The ambient capture author also requires a principal.

@@ -2771,10 +2771,25 @@ describe("workspaceEngineCapture agent attribution", () => {
     const engine = liveCapture(root, loopback, { requests });
     const text = "a".repeat(128 * 1024 - 1) + "€";
     const author = { kind: "agent", agentId: "agent", onBehalfOf: "local" } as const;
-    await engine.writeAuthoredTextFile(join(root, "large.txt"), text, author, { createOnly: true, requestId: "stable" });
+    await engine.writeAuthoredFile(join(root, "large.txt"), Buffer.from(text), author, { createOnly: true, requestId: "stable" });
     expect(await readFile(join(root, "large.txt"), "utf8")).toBe(text);
     expect(requests.find(request => request.method === VERSIONED_METHOD.textWriteBlob)?.idempotencyKey).toBe("stable");
-    await engine.writeAuthoredTextFile(join(root, "large.txt"), text, author, { createOnly: true, requestId: "stable" });
+    await engine.writeAuthoredFile(join(root, "large.txt"), text, author, { createOnly: true, requestId: "stable" });
+    expect(await liveMomentAuthors(engine)).toEqual([author]);
+    await engine.stop();
+  });
+
+  it("sends binary content with its author, precondition, and batch correlation", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const requests: Request[] = [];
+    const engine = liveCapture(root, new VersionedLoopbackEngine(), { requests });
+    const author = { kind: "agent", agentId: "Client", onBehalfOf: "local", depth: 2 } as const;
+    const outcome = await engine.writeAuthoredFile(join(root, "bytes.bin"), new Uint8Array([0, 255, 1]), author,
+      { createOnly: true, requestId: "binary", correlationId: "batch" });
+    expect(outcome.materializeOutcome).toBe("applied");
+    const request = requests.find(request => request.method === VERSIONED_METHOD.binaryWrite);
+    expect(request).toMatchObject({ params: { bytes: [0, 255, 1], author, createOnly: true, requestId: "binary", correlationId: "batch" } });
+    expect(requests.findIndex(request => request.method === "capture.flush")).toBeLessThan(requests.indexOf(request!));
     expect(await liveMomentAuthors(engine)).toEqual([author]);
     await engine.stop();
   });
@@ -2786,7 +2801,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     await engine.setActiveAgentRun(run);
     const author = { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn-123" } as const;
 
-    await engine.writeAuthoredTextFile(join(root, "output.txt"), "Written by an agent\n", author);
+    await engine.writeAuthoredFile(join(root, "output.txt"), "Written by an agent\n", author);
 
     expect(await readFile(join(root, "output.txt"), "utf8")).toBe("Written by an agent\n");
     expect(await liveMomentAuthors(engine)).toEqual([author]);
@@ -2802,11 +2817,11 @@ describe("workspaceEngineCapture agent attribution", () => {
     // The loopback engine models agent authors; the daemon takes an automation's the same way.
     const author = { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" } as const;
 
-    await expect(engine.writeAuthoredTextFile(target, "changed\n", author, { expectedContentHash: hash("something else\n") }))
+    await expect(engine.writeAuthoredFile(target, "changed\n", author, { expectedContentHash: hash("something else\n") }))
       .rejects.toBeInstanceOf(AuthoredTextChangedError);
     expect(await readFile(target, "utf8")).toBe("version: 1\n");
 
-    await engine.writeAuthoredTextFile(target, "version: 1\nautomations: []\n", author, { expectedContentHash: hash("version: 1\n") });
+    await engine.writeAuthoredFile(target, "version: 1\nautomations: []\n", author, { expectedContentHash: hash("version: 1\n") });
     expect(await readFile(target, "utf8")).toBe("version: 1\nautomations: []\n");
     expect(await liveMomentAuthors(engine)).toContainEqual(author);
     await engine.stop();
@@ -2823,7 +2838,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     );
     const engine = liveCapture(root, new VersionedLoopbackEngine());
 
-    const result = await engine.writeAuthoredTextFile(
+    const result = await engine.writeAuthoredFile(
       join(root, "alias", "output.txt"),
       "canonical\n",
       { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" },
@@ -2851,8 +2866,8 @@ describe("workspaceEngineCapture agent attribution", () => {
     };
 
     const attempts = await Promise.allSettled([
-      engine.writeAuthoredTextFile(target, "first", author, { createOnly: true }),
-      engine.writeAuthoredTextFile(target, "second", author, { createOnly: true }),
+      engine.writeAuthoredFile(target, "first", author, { createOnly: true }),
+      engine.writeAuthoredFile(target, "second", author, { createOnly: true }),
     ]);
 
     expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
@@ -2885,7 +2900,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     });
     const engine = liveCapture(root, loopback, { requests });
     try {
-      const outcome = await engine.writeAuthoredTextFile(
+      const outcome = await engine.writeAuthoredFile(
         targetPath,
         "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n",
         { kind: "agent", agentId: "plugin:records", onBehalfOf: "local", agentRunId: "create" },
@@ -2924,7 +2939,7 @@ describe("workspaceEngineCapture agent attribution", () => {
       },
     });
     const engine = liveCapture(root, loopback);
-    const blocker = engine.writeAuthoredTextFile(
+    const blocker = engine.writeAuthoredFile(
       join(root, "queue-blocker.txt"),
       "block\n",
       { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" },
@@ -2932,7 +2947,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     await entered.promise;
 
     const controller = new AbortController();
-    const pending = engine.writeAuthoredTextFile(
+    const pending = engine.writeAuthoredFile(
       join(root, "cancelled.txt"),
       "must not land\n",
       { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" },
@@ -2958,19 +2973,19 @@ describe("workspaceEngineCapture agent attribution", () => {
     };
 
     await expect(
-      engine.writeAuthoredTextFile(
+      engine.writeAuthoredFile(
         join(root, "at-limit.txt"),
         "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES),
         author,
       ),
-    ).resolves.toEqual({ resolvedAbsolutePath: join(root, "at-limit.txt") });
+    ).resolves.toMatchObject({ resolvedAbsolutePath: join(root, "at-limit.txt"), materializeOutcome: "applied" });
     await expect(
-      engine.writeAuthoredTextFile(
+      engine.writeAuthoredFile(
         join(root, "over-limit.txt"),
         "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1),
         author,
       ),
-    ).resolves.toEqual({ resolvedAbsolutePath: join(root, "over-limit.txt") });
+    ).resolves.toMatchObject({ resolvedAbsolutePath: join(root, "over-limit.txt"), materializeOutcome: "applied" });
     await engine.stop();
   });
 

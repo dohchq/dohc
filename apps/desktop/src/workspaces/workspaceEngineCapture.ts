@@ -443,20 +443,19 @@ export interface WorkspaceEngineCapture {
   // Registers engine-originated disk writes the watcher is about to observe;
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
-  // Writes one text file with an explicit per-operation author, or none when
-  // the writer did not name itself. This never reads or changes the
+  // Writes text or bytes with an explicit per-operation author. This never changes the
   // workspace's ambient agent slot. Returns the resolved path where the
   // write landed. With `expectedContentHash`, it first settles every change
   // the daemon has seen, so none lands over this write, then writes only
   // while the file on disk still hashes to it, and otherwise throws
   // AuthoredTextChangedError. A caller that replaces a file the editor can
   // save holds that file's editor ordering around this call.
-  writeAuthoredTextFile(
+  writeAuthoredFile(
     absolutePath: string,
-    text: string,
-    author: MomentWriteAuthor | null,
-    options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string; requestId?: string },
-  ): Promise<{ resolvedAbsolutePath: string }>;
+    content: string | Uint8Array,
+    author: MomentWriteAuthor,
+    options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string; requestId?: string; correlationId?: string; beforeWrite?: (resolvedAbsolutePath: string) => Promise<void> },
+  ): Promise<{ resolvedAbsolutePath: string; materializeOutcome: string | undefined }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
   // editor edits as ydoc.update ops and, on each debounced settle, projects the
@@ -1024,7 +1023,7 @@ export class RestoreFolderInUseError extends Error {
   }
 }
 
-function requirePublishedWrite(path: string, result: { materializeOutcome?: string }): void {
+export function requirePublishedWrite(path: string, result: { materializeOutcome?: string }): void {
   if (result.materializeOutcome === "conflict" || result.materializeOutcome === "superseded") {
     throw new AuthoredTextChangedError(path);
   }
@@ -3443,8 +3442,8 @@ export function createWorkspaceEngineCapture(
 
     registerExpectedEngineEvents,
 
-    writeAuthoredTextFile(absolutePath, text, author, writeOptions = {}) {
-      return enqueueResult("write authored text", async () => {
+    writeAuthoredFile(absolutePath, content, author, writeOptions = {}) {
+      return enqueueResult("write authored file", async () => {
         if (writeOptions.signal?.aborted) {
           throw new Error("The write was cancelled.");
         }
@@ -3457,6 +3456,7 @@ export function createWorkspaceEngineCapture(
             access: "write",
           });
         const path = resolvedRelative.replaceAll("\\", "/");
+        await writeOptions.beforeWrite?.(resolvedAbsolute);
         if (
           path.length === 0 ||
           isAbsolute(path) ||
@@ -3476,22 +3476,29 @@ export function createWorkspaceEngineCapture(
         const metadata: ActorNeutralWriteMetadata = {
           origin: "api",
           summary: `Updated ${pathBasename(path)}`,
-          correlationId: `authored-write-${writeOptions.requestId ?? createId()}`,
+          correlationId: writeOptions.correlationId ?? `authored-write-${writeOptions.requestId ?? createId()}`,
         };
         try {
-          const result = await engine.writeTextFile({
+          let text: string | undefined;
+          if (typeof content === "string") text = content;
+          else if (!content.includes(0)) {
+            try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content); }
+            catch { /* Invalid UTF-8 is stored as bytes. */ }
+          }
+          const input = {
             workspaceId,
             versionId,
             path,
-            text,
-            publish: true,
             ...(writeOptions.requestId !== undefined ? { requestId: writeOptions.requestId } : {}),
             ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
             ...(author ? { author } : {}),
-          });
-          requirePublishedWrite(path, result);
+          };
+          const result = text === undefined
+            ? await engine.writeBinaryFile({ ...input, bytes: content as Uint8Array })
+            : await engine.writeTextFile({ ...input, text, publish: true });
+          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome };
         } catch (error) {
           if (error instanceof VersionedTextStoreError && error.code === "write-precondition-failed") {
             throw new AuthoredTextChangedError(path);
@@ -3501,7 +3508,6 @@ export function createWorkspaceEngineCapture(
           }
           throw error;
         }
-        return { resolvedAbsolutePath: resolvedAbsolute };
       });
     },
 

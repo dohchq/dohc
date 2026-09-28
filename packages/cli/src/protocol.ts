@@ -117,7 +117,7 @@ const groupsFullArgsSchema = z.object(argsBase).strict();
 
 const documentPathArg = z.string().min(1).max(4096);
 // Each side of an edit is at most 256 KiB as UTF-8. The socket still refuses a
-// request line over 1 MiB, which JSON escaping of both sides can reach.
+// request line over 14 MiB, which JSON escaping of both sides can reach.
 const MAX_DOCUMENT_EDIT_BYTES = 256 * 1024;
 function fitsUtf8Bytes(value: string, limit: number): boolean {
   if (value.length > limit) return false;
@@ -140,6 +140,22 @@ const documentReadArgsSchema = z
 // after a timeout for example, the request returns its first result while
 // dohc runs instead of doing its work twice.
 export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
+
+export const MAX_FILE_WRITE_BYTES = 10 * 1024 * 1024;
+export const MAX_CLI_REQUEST_BYTES = 14 * 1024 * 1024;
+export const fileWriteFileSchema = z.object({
+  path: documentPathArg,
+  contentBase64: z.string(),
+  expectedSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  createOnly: z.boolean().optional(),
+}).strict();
+export type CliFileWrite = z.infer<typeof fileWriteFileSchema>;
+const fileWriteArgsSchema = z.object({
+  ...argsBase,
+  files: z.array(fileWriteFileSchema).min(1),
+  agent: documentAgentNameSchema.optional(),
+  requestId: requestIdSchema,
+}).strict();
 
 const documentEditArgsSchema = z
   .object({
@@ -356,6 +372,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     verb: z.literal("collectionCreateRecord"),
     args: collectionCreateRecordArgsSchema,
   }).strict(),
+  z.object({ ...requestBase, verb: z.literal("fileWrite"), args: fileWriteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
@@ -988,7 +1005,16 @@ const automationRetryResultSchema = z.union([
     .strict(),
 ]);
 
+const fileWriteResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), written: z.array(z.string()) }).strict(),
+  z.object({
+    ok: z.literal(false), reason: z.string(), written: z.array(z.string()).optional(),
+    path: z.string().optional(), currentSha256: z.string().nullable().optional(),
+  }).strict(),
+]);
+
 export const cliResultSchemas = {
+  fileWrite: fileWriteResultSchema,
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,

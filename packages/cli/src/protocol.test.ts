@@ -316,3 +316,14 @@ it("preserves a group's purpose and each thread's lane", () => {
   }));
   expect(parseCliResult("threads", { group, threads })).toEqual({ group, threads });
 });
+
+
+it("validates file write authors and preserves partial batch results", () => {
+  const input = { token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+    args: { cwd: "/workspace", actor: "agent", agent: "Client", requestId: "batch", files: [{ path: "file.txt", contentBase64: "eA==", createOnly: true }] } };
+  expect(cliRequestSchema.safeParse(input).success).toBe(true);
+  expect(cliRequestSchema.safeParse({ ...input, args: { ...input.args, agent: "automation/spoof" } }).success).toBe(false);
+  expect(cliRequestSchema.safeParse({ ...input, args: { ...input.args, files: [] } }).success).toBe(false);
+  const failed = { ok: false, written: ["1.txt", "2.txt"], path: "3.txt", reason: "Changed. Read again.", currentSha256: "a".repeat(64) };
+  expect(parseCliResult("fileWrite", failed)).toEqual(failed);
+});

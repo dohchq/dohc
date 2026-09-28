@@ -1,3 +1,4 @@
+import { requirePublishedWrite } from "./workspaceEngineCapture";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { randomBytes } from "node:crypto";
 import { recordIdFromBytes } from "@dohc/automation-executor/record-ids";
@@ -63,7 +64,7 @@ export interface CollectionRecordEditAdapter {
 
 /** Workspace-scoped authority the caller (main) supplies. The CLI/MCP caller never sees it. */
 export interface CollectionRecordEditContext {
-  capture: Pick<WorkspaceEngineCapture, "openYDocSession" | "writeAuthoredTextFile">;
+  capture: Pick<WorkspaceEngineCapture, "openYDocSession" | "writeAuthoredFile">;
   workspaceRoot: string;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withAdapter<T>(
@@ -461,12 +462,12 @@ async function createRecordFile(
   const text = `---\n${RECORD_ID_FRONTMATTER_KEY}: ${recordId}\n---\n`;
   try {
     if (author.kind === "automation") {
-      await context.capture.writeAuthoredTextFile(
+      requirePublishedWrite(requestedPath, await context.capture.writeAuthoredFile(
         join(context.workspaceRoot, requestedPath),
         text,
         author,
         { createOnly: true, signal: context.signal },
-      );
+      ));
       return requestedPath;
     }
     return await withStaleSensitiveWorkspaceOperation(

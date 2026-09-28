@@ -1,6 +1,8 @@
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   CLI_PROTOCOL_VERSION,
+  MAX_CLI_REQUEST_BYTES,
+  type CliFileWrite,
   cliRequestSchema,
   cliTransportResponseSchema,
   parseCliResult,
@@ -97,7 +99,7 @@ export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
 export const CLI_ENDPOINT_FILE = "dohc-cli-endpoint";
 
-const MAX_REQUEST_BYTES = 1024 * 1024;
+const MAX_REQUEST_BYTES = MAX_CLI_REQUEST_BYTES;
 const MAX_FTS_CANDIDATES = 50_000;
 const LIST_MOMENTS_HARD_LIMIT = 500;
 const MAX_SOCKET_CONNECTIONS = 64;
@@ -243,6 +245,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
+  writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
   automations?: CliAutomationsPort;
 }
 
@@ -572,7 +575,7 @@ function collectionWriteAuthor(
 
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
-// local owner, recorded under the name the agent gave itself or under none,
+// local owner, recorded under its handshake name or the unnamed agent label,
 // at the depth of the agent run in progress. Any process holding the socket
 // token could otherwise claim the person's typing.
 function documentEditOrigin(
@@ -581,7 +584,7 @@ function documentEditOrigin(
   options: CliServerOptions,
 ): LiveDocumentEditOrigin {
   return {
-    ...(agent === undefined ? {} : { actorOriginId: agent }),
+    actorOriginId: agent ?? "dohc-mcp",
     attribution: {
       actorKind: "agent",
       onBehalfOf: "local",
@@ -2312,6 +2315,16 @@ async function dispatch(
       }
     }
 
+    case "fileWrite": {
+      if (request.args.actor !== "agent") return { ok: false, written: [], reason: `A file write through the CLI socket is recorded as an agent's; send actor "agent".` };
+      if (!context.writeFiles) return { ok: false, written: [], reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
+      try {
+        const result = await context.writeFiles(request.args.files, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
+        if (result.written?.length) await notifyWrite(options, context);
+        return result;
+      } catch (error) { return mcpFailure(error, "dohc could not write the files. Retry the write."); }
+    }
+
     case "documentRead": {
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
@@ -2893,7 +2906,7 @@ async function workspaceContextForRequest(
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
   const documentWriteRequest =
-    request.verb === "documentEdit" || request.verb === "documentCreate";
+    request.verb === "documentEdit" || request.verb === "documentCreate" || request.verb === "fileWrite";
   const writeRequest =
     collectionWriteRequest ||
     documentWriteRequest ||
@@ -3002,7 +3015,7 @@ function attachSocketHandler(
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: false,
-      error: "dohc: invalid CLI request",
+      error: "dohc: CLI request exceeds 14 MiB. Split the files into smaller batches.",
     });
     socket.end(`${JSON.stringify(response)}\n`);
   };
