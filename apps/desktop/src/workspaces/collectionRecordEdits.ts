@@ -134,7 +134,7 @@ export interface CreateCollectionRecordInput {
   /**
    * The id of the record to create, from derivedRecordId, for a caller with
    * a stable step identity. When a record with this id is already in the
-   * Collection, the create returns it (and sets its fields) instead of
+   * Collection, the create returns it (and seeds unchanged fields) instead of
    * adding another. Omitted, the record gets a new random id.
    */
   recordId?: string;
@@ -371,7 +371,7 @@ export async function setCollectionRecordFields(
  * unless that file carries this create's record id: then it is an earlier
  * attempt's file, and the create continues with it. With `recordId`, a
  * record in this Collection that already has the id is the one returned,
- * even under another name, and its fields are set to `fields`.
+ * even under another name. Seeding preserves fields changed since creation.
  */
 export async function createCollectionRecord(
   context: CollectionRecordEditContext,
@@ -423,8 +423,12 @@ export async function createCollectionRecord(
         recordPath: path,
         fields: Object.fromEntries(entries),
         author: input.author,
-        idempotencyKeyPrefix: input.idempotencyKeyPrefix,
-        expectedBefore: input.expectedBefore,
+        // The file persists the retry identity. Its seed fields start absent,
+        // so retries need no process-local state to preserve later edits.
+        idempotencyKeyPrefix: input.idempotencyKeyPrefix ?? `create-record/${recordId}`,
+        expectedBefore: Object.fromEntries(entries.map(([field]) => [field,
+          input.expectedBefore && Object.hasOwn(input.expectedBefore, field) ? input.expectedBefore[field] : null,
+        ])),
         settleUnchanged: true,
         onStage: stage => { failedStage = stage; },
       });
@@ -644,7 +648,7 @@ function waitForRecord(
     const expire = (): void => {
       finish({
         error: new Error(
-          `The record file was created at ${path}, but the engine did not adopt it as a collection record in time. Look for it in the Collection before you create it again.`,
+          `dohc created ${path}, but the engine did not add it to the Collection in time.`,
           lastError === undefined ? undefined : { cause: lastError },
         ),
       });

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
@@ -134,9 +135,17 @@ export function useShellError(workspaceId: string) {
       kind?: ShellErrorKind,
     ) => {
       const { cause } = readError(error);
+      const partial = error instanceof CreationPartialError ? error.partial : undefined;
+      const details: ReadonlyArray<ErrorDetailField> = partial ? [
+        ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
+        ["Stage", partial.failedStage],
+        ["Record ID", partial.retry.recordId],
+        ["Reason", partial.reason, partial.reason.length],
+        ["Next", partial.retry.instruction, partial.retry.instruction.length],
+      ] : cause ? [["Cause", cause]] : [];
       push({
-        message: withErrorWords(fallback, error),
-        ...(cause ? { details: [["Cause", cause]] } : {}),
+        message: partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
+        ...(details.length ? { details } : {}),
         retry,
         ...(kind ? { kind } : {}),
       });

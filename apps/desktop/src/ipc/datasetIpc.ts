@@ -19,6 +19,12 @@ type Workspace = { workspaceId: string; shareView?: unknown };
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; scope?: string; assertCurrent(): void };
 
+class DatasetScopeError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
 /** The desktop and owner CLI enter the same workspace authority before using data. */
 export function createDatasetHandler<Caller, W extends Workspace, O extends Operation<W>>(dependencies: {
   withWorkspaceOperation<T>(caller: Caller, workspaceId: string, work: (operation: O) => Promise<T>): Promise<T>;
@@ -51,7 +57,10 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
     let formPartial: CreationPartial | undefined;
     try {
       return await dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
-      const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
+      const current = () => {
+        try { operation.signal.throwIfAborted(); operation.assertCurrent(); }
+        catch (error) { throw new DatasetScopeError(error); }
+      };
       current();
       if (input.action === "export") {
         if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
@@ -253,13 +262,13 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
           if (created.length === 0) throw error;
           const remove = rulesChanged || error instanceof SourceCreationConflict || error instanceof CreatedFileWriteError;
           return formPartial = {
-            kind: "partial", created, failedStage,
+            kind: "partial", created, failedStage: error instanceof DatasetScopeError ? "scope" : failedStage,
             reason: error instanceof Error ? error.message : String(error),
             retry: {
               mode: remove ? "remove-and-retry" : "resume",
               instruction: remove
                 ? "Review the listed files in Files, then remove them. Reload the Collection and create the form in an empty folder."
-                : "Try again with the same form settings and folder. Matching files are kept; only missing files are created.",
+                : "Try again with the same form settings and folder. dohc keeps matching files and creates only missing files.",
             },
           };
         };
@@ -269,14 +278,11 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
             created = [...paths];
           });
           created = Object.keys(files);
-          failedStage = "scope";
           current();
           failedStage = "revision";
           const latest = await data.approvedArtifacts(input.datasetId);
-          failedStage = "scope";
           current();
           if (!latest.active || latest.revision.revisionSha256 !== input.revisionSha256) {
-            failedStage = "revision";
             rulesChanged = true;
             throw new Error("Collection rules changed.");
           }
@@ -357,7 +363,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       });
     } catch (error) {
       if (formPartial) return formPartial;
-      if (formFailure) return formFailure(error);
+      if (formFailure) return formFailure(new DatasetScopeError(error));
       throw error;
     }
   };

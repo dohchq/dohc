@@ -185,6 +185,14 @@ it("refuses stale form configuration before writing and guards a late source wri
   await expect(f.handler("window", f.createForm)).resolves.toMatchObject({ kind: "partial", failedStage: "scope", retry: { mode: "resume" } });
 });
 
+it("reports scope when the workspace changes during the final form rules check", async () => {
+  const f = fixture();
+  const approved = f.host.approvedArtifacts();
+  f.host.approvedArtifacts.mockReturnValueOnce(approved).mockImplementationOnce(() => { f.stale(); return approved; });
+  await expect(f.handler("window", f.createForm)).resolves.toMatchObject({ kind: "partial", failedStage: "scope",
+    reason: "stale workspace", retry: { mode: "resume" } });
+});
+
 it("keeps recovery owner-only and rejects mismatched approval scope",async()=>{
  const f=fixture();
  const prepared=await f.handler("window",{workspaceId:"workspace",action:"prepareRecovery",sourcePath:"C:/private/backup.dohc-recovery"});

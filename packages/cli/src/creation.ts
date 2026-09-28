@@ -18,9 +18,9 @@ export type CreationPartial = z.infer<typeof CreationPartial>;
 const stageWords: Record<CreationStage, string> = {
   scope: "confirm creation in the original workspace",
   register: "open the workspace engine",
-  write: "save the remaining files", capture: "capture the files", index: "add the record to the Collection",
+  write: "finish saving", capture: "capture the files", index: "add the record to the Collection",
   bind: "open the record for editing", fields: "set the record fields", settle: "save the record fields",
-  close: "close the record session", verify: "verify the saved files", revision: "confirm the Collection rules",
+  close: "finish editing the record", verify: "verify the saved files", revision: "confirm the Collection rules",
 };
 export function creationPartialMessage(result: CreationPartial): string {
   return [
@@ -30,6 +30,18 @@ export function creationPartialMessage(result: CreationPartial): string {
     result.reason,
     result.retry.instruction,
   ].filter(Boolean).join("\n");
+}
+
+/** The retry or copy control beside this sentence supplies the next action. */
+export function creationPartialNotice(result: CreationPartial): string {
+  if (result.retry.mode === "remove-and-retry") {
+    return result.retry.recordId
+      ? "dohc created the record file; copy the details to review it in Files."
+      : "dohc created form files; copy the details to review them in Files.";
+  }
+  return result.retry.recordId
+    ? "dohc created the record file but could not finish the record."
+    : "dohc created form files but could not finish the form.";
 }
 
 export class CreationPartialError extends Error {

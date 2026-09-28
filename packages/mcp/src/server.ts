@@ -90,7 +90,7 @@ function text(structuredContent: Record<string, unknown>) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
     structuredContent,
-    ...(structuredContent.ok === false ? { isError: true } : {}),
+    ...(structuredContent.ok === false || structuredContent.kind === "partial" ? { isError: true } : {}),
   };
 }
 

@@ -687,6 +687,7 @@ describe("createCollectionRecord", () => {
       {
         actorOriginId: "notes-agent",
         attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+        idempotencyKey: `create-record/${recordId}/status`,
       },
     ]);
     expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
@@ -981,6 +982,52 @@ describe("createCollectionRecord", () => {
 });
 
 describe("partial record retry", () => {
+  it("preserves a person's later edit after seeding lands but settlement fails", async () => {
+    const root = await createTestScratch("dohc-record-later-edit-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const input = { collectionPath: "tasks", name: "retry", fields: { status: "open" }, author: AGENT };
+    vi.spyOn(session, "settleNow").mockRejectedValueOnce(new Error("settle refused"));
+    const first = createCollectionRecord(context, input);
+    await engine.listening();
+    const recordId = await engine.adopt(root, "tasks/retry.md");
+    engine.announce(["tasks/retry.md"]);
+    const partial = await first;
+    expect(partial).toMatchObject({ kind: "partial", failedStage: "settle", retry: { recordId } });
+    if (!("kind" in partial)) throw Error("expected partial");
+    expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+
+    // A fresh session models a retry after the original caller has gone away.
+    const resumed = fakeSession();
+    Y.applyUpdate(resumed.log.doc, Y.encodeStateAsUpdate(log.doc));
+    resumed.log.doc.getMap("frontmatter").set("status", "done");
+    await expect(createCollectionRecord(contextFor(root, resumed.session, engine.overrides), {
+      ...input, recordId: partial.retry.recordId,
+    })).resolves.toEqual({ path: "tasks/retry.md", recordId });
+    expect(resumed.log.doc.getMap("frontmatter").get("status")).toBe("done");
+    expect(resumed.log.journaled).toEqual([]);
+    expect(log.journaled[0]?.idempotencyKey).toBe(`create-record/${recordId}/status`);
+    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+  });
+
+  it("seeds only fields still absent when retrying after binding fails", async () => {
+    const root = await createTestScratch("dohc-record-missing-fields-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const input = { collectionPath: "tasks", name: "retry", fields: { status: "open", priority: "high" }, author: AGENT };
+    vi.spyOn(context.capture, "openYDocSession").mockRejectedValueOnce(new Error("bind refused"));
+    const first = createCollectionRecord(context, input);
+    await engine.listening();
+    const recordId = await engine.adopt(root, "tasks/retry.md");
+    engine.announce(["tasks/retry.md"]);
+    expect(await first).toMatchObject({ kind: "partial", failedStage: "bind" });
+    log.doc.getMap("frontmatter").set("status", "done");
+    await expect(createCollectionRecord(context, { ...input, recordId })).resolves.toEqual({ path: "tasks/retry.md", recordId });
+    expect(log.doc.getMap("frontmatter").toJSON()).toEqual({ status: "done", priority: "high" });
+    expect(log.journaled.map(entry => entry.idempotencyKey)).toEqual([`create-record/${recordId}/priority`]);
+  });
 
   it("keeps a reassigned automation identity when capture cannot finish", async () => {
     const root = await createTestScratch("dohc-record-automation-retry-");
