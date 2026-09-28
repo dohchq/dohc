@@ -12,6 +12,8 @@ const MAX_ID_LENGTH = 64;
 export const MAX_NAME_LENGTH = 120;
 // Steps in one automation, counting each If and the steps inside it.
 export const MAX_STEPS = 25;
+// About 100 lines of inline code; longer code belongs in its own file.
+export const MAX_CODE_LENGTH = 8_000;
 // An If inside an If inside an If; the file refuses a fourth.
 export const MAX_IF_DEPTH = 3;
 

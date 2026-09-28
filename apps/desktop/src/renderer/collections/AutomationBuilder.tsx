@@ -19,6 +19,7 @@ import {
   literalFor,
   literalText,
   MAX_NAME_LENGTH,
+  MAX_CODE_LENGTH,
   MAX_IF_DEPTH,
   MAX_STEPS,
   numberValue,
@@ -61,6 +62,7 @@ type Target = Extract<ListAutomationTargetsResult, { collections: unknown }>["co
 type SetStep = Extract<AutomationStep, { kind: "set" }>;
 type AddStep = Extract<AutomationStep, { kind: "add-record" }>;
 type FindStep = Extract<AutomationStep, { kind: "find" }>;
+type CodeStep = Extract<AutomationStep, { kind: "run" | "run-file" }>;
 type FieldValue = SetStep["values"][number];
 type Reach = ValidAutomationSummary["reach"];
 
@@ -167,7 +169,7 @@ const DIAGNOSTIC_SENTENCES: Partial<Record<AutomationDiagnostic["code"], string>
   "invalid-binding-name": "A result name starts with a letter or _, then uses only letters, digits, and _. It cannot be a formula name such as today.",
   "invalid-time": "Write the time as HH:MM on a 24-hour clock, or :MM past each hour.",
   "invalid-timezone": "Choose a time zone by its name, such as Europe/London.",
-  "invalid-path": "Write the path inside the workspace, with / between folders and no .. or leading /.",
+  "invalid-path": "Write the path inside its folder, with / between folders, and no .. or leading /.",
 };
 
 /** What a file contract code means for a person building an automation. */
@@ -720,6 +722,8 @@ interface StepEntry {
   verdict: string | null;
   /** An If's Do and Otherwise steps, which the draft holds instead of the step's own lists; null for any other step. */
   branches: Record<Branch, StepEntry[]> | null;
+  /** A code step's other source while the step uses this one: its code while it runs a file, or its file while it runs code. */
+  other?: string;
   /** What a Find step reads, or when an If runs its Do steps, which the draft holds instead of the step's condition; null for any other step. */
   condition: ConditionDraft | null;
 }
@@ -829,7 +833,7 @@ function placeOf(
   entries: readonly StepEntry[],
   edits: (entry: StepEntry) => boolean,
   part: "field" | "value" = "value",
-): { key: string; name: string | null } {
+): { key: string; name: string | null; step?: AutomationStep["kind"] } {
   const parts = path.split("/").slice(1).map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
   const [head, option] = parts;
   if (head === "name") return { key: "name", name: null };
@@ -855,8 +859,9 @@ function placeOf(
     }
     if (name === undefined) {
       // A Find's condition, a result's name, and a Set's records each have a control where the step edits.
-      const control = kind === "find" || kind === "if" ? "condition" : kind === "as" || kind === "records" ? kind : null;
-      return { key: control !== null && edits(entry) ? `step-${entry.key}/${control}` : `step-${entry.key}`, name: null };
+      const control = kind === "find" || kind === "if" ? "condition" : kind === "run" || kind === "run-file" ? "source"
+        : kind === "as" || kind === "records" ? kind : null;
+      return { key: control !== null && edits(entry) ? `step-${entry.key}/${control}` : `step-${entry.key}`, name: null, step: entry.step.kind };
     }
     if (kind !== "set" && kind !== "add-record" && kind !== "input") return { key: `step-${entry.key}`, name: null };
     const row = edits(entry) ? entry.rows.find(({ value }) => value.field === name) : undefined;
@@ -1059,6 +1064,7 @@ export function AutomationBuilder(props: {
     diagnostics: AutomationDiagnostic[];
     formulaProblems: CheckCollectionAutomationResult["formulaProblems"];
     cannotRun: string | null;
+    missingFiles: readonly string[];
   } | null>(null);
   // Counts Saves that found a problem, each of which moves focus to the first one shown and says how many there are.
   const [refused, setRefused] = useState(0);
@@ -1182,7 +1188,7 @@ export function AutomationBuilder(props: {
   const full = ordered.length >= MAX_STEPS;
   const editableOf = (entry: StepEntry) => editableStep(entry.step, table, triggerTable);
   const edits = (entry: StepEntry) =>
-    entry.step.kind === "if" || editableAction(entry.step, table) !== null || editableOf(entry) !== null || editableFind(entry.step, table, triggerTable) !== null;
+    entry.step.kind === "if" || entry.step.kind === "run" || entry.step.kind === "run-file" || editableAction(entry.step, table) !== null || editableOf(entry) !== null || editableFind(entry.step, table, triggerTable) !== null;
   const dirty = JSON.stringify(automation) !== JSON.stringify(props.baseline);
   // What Save writes: a draft without a name takes its sentence, and a new
   // one an id from its name. Main checks exactly this.
@@ -1190,6 +1196,11 @@ export function AutomationBuilder(props: {
   const candidate: Automation = { ...automation, name: finalName, id: isNew ? idFor(finalName, props.takenIds) : automation.id };
   const automationKey = JSON.stringify(candidate);
   const draftKey = JSON.stringify(automation);
+  // The draft main checks last: an answer for an older one, arriving late, never replaces it.
+  const latestKey = useRef(automationKey);
+  latestKey.current = automationKey;
+  const latestCandidate = useRef(candidate);
+  latestCandidate.current = candidate;
   useEffect(() => {
     props.onDraftChange({ automation, dirty });
   }, [draftKey, dirty]);
@@ -1255,7 +1266,7 @@ export function AutomationBuilder(props: {
   /** Main's check of this exact automation: what the file contract refuses, and each formula's syntax. */
   const check = async (target: Automation, key: string) => {
     const result = await bridge().checkCollectionAutomation({ workspaceId, collectionPath, automation: target });
-    return { key, diagnostics: result.diagnostics, formulaProblems: result.formulaProblems, cannotRun: result.cannotRun };
+    return { key, diagnostics: result.diagnostics, formulaProblems: result.formulaProblems, cannotRun: result.cannotRun, missingFiles: result.missingFiles };
   };
   // Checked a moment after the person stops typing, so a formula's syntax
   // error shows as it happens.
@@ -1264,7 +1275,7 @@ export function AutomationBuilder(props: {
     const timer = setTimeout(() => {
       void check(candidate, automationKey)
         .then((answer) => {
-          if (scope.isCurrent(epoch)) setChecked(answer);
+          if (scope.isCurrent(epoch) && answer.key === latestKey.current) setChecked(answer);
         })
         // Save checks again; a failure there is reported.
         .catch(() => undefined);
@@ -1338,6 +1349,16 @@ export function AutomationBuilder(props: {
     else if (bound !== null && !RESULT_NAME.test(bound.name)) {
       problems.set(`step-${key}/as`, "A result name starts with a letter or _, then uses only letters, digits, and _.");
     }
+    if (step.kind === "run" || step.kind === "run-file") {
+      if (step.kind === "run" && step.code.trim() === "") problems.set(`step-${key}/source`, "Write the code this step runs.");
+      else if (step.kind === "run" && step.code.length > MAX_CODE_LENGTH) {
+        problems.set(`step-${key}/source`, `This code is longer than ${MAX_CODE_LENGTH.toLocaleString()} characters. Move it to a file.`);
+      }
+      if (step.kind === "run-file" && step.file.trim() === "") problems.set(`step-${key}/source`, "Name the file this step runs.");
+      if (step.as !== null && !RESULT_NAME.test(step.as)) {
+        problems.set(`step-${key}/as`, "A result name starts with a letter or _, then uses only letters, digits, and _.");
+      }
+    }
     const find = editableFind(step, table, triggerTable);
     // A step in a dataset whose trigger watches no table names its own.
     if ((find !== null || editableOf(entry)?.kind === "add-record") && table !== null && datasetTableOf(entry) === null) {
@@ -1391,9 +1412,10 @@ export function AutomationBuilder(props: {
   // A syntax error shows as the person types; the rest once they try to save.
   const syntaxKeys = new Set<string>();
   for (const found of current?.formulaProblems ?? []) {
-    const { key, name } = placeOf(found.path, draft.steps, edits);
+    const { key, name, step: kind } = placeOf(found.path, draft.steps, edits);
     if (problems.has(key)) continue;
     problems.set(key, "code" in found ? unsaved(found.code)
+      : kind === "run" ? `The code has a syntax error. ${found.problem}`
       : `${name === null ? "This formula" : `The formula for ${name}`} has a syntax error. ${found.problem}`);
     syntaxKeys.add(key);
   }
@@ -1551,7 +1573,7 @@ export function AutomationBuilder(props: {
       );
     };
     // The name later steps use for this step's result.
-    const resultName = (named: FindStep | AddStep) => (
+    const resultName = (named: FindStep | AddStep | CodeStep) => (
       <label className="flex items-center gap-1.5 text-[12px] text-muted">
         <span className="shrink-0">Name result</span>
         <input
@@ -1704,19 +1726,71 @@ export function AutomationBuilder(props: {
               Add input
             </SecondaryButton>
           </div>
-        ) : step.kind === "run" ? (
-          // Code reads here as the file holds it. People change it in the file.
-          <pre
-            aria-label={`Step ${number}, code`}
-            tabIndex={0}
-            className="m-0 max-h-48 overflow-auto whitespace-pre rounded bg-panel-2 px-2 py-1.5 font-mono text-[11px] leading-snug text-ink"
-          >
-            {step.code}
-          </pre>
-        ) : step.kind === "run-file" ? (
-          <div className="flex min-w-0 items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded bg-panel-2 px-1 font-mono text-[11px] text-ink" title={step.file}>{step.file}</code>
-            <SecondaryButton size="compact" onClick={() => props.onOpenFile(`${collectionPath}/${step.file}`)}>Open file</SecondaryButton>
+        ) : step.kind === "run" || step.kind === "run-file" ? (
+          <div className="flex flex-col gap-2">
+            <select
+              aria-label={`Step ${number}, code source`}
+              data-focus={`step-${key}-first`}
+              value={step.kind}
+              onChange={(event) => setStep(key, (current) => {
+                if (event.target.value === current.step.kind || (current.step.kind !== "run" && current.step.kind !== "run-file")) return current;
+                // The source it leaves stays in the draft, so switching back finds it again.
+                const leaving = current.step;
+                const kept = current.other ?? "";
+                return leaving.kind === "run"
+                  ? { ...current, step: { kind: "run-file", file: kept, as: leaving.as }, other: leaving.code }
+                  : { ...current, step: { kind: "run", code: kept, as: leaving.as }, other: leaving.file };
+              })}
+              className={selectClass}
+            >
+              <option value="run">Code here</option>
+              <option value="run-file">Code in a file</option>
+            </select>
+            {step.kind === "run" ? (
+              <textarea
+                aria-label={`Step ${number}, code`}
+                value={step.code}
+                rows={8}
+                // Lines stay whole, so a syntax error's line is the line on screen.
+                wrap="off"
+                spellCheck={false}
+                placeholder={"return { output: ctx.sum(ctx.trigger.record.Amounts) };"}
+                onChange={(event) => setStep(key, (current) => ({ ...current, step: { ...step, code: event.target.value } }))}
+                className={`${formulaClass} resize-y leading-snug`}
+                {...invalid(problem(`step-${key}/source`))}
+              />
+            ) : (
+              <div className="flex items-start gap-1.5">
+                <input
+                  aria-label={`Step ${number}, file`}
+                  value={step.file}
+                  spellCheck={false}
+                  placeholder="scripts/total.js"
+                  onChange={(event) => setStep(key, (current) => ({ ...current, step: { ...step, file: event.target.value } }))}
+                  className={`${inputClass} font-mono text-[12px]`}
+                  {...invalid(problem(`step-${key}/source`))}
+                />
+                <SecondaryButton
+                  size="compact"
+                  className="shrink-0"
+                  disabled={step.file.trim() === "" || missing.has(step.file) || problems.has(`step-${key}/source`)}
+                  onClick={() => props.onOpenFile(`${collectionPath}/${step.file}`)}
+                >
+                  Open file
+                </SecondaryButton>
+              </div>
+            )}
+            <Problem shown={problem(`step-${key}/source`)} />
+            {step.kind === "run-file" && missing.has(step.file) ? (
+              <StatusLine tone="warning" icon={AlertTriangle} label="No file">
+                <p className="m-0">{own} has no file {step.file}. Create it to write the code there.</p>
+                <SecondaryButton size="compact" className="mt-1" onClick={() => void createCodeFile(step.file, entry.other ?? "")}>
+                  Create file
+                </SecondaryButton>
+              </StatusLine>
+            ) : null}
+            {resultName(step)}
+            <Problem shown={problem(`step-${key}/as`)} />
           </div>
         ) : entry.branches !== null && entry.condition !== null && step.kind === "if" ? (
           <div className="flex flex-col gap-2">
@@ -1936,6 +2010,15 @@ export function AutomationBuilder(props: {
               Run an action
             </SecondaryButton>
           ) : null}
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1"
+            disabled={full}
+            onClick={() => addStep(listId, { kind: "run", code: "", as: null })}
+          >
+            <Plus size={12} aria-hidden />
+            Run code
+          </SecondaryButton>
         </div>
         {full ? <p className="m-0 text-[12px] text-muted">An automation holds at most {MAX_STEPS} steps. Remove a step to add another.</p> : null}
         {deepest ? (
@@ -1950,6 +2033,27 @@ export function AutomationBuilder(props: {
   // Main's answer for this draft; until it comes, what it said of the saved version, while nothing changed.
   // An unchanged automation keeps what the list said when main gives no reason, as for a dataset whose rules are not approved, which main's check cannot see.
   const cannotRun = current?.cannotRun ?? (dirty ? null : props.cannotRun);
+  // Code files a step names that main could not find, from its last answer for this draft.
+  const missing = new Set(current?.missingFiles ?? []);
+  /** Creates a code file in this Collection's folder with the code the step held, if any, then opens it. */
+  const createCodeFile = async (file: string, code: string) => {
+    const epoch = scope.current();
+    try {
+      await bridge().createWorkspaceFile({ workspaceId, relativePath: `${collectionPath}/${file}`, initialText: code });
+    } catch (error) {
+      if (scope.isCurrent(epoch)) onError(`dohc could not create ${file}.`, error, () => void createCodeFile(file, code));
+      return;
+    }
+    if (!scope.isCurrent(epoch)) return;
+    props.onOpenFile(`${collectionPath}/${file}`);
+    // Main checks the draft as it is now, so the step stops saying the file is missing and the rest still say so.
+    try {
+      const answer = await check(latestCandidate.current, latestKey.current);
+      if (scope.isCurrent(epoch) && answer.key === latestKey.current) setChecked(answer);
+    } catch {
+      // The next check, as after an edit or at Save, says again.
+    }
+  };
   // Every table's actions, the trigger's table first, so a new step runs one on the trigger's record.
   const actionsByTable = [...(table?.actions ?? [])].sort((a, b) => Number(b.table === watched) - Number(a.table === watched));
   const trigger = draft.when;

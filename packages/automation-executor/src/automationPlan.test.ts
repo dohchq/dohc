@@ -291,6 +291,31 @@ describe("a formula's syntax, for the builder", () => {
       "/do/1/otherwise/3/wake-agent",
       "/do/1/otherwise/4/add-record/Title",
     ]);
+    // Code parses as the strict body the guest runs, and never runs here.
+    expect(syntax({ do: [{ kind: "run", code: "const total = 1;\nreturn { total: total + };", as: null }] }))
+      .toEqual([{ path: "/do/0/run", problem: "Unexpected token on line 2." }]);
+    expect(syntax({ do: [{ kind: "run", code: "while (true) {}\nreturn 1;", as: "one" }] })).toEqual([]);
+    expect(syntax({ do: [{ kind: "run", code: "with (ctx) {}", as: null }] })).toEqual([
+      { path: "/do/0/run", problem: "'with' in strict mode on line 1." },
+    ]);
+    // It is the body of a function of ctx, as the guest builds it.
+    expect(syntax({ do: [{ kind: "run", code: "const ctx = 1;\nreturn ctx;", as: null }] })).toEqual([
+      { path: "/do/0/run", problem: "Identifier 'ctx' has already been declared on line 1." },
+    ]);
+    expect(syntax({ do: [{ kind: "run", code: "return new.target;", as: null }] })).toEqual([]);
+    // A block the code never closes is on its last line, not the line after.
+    expect(syntax({ do: [{ kind: "run", code: "if (true) {\n  return 1;", as: null }] })).toEqual([
+      { path: "/do/0/run", problem: "Unexpected token on line 2." },
+    ]);
+    // Every JavaScript line break counts as one.
+    expect(syntax({ do: [{ kind: "run", code: "if (true) {\r  return 1;\u2028", as: null }] })).toEqual([
+      { path: "/do/0/run", problem: "Unexpected token on line 3." },
+    ]);
+    for (const code of ["return 1; }); (function () {", "return 1; }, function () {"]) {
+      expect(syntax({ do: [{ kind: "run", code, as: null }] })).toEqual([
+        { path: "/do/0/run", problem: "The code ends the step's function early. Remove the extra closing brace." },
+      ]);
+    }
     expect(syntax({ do: [{ kind: "notify", text: "Hi {1 +}", to: [{ kind: "literal", value: "ana" }] }] }))
       .toEqual([{ path: "/do/0/notify", code: "invalid-template" }]);
     expect(syntax({ do: [{ kind: "post", text: "{record?.of / 2}", group: "Trip" }] }))

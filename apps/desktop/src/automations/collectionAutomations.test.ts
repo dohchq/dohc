@@ -1383,6 +1383,12 @@ describe("Collection automations", () => {
     await expect(w.executor.draftCannotRun("Tasks", draft)).resolves.toMatch(/cannot name a table or a Collection action/u);
     await expect(w.executor.draftCannotRun("Tasks", { ...draft, do: [{ kind: "set", values: [{ field: "Points", value: { kind: "literal", value: 1 } }], records: null, operation: null }] }))
       .resolves.toBeNull();
+    // A code file is looked for, not read: one the folder has is not named.
+    await writeFile(join(w.root, "Tasks", "have.js"), "return 1;\n");
+    const coded: Automation = { ...draft, do: [{ kind: "run-file", file: "have.js", as: null }, { kind: "run-file", file: "lack.js", as: null }] };
+    await expect(w.executor.missingCodeFiles("Tasks", coded)).resolves.toEqual(["lack.js"]);
+    // A path the file contract refuses is not looked for.
+    await expect(w.executor.missingCodeFiles("Tasks", { ...draft, do: [{ kind: "run-file", file: "../lack.js", as: null }] })).resolves.toEqual([]);
     expect(w.authored).toEqual([]);
   });
 

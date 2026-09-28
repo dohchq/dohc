@@ -11,7 +11,7 @@ import {
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
 import { COLLECTION_SCHEMA_FILENAME, collectionVersionError, type CollectionListResult } from "@dohc/workspace-contracts/collection";
-import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import { isNormalizedRelativePath, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type {
   DatasetAutomationClaim,
@@ -1585,6 +1585,18 @@ export class CollectionAutomations {
       : []);
     const pinned = dataset === undefined ? automation : pinDatasetOperations(automation, dataset, (step) => held.has(JSON.stringify(step)));
     return (await this.reasonsIn(collectionPath, false)).reasonOf(pinned);
+  }
+
+  /**
+   * The code files a draft's steps name that this Collection's folder
+   * lacks, as each step names them. It looks for each file and reads none.
+   */
+  async missingCodeFiles(collectionPath: string, automation: Automation): Promise<string[]> {
+    // Only a path the file contract takes, so a lookup stays inside the Collection's folder by name.
+    const files = [...new Set(stepsInOrder(automation).flatMap(({ step }) =>
+      (step.kind === "run-file" && isNormalizedRelativePath(step.file) ? [step.file] : [])))];
+    const found = await Promise.all(files.map((file) => this.options.pathExists(`${collectionPath}/${file}`)));
+    return files.filter((_, index) => !found[index]);
   }
 
   /**

@@ -133,6 +133,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
         diagnostics: written.status === "refused" ? written.diagnostics : [],
         formulaProblems: formulaProblems(automation),
         cannotRun: null as string | null,
+        missingFiles: [] as string[],
       };
     }),
     onAutomationRunsChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
@@ -146,6 +147,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       return () => hostListeners.delete(listener);
     }),
     onCloudSessionChanged: vi.fn(() => () => undefined),
+    createWorkspaceFile: vi.fn(async ({ relativePath }: { relativePath: string }) => ({ relativePath })),
   };
   vi.stubGlobal("dohcDesktop", bridge);
   // Another writer changes the file; the panel reads it again, as it does
@@ -613,7 +615,7 @@ describe("a dataset table's ⚡ panel", () => {
     // Main's check of the unchanged automation gives no reason, as for rules it cannot see. The syntax
     // problem it also names shows when its answer has landed.
     bridge.checkCollectionAutomation.mockResolvedValue({
-      diagnostics: [], formulaProblems: [{ path: "/do/0/set/Finished on", problem: "Marker." }], cannotRun: null,
+      diagnostics: [], formulaProblems: [{ path: "/do/0/set/Finished on", problem: "Marker." }], cannotRun: null, missingFiles: [],
     });
     const user = userEvent.setup();
     render(<Panel table={INVOICES} />);
@@ -627,7 +629,7 @@ describe("a dataset table's ⚡ panel", () => {
     const { bridge, written } = makeBridge(read([]));
     const reason = "A schedule starts this automation, so an action's input cannot use trigger.record. Use a value instead.";
     bridge.checkCollectionAutomation.mockImplementation(async ({ automation }: { automation: Automation }) => ({
-      diagnostics: [], formulaProblems: [], cannotRun: automation.do.some((step) => step.kind === "invoke" && step.input.length > 0) ? reason : null,
+      diagnostics: [], formulaProblems: [], cannotRun: automation.do.some((step) => step.kind === "invoke" && step.input.length > 0) ? reason : null, missingFiles: [],
     }));
     const user = userEvent.setup();
     render(<Panel table={withActions} />);
@@ -1951,9 +1953,11 @@ describe("the builder", () => {
     await openBuilder(user);
 
     expect(within(screen.getByTestId("builder-step-1")).getByText("Run code")).toBeTruthy();
-    expect(screen.getByLabelText("Step 2, code").textContent).toBe(code);
+    expect((screen.getByRole("textbox", { name: "Step 2, code" }) as HTMLTextAreaElement).value).toBe(code);
+    // Lines stay whole, so a syntax error's line number is the line on screen.
+    expect(screen.getByRole("textbox", { name: "Step 2, code" }).getAttribute("wrap")).toBe("off");
     const file = screen.getByTestId("builder-step-2");
-    expect(within(file).getByText("scripts/notify.js")).toBeTruthy();
+    expect((within(file).getByRole("textbox", { name: "Step 3, file" }) as HTMLInputElement).value).toBe("scripts/notify.js");
     await user.click(within(file).getByRole("button", { name: "Open file" }));
     expect(onOpenFile).toHaveBeenCalledWith("Tasks/scripts/notify.js");
 
@@ -1962,6 +1966,86 @@ describe("the builder", () => {
     await waitFor(() => expect(written).toHaveLength(1));
     expect(written[0]!.automations).toEqual([{ ...coded, name: "Stamp the finish date!" }]);
   });
+
+  it("writes code in a step, inside an If too, shows its syntax error without running it, and saves it with its result name", async () => {
+    const titled = { kind: "set" as const, values: [{ field: "Title", value: { kind: "literal" as const, value: "x" } }], records: null, operation: null };
+    const { written } = makeBridge(read([summary({ ...stamp, do: [{ kind: "if", if: "record.Points > 1", do: [titled], otherwise: [] }] })]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    await user.click(within(screen.getByRole("group", { name: "Step 1, Do" })).getByRole("button", { name: "Run code" }));
+    expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Step 3, code source" }));
+    const code = screen.getByRole("textbox", { name: "Step 3, code" });
+    await user.type(code, "const total = 2;{enter}return {{ total: total + };");
+    expect(await screen.findByText("The code has a syntax error. Unexpected token on line 2.", undefined, SLOW)).toBeTruthy();
+    expect(code.getAttribute("aria-invalid")).toBe("true");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(written).toEqual([]);
+
+    await user.clear(code);
+    await user.type(code, "return {{ total: 2 };");
+    await user.type(screen.getByRole("textbox", { name: "Step 3, result name" }), "doubled");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do[0]).toMatchObject({ kind: "if", do: [titled, { kind: "run", code: "return { total: 2 };", as: "doubled" }] });
+  }, 30_000);
+
+  it("keeps code past the bound whole and says so, and names a field called run's formula error as a formula's", async () => {
+    const saved: Automation = { ...stamp, do: [
+      { kind: "set", values: [{ field: "run", value: { kind: "formula", expression: "1 +" } }], records: null, operation: null },
+      { kind: "run", code: "return 1;", as: null },
+    ] };
+    const { written } = makeBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel fields={[...FIELDS, { name: "run", type: "text" }]} />);
+    await openBuilder(user);
+    expect(await screen.findByText("This formula has a syntax error. Unexpected token.", undefined, SLOW)).toBeTruthy();
+    const code = screen.getByRole("textbox", { name: "Step 2, code" }) as HTMLTextAreaElement;
+    const long = `return ${JSON.stringify("x".repeat(8_000))};`;
+    fireEvent.change(code, { target: { value: long } });
+    expect(code.value).toBe(long);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("This code is longer than 8,000 characters. Move it to a file.")).toBeTruthy();
+    expect(written).toEqual([]);
+  }, 30_000);
+
+  it("moves code into a file it creates, keeps the code while the step names a file, and refuses a path outside the folder", async () => {
+    const { bridge, written } = makeBridge(read([summary({ ...stamp, do: [{ kind: "run", code: "return 1;", as: null }] })]));
+    const checkBy = bridge.checkCollectionAutomation.getMockImplementation()!;
+    bridge.checkCollectionAutomation.mockImplementation(async (payload: { automation: Automation }) => ({
+      ...(await checkBy(payload)),
+      missingFiles: payload.automation.do.flatMap((step) => (step.kind === "run-file" && step.file === "scripts/one.js" ? [step.file] : [])),
+    }));
+    const onOpenFile = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onOpenFile={onOpenFile} />);
+    await openBuilder(user);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, code source" }), "run-file");
+    const file = screen.getByRole("textbox", { name: "Step 1, file" });
+    await user.type(file, "../one.js");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Write the path inside its folder, with / between folders, and no .. or leading /.", undefined, SLOW)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Open file" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(written).toEqual([]);
+
+    await user.clear(file);
+    await user.type(file, "scripts/one.js");
+    expect(await screen.findByText("Tasks has no file scripts/one.js. Create it to write the code there.", undefined, SLOW)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Open file" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Create file" }));
+    // The file starts with the code the step held.
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: "Tasks/scripts/one.js", initialText: "return 1;" }));
+    await waitFor(() => expect(onOpenFile).toHaveBeenCalledWith("Tasks/scripts/one.js"));
+
+    // Switching back finds the code again.
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, code source" }), "run");
+    expect((screen.getByRole("textbox", { name: "Step 1, code" }) as HTMLTextAreaElement).value).toBe("return 1;");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, code source" }), "run-file");
+    expect((screen.getByRole("textbox", { name: "Step 1, file" }) as HTMLInputElement).value).toBe("scripts/one.js");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual([{ kind: "run-file", file: "scripts/one.js", as: null }]);
+  }, 30_000);
 
   it("shows a formula's syntax error beside it and does not save until it is fixed", async () => {
     const { written, bridge } = makeBridge(read([summary(stamp)]));
@@ -2258,7 +2342,7 @@ describe("the builder", () => {
     bridge.checkCollectionAutomation.mockResolvedValue({
       diagnostics: [{ code: "duplicate-value", path: "/automations/0/do/0/do/1/as" }],
       formulaProblems: [{ path: "/do/0/otherwise/0/set/Title", problem: "Unexpected token." }],
-      cannotRun: null,
+      cannotRun: null, missingFiles: [],
     });
     const user = userEvent.setup();
     render(<Panel />);
