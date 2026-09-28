@@ -4,12 +4,14 @@ import {
   AUTOMATION_HOST_MAX_BODY_BYTES,
   AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES,
   AUTOMATION_INSTALL_ID_MAX_CHARS,
+  AUTOMATION_SERVER_INSTALL_ID,
   isNoticeLine,
   type RelayAutomationGroupHandoverResponse,
 } from "@dohc/workspace-contracts/relay";
 import { badRequest, notFound, relayError } from "./errors";
 import { relayPathSegments } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
+import type { AutomationServer } from "./storage/automationHosts";
 
 // Changes to the host, per owner: a burst of 60, then one a second. An
 // owner's computers check in when they open, on reconnect, and about once a
@@ -55,10 +57,13 @@ export function parseAutomationHostAction(value: string | undefined): Automation
   return AUTOMATION_HOST_ACTIONS.find((action) => action === value) ?? null;
 }
 
-// Which of the owner's computers runs the workspace's schedules and
-// Group-message automations. Every route acts for the workspace owner only:
-// it checks ownership before it reads the body, and storage checks it again
-// in each transaction because reading the body can yield.
+// Which of the owner's computers, or the server, runs the workspace's
+// schedules and Group-message automations. Every route acts for the
+// workspace owner only: it checks ownership before it reads the body, and
+// storage checks it again in each transaction because reading the body can
+// yield. `server` is this server while it runs automations, else null. Only
+// the server itself acts for the server: a computer's check-in or release
+// naming it is refused.
 export function createAutomationHostRoutes(
   storage: Pick<
     SyncRelayStorage,
@@ -72,13 +77,14 @@ export function createAutomationHostRoutes(
   >,
   nowMs: () => number,
   changeRateLimiter: TokenBucketLimiter,
+  server: AutomationServer | null,
 ) {
   return async function respondToAutomationHost(
     request: Request,
     route: AutomationHostRoute,
     ownerUserId: string,
   ): Promise<Response> {
-    const scope = { workspaceId: route.workspaceId, ownerUserId };
+    const scope = { workspaceId: route.workspaceId, ownerUserId, server, nowMs: nowMs() };
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
     if (route.action === "read") {
       if (request.method !== "GET") throw relayError("method_not_allowed");
@@ -106,10 +112,9 @@ export function createAutomationHostRoutes(
           if (typeof body.claim !== "boolean") throw badRequest("claim must be true or false");
           return storage.checkInAutomationComputer({
             ...scope,
-            installId: installId(body.installId),
+            installId: computerInstallId(body.installId),
             label: label(body.label),
             claim: body.claim,
-            nowMs: nowMs(),
           });
         case "choose":
           return storage.chooseAutomationHost({
@@ -120,7 +125,7 @@ export function createAutomationHostRoutes(
         case "release":
           return storage.releaseAutomationHost({
             ...scope,
-            installId: installId(body.installId),
+            installId: computerInstallId(body.installId),
             generation: generation(body.generation),
             releasedThroughMs: nonNegativeInteger(body.releasedThroughMs, "releasedThroughMs"),
             groups: groupHandover(body.groups),
@@ -160,6 +165,13 @@ function groupHandover(value: unknown): string {
 function installId(value: unknown): string {
   if (!isNoticeLine(value, AUTOMATION_INSTALL_ID_MAX_CHARS)) throw badRequest("installId is invalid");
   return value;
+}
+
+// An install id a computer sends about itself, never the server's.
+export function computerInstallId(value: unknown): string {
+  const id = installId(value);
+  if (id === AUTOMATION_SERVER_INSTALL_ID) throw badRequest("installId is reserved for the server");
+  return id;
 }
 
 function label(value: unknown): string {

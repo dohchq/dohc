@@ -158,6 +158,8 @@ import {
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
+import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
+import { useAskAgent } from "./shell/useAskAgent";
 import { collectionAutomationOf, NoticeCenter } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
@@ -563,6 +565,8 @@ export function DesktopWorkspaceShell(props: {
   // to reopen the connection dialog, and cleared when that dialog closes.
   const [cloudRetryServerUrl, setCloudRetryServerUrl] = useState("");
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
+  // The part a Customize… command opened Settings for, if one did.
+  const [settingsFocus, setSettingsFocus] = useState<CustomizePart | null>(null);
   // The owner's live-document list, holding the workspace it was opened for
   // rather than a bare flag. The render below only matches the current
   // workspace, so a switch cannot leave the previous workspace's list — or
@@ -595,10 +599,21 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const openSettings = useCallback(
-    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
+    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => {
+      setSettingsFocus(null);
+      setSettingsSection(section);
+    },
     [],
   );
-  const closeSettings = useCallback(() => setSettingsSection(null), []);
+  const customize = useCallback((part: CustomizePart) => {
+    setSettingsFocus(part);
+    setSettingsSection(CUSTOMIZE_TARGETS[part].section);
+  }, []);
+  const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
+  const closeSettings = useCallback(() => {
+    setSettingsSection(null);
+    setSettingsFocus(null);
+  }, []);
 
   const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
     props.workspace.workspaceId,
@@ -2377,6 +2392,19 @@ export function DesktopWorkspaceShell(props: {
     setChatsThreadRevision((current) => current + 1);
   }, []);
   const openChatsNavInTab = chatEditors.open;
+  const askAgent = useAskAgent({
+    workspaceId,
+    agentSetup,
+    chatsAvailable: captureAvailable,
+    openChat: chatEditors.open,
+    onOpenChat: closeSettings,
+    onSetUp: openAgentSettings,
+    reportShellError,
+  });
+  const customizeContext = useMemo(
+    () => ({ customize, ...(askAgent ? { askAgent } : {}) }),
+    [askAgent, customize],
+  );
   const openChatsTab = useCallback(() => {
     openChatsNavInTab({ level: "feed" });
   }, [openChatsNavInTab]);
@@ -4295,10 +4323,6 @@ export function DesktopWorkspaceShell(props: {
         })),
     [props.workspaces],
   );
-  const openAgentSettings = useCallback(
-    () => openSettings("agents"),
-    [openSettings],
-  );
   // The add-agent form writes the same settings file the dialog does. The
   // root hears the write through the settings-changed broadcast and the
   // agent setup summary follows.
@@ -4546,6 +4570,7 @@ export function DesktopWorkspaceShell(props: {
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
+    <CustomizeContext.Provider value={customizeContext}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <div
       data-testid="workspace-shell"
@@ -4831,6 +4856,8 @@ export function DesktopWorkspaceShell(props: {
         {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
         {wb.sidebarVisible ? (
           <ShellSidePanel
+            customize={customize}
+            {...(askAgent ? { askAgent } : {})}
             wb={wb}
             mutateWb={mutateWb}
             sidePanelTitle={sidePanelTitle}
@@ -5090,6 +5117,7 @@ export function DesktopWorkspaceShell(props: {
                     onDraftsChange={chatEditors.get(tabPath).onDraftsChange}
                     initialNav={chatEditors.get(tabPath).nav}
                     initialDrafts={chatEditors.get(tabPath).drafts}
+                    focusNewPost={chatEditors.get(tabPath).focusNewPost}
                     editorTabPath={tabPath}
                     onOpenInTab={openChatsNavInTab}
                     variant="page"
@@ -5305,6 +5333,7 @@ export function DesktopWorkspaceShell(props: {
             left History view and the history tab — never here. */}
         {wb.chatsVisible ? (
           <ShellChatsPanel
+            customize={customize}
             wb={wb}
             mutateWb={mutateWb}
             isShareView={isShareView}
@@ -5799,6 +5828,8 @@ export function DesktopWorkspaceShell(props: {
               syncStatus ? !statusSaysNoRecorder(syncStatus) : undefined
             }
             initialSection={settingsSection}
+            {...(settingsFocus ? { focus: CUSTOMIZE_TARGETS[settingsFocus] } : {})}
+            {...(askAgent ? { askAgent } : {})}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
             onWorkspaceFilesChanged={onSettingsFilesChanged}
@@ -5894,6 +5925,7 @@ export function DesktopWorkspaceShell(props: {
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
     </CollectionFieldMarksProvider>
+    </CustomizeContext.Provider>
     </AgentSettingsProvider>
   );
 }

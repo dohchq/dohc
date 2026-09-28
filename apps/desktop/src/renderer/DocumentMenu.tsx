@@ -1,8 +1,9 @@
 import { useRequestSequence } from "./useRequestSequence";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { IconButton } from "./ui/controls";
 import { bridge } from "./bridge";
+import { CustomizeContext } from "./settings/customize";
 
 // The document header's "…" menu (ViewHeader): copy the raw markdown, export
 // it as a .md file, or export a self-contained HTML/PDF render. Styled and
@@ -13,7 +14,8 @@ type DocumentMenuItemId =
   | "copy-markdown"
   | "export-markdown"
   | "export-html"
-  | "export-pdf";
+  | "export-pdf"
+  | "customize";
 
 const ITEMS: ReadonlyArray<{ id: DocumentMenuItemId; label: string }> = [
   { id: "copy-markdown", label: "Copy as Markdown" },
@@ -21,6 +23,8 @@ const ITEMS: ReadonlyArray<{ id: DocumentMenuItemId; label: string }> = [
   { id: "export-html", label: "Export as HTML…" },
   { id: "export-pdf", label: "Export as PDF…" },
 ];
+// Opens the editor's settings, where a workspace shell provides them.
+const CUSTOMIZE_ITEM = { id: "customize", label: "Customize…" } as const;
 
 // How long a quiet inline confirmation ("Copied") replaces an item's label —
 // mirrors the code-block copy button's "copy" → "copied" swap
@@ -51,6 +55,8 @@ export function DocumentMenu(props: {
   // believes is their document.
   getMarkdown: () => string | null;
 }) {
+  const customize = useContext(CustomizeContext)?.customize;
+  const items = customize ? [...ITEMS, CUSTOMIZE_ITEM] : ITEMS;
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(0);
   // The transient half: an item's label swaps for 1.2s to say what happened.
@@ -252,6 +258,11 @@ export function DocumentMenu(props: {
       void copyAsMarkdown(attempt);
       return;
     }
+    if (id === "customize") {
+      setOpen(false);
+      customize?.("editor");
+      return;
+    }
     // The export path needs no token: it decides everything it says before
     // its first await, and closes the menu before the bridge call.
     void exportDocument(
@@ -260,7 +271,7 @@ export function DocumentMenu(props: {
   }
 
   const move = (delta: number) =>
-    setSelected((current) => (current + delta + ITEMS.length) % ITEMS.length);
+    setSelected((current) => (current + delta + items.length) % items.length);
 
   return (
     <div className="dohc-document-menu" ref={containerRef}>
@@ -298,7 +309,7 @@ export function DocumentMenu(props: {
               move(-1);
             } else if (event.key === "Enter") {
               event.preventDefault();
-              const item = ITEMS[selected];
+              const item = items[selected];
               if (item) runItem(item.id);
             } else if (event.key === "Escape") {
               event.preventDefault();
@@ -306,7 +317,7 @@ export function DocumentMenu(props: {
             }
           }}
         >
-          {ITEMS.map((item, index) => (
+          {items.map((item, index) => (
             <button
               key={item.id}
               type="button"

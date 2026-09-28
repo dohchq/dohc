@@ -44,7 +44,9 @@ import { applyLookSettings } from "../theme";
 import { palette } from "../tokens";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
+import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
+import type { CustomizeTarget } from "./customize";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { ScheduleHostRow } from "./ScheduleHostRow";
 import {
@@ -118,6 +120,11 @@ export function SettingsDialog(props: {
    */
   sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
+  // The part a Customize… command opened Settings for: its row is marked and
+  // takes focus.
+  focus?: CustomizeTarget;
+  // Hands a settings change to the person's agent. Absent while chats are off.
+  askAgent?: AskAgent;
   onClose: () => void;
   onAgentActiveChange?: (update: {
     active: boolean;
@@ -195,7 +202,15 @@ export function SettingsDialog(props: {
   }, [clearSaveStateTimer]);
 
   useEffect(() => {
-    closeRef.current?.focus();
+    const row = props.focus
+      ? dialogRef.current?.querySelector<HTMLElement>(`[data-testid="${props.focus.row}"]`)
+      : null;
+    if (!row) {
+      closeRef.current?.focus();
+      return;
+    }
+    row.focus({ preventScroll: true });
+    row.scrollIntoView?.({ block: "center" });
   }, []);
 
   useEffect(() => () => clearSaveStateTimer(), [clearSaveStateTimer]);
@@ -511,6 +526,26 @@ export function SettingsDialog(props: {
     saveUserSettings({ ...userSettings, appearance: { ...userSettings.appearance, ...patch } });
   const saveEditor = (patch: Partial<DesktopUserSettings["editor"]>) =>
     saveUserSettings({ ...userSettings, editor: { ...userSettings.editor, ...patch } });
+  // Setting up an agent stays in this dialog, and clears a search that
+  // would hide the Agents section.
+  const askAgent = props.askAgent
+    ? {
+        ...props.askAgent,
+        setUp: () => {
+          setQuery("");
+          setActiveSection("agents");
+        },
+      }
+    : undefined;
+  const askAgentAside = (target?: CustomizeTarget) =>
+    askAgent ? (
+      <AskAgentButton
+        askAgent={askAgent}
+        request={target ? { kind: "settings", target } : { kind: "settings" }}
+      />
+    ) : null;
+  const customizeRow = (row: string) =>
+    props.focus?.row === row ? { highlighted: true, aside: askAgentAside(props.focus) } : {};
 
   const renderSection = () => {
     if (query.trim() && filteredSections.length === 0) {
@@ -616,6 +651,7 @@ export function SettingsDialog(props: {
               modified={userSettings.appearance.yourColor !== null}
               onReset={() => void saveAppearance({ yourColor: null })}
               testId="settings-row-your-color"
+              {...customizeRow("settings-row-your-color")}
             >
               <ChatAvatar name={userSettings.profile.preferredName ?? "You"} kind="human" own size="comment" />
               <HueControl
@@ -645,6 +681,7 @@ export function SettingsDialog(props: {
               modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}
               onReset={() => void saveEditor({ fontFamily: DEFAULT_USER_SETTINGS.editor.fontFamily })}
               testId="settings-row-editor-font"
+              {...customizeRow("settings-row-editor-font")}
             >
               <SegmentedControl
                 label="Editor font"
@@ -708,6 +745,7 @@ export function SettingsDialog(props: {
                 })
               }
               testId="settings-row-sidebar"
+              {...customizeRow("settings-row-sidebar")}
             >
               <SidebarViewsControl
                 sidebar={userSettings.sidebar}
@@ -995,6 +1033,7 @@ export function SettingsDialog(props: {
               title="Settings file"
               description="Changes apply when you save the file."
               testId="settings-row-settings-file"
+              aside={askAgentAside()}
             >
               {settingsFilePath ? (
                 <code

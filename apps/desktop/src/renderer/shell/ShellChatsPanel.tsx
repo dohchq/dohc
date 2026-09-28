@@ -6,6 +6,8 @@ import type {
   WorkspaceSummary,
 } from "../../ipc/bridgeContract";
 import { ErrorBoundary } from "../ErrorBoundary";
+import type { CustomizePart } from "../settings/customize";
+import { MoreMenu } from "../ui/MoreMenu";
 import { ChatsPanel, type ChatsPanelTab } from "../workbench/ChatsPanel";
 import { PanelLoading } from "../workbench/PanelLoading";
 import {
@@ -27,6 +29,7 @@ type LinkedChatsPanelProps = ComponentProps<typeof LazyLinkedChatsPanel>;
 
 // The right side panel: chats across the workspace, or the active file's.
 export function ShellChatsPanel(props: {
+  customize: (part: CustomizePart) => void;
   wb: WorkbenchState;
   mutateWb: (updater: (state: WorkbenchState) => WorkbenchState) => void;
   isShareView: boolean;
@@ -48,6 +51,7 @@ export function ShellChatsPanel(props: {
   chatsNavigatorProps: ComponentProps<typeof LazyChatsView>;
 }) {
   const {
+    customize,
     wb,
     mutateWb,
     isShareView,
@@ -79,20 +83,27 @@ export function ShellChatsPanel(props: {
       tab={chatsPanelActiveTab}
       onTabChange={setChatsPanelTab}
       actions={
-        captureAvailable &&
-        chatsPanelActiveTab === "all" &&
-        !isChatsTabPath(focusedTabPath) ? (
-          <button
-            type="button"
-            data-testid="chats-open-tab"
-            aria-label="Open chats in tab"
-            title="Open chats in tab"
-            onClick={openChatsTab}
-            className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-          >
-            <Maximize2 size={13} aria-hidden />
-          </button>
-        ) : undefined
+        <>
+          {captureAvailable &&
+          chatsPanelActiveTab === "all" &&
+          !isChatsTabPath(focusedTabPath) ? (
+            <button
+              type="button"
+              data-testid="chats-open-tab"
+              aria-label="Open chats in tab"
+              title="Open chats in tab"
+              onClick={openChatsTab}
+              className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+            >
+              <Maximize2 size={13} aria-hidden />
+            </button>
+          ) : null}
+          <MoreMenu
+            label="Chats actions"
+            testId="chats-panel-menu"
+            items={[{ label: "Customize…", onSelect: () => customize("chats") }]}
+          />
+        </>
       }
     >
       {/* Chats island: a crash in either panel view stays contained;

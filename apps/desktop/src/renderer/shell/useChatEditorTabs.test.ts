@@ -218,4 +218,48 @@ describe("chat editor tabs", () => {
     expect(stale.nav).toBeUndefined();
     vi.unstubAllGlobals();
   });
+  it("puts a prefill in the new-post composer after what the person typed, and remounts the tab", () => {
+    const onOpen = vi.fn();
+    const path = chatEditorPath(agent);
+    const { result } = renderHook(() => useChatEditorTabs({
+      workspaceId: "workspace", onOpen, onNavigate: vi.fn(), paths: [path], activePaths: [path], enabled: false,
+    }));
+    act(() => result.current.open(agent, "First request"));
+    expect(result.current.get(path).nav).toBe(agent);
+    expect(result.current.get(path).drafts?.newThreadBody).toBe("First request");
+    expect(result.current.get(path).focusNewPost).toBe(true);
+    const revision = result.current.get(path).revision;
+    act(() => result.current.get(path).onDraftsChange({ ...draft, composer: "", newThreadBody: "My own words" }));
+    // The page reported its drafts, so a later remount leaves focus alone.
+    expect(result.current.get(path).focusNewPost).toBe(false);
+    act(() => result.current.open(agent, "Second request"));
+    expect(result.current.get(path).drafts?.newThreadBody).toBe("My own words\n\nSecond request");
+    expect(result.current.get(path).revision).toBe(revision + 1);
+    expect(onOpen).toHaveBeenLastCalledWith(path);
+  });
+
+  it("keeps a thread with an unsent reply instead of putting a prefill over it", () => {
+    const onOpen = vi.fn();
+    const path = chatEditorPath(general);
+    const { result } = renderHook(() => useChatEditorTabs({
+      workspaceId: "workspace", onOpen, onNavigate: vi.fn(), paths: [path], enabled: false,
+    }));
+    act(() => { result.current.open(thread); });
+    act(() => result.current.get(path).onDraftsChange(draft));
+    let opened = true;
+    act(() => { opened = result.current.open(general, "Request"); });
+    expect(opened).toBe(false);
+    expect(result.current.get(path).nav).toBe(thread);
+    expect(result.current.get(path).drafts).toBe(draft);
+    expect(onOpen).toHaveBeenLastCalledWith(path);
+
+    // An empty reply gives way, and the channel's unsent new post stays.
+    act(() => result.current.get(path).onDraftsChange({
+      ...draft, composer: "  ", newThreadBody: "Half a post", replyTarget: { messageId: "m", authorLabel: "Ana" },
+    }));
+    act(() => { opened = result.current.open(general, "Request"); });
+    expect(opened).toBe(true);
+    expect(result.current.get(path).nav).toBe(general);
+    expect(result.current.get(path).drafts).toEqual({ ...draft, composer: "", newThreadBody: "Half a post\n\nRequest" });
+  });
 });

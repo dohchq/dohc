@@ -2,6 +2,8 @@ import { Maximize2, RefreshCw } from "lucide-react";
 import { Suspense, lazy, type ComponentProps, type ReactNode } from "react";
 import type { WorkspaceSummary } from "../../ipc/bridgeContract";
 import { ErrorBoundary } from "../ErrorBoundary";
+import type { CustomizePart } from "../settings/customize";
+import { MoreMenu } from "../ui/MoreMenu";
 import type { RelayShareTarget } from "../RelayShareDialog";
 import { PanelLoading } from "../workbench/PanelLoading";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
@@ -10,7 +12,7 @@ import { PanelLoading } from "../workbench/PanelLoading";
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "../workbench/SearchView";
 import { SidePanel } from "../workbench/SidePanel";
-import { setSidebarWidth, type WorkbenchState } from "../workbench/workbenchState";
+import { setView, setSidebarWidth, type WorkbenchState } from "../workbench/workbenchState";
 import { LazyGraphView, LazySitePreviewPage } from "./lazyViews";
 
 const LazyAppsView = lazy(() =>
@@ -23,6 +25,8 @@ type SitePreviewPageProps = ComponentProps<typeof LazySitePreviewPage>;
 
 // The left side panel: the view the activity bar selected, or a pinned app.
 export function ShellSidePanel(props: {
+  askAgent?: AppsViewProps["askAgent"];
+  customize: (part: CustomizePart) => void;
   wb: WorkbenchState;
   mutateWb: (updater: (state: WorkbenchState) => WorkbenchState) => void;
   sidePanelTitle: string;
@@ -50,6 +54,8 @@ export function ShellSidePanel(props: {
   setShareTarget: (target: RelayShareTarget) => void;
 }) {
   const {
+    askAgent,
+    customize,
     wb,
     mutateWb,
     sidePanelTitle,
@@ -82,40 +88,53 @@ export function ShellSidePanel(props: {
       width={wb.sidebarWidth}
       onWidthChange={(width) => mutateWb((state) => setSidebarWidth(state, width))}
       actions={
-        wb.activeView === "history" ? (
-          <button
-            type="button"
-            data-testid="history-open-tab"
-            aria-label="Open history in tab"
-            title="Open history in tab"
-            onClick={openHistoryTab}
-            className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-          >
-            <Maximize2 size={13} aria-hidden />
-          </button>
-        ) : wb.activeView === "graph" ? (
-          <button
-            type="button"
-            data-testid="graph-open-tab"
-            aria-label="Open graph in tab"
-            title="Open graph in tab"
-            onClick={openGraphTab}
-            className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-          >
-            <Maximize2 size={13} aria-hidden />
-          </button>
-        ) : wb.activeView === "sites" ? (
-          <button
-            type="button"
-            data-testid="sites-refresh"
-            aria-label="Refresh apps"
-            title="Refresh apps"
-            onClick={refreshSites}
-            className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-          >
-            <RefreshCw size={13} aria-hidden />
-          </button>
-        ) : undefined
+        <>
+          {wb.activeView === "history" ? (
+            <button
+              type="button"
+              data-testid="history-open-tab"
+              aria-label="Open history in tab"
+              title="Open history in tab"
+              onClick={openHistoryTab}
+              className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+            >
+              <Maximize2 size={13} aria-hidden />
+            </button>
+          ) : wb.activeView === "graph" ? (
+            <button
+              type="button"
+              data-testid="graph-open-tab"
+              aria-label="Open graph in tab"
+              title="Open graph in tab"
+              onClick={openGraphTab}
+              className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+            >
+              <Maximize2 size={13} aria-hidden />
+            </button>
+          ) : wb.activeView === "sites" ? (
+            <button
+              type="button"
+              data-testid="sites-refresh"
+              aria-label="Refresh apps"
+              title="Refresh apps"
+              onClick={refreshSites}
+              className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+            >
+              <RefreshCw size={13} aria-hidden />
+            </button>
+          ) : null}
+          <MoreMenu
+            label="Sidebar actions"
+            testId="side-panel-menu"
+            items={[
+              { label: "Customize…", onSelect: () => customize("sidebar") },
+              // Pinned apps open here. The Apps view pins one or makes one.
+              ...(wb.activeView === "sites"
+                ? []
+                : [{ label: "Add an app here…", onSelect: () => mutateWb((state) => setView(state, "sites")) }]),
+            ]}
+          />
+        </>
       }
     >
       {/* One island: a crash inside any panel view (or a failed lazy
@@ -149,6 +168,7 @@ export function ShellSidePanel(props: {
             onOpenPath={openPathWithHeading}
             onCreateFirstApp={createFirstApp}
             receivedShareWorkspace={shareView !== null}
+            {...(askAgent ? { askAgent } : {})}
           />
         </Suspense>
       ) : wb.activeView === "history" ? (

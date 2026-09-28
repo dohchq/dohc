@@ -70,12 +70,16 @@ Use the canonical runner below. Other agents reuse its evidence instead of recon
 
 Fetch the PR's target branch. Use its fetched ref as `<target-ref>` below, such as `origin/main`.
 Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
-The plan also lists selected JavaScript packages, integration proofs, and required services.
+The plan also lists selected JavaScript packages, test files, integration proofs, and required services.
 JavaScript selection follows workspace dependencies and declared external test inputs.
+Desktop-only changes run the Y.Doc compatibility files that import desktop code.
+Changes to Y.Doc projection or its other inputs run the complete Y.Doc suite, including the checkpoint boundary test.
 Shared configuration and unclassified code inputs select the full JavaScript suite.
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
 The JavaScript gate typechecks the whole workspace and runs repository checks before selected package tests.
+It installs Electron only when desktop preparation is selected.
+On headless Linux hosts, only the desktop proof runs under Xvfb.
 It starts a dedicated Postgres container when selected tests or proofs need one.
 Selected integration suites must run; unavailable prerequisites cause failure rather than a silent skip.
 The native self-host editing proof checks the prepared engine and its complete delivery evidence when selected.
