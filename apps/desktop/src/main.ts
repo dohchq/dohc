@@ -30,7 +30,7 @@ import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
-import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { createLocalDatasetHost, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
@@ -3822,7 +3822,7 @@ async function stopAllSitePreviews(): Promise<void> {
   );
 }
 
-let datasetForCli: ((input: DatasetRequest) => Promise<DatasetResult>) | undefined;
+let datasetForCli: ((input: DatasetRequest, agent: LocalDatasetAgent | null) => Promise<DatasetResult>) | undefined;
 // A window's press path; the CLI's presses take it too.
 let pressNamedForCli: ReturnType<typeof registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>>["pressNamed"] | undefined;
 const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
@@ -3851,7 +3851,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
     const slot = operation.state.datasetHost;
     let pending = slot.pending;
     if (!pending) {
-      const runtimePath = datasetRuntimePath();
+      const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
       pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath,
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
         persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
@@ -3859,7 +3859,19 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
           installedDatasetCompiler ??= createInstalledDatasetCompiler(resourcesBasePath());
           return (await installedDatasetCompiler)(source, path, signal);
         },
-        onAutomationClaims: () => collectionAutomationsOf(workspace.workspaceId)?.notifyClaimed(),
+        // Only this attachment's run. A host left from an earlier attachment
+        // refuses the invocation rather than write as the owner at depth 0.
+        agentRun: () => {
+          const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
+          if (run === undefined) throw new Error("The Collection workspace attachment changed.");
+          return run;
+        },
+        // A commit that made failed claims, as a chain stop does, sends their notices now.
+        onAutomationClaims: (failed) => {
+          const automations = collectionAutomationsOf(workspace.workspaceId);
+          automations?.notifyClaimed();
+          if (failed) automations?.failuresChanged();
+        },
         onDatasetsChanged: () => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(),
       });
       slot.pending = pending;
@@ -3892,9 +3904,9 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
-  dataset: input => {
+  dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
-    return datasetForCli(input);
+    return datasetForCli(input, agent);
   },
   ownerAppPublication: input => {
     if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
@@ -3941,7 +3953,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
         }),
         describeDataset: async (datasetId) => {
           const described = await describe({ action: "describe", workspaceId: workspace.workspaceId,
-            datasetPath: `${input.collectionPath}/dataset.json`, expectedDatasetId: datasetId });
+            datasetPath: `${input.collectionPath}/dataset.json`, expectedDatasetId: datasetId }, null);
           if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
           return described.dataset;
         },
@@ -5257,13 +5269,12 @@ function registerIpcHandlers(): void {
   });
   const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
-    agentRunDepth: (workspace) => activity.agentRunDepth(workspace.workspaceId),
     exportArchive: async (workspace, input, signal, authorize) => {
       if (!input.savePath) throw new Error("Choose an absolute recovery export path.");
       return exportDatasetArchive(workspace, input.datasetId, input.savePath, input.overwrite, signal, authorize);
     },
   });
-  datasetForCli = async input => DatasetResult.parse(await cliDataset(input.workspaceId, input));
+  datasetForCli = async (input, agent) => DatasetResult.parse(await cliDataset(input.workspaceId, input, agent));
   const localDatasetLaunches = new WeakMap<LocalDatasetHost, Promise<LocalAppLaunchHost>>();
   const localPublication = createLocalOwnerAppPublicationHandler<DesktopRendererWorkspaceOperation["workspace"],
     { workspace: DesktopRendererWorkspaceOperation["workspace"]; signal: AbortSignal; scope?: string; assertCurrent(): void }>({
