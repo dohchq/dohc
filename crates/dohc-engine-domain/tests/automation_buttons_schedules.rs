@@ -5,13 +5,14 @@
 //! a mark that only moves forward.
 
 use dohc_engine_domain::{
-    AUTOMATION_CLAIM_HISTORY_LIMIT, AUTOMATION_PRESS_RETENTION_MS, AutomationChangeKind,
-    AutomationClaim, AutomationClaimState, AutomationPress, AutomationPressed,
-    AutomationScheduleClaim, AutomationScheduleClaimed, AutomationScheduleMark, AutomationSettle,
-    AutomationSubscription, AutomationTrigger, ChangeActorKind, DomainError,
-    MAX_AUTOMATION_SCHEDULE_RUNS, NoFaults, claim_automation_run_now, claim_automation_schedule,
-    claim_next_pending_automation, list_automation_schedule_marks, press_automation,
-    retry_automation_claim, settle_automation_claim, subscribe_automation,
+    AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_CLAIM_HISTORY_LIMIT,
+    AUTOMATION_PRESS_RETENTION_MS, AutomationChangeKind, AutomationClaim, AutomationClaimState,
+    AutomationPress, AutomationPressed, AutomationScheduleClaim, AutomationScheduleClaimed,
+    AutomationScheduleMark, AutomationSettle, AutomationSubscription, AutomationTrigger,
+    ChangeActorKind, DomainError, MAX_AUTOMATION_SCHEDULE_RUNS, NoFaults, PressActor,
+    claim_automation_run_now, claim_automation_schedule, claim_next_pending_automation,
+    list_automation_schedule_marks, press_automation, retry_automation_claim,
+    settle_automation_claim, subscribe_automation,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -47,6 +48,7 @@ fn press_on(
             automation_id: automation_id.to_owned(),
             record_id: record_id.to_owned(),
             pressed_by: pressed_by.to_owned(),
+            by: PressActor::Human,
         },
         now_ms,
         &NoFaults,
@@ -207,11 +209,82 @@ fn a_press_claims_once_and_joins_an_unfinished_run_of_its_button() {
             automation_id: "collection:triage".to_owned(),
             record_id: INVOICE.to_owned(),
             pressed_by: ADA.to_owned(),
+            by: PressActor::Human,
         },
         20,
         &NoFaults,
     );
     assert!(matches!(malformed, Err(DomainError::InvalidInput { .. })));
+}
+
+/// An agent's press for a person, at its run's depth.
+fn agent_press(
+    store: &mut EngineStore,
+    press_id: &str,
+    record_id: &str,
+    depth: u32,
+    now_ms: i64,
+) -> Result<AutomationPressed, DomainError> {
+    press_automation(
+        store,
+        WS,
+        &AutomationPress {
+            press_id: press_id.to_owned(),
+            automation_id: PAY.to_owned(),
+            record_id: record_id.to_owned(),
+            pressed_by: ADA.to_owned(),
+            by: PressActor::Agent {
+                origin_id: "dohc-mcp".to_owned(),
+                depth,
+            },
+        },
+        now_ms,
+        &NoFaults,
+    )
+}
+
+#[test]
+fn an_agents_press_claims_for_its_person_at_its_runs_depth_and_stops_at_the_cap() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+
+    let pressed = claimed(agent_press(&mut store, "press-1", INVOICE, 2, 10).expect("press"));
+    assert_eq!(pressed.depth, 2);
+    assert_eq!(pressed.change.actor_kind, Some(ChangeActorKind::Agent));
+    assert_eq!(pressed.change.author_origin_id.as_deref(), Some("dohc-mcp"));
+    // The run acts for the person, so only their presses join it.
+    assert_eq!(pressed.change.on_behalf_of.as_deref(), Some(ADA));
+    assert_eq!(pressed.state, AutomationClaimState::Pending);
+    let theirs = joined(press(&mut store, "press-2", INVOICE, 11).expect("the person's press"));
+    assert_eq!(theirs.claim_id, pressed.claim_id);
+
+    // At the cap the press stops at once, as a record change at the cap does.
+    let stopped = claimed(
+        agent_press(
+            &mut store,
+            "press-3",
+            OTHER_INVOICE,
+            AUTOMATION_CHAIN_DEPTH_CAP,
+            12,
+        )
+        .expect("press at the cap"),
+    );
+    assert_eq!(stopped.state, AutomationClaimState::Failed);
+    assert_eq!(stopped.error.as_deref(), Some(AUTOMATION_CHAIN_STOPPED));
+    assert_eq!(stopped.attempts, 0);
+    // A depth past the cap counts as the cap.
+    let past = claimed(
+        agent_press(
+            &mut store,
+            "press-4",
+            OTHER_INVOICE,
+            AUTOMATION_CHAIN_DEPTH_CAP + 3,
+            13,
+        )
+        .expect("press past the cap"),
+    );
+    assert_eq!(past.depth, AUTOMATION_CHAIN_DEPTH_CAP);
+    assert_eq!(past.state, AutomationClaimState::Failed);
 }
 
 #[test]

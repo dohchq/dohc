@@ -15,6 +15,10 @@ import { cutText } from "./automationChat";
 // cap, and the failure reason the engine records for a run that did not
 // finish. A chain stop is a flag on the failure, not a reason text.
 const AUTOMATION_CHAIN_DEPTH_CAP = 4;
+/** The failure a claim at the chain depth cap is inserted with, in the engine and the dataset ledger. */
+export const AUTOMATION_CHAIN_STOPPED = "chain-stopped";
+/** Why a press at the chain depth cap ran nothing. */
+export const CHAIN_STOPPED_PRESS = `dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so this press did not run.`;
 const AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
 
 /** An automation's newest failed claim, from the engine or the dataset ledger. */

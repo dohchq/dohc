@@ -63,10 +63,27 @@ pub enum FaultPoint {
     /// newer external content and does not overwrite (capture + preserve-both).
     /// `materialize.before-preimage-revalidate`.
     MaterializeBeforePreimageRevalidate,
+    /// A staged file held bytes the store lacks and its open row is durable;
+    /// the file has not gone back yet. A crash here ⇒ restart puts it back
+    /// from the row. `materialize.after-displacement-journal`.
+    MaterializeAfterDisplacementJournal,
+    /// The target moved into staging with no row, the temp not yet renamed
+    /// into its name, which is empty. A crash here ⇒ restart finds the staged
+    /// file by name, moves it back and replays the job against it.
+    /// `materialize.after-displace-before-place`.
+    MaterializeAfterDisplaceBeforePlace,
     /// File replaced, job not yet marked complete. A crash here ⇒ restart replay
-    /// is idempotent (preimage hash now matches the new content; no second
-    /// write, no duplicate). `materialize.after-rename-before-complete`.
+    /// settles any displaced file, then is idempotent (preimage hash now
+    /// matches the new content; no second write, no duplicate).
+    /// `materialize.after-rename-before-complete`.
     MaterializeAfterRenameBeforeComplete,
+    /// The staged file was read and judged, and nothing acted on the verdict
+    /// yet. A crash here ⇒ restart judges it again from its name.
+    /// `materialize.after-displaced-hash`.
+    MaterializeAfterDisplacedHash,
+    /// A known staged copy was removed, before the job completion commit.
+    /// Process restart replays from history or the already placed target.
+    MaterializeAfterKnownCopyDeletion,
 
     // ---- rollback post-commit response -----------------------------------
     /// The rollback transaction is durable, immediately before the runtime
@@ -131,8 +148,18 @@ impl FaultPoint {
             FaultPoint::MaterializeBeforePreimageRevalidate => {
                 "materialize.before-preimage-revalidate"
             }
+            FaultPoint::MaterializeAfterDisplacementJournal => {
+                "materialize.after-displacement-journal"
+            }
+            FaultPoint::MaterializeAfterDisplaceBeforePlace => {
+                "materialize.after-displace-before-place"
+            }
             FaultPoint::MaterializeAfterRenameBeforeComplete => {
                 "materialize.after-rename-before-complete"
+            }
+            FaultPoint::MaterializeAfterDisplacedHash => "materialize.after-displaced-hash",
+            FaultPoint::MaterializeAfterKnownCopyDeletion => {
+                "materialize.after-known-copy-deletion"
             }
             FaultPoint::RollbackBeforeActiveVersionLookup => {
                 "rollback.before-active-version-lookup"

@@ -1,7 +1,7 @@
 import { invalidateDatasetAddresses } from "./datasetAddress";
 import { describe, expect, it, vi } from "vitest";
 import { compileClosedApp } from "./closedAppCompiler";
-import { prepareOwnerAppPublication } from "./ownerAppPublication";
+import { parseAppPublicationDeclaration, prepareOwnerAppPublication } from "./ownerAppPublication";
 import { type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 
@@ -34,11 +34,27 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
 
 it("refuses retired app-owned backend declarations before compilation", async () => {
   const h = harness();
-  await expect(h.prepare()).rejects.toThrow("app/app.publish.json must hold entryPath, inputs, and packageMap, and at most one of collection or dataset.");
+  await expect(h.prepare()).rejects.toThrow("app/app.publish.json has an unknown key: backend. Remove it or correct its name.");
   expect(h.compile).not.toHaveBeenCalled();
 });
 
 describe("app.publish.json paths", () => {
+  it.each([undefined, 1])("reads version %s", (version) => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {} }));
+    expect(parseAppPublicationDeclaration(bytes, "app").entryPath).toBe("app/main.ts");
+  });
+
+  it.each([[undefined, "colection"], [1, "colection"], [1, ""]] as const)("rejects unknown keys before publishing version %s: %s", async (version, key) => {
+    const h = harness();
+    h.setDeclaration({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, [key]: {} });
+    await expect(h.prepare()).rejects.toThrow(`app/app.publish.json has an unknown key: ${key}.`);
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("refuses a newer version before interpreting fields", () => {
+    expect(() => parseAppPublicationDeclaration(new TextEncoder().encode('{"version":2}'), "app"))
+      .toThrow("app/app.publish.json uses a newer version. Update dohc to read this file.");
+  });
   const manifest = { entryPath: "main.ts", inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"], packageMap: { greeting: "deps/greeting.js" } };
   const place = (h: ReturnType<typeof harness>, root: string, parent: string, value: unknown = manifest) => {
     h.sources.clear();
@@ -128,7 +144,7 @@ describe("app without app.publish.json", () => {
   it("names a file the page links but the folder cannot publish", async () => {
     const h = harness();
     page(h, { "app/index.html": '<!doctype html><img alt="Map" src="my%20map.png">', "app/my map.png": "png" });
-    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it using only letters, digits, and _ @ . / -, then publish again.");
+    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it without spaces or symbols, then publish again.");
   });
 
   it("includes every type the compiler accepts, and leaves out build configuration and installed packages", async () => {
@@ -175,7 +191,7 @@ describe("owner dataset publication", () => {
     expect(h.compile).toHaveBeenCalledTimes(1);
     expect(h.capturePaths).toEqual([["app/app.publish.json"], ["app/app.publish.json", "app/main.ts"], ["private/dataset.json"]]);
     expect(files.map(file => file.path)).toEqual(["bundle.js"]);
-    expect(candidate.capabilities).toEqual([{ ...binding, operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }] }]);
+    expect(candidate.capabilities).toEqual([{ ...binding, name: approved.definition.name, operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }] }]);
   });
 
   it("does not accept link read approval from app source", async () => {
@@ -229,4 +245,11 @@ describe("owner dataset publication", () => {
     await expect(h.prepare()).rejects.toMatchObject({ name: "AbortError" });
     expect(h.compile).not.toHaveBeenCalled();
   });
+});
+
+it.each(["会议", "Cafe\u0301"])("publishes Unicode source names from disk without renaming %s", root => {
+  const h = harness(); h.sources.clear();
+  h.sources.set(root + "/index.html", '<!doctype html><script src="' + encodeURIComponent("скрипт.js") + '"></script>');
+  h.sources.set(root + "/скрипт.js", 'document.title = "Ready";');
+  return expect(h.prepare(root)).resolves.toMatchObject({ candidate: { appRoot: root, entryPath: root + "/index.html" } });
 });

@@ -35,7 +35,7 @@ export async function stageTripPoll(workspaceRoot) {
   const inputs = [...sources, ...dependencies.map(([, name, path]) => `deps/${name}/${path}`)];
   const packageMap = { react: "deps/react/index.js", "react/jsx-runtime": "deps/react/jsx-runtime.js",
     "react-dom": "deps/react-dom/index.js", "react-dom/client": "deps/react-dom/client.js", scheduler: "deps/scheduler/index.js" };
-  const declaration = { entryPath: "main.tsx", inputs, packageMap, collection: {kind: "collection-create", collectionPath: "responses",
+  const declaration = { version: 1, entryPath: "main.tsx", inputs, packageMap, collection: {kind: "collection-create", collectionPath: "responses",
     allowedFields: ["destination", "name"], requiredFields: ["destination"], readFields: ["destination", "name"]} };
   await writeFile(join(appRoot, "app.publish.json"), JSON.stringify(declaration, null, 2) + "\n");
   return { appRoot, declaration };

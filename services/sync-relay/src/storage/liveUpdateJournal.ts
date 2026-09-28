@@ -1,5 +1,6 @@
 import {readRestoreAdmission,verifyRestoreCheckpoint} from "./liveRestoreCheckpoint";
 import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJournalHistory";
+import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
 import { allowsServiceActivationCandidate, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
 import { createHash } from "node:crypto";
@@ -170,7 +171,7 @@ export function assertJournalCheckpointPosition(db: SqliteDb, row: {admitted: {m
     const length = authorityInteger(raw.update_length, 1);
     journalIntegrity(length <= 20_971_520);
     bytes += length;
-    const due = index + 1 === 4095 || bytes >= 20_971_520;
+    const due = liveJournalCheckpointDue(index + 1, bytes);
     const hasCheckpoint = raw.has_checkpoint_bytes === 1;
     journalIntegrity(hasCheckpoint === (raw.has_checkpoint_digest === 1));
     journalIntegrity((due || (restored !== null && index === segment.length - 1)) === hasCheckpoint);
@@ -424,7 +425,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
     verifyJournalCut(token);
     const updateBytes = journalBytes(outer.updateBytes), receivedAtMs = authorityInteger(outer.receivedAtMs);
     if (createHash("sha256").update(updateBytes).digest("hex") !== metadata.updateDigest) return { result: { kind: "refused", reason: "invalid-update" }, admitted: null };
-    const anticipatedCheckpoint = token.suffixCount + 1 === 4095 || token.suffixBytes + updateBytes.byteLength >= 20_971_520;
+    const anticipatedCheckpoint = liveJournalCheckpointDue(token.suffixCount + 1, token.suffixBytes + updateBytes.byteLength);
     const validation = snapshotJournalValidation(outer.validation, anticipatedCheckpoint);
     if (validation.kind === "accepted") {
       const evidence = validation.evidence;
@@ -474,7 +475,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         if (validation.kind === "refused") return refused(journalValidationRefusal(validation));
         requireRestoreSourceCoverage(storage, document, namespace, validation.evidence.candidate.ranges, validation.evidence.checkpointRanges, read.coverage);
         const firstSeen = subtractJournalRanges(subtractJournalRanges(validation.evidence.candidate.ranges, validation.evidence.checkpointRanges), read.coverage);
-        const due = read.cut.suffixCount + 1 === 4095 || read.cut.suffixBytes + updateBytes.byteLength >= 20_971_520;
+        const due = liveJournalCheckpointDue(read.cut.suffixCount + 1, read.cut.suffixBytes + updateBytes.byteLength);
         journalIntegrity(due === anticipatedCheckpoint);
         const checkpointBytes = due ? validation.evidence.stateUpdate! : null;
         const checkpointDigest = due ? validation.evidence.stateUpdateSha256 : null;

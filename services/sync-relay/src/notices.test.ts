@@ -79,6 +79,9 @@ async function relay(
   clock = 10_000;
   shares = 0;
   const storage = await testStorage();
+  // These tests fill lists with 1,000 rows, one commit each. None tests crash
+  // durability, so skip the per-commit disk flush.
+  (storage as unknown as StorageContext).db.exec("PRAGMA synchronous = OFF");
   current = storage;
   const h = testHandler(storage, {
     nowMs: () => clock,
@@ -517,7 +520,7 @@ describe("limits on notices from other people", () => {
     const fromRecent = await pull(h, "owner", recent, 5);
     expect(fromRecent.replace).toBe(false);
     expect(fromRecent.notices[0]).toMatchObject({ removed: true });
-  }, 60_000);
+  });
 
   it("makes room in a list full of read rows for anyone who may send", async () => {
     const { h, storage } = await sharedTrip();

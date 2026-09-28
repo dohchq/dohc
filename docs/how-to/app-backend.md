@@ -58,6 +58,7 @@ Keep app code and Collection views on the same dataset. They do not need separat
 ## Connect the app
 
 Put `app.publish.json` in the app folder. Declare the frontend entry, source inputs, and a `dataset` binding.
+Include `"version": 1`. See [workspace file versions](../reference/workspace-file-versions.md) for parsing and update rules.
 Write entryPath, inputs, and packageMap paths relative to the app folder. Start a path with `../` to include a file beside it.
 After moving or renaming a dataset folder, update its path in commands and app manifests.
 An old path reports a broken reference. dohc does not rewrite app source when files move.

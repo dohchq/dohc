@@ -222,13 +222,15 @@ describe("transactional Collection page", () => {
   });
 
   it("keeps creation outside management and returns focus when its disclosure closes", async () => {
-    const onReviewSchema = vi.fn(); setup({onReviewSchema}); await screen.findByText("Alice");
+    const onReviewSchema = vi.fn(); const onCustomize = vi.fn(); setup({onReviewSchema, onCustomize}); await screen.findByText("Alice");
     const manage = screen.getByLabelText("Manage Collection");
     const details = manage.closest("details")!;
     expect(screen.getByRole("button",{name:"New record"}).closest("details")).toBeNull();
     fireEvent.click(manage); expect(details.open).toBe(true);
     const fields = screen.getByRole("button",{name:"Fields and names"});
     fireEvent.click(fields); expect(onReviewSchema).toHaveBeenCalledOnce();
+    fireEvent.click(manage); fireEvent.click(screen.getByRole("button",{name:"Customize…"})); expect(onCustomize).toHaveBeenCalledOnce();
+    fireEvent.click(manage);
     fields.focus(); fireEvent.keyDown(fields,{key:"Escape"});
     expect(details.open).toBe(false); expect(document.activeElement).toBe(manage);
   });
@@ -258,10 +260,11 @@ describe("transactional Collection page", () => {
   it("closes details on Escape and returns keyboard focus to the row", async () => {
     setup(); await screen.findByText("Alice");
     const open = screen.getByRole("button", { name: "Open record 1" });
+    open.focus();
     fireEvent.click(open);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
-    expect(document.activeElement).toBe(open);
+    await waitFor(() => expect(document.activeElement).toBe(open));
   });
   it("clears previously displayed records when a read loses access", async () => {
     const result = setup(); await screen.findByText("Alice");

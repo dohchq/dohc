@@ -69,9 +69,11 @@ test("editor groups keep mixed surfaces visible, resize, and collapse", async ()
     await expect(leftGroup.getByTestId("tab-data.csv")).toBeVisible();
     await expect(rightGroup.getByTestId("tab-data.csv")).toHaveCount(0);
 
-    await rightGroup.click({ position: { x: 20, y: 60 } });
+    const lastTab = rightGroup.getByTestId("tab-brief.md");
+    await lastTab.focus();
     await page.keyboard.press(process.platform === "darwin" ? "Meta+w" : "Control+w");
     await expect(rightGroup).toHaveCount(0);
+    await expect(leftGroup).toBeFocused();
     await expect(page.getByTestId("tab-brief.md")).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

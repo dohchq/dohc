@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useLayoutEffect, useRef } from "react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode, useLayoutEffect, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Overlay } from "./Overlay";
 
@@ -118,4 +118,57 @@ describe("Overlay", () => {
 
     expect(document.activeElement).toBe(editor);
   });
+});
+
+function FocusDialog({ removeOpener = false }: { removeOpener?: boolean }) {
+  const [open, setOpen] = useState(false);
+  return <section data-focus-surface="test" tabIndex={-1} data-testid="surface">
+    {(!removeOpener || !open) && <button onClick={() => setOpen(true)}>Open dialog</button>}
+    {open && <Overlay onClose={() => setOpen(false)}><button autoFocus onClick={() => setOpen(false)}>Done</button></Overlay>}
+  </section>;
+}
+
+it.each(["Escape", "Done", "backdrop"])("returns dialog focus after %s", async (action) => {
+  render(<StrictMode><FocusDialog /></StrictMode>);
+  const opener = screen.getByText("Open dialog");
+  opener.focus();
+  fireEvent.click(opener);
+  expect(document.activeElement).toBe(screen.getByText("Done"));
+  if (action === "Escape") fireEvent.keyDown(document, { key: "Escape" });
+  else if (action === "Done") fireEvent.click(screen.getByText("Done"));
+  else fireEvent.click(document.querySelector('[data-dohc-modal="true"]')!);
+  await waitFor(() => expect(document.activeElement).toBe(opener));
+});
+
+it("returns to the containing surface when the dialog opener was removed", async () => {
+  render(<FocusDialog removeOpener />);
+  const opener = screen.getByText("Open dialog");
+  opener.focus();
+  fireEvent.click(opener);
+  fireEvent.click(screen.getByText("Done"));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("surface")));
+});
+
+it("returns nested dialogs to their own opener, then the outer opener", async () => {
+  function Nested() {
+    const [outer, setOuter] = useState(false);
+    const [inner, setInner] = useState(false);
+    return <><button onClick={() => setOuter(true)}>Outer opener</button>
+      {outer && <Overlay onClose={() => setOuter(false)}>
+        <button onClick={() => setInner(true)}>Inner opener</button>
+        {inner && <Overlay onClose={() => setInner(false)}><button autoFocus>Inner content</button></Overlay>}
+      </Overlay>}
+    </>;
+  }
+  render(<Nested />);
+  const outer = screen.getByText("Outer opener");
+  outer.focus();
+  fireEvent.click(outer);
+  const inner = screen.getByText("Inner opener");
+  inner.focus();
+  fireEvent.click(inner);
+  fireEvent.keyDown(document, { key: "Escape" });
+  await waitFor(() => expect(document.activeElement).toBe(inner));
+  fireEvent.keyDown(document, { key: "Escape" });
+  await waitFor(() => expect(document.activeElement).toBe(outer));
 });

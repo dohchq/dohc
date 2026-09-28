@@ -6,6 +6,7 @@ import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   computerLabel,
+  computersOfAnswer,
   createAutomationHosts,
   HANDOVER_READ_FIRST_MS,
   HANDOVER_READ_MAX_MS,
@@ -42,6 +43,7 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
   let whileFinishing: ((stillHandingOver: () => boolean) => void) | null = null;
   const requests: HostRequest[] = [];
   const started: Array<number | null> = [];
+  const floors: Array<number | null> = [];
   const stored: Array<RelayAutomationHost | null> = [];
   let hostChanges = 0;
   const errors: unknown[] = [];
@@ -69,7 +71,7 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
     },
     stored: () => options.stored,
     store: (_workspaceId, row) => { stored.push(row); },
-    startedHere: (_workspaceId, startAfterMs) => { started.push(startAfterMs); },
+    startedHere: (_workspaceId, startAfterMs, floorMs) => { started.push(startAfterMs); floors.push(floorMs); },
     hostChanged: () => { hostChanges += 1; },
     finishHere: async (_workspaceId, stillHandingOver) => {
       finishes += 1;
@@ -88,7 +90,7 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
   const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
   const armed = () => timers.filter((timer) => !timer.done).map((timer) => timer.delayMs);
   return {
-    hosts, requests, started, stored, errors, settle,
+    hosts, requests, started, floors, stored, errors, settle,
     hostChanges: () => hostChanges,
     armed,
     /** Fires the one armed timer and lets its read land. */
@@ -320,6 +322,16 @@ describe("automation hosts", () => {
     taken.hosts.open("ws");
     await taken.settle();
     expect(taken.started, "no release, so a run before now may have happened there").toEqual([null]);
+    expect(taken.floors, "but never at or before the progress recorded").toEqual([1_000]);
+
+    // The server stopped running automations without a release, after it
+    // ran past the release this computer last saw: the relay records its
+    // own clock, and this computer starts after it, whatever its clock says.
+    const afterServer = world({ stored: host("server", 5, null, 7_000) });
+    afterServer.setRelay(host(ME, 6, null, 20_000));
+    afterServer.hosts.open("ws");
+    await afterServer.settle();
+    expect(afterServer.started).toEqual([20_000]);
   });
 
   it("keeps a closed workspace's holds, so a reopen finds them and a handover still waits", async () => {
@@ -534,6 +546,15 @@ describe("host answers and labels", () => {
     expect(hostOfAnswer({ status: 409, body: { ok: true, host: null } })).toBeUndefined();
     expect(hostOfAnswer({ status: 200, body: { ok: true, host: { ...host(ME, 1, null, null), extra: 1 } } })).toBeUndefined();
     expect(hostOfAnswer({ status: 200, body: { ok: true, host: host(" padded", 1, null, null) } })).toBeUndefined();
+  });
+
+  it("takes the owner's computers and the server, each with its kind", () => {
+    const server = { installId: "server", kind: "server", label: "My dohc server", lastSeenMs: 5 };
+    const laptop = { installId: OTHER, kind: "computer", label: "Ice's laptop", lastSeenMs: 4 };
+    const of = (computers: unknown[]) => computersOfAnswer({ status: 200, body: { ok: true, host: null, computers } });
+    expect(of([server, { ...laptop, extra: 1 }])).toEqual([server, laptop]);
+    expect(of([{ ...laptop, kind: undefined }])).toBeUndefined();
+    expect(of([{ ...laptop, kind: "phone" }])).toBeUndefined();
   });
 
   it("tells a relay that did not answer from a failure", () => {

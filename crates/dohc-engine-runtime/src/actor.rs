@@ -445,6 +445,28 @@ impl ActorHandle {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
     }
 
+    /// Recovery copies in this workspace, read on its store actor.
+    pub async fn kept_materialization_files(
+        &self,
+        workspace_id: String,
+        root: std::path::PathBuf,
+    ) -> Result<Vec<(String, String)>, RuntimeError> {
+        self.run(move |store, _| {
+            Ok(store
+                .list_kept_displacements(&workspace_id)?
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.target_path,
+                        format!(".dohc/engine/displaced/{}", row.displaced_name),
+                    )
+                })
+                .filter(|(_, path)| std::fs::symlink_metadata(root.join(path)).is_ok())
+                .collect())
+        })
+        .await
+    }
+
     // --- Async API (drives the tokio loop from within a runtime) ---
 
     /// Stamp a fresh database with its root's binding token, or verify an

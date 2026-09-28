@@ -25,6 +25,8 @@ import { useCollectionHistoryUndo } from "./useCollectionHistoryUndo";
 import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
 import { CollectionArchiveDialog } from "./CollectionArchiveDialog";
 import { CollectionDeleteDialog } from "./CollectionDeleteDialog";
+import { CollectionCustomizeDialog } from "./collections/CollectionCustomizeDialog";
+import { AUTOMATIONS_FILE } from "./collections/AutomationsPanel";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -63,6 +65,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
   const [viewingHistory, setViewingHistory] = useState(false);
   const [viewingPending, setViewingPending] = useState(false);
   const [editingFields, setEditingFields] = useState(false);
+  const [customizing, setCustomizing] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
   const [exportingRecovery, setExportingRecovery] = useState(false);
@@ -208,6 +211,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
     onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
     onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
     onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
+    onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
     onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
     onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
     onCustomAction={setCustomAction}
@@ -324,6 +328,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
       onExport={exportRecovery} />}
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
+    {customizing && automations.collectionPath !== null && <CollectionCustomizeDialog name={table?.name ?? dataset.name}
+      files={[{ path: `${automations.collectionPath}/${AUTOMATIONS_FILE}`, holds: "automations" }]} onClose={() => setCustomizing(false)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
       buttonStates={buttonStates}
       onChooseButton={table ? chooseButton : undefined}

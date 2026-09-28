@@ -1,3 +1,4 @@
+import { nameSlug } from "@dohc/workspace-contracts/names";
 import { validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { StepMap } from "@tiptap/pm/transform";
@@ -209,18 +210,12 @@ async function resolveAttachmentSettings(
   }
 }
 
-// Slug of the original filename (sans extension): lowercase, non-alphanumerics
-// collapsed to single dashes, trimmed, capped. Empty names fall back to
+// Slug of the original filename (sans extension), capped at 40 UTF-8 bytes.
+// Letters, numbers, and attached marks stay. Empty names fall back to
 // "image" so a filename is always produced.
 export function slugifyBaseName(name: string): string {
   const withoutExt = name.replace(/\.[^./\\]*$/, "");
-  const slug = withoutExt
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40)
-    .replace(/-+$/g, "");
-  return slug.length > 0 ? slug : "image";
+  return nameSlug(withoutExt, 40) || "image";
 }
 
 // Short, stable content hash (twin FNV-1a lanes → base36). Same bytes → same
