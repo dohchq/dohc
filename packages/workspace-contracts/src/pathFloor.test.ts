@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import data from "./pathFoldData.json";
+import data from "./pathFoldData.json" with { type: "json" };
 import fixtures from "../../../crates/dohc-engine-files/src/pathFoldFixtures.json";
 import { foldPathSegment, isIgnoredPathSegment } from "./pathFloor";
 

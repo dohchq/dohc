@@ -1,4 +1,4 @@
-import data from "./pathFoldData.json";
+import data from "./pathFoldData.json" with { type: "json" };
 
 const mappings: Record<string, string> = data.mappings;
 
