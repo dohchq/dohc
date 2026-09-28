@@ -287,7 +287,14 @@ async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
             )
             .await
             .expect_err("an unknown first version must fail closed");
-        assert_eq!(error.message, "version-not-found");
+        assert_eq!(
+            error.message,
+            if method == "versionedBinary.write" {
+                "invalid-version"
+            } else {
+                "version-not-found"
+            }
+        );
     }
 
     let connection =
@@ -324,7 +331,9 @@ async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_and_binary_writes_publish_through_materialization() {
     let (scratch, transport, handle) = fixture("materialize").await;
-    let text = write(&transport, &handle, 2, "plain.md", "published", "plain-1").await;
+    let text = call(&transport, &handle, 2, "versionedText.write", json!({
+        "versionId": "main", "path": "plain.md", "text": "published", "origin": "api", "publish": true, "requestId": "plain-1",
+    })).await;
     assert_eq!(text["materializeOutcome"], "applied");
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("plain.md")).unwrap(),
@@ -6357,6 +6366,14 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         }),
     )
     .await;
+    call(
+        &transport,
+        &handle_a,
+        30,
+        "versions.setActive",
+        json!({ "workspaceId": workspace_a, "versionId": named["id"] }),
+    )
+    .await;
     let written = call(
         &transport,
         &handle_a,
@@ -6381,6 +6398,16 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     )
     .await;
     assert_eq!(happy["bytesBase64"], "BAMCAQ==");
+
+    call(
+        &transport,
+        &handle_a,
+        31,
+        "versions.setActive",
+        json!({ "workspaceId": workspace_a, "versionId": "main" }),
+    )
+    .await;
+    assert!(!scratch.path().join("private.bin").exists());
 
     call(&transport, &handle_a, 6, "workspace.close", json!({})).await;
     let connection =

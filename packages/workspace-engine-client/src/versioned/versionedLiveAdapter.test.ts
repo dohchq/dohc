@@ -387,11 +387,24 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it.each(["api", "local-file"] as const)("records %s text without publishing unless explicitly requested", async (origin) => {
+    const loopback = new VersionedLoopbackEngine();
+    const adapter = new VersionedLiveAdapter({ sendRequest: (request) => loopback.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });
+    const input = { workspaceId: WORKSPACE, versionId: "main", path: "captured.txt", text: "on disk", requestId: "capture", metadata: { origin } };
+    const captured = await adapter.writeTextFile(input);
+    expect(captured.materializeOutcome).toBe("skipped");
+    expect(captured.materialized).toBe(false);
+    await expect(adapter.writeTextFile({ ...input, publish: true })).rejects.toThrow();
+    const authored = await adapter.writeTextFile({ ...input, requestId: "authored", text: "authored", publish: true });
+    expect(authored.materializeOutcome).toBe("applied");
+    expect(loopback.requests.filter(request => request.method === VERSIONED_METHOD.textWrite).map(request => (request.params as { publish?: boolean }).publish)).toEqual([undefined, true, true]);
+  });
+
   it.each([128 * 1024 - 1, 128 * 1024, 128 * 1024 + 1, 10 * 1024 * 1024])("keeps %i UTF-8 bytes as text and reuses the caller key", async (bytes) => {
     const loopback = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter({ sendRequest: (request) => loopback.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });
     const text = "a".repeat(bytes - 3) + "€";
-    const input = { workspaceId: WORKSPACE, versionId: "main", path: "large.txt", text, requestId: "stable", metadata: { origin: "api" as const } };
+    const input = { workspaceId: WORKSPACE, versionId: "main", path: "large.txt", text, publish: true, requestId: "stable", metadata: { origin: "api" as const } };
     const first = await adapter.writeTextFile(input);
     const replay = await adapter.writeTextFile(input);
     expect(first.snapshot.text).toBe(text);
@@ -415,7 +428,7 @@ describe("VersionedLiveAdapter", () => {
     await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
     const input = {
       workspaceId: WORKSPACE, versionId: "main", path: "new.md", text: "original",
-      createOnly: true, requestId: "create-request", metadata: { origin: "api" as const },
+      publish: true, createOnly: true, requestId: "create-request", metadata: { origin: "api" as const },
     };
     const first = await adapter.writeTextFile(input);
     const replay = await adapter.writeTextFile(input);

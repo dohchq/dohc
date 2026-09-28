@@ -23,6 +23,172 @@ const BYTES: &[u8] = &[0, 1, 2, 3, 0xff];
 const UPDATED_BYTES: &[u8] = &[9, 8, 7, 6, 0xfe];
 const OTHER_LINEAGE_BYTES: &[u8] = &[4, 3, 2, 1, 0xfd];
 
+#[tokio::test]
+async fn superseded_rename_write_allows_delete_on_retry_without_restart() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    actor
+        .versioned_binary_write(
+            binary_write("old.bin", "seed"),
+            scratch.path().into(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let input = RenameTextFile {
+        workspace_id: WORKSPACE.into(),
+        version_id: "main".into(),
+        from_path: "old.bin".into(),
+        to_path: "new.bin".into(),
+        moment_id: "rename".into(),
+        request_id: Some("rename".into()),
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 20,
+    };
+    actor
+        .versioned_text_rename(
+            input.clone(),
+            scratch.path().into(),
+            Arc::new(()),
+            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    std::fs::write(scratch.path().join("new.bin"), UPDATED_BYTES).unwrap();
+    actor
+        .versioned_binary_write(
+            binary_write_for("main", "new.bin", "newer", UPDATED_BYTES),
+            scratch.path().into(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    supersede_job(&db, scratch.path(), &binary_rename_write_job_id("rename"));
+    assert!(scratch.path().join("old.bin").exists());
+    actor
+        .versioned_text_rename(
+            input,
+            scratch.path().into(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!scratch.path().join("old.bin").exists());
+    assert_eq!(
+        std::fs::read(scratch.path().join("new.bin")).unwrap(),
+        UPDATED_BYTES
+    );
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn superseded_rollback_job_replays_as_complete() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    for (key, bytes) in [("seed", BYTES), ("mutation", UPDATED_BYTES)] {
+        actor
+            .versioned_binary_write(
+                binary_write_for("main", "file.bin", key, bytes),
+                scratch.path().into(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let mut input = rollback("main", "file.bin", "mutation");
+    input.request_id = Some("undo".into());
+    actor
+        .versioned_text_rollback(
+            input.clone(),
+            scratch.path().into(),
+            Arc::new(()),
+            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    std::fs::write(scratch.path().join("file.bin"), OTHER_LINEAGE_BYTES).unwrap();
+    actor
+        .versioned_binary_write(
+            binary_write_for("main", "file.bin", "newer", OTHER_LINEAGE_BYTES),
+            scratch.path().into(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    supersede_job(
+        &db,
+        scratch.path(),
+        &binary_rollback_job_identity(WORKSPACE, "main", "mutation"),
+    );
+    let replay = actor
+        .versioned_text_rollback(
+            input,
+            scratch.path().into(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(replay.deduped);
+    assert_eq!(
+        replay.materialize_outcome,
+        PostCommitMaterializeOutcome::Skipped
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("file.bin")).unwrap(),
+        OTHER_LINEAGE_BYTES
+    );
+    supervisor.close(&db).unwrap();
+}
+
+fn supersede_job(db: &std::path::Path, root: &std::path::Path, id: &str) {
+    use dohc_engine_files::materialize::{
+        DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer, materialize_one,
+    };
+    let store = EngineStore::open(db, 30).unwrap();
+    let job = store.load_materialization_job(id).unwrap().unwrap();
+    assert_eq!(
+        materialize_one(
+            &store,
+            root,
+            &job,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &StdBackoff,
+                now_ms: 30,
+                faults: &NoFaults
+            }
+        )
+        .unwrap(),
+        JobOutcome::Superseded
+    );
+    assert_eq!(
+        store.load_materialization_job(id).unwrap().unwrap().status,
+        dohc_engine_storage::JobStatus::Complete
+    );
+}
+
 #[derive(Default)]
 struct CountingRecorder {
     records: AtomicUsize,
@@ -1705,7 +1871,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
             |row| row.get(0),
         )
         .expect("restore job");
-    assert_eq!(status, "cancelled");
+    assert_eq!(status, "complete");
     drop(connection);
     supervisor.close(&db).expect("close actor");
 }
@@ -1929,7 +2095,7 @@ async fn ordinary_rollback_prefixed_write_is_superseded_normally() {
             |row| row.get(0),
         )
         .expect("spoof-prefixed ordinary job");
-    assert_eq!(status, "cancelled");
+    assert_eq!(status, "complete");
     assert_eq!(
         std::fs::read(scratch.path().join("spoof.bin")).expect("newer bytes remain"),
         UPDATED_BYTES
@@ -2140,7 +2306,7 @@ async fn legacy_global_pending_job_is_fenced_by_newer_scoped_completion() {
             |row| row.get(0),
         )
         .expect("legacy job status");
-    assert_eq!(status, "cancelled", "the global job must be superseded");
+    assert_eq!(status, "complete", "the global job must be superseded");
     drop(connection);
     supervisor.close(&db).expect("close actor");
 }

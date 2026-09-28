@@ -3459,6 +3459,7 @@ fn windows_staging_and_failed_return_preserve_attributes() {
         .unwrap(); // hidden | archive
     drop(file);
     let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+    let original_permissions = permissions.clone();
     permissions.set_readonly(true);
     std::fs::set_permissions(&target, permissions).unwrap();
     let attrs = std::fs::metadata(&target).unwrap().file_attributes();
@@ -3492,9 +3493,7 @@ fn windows_staging_and_failed_return_preserve_attributes() {
         std::fs::metadata(&destination).unwrap().file_attributes(),
         attrs
     );
-    let mut permissions = std::fs::metadata(&destination).unwrap().permissions();
-    permissions.set_readonly(false);
-    std::fs::set_permissions(&destination, permissions).unwrap();
+    std::fs::set_permissions(&destination, original_permissions).unwrap();
 }
 
 #[cfg(windows)]

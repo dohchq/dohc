@@ -402,6 +402,7 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     text: string;
+    publish?: boolean;
     createOnly?: boolean;
     expectedSha256?: string;
     requestId?: string;
@@ -416,6 +417,7 @@ export class VersionedLiveAdapter {
       workspaceId: input.workspaceId,
       versionId: input.versionId,
       path: input.path,
+      ...(input.publish !== undefined ? { publish: input.publish } : {}),
       ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
       ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
       ...(input.restoreBeforeMomentId !== undefined ? { restoreBeforeMomentId: input.restoreBeforeMomentId } : {}),

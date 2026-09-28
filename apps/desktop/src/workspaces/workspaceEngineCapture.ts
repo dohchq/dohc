@@ -3484,6 +3484,7 @@ export function createWorkspaceEngineCapture(
             versionId,
             path,
             text,
+            publish: true,
             ...(writeOptions.requestId !== undefined ? { requestId: writeOptions.requestId } : {}),
             ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
@@ -5743,6 +5744,7 @@ export function createWorkspaceEngineCapture(
                     versionId: activeVersionId,
                     path,
                     text: target.text,
+                    publish: true,
                     restoreBeforeMomentId: momentId,
                     metadata,
                   });
@@ -5959,6 +5961,7 @@ export function createWorkspaceEngineCapture(
             versionId,
             path,
             text: input.text,
+            publish: true,
             metadata,
           });
           requirePublishedWrite(path, written);
@@ -6096,6 +6099,7 @@ export function createWorkspaceEngineCapture(
               versionId,
               path: toPath,
               text: canonical,
+              publish: true,
               metadata: input.metadata ?? {
                 origin: "api",
                 summary: `Repaired archived ${pathBasename(toPath)}`,
@@ -6171,6 +6175,7 @@ export function createWorkspaceEngineCapture(
             versionId,
             path: fromPath,
             text: canonical,
+            publish: true,
             metadata: {
               ...metadata,
               summary: `Restored generated ${pathBasename(fromPath)} before archive`,

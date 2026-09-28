@@ -86,6 +86,8 @@ type MutationMetadata = JsonObject & {
 };
 
 type VersionedTextWriteParams = MutationMetadata & {
+  /** Publish after committing. Omit when recording bytes already on disk. */
+  publish?: boolean;
   versionId: string;
   objectId?: string;
   path: string;

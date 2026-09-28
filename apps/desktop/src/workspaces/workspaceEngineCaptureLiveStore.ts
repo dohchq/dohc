@@ -878,6 +878,7 @@ export function createCaptureLiveStores(
       requestId?: string;
       expectedSha256?: string;
       text: string;
+      publish?: boolean;
       createOnly?: boolean;
       restoreBeforeMomentId?: string;
       metadata: ActorNeutralWriteMetadata;

@@ -50,6 +50,8 @@ struct VersionedTextWriteParams {
     path: String,
     text: String,
     #[serde(default)]
+    publish: bool,
+    #[serde(default)]
     restore_before_moment_id: Option<String>,
     #[serde(default)]
     create_only: bool,
@@ -82,6 +84,8 @@ struct VersionedTextWriteBlobParams {
     path: String,
     sha256: String,
     bytes_base64: String,
+    #[serde(default)]
+    publish: bool,
     #[serde(default)]
     restore_before_moment_id: Option<String>,
     #[serde(default)]
@@ -392,21 +396,43 @@ impl EngineService {
             author_json,
             now_ms: params.now_ms.unwrap_or(now_ms()?),
         };
-        let result = open
-            .actor
-            .versioned_text_publish(
-                input,
-                open.root.clone(),
-                dohc_engine_runtime::WriteConditions {
-                    create_only: params.create_only,
-                    expected_sha256: params.expected_sha256,
-                },
-                params.restore_before_moment_id,
-                Arc::new(self.self_writes.scoped(&open.root)),
-                Arc::new(NoFaults),
-                cancellation.token(),
-            )
-            .await;
+        if !params.publish && (params.create_only || params.expected_sha256.is_some()) {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "write conditions require publication",
+            ));
+        }
+        let result = if params.publish {
+            open.actor
+                .versioned_text_publish(
+                    input,
+                    open.root.clone(),
+                    dohc_engine_runtime::WriteConditions {
+                        create_only: params.create_only,
+                        expected_sha256: params.expected_sha256,
+                    },
+                    params.restore_before_moment_id,
+                    Arc::new(self.self_writes.scoped(&open.root)),
+                    Arc::new(NoFaults),
+                    cancellation.token(),
+                )
+                .await
+        } else {
+            open.actor
+                .versioned_text_write_indexed_with_history(
+                    input,
+                    open.root.clone(),
+                    params.restore_before_moment_id,
+                    Arc::new(NoFaults),
+                    cancellation.token(),
+                )
+                .await
+                .map(|write| dohc_engine_runtime::TextWriteExecutionResult {
+                    write,
+                    materialized: false,
+                    materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+                })
+        };
         drop(session_serial);
         let execution = result.map_err(map_runtime)?;
         let result = execution.write;
@@ -455,6 +481,7 @@ impl EngineService {
                 object_id: parsed.object_id,
                 path: parsed.path,
                 text,
+                publish: parsed.publish,
                 restore_before_moment_id: parsed.restore_before_moment_id,
                 create_only: parsed.create_only,
                 expected_sha256: parsed.expected_sha256,
@@ -1129,11 +1156,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disk_sourced_text_writes_leave_newer_disk_bytes_untouched() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let handle = open_for_test(&service, scratch.path()).await;
+        for (index, origin) in ["local-file", "api"].into_iter().enumerate() {
+            let path = format!("capture-{index}.txt");
+            std::fs::write(scratch.path().join(&path), "read by capture").unwrap();
+            let read = std::fs::read_to_string(scratch.path().join(&path)).unwrap();
+            std::fs::write(scratch.path().join(&path), "newer outside write").unwrap();
+            let identity = file_id::get_file_id(scratch.path().join(&path)).unwrap();
+            let params =
+                json!({ "versionId": "main", "path": path, "text": read, "origin": origin });
+            let request = Request {
+                id: index as u64,
+                method: "versionedText.write".into(),
+                workspace: Some(handle.clone()),
+                deadline_ms: None,
+                idempotency_key: None,
+                progress: false,
+                params: params.clone(),
+            };
+            let result = service
+                .versioned_text_write(&RequestContext::unbounded(), &request, params)
+                .await
+                .unwrap();
+            assert_eq!(result["materializeOutcome"], "skipped");
+            assert_eq!(result["snapshot"]["text"], read);
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join(&path)).unwrap(),
+                "newer outside write"
+            );
+            assert_eq!(
+                file_id::get_file_id(scratch.path().join(&path)).unwrap(),
+                identity
+            );
+        }
+        service.workspace_close(Some(handle)).await.unwrap();
+        let store = dohc_engine_storage::EngineStore::open(
+            &scratch.path().join(".dohc/engine/engine.db"),
+            2,
+        )
+        .unwrap();
+        let jobs: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT count(*) FROM materialization_jobs", [], |row| {
+                    row.get(0)
+                })
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .unwrap();
+        assert_eq!(jobs, 0);
+        assert!(!std::fs::read_dir(scratch.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".conflict")
+        }));
+    }
+
+    #[tokio::test]
     async fn text_rpc_lost_reply_uses_stable_ids_across_service_restart() {
         let scratch = ScratchDir::new().unwrap();
         let service = EngineService::new();
         let handle = open_for_test(&service, scratch.path()).await;
-        let params = json!({ "versionId": "main", "path": "note.txt", "text": "original", "createOnly": true, "author": { "kind": "agent", "agentId": "writer", "onBehalfOf": "local" } });
+        let params = json!({ "versionId": "main", "path": "note.txt", "text": "original", "publish": true, "createOnly": true, "author": { "kind": "agent", "agentId": "writer", "onBehalfOf": "local" } });
         let first = write_for_test(
             &service,
             &handle,
@@ -1219,7 +1307,7 @@ mod tests {
         ] {
             let text = format!("{}€", "x".repeat(size - 3));
             let path = format!("size-{size}.txt");
-            let params = json!({ "versionId": "main", "path": path, "sha256": dohc_engine_storage::hex_sha256(text.as_bytes()), "bytesBase64": base64::engine::general_purpose::STANDARD.encode(text.as_bytes()) });
+            let params = json!({ "versionId": "main", "publish": true, "path": path, "sha256": dohc_engine_storage::hex_sha256(text.as_bytes()), "bytesBase64": base64::engine::general_purpose::STANDARD.encode(text.as_bytes()) });
             let result = write_for_test(
                 &service,
                 &handle,

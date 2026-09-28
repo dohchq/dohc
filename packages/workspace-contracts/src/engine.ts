@@ -474,6 +474,8 @@ export interface VersionedTextStore {
     requestId?: string;
     expectedSha256?: string;
     text: string;
+    /** Publish after committing. Omit when recording bytes already on disk. */
+    publish?: boolean;
     createOnly?: boolean;
     restoreBeforeMomentId?: VersionedTextMomentId;
     metadata: ActorNeutralWriteMetadata;

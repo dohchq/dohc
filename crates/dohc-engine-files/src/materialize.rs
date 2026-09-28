@@ -497,190 +497,6 @@ pub enum ProjectionTargetKind {
     Secret,
 }
 
-/// Private evidence for an authored create. Publication links this complete file
-/// into an absent workspace path; the link preserves identity across restart.
-pub struct AuthoredCreateStage {
-    root: PathBuf,
-    stage: PathBuf,
-    target: PathBuf,
-}
-
-#[derive(Debug)]
-pub struct AuthoredCreatePublishError {
-    pub error: MaterializeError,
-    pub may_be_published: bool,
-}
-
-impl AuthoredCreateStage {
-    pub fn open(root: &Path, path: &str, id: &str) -> Result<Self, MaterializeError> {
-        if id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
-            return Err(MaterializeError::UnsafeTargetPath);
-        }
-        let root = std::fs::canonicalize(root).map_err(|e| MaterializeError::io(root, &e))?;
-        let target = resolve_target(&root, path)?;
-        walk_target_components(
-            &root,
-            target.parent().ok_or(MaterializeError::UnsafeTargetPath)?,
-            reject_link_or_reparse,
-        )?;
-        let stage = root
-            .join(".dohc/engine/authored-create")
-            .join(format!("{id}.stage"));
-        prepare_target_parent_symlink_free(&root, &stage)?;
-        Ok(Self {
-            root,
-            stage,
-            target,
-        })
-    }
-
-    pub fn prepare(&self, text: &str) -> Result<(), MaterializeError> {
-        if text.len() > MAX_MATERIALIZE_BYTES {
-            return Err(MaterializeError::TooLarge { actual: text.len() });
-        }
-        prepare_target_parent_symlink_free(&self.root, &self.target)?;
-        let sibling = self.preparation_sibling();
-        let prepared = (|| {
-            // Create in the destination directory to inherit its security metadata.
-            let file = write_temp(&sibling, text.as_bytes())?;
-            file.sync_all()
-                .map_err(|error| MaterializeError::io(&sibling, &error))?;
-            std::fs::hard_link(&sibling, &self.stage)
-                .map_err(|error| MaterializeError::io(&self.stage, &error))?;
-            sync_parent_dir(self.stage.parent(), DurabilityPolicy::per_os())
-        })();
-        let removed = remove_authored_preparation(&sibling);
-        prepared?;
-        removed?;
-        sync_parent_dir(sibling.parent(), DurabilityPolicy::per_os())
-    }
-
-    fn preparation_sibling(&self) -> PathBuf {
-        temp_sibling(
-            &self.target,
-            &format!(
-                "authored-create-{}",
-                self.stage.file_stem().expect("stage ID").to_string_lossy()
-            ),
-        )
-    }
-
-    /// False means an existing entry won. Never overwrite or follow that entry.
-    pub fn publish(&self) -> Result<bool, AuthoredCreatePublishError> {
-        self.publish_with_link(|from, to| std::fs::hard_link(from, to))
-    }
-
-    fn publish_with_link(
-        &self,
-        link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
-    ) -> Result<bool, AuthoredCreatePublishError> {
-        let unpublished = |error| AuthoredCreatePublishError {
-            error,
-            may_be_published: false,
-        };
-        walk_target_components(
-            &self.root,
-            self.target
-                .parent()
-                .ok_or(MaterializeError::UnsafeTargetPath)
-                .map_err(unpublished)?,
-            ensure_real_directory,
-        )
-        .map_err(unpublished)?;
-        if let Err(error) = link(&self.stage, &self.target) {
-            // A remote server can create the link before losing its reply.
-            // Unsupported is a definitive refusal; other outcomes need identity evidence.
-            if error.kind() == ErrorKind::Unsupported {
-                return Err(unpublished(MaterializeError::io(&self.target, &error)));
-            }
-            match self.is_published() {
-                Ok(true) => {}
-                Ok(false) if error.kind() == ErrorKind::AlreadyExists => return Ok(false),
-                Ok(false) => return Err(unpublished(MaterializeError::io(&self.target, &error))),
-                Err(_) => {
-                    return Err(AuthoredCreatePublishError {
-                        error: MaterializeError::io(&self.target, &error),
-                        may_be_published: true,
-                    });
-                }
-            }
-        }
-        sync_parent_dir(self.target.parent(), DurabilityPolicy::per_os()).map_err(|error| {
-            AuthoredCreatePublishError {
-                error,
-                may_be_published: true,
-            }
-        })?;
-        Ok(true)
-    }
-
-    pub fn is_published(&self) -> Result<bool, MaterializeError> {
-        // Missing evidence cannot prove either publication or a collision.
-        let stage = same_file::Handle::from_path(&self.stage)
-            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
-        let metadata = match std::fs::symlink_metadata(&self.target) {
-            Ok(metadata) => metadata,
-            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
-                return Ok(false);
-            }
-            Err(e) => return Err(MaterializeError::io(&self.target, &e)),
-        };
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata_is_reparse_point(&metadata)
-        {
-            return Ok(false);
-        }
-        let target = same_file::Handle::from_path(&self.target)
-            .map_err(|e| MaterializeError::io(&self.target, &e))?;
-        Ok(stage == target)
-    }
-
-    pub fn cleanup(&self) -> Result<(), MaterializeError> {
-        remove_authored_preparation(&self.preparation_sibling())?;
-        match std::fs::remove_file(&self.stage) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(MaterializeError::io(&self.stage, &e)),
-        }
-    }
-}
-
-fn remove_authored_preparation(path: &Path) -> Result<(), MaterializeError> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
-            Ok(())
-        }
-        Err(error) => Err(MaterializeError::io(path, &error)),
-    }
-}
-
-/// No intent remains when this runs. Only this subsystem owns these private files.
-pub fn cleanup_authored_create_stages(root: &Path) -> Result<(), MaterializeError> {
-    let root = std::fs::canonicalize(root).map_err(|e| MaterializeError::io(root, &e))?;
-    let dir = root.join(".dohc/engine/authored-create");
-    ensure_target_symlink_free(&root, &dir)?;
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(MaterializeError::io(&dir, &e)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|e| MaterializeError::io(&dir, &e))?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.len() == 70
-            && name.ends_with(".stage")
-            && name[..64].bytes().all(|c| c.is_ascii_hexdigit())
-        {
-            std::fs::remove_file(entry.path())
-                .map_err(|e| MaterializeError::io(&entry.path(), &e))?;
-        }
-    }
-    Ok(())
-}
-
 /// Read a prospective projection target without treating foreign or
 /// transiently unreadable content as an overwrite preimage.
 pub fn probe_projection_target(
@@ -758,6 +574,20 @@ pub fn probe_projection_target(
             }
         }
     }
+}
+
+/// Hash a write precondition without applying capture's text or binary caps.
+pub fn write_precondition_sha256(
+    root: &Path,
+    rel: &str,
+) -> Result<Option<String>, MaterializeError> {
+    let root = std::fs::canonicalize(root).map_err(|error| MaterializeError::io(root, &error))?;
+    let target = resolve_target(&root, rel)?;
+    ensure_target_symlink_free(&root, &target)?;
+    Ok(match read_current_no_follow(&target)? {
+        CurrentTarget::Present(bytes) => Some(hex_sha256(&bytes)),
+        CurrentTarget::Absent | CurrentTarget::Oversized => None,
+    })
 }
 
 fn existing_ancestor_is_contained(root: &Path, target: &Path) -> bool {
@@ -957,12 +787,12 @@ fn materialize_one_ordinary(
     }
 
     // Load the content blob (integrity-verified on read).
-    let content = store.get_binary_blob(&job.content_sha256)?.ok_or_else(|| {
-        MaterializeError::MissingBlob {
+    let content = store
+        .get_materialization_blob(&job.content_sha256)?
+        .ok_or_else(|| MaterializeError::MissingBlob {
             job_id: job.job_id.clone(),
             sha256: job.content_sha256.clone(),
-        }
-    })?;
+        })?;
     if content.len() > MAX_MATERIALIZE_BYTES {
         return Err(MaterializeError::TooLarge {
             actual: content.len(),
@@ -4255,177 +4085,6 @@ mod tests {
         assert!(root.join("real/sub").is_dir());
     }
 
-    #[test]
-    fn authored_create_preparation_retains_only_private_identity() {
-        let root =
-            dohc_test_scratch::ScratchDir::new_named("authored-preparation").expect("scratch");
-        let stage =
-            super::AuthoredCreateStage::open(root.path(), "nested/record.md", &"d".repeat(64))
-                .expect("stage");
-        stage.prepare("authored").expect("prepare");
-        assert!(!stage.preparation_sibling().exists());
-        assert!(!stage.target.exists());
-        assert_eq!(
-            std::fs::read_to_string(&stage.stage).expect("private bytes"),
-            "authored"
-        );
-        std::fs::remove_dir(stage.target.parent().expect("parent"))
-            .expect("destination removed after preparation");
-        assert!(stage.stage.exists());
-        let reopened =
-            super::AuthoredCreateStage::open(root.path(), "nested/record.md", &"d".repeat(64))
-                .expect("reopen");
-        assert!(reopened.publish().expect("publish"));
-        assert!(reopened.is_published().expect("retained identity"));
-    }
-
-    #[test]
-    fn authored_create_failed_preparation_removes_sibling_and_preserves_existing_evidence() {
-        let root =
-            dohc_test_scratch::ScratchDir::new_named("authored-prepare-failure").expect("scratch");
-        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"e".repeat(64))
-            .expect("stage");
-        std::fs::write(&stage.stage, "prior evidence").expect("existing stage");
-        assert!(stage.prepare("new attempt").is_err());
-        assert!(!stage.preparation_sibling().exists());
-        assert_eq!(
-            std::fs::read_to_string(&stage.stage).expect("private bytes"),
-            "prior evidence"
-        );
-        stage.cleanup().expect("discard abandoned preparation");
-        stage.prepare("retry").expect("retry");
-    }
-
-    #[test]
-    fn authored_create_abandoned_sibling_never_becomes_user_content() {
-        let root =
-            dohc_test_scratch::ScratchDir::new_named("authored-orphan-sibling").expect("scratch");
-        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"f".repeat(64))
-            .expect("stage");
-        let sibling = stage.preparation_sibling();
-        std::fs::write(&sibling, "partial preparation").expect("crash before evidence link");
-        assert!(crate::floor::is_excluded_file(
-            sibling.file_name().unwrap().to_str().unwrap()
-        ));
-        stage.cleanup().expect("retry cleanup before intent");
-        assert!(!sibling.exists());
-        stage.prepare("complete").expect("prepare");
-        std::fs::hard_link(&stage.stage, &sibling).expect("crash after private evidence link");
-        stage.cleanup().expect("cleanup both private names");
-        assert!(!sibling.exists());
-        assert!(!stage.stage.exists());
-        assert!(!stage.target.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn authored_create_uses_ordinary_restrictive_mode() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = dohc_test_scratch::ScratchDir::new_named("authored-mode").expect("scratch");
-        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"1".repeat(64))
-            .expect("stage");
-        stage.prepare("authored").expect("prepare");
-        let mode = std::fs::metadata(&stage.stage)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode & !0o600, 0);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn authored_create_inherits_destination_acl() {
-        fn powershell(path: &std::path::Path, script: &str) {
-            let output = std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                .env("DOHC_ACL_PROBE", path)
-                .output()
-                .expect("powershell");
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let root = dohc_test_scratch::ScratchDir::new_named("authored-acl").expect("scratch");
-        let destination = root.path().join("destination");
-        std::fs::create_dir(&destination).expect("directory");
-        powershell(
-            &destination,
-            r#"$ErrorActionPreference='Stop'; $acl=[System.IO.Directory]::GetAccessControl($env:DOHC_ACL_PROBE); $sid=[System.Security.Principal.SecurityIdentifier]::new('S-1-1-0'); $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,[System.Security.AccessControl.FileSystemRights]::Read,[System.Security.AccessControl.InheritanceFlags]'ObjectInherit,ContainerInherit',[System.Security.AccessControl.PropagationFlags]::None,[System.Security.AccessControl.AccessControlType]::Allow); $acl.AddAccessRule($rule); [System.IO.Directory]::SetAccessControl($env:DOHC_ACL_PROBE,$acl)"#,
-        );
-        let stage =
-            super::AuthoredCreateStage::open(root.path(), "destination/record.md", &"2".repeat(64))
-                .expect("stage");
-        stage.prepare("authored").expect("prepare");
-        stage.publish().expect("publish");
-        powershell(
-            &stage.target,
-            r#"$ErrorActionPreference='Stop'; $rules=([System.IO.File]::GetAccessControl($env:DOHC_ACL_PROBE)).GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); if (-not ($rules | Where-Object { $_.IdentityReference.Value -eq 'S-1-1-0' -and $_.IsInherited -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Read) })) { throw 'Destination inherited Read ACE is missing' }"#,
-        );
-        assert!(stage.is_published().expect("same inode"));
-        assert!(!stage.preparation_sibling().exists());
-    }
-
-    #[test]
-    fn authored_create_resolves_ambiguous_link_outcomes_by_identity() {
-        for kind in [
-            std::io::ErrorKind::TimedOut,
-            std::io::ErrorKind::Other,
-            std::io::ErrorKind::AlreadyExists,
-        ] {
-            let root = dohc_test_scratch::ScratchDir::new_named("ambiguous-link").expect("scratch");
-            let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"a".repeat(64))
-                .expect("stage");
-            stage.prepare("authored").expect("prepare");
-            let result = stage.publish_with_link(|from, to| {
-                std::fs::hard_link(from, to)?;
-                Err(std::io::Error::from(kind))
-            });
-            assert!(result.expect("own link is published"));
-            assert!(stage.is_published().expect("identity"));
-        }
-    }
-
-    #[test]
-    fn authored_create_keeps_unknown_link_evidence_but_refuses_known_failures() {
-        for kind in [
-            std::io::ErrorKind::TimedOut,
-            std::io::ErrorKind::AlreadyExists,
-            std::io::ErrorKind::Unsupported,
-        ] {
-            let root = dohc_test_scratch::ScratchDir::new_named("unknown-link").expect("scratch");
-            let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"b".repeat(64))
-                .expect("stage");
-            stage.prepare("authored").expect("prepare");
-            let error = stage
-                .publish_with_link(|from, _| {
-                    std::fs::remove_file(from)?;
-                    Err(std::io::Error::from(kind))
-                })
-                .expect_err("failed link");
-            assert_eq!(
-                error.may_be_published,
-                kind != std::io::ErrorKind::Unsupported
-            );
-        }
-    }
-
-    #[test]
-    fn authored_create_link_collision_preserves_foreign_file() {
-        let root = dohc_test_scratch::ScratchDir::new_named("foreign-link").expect("scratch");
-        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"c".repeat(64))
-            .expect("stage");
-        stage.prepare("authored").expect("prepare");
-        std::fs::write(root.path().join("record.md"), "foreign").expect("foreign");
-        assert!(!stage.publish().expect("collision"));
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("record.md")).expect("read"),
-            "foreign"
-        );
-    }
-
     use super::*;
     use dohc_engine_storage::{
         FaultAction, JobStatus, MaterializationJobSpec, NoFaults, StorageError, enqueue_job,
@@ -4762,6 +4421,26 @@ mod tests {
             || std::io::Error::from(ErrorKind::Unsupported),
         ] {
             let replacer = UnsupportedLinks(error);
+            let scratch = Scratch::new("unsupported-links-text");
+            let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+            let sha = hex_sha256(b"authored text");
+            store.write_with(&NoFaults, |tx| {
+                tx.execute("INSERT INTO blobs (sha256, byte_length, text) VALUES (?1, 13, 'authored text')", [&sha]).map_err(StorageError::persist_public)?;
+                enqueue_job(tx, &MaterializationJobSpec { job_id: "authored-text".into(), workspace_id: "workspace".into(), target_path: "authored.txt".into(), content_sha256: sha.clone(), preimage: Preimage::Absent, target_generation: 1, now_ms: 1 })
+            }).unwrap();
+            let job = store
+                .load_materialization_job("authored-text")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                materialize_one(&store, &scratch.root, &job, &options_with(&replacer)).unwrap(),
+                JobOutcome::Completed
+            );
+            assert_eq!(
+                std::fs::read(scratch.root.join("authored.txt")).unwrap(),
+                b"authored text"
+            );
+            assert_eq!(store.binary_blob_count().unwrap(), 0);
             for overwrite in [false, true] {
                 let scratch = Scratch::new("unsupported-links");
                 let mut store = EngineStore::open(&scratch.db(), 1).unwrap();

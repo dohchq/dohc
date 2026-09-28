@@ -24,7 +24,6 @@
 //! task outlives the actor). Cancellation ([`CancellationToken`](tokio_util::sync::CancellationToken)) is checked
 //! between bounded units, never inside a transaction.
 
-mod authored_create;
 mod automations;
 mod capture;
 mod chats;

@@ -2569,6 +2569,60 @@ CREATE INDEX materialization_displacements_state
     ON materialization_displacements(state, job_id);
 ";
 
+// A job references either content table. Keep the reference checks while
+// allowing text jobs to use the text blob already owned by their moment.
+const V2_MATERIALIZATION_TEXT_BLOBS_DDL: &str = "\
+CREATE TABLE materialization_jobs_next (
+    job_id TEXT NOT NULL PRIMARY KEY,
+    target_path TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    preimage_present INTEGER NOT NULL,
+    preimage_sha256 TEXT,
+    target_generation INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at_ms INTEGER NOT NULL,
+    completed_at_ms INTEGER,
+    operation TEXT NOT NULL DEFAULT 'write',
+    workspace_id TEXT NOT NULL DEFAULT ''
+) STRICT;
+INSERT INTO materialization_jobs_next SELECT * FROM materialization_jobs;
+DROP TABLE materialization_jobs;
+ALTER TABLE materialization_jobs_next RENAME TO materialization_jobs;
+CREATE INDEX idx_materialization_jobs_status ON materialization_jobs(status);
+CREATE INDEX idx_materialization_jobs_workspace_path_status_generation
+    ON materialization_jobs(workspace_id, target_path, status, target_generation);
+CREATE INDEX idx_materialization_jobs_mutation_generation
+    ON materialization_jobs(target_generation DESC)
+    WHERE job_id NOT GLOB 'version-switch-mat_*'
+      AND job_id NOT GLOB 'version-switch-secret-mat_*';
+CREATE TRIGGER materialization_content_insert BEFORE INSERT ON materialization_jobs
+WHEN NOT EXISTS (SELECT 1 FROM blobs WHERE sha256 = NEW.content_sha256)
+ AND NOT EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = NEW.content_sha256)
+BEGIN SELECT RAISE(ABORT, 'missing materialization content'); END;
+CREATE TRIGGER materialization_content_update BEFORE UPDATE OF content_sha256 ON materialization_jobs
+WHEN NOT EXISTS (SELECT 1 FROM blobs WHERE sha256 = NEW.content_sha256)
+ AND NOT EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = NEW.content_sha256)
+BEGIN SELECT RAISE(ABORT, 'missing materialization content'); END;
+CREATE TRIGGER materialization_text_delete BEFORE DELETE ON blobs
+WHEN EXISTS (SELECT 1 FROM materialization_jobs WHERE content_sha256 = OLD.sha256)
+ AND NOT EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = OLD.sha256)
+BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
+CREATE TRIGGER materialization_text_update BEFORE UPDATE OF sha256 ON blobs
+WHEN OLD.sha256 <> NEW.sha256
+ AND EXISTS (SELECT 1 FROM materialization_jobs WHERE content_sha256 = OLD.sha256)
+ AND NOT EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = OLD.sha256)
+BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
+CREATE TRIGGER materialization_binary_delete BEFORE DELETE ON binary_blobs
+WHEN EXISTS (SELECT 1 FROM materialization_jobs WHERE content_sha256 = OLD.sha256)
+ AND NOT EXISTS (SELECT 1 FROM blobs WHERE sha256 = OLD.sha256)
+BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
+CREATE TRIGGER materialization_binary_update BEFORE UPDATE OF sha256 ON binary_blobs
+WHEN OLD.sha256 <> NEW.sha256
+ AND EXISTS (SELECT 1 FROM materialization_jobs WHERE content_sha256 = OLD.sha256)
+ AND NOT EXISTS (SELECT 1 FROM blobs WHERE sha256 = OLD.sha256)
+BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2687,6 +2741,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 20,
         id: "v2-materialization-displacements",
         sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 21,
+        id: "v2-materialization-text-blobs",
+        sql: V2_MATERIALIZATION_TEXT_BLOBS_DDL,
         sets_user_version: None,
     },
 ];
@@ -3026,6 +3086,10 @@ mod tests {
                 "v2-materialization-displacements",
                 "2887eaf2ca3af9e0361b7dce143eddaf80e94c60dfaf46bcb2b29443c735a36b",
             ),
+            (
+                "v2-materialization-text-blobs",
+                "3f5bf14bb5704f8f7b02e3af1fd50db2fbc59ee031e11aedf99339bf1bfce74c",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3036,6 +3100,59 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn materialization_text_blobs_upgrade_preserves_jobs_and_content_references() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = BASELINE_MIGRATIONS.len() - 1;
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let binary = crate::blob::put_binary_blob(&conn, b"binary").unwrap();
+        conn.execute("INSERT INTO materialization_jobs (job_id, target_path, content_sha256, preimage_present, target_generation, created_at_ms) VALUES ('pending', 'asset.bin', ?1, 0, 1, 1), ('complete', 'other.bin', ?1, 0, 2, 2)", [&binary]).unwrap();
+        conn.execute("UPDATE materialization_jobs SET status='complete', completed_at_ms=3 WHERE job_id='complete'", []).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let jobs: i64 = conn.query_row("SELECT count(*) FROM materialization_jobs WHERE (job_id='pending' AND status='pending') OR (job_id='complete' AND status='complete' AND completed_at_ms=3)", [], |row| row.get(0)).unwrap();
+        assert_eq!(jobs, 2);
+        assert!(
+            conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&binary])
+                .is_err()
+        );
+        conn.execute("INSERT INTO blobs VALUES ('text-sha', 4, 'text')", [])
+            .unwrap();
+        conn.execute("INSERT INTO materialization_jobs (job_id, target_path, content_sha256, preimage_present, target_generation, created_at_ms) VALUES ('text', 'note.txt', 'text-sha', 0, 3, 3)", []).unwrap();
+        assert!(
+            conn.execute("DELETE FROM blobs WHERE sha256='text-sha'", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE blobs SET sha256='changed' WHERE sha256='text-sha'",
+                []
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE binary_blobs SET sha256='changed' WHERE sha256=?1",
+                [&binary]
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE materialization_jobs SET content_sha256='missing' WHERE job_id='text'",
+                []
+            )
+            .is_err()
+        );
+        assert!(conn.execute("INSERT INTO materialization_jobs (job_id, target_path, content_sha256, preimage_present, target_generation, created_at_ms) VALUES ('missing', 'missing.txt', 'missing', 0, 4, 4)", []).is_err());
+        conn.execute("DELETE FROM materialization_jobs WHERE job_id='text'", [])
+            .unwrap();
+        conn.execute("DELETE FROM blobs WHERE sha256='text-sha'", [])
+            .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
     }
 
     /// The ledger is raw TEXT. A tampered checksum that is not ASCII must

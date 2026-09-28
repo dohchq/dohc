@@ -58,17 +58,18 @@ impl WriteConditions {
         if !self.create_only && self.expected_sha256.is_none() {
             return Ok(());
         }
-        let current = probe_projection_target(root, path, ProjectionTargetKind::Plaintext);
-        if self.create_only && (before_present || !matches!(current, ProjectionTargetState::Absent))
+        if self.create_only
+            && (before_present
+                || !matches!(
+                    probe_projection_target(root, path, ProjectionTargetKind::Plaintext),
+                    ProjectionTargetState::Absent
+                ))
         {
             return Err(DomainError::TargetPathExists.into());
         }
         if let Some(expected) = &self.expected_sha256 {
-            let current_sha256 = match current {
-                ProjectionTargetState::Text { sha256 }
-                | ProjectionTargetState::Binary { sha256 } => Some(sha256),
-                _ => None,
-            };
+            let current_sha256 =
+                dohc_engine_files::materialize::write_precondition_sha256(root, path)?;
             if current_sha256.as_ref() != Some(expected) {
                 return Err(DomainError::WritePreconditionFailed { current_sha256 }.into());
             }
@@ -148,7 +149,6 @@ impl ActorHandle {
                     &input,
                     root_dir.as_deref(),
                     None,
-                    false,
                     faults.as_ref(),
                     &token,
                 )
@@ -185,7 +185,6 @@ impl ActorHandle {
                     &input,
                     root_dir.as_deref(),
                     restore_before_moment_id.as_deref(),
-                    false,
                     faults.as_ref(),
                     &token,
                 )
@@ -237,7 +236,6 @@ impl ActorHandle {
                     &input,
                     Some(&root),
                     restore_before_moment_id.as_deref(),
-                    false,
                     Some(&conditions),
                     faults.as_ref(),
                     &token,
@@ -695,7 +693,6 @@ pub(super) fn versioned_text_write_on_store(
     input: &WriteText,
     root_dir: Option<&std::path::Path>,
     restore_before_moment_id: Option<&str>,
-    finish_create: bool,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -704,7 +701,6 @@ pub(super) fn versioned_text_write_on_store(
         input,
         root_dir,
         restore_before_moment_id,
-        finish_create,
         None,
         faults,
         token,
@@ -717,13 +713,15 @@ fn versioned_text_write_with_publication_on_store(
     input: &WriteText,
     root_dir: Option<&std::path::Path>,
     restore_before_moment_id: Option<&str>,
-    finish_create: bool,
     conditions: Option<&WriteConditions>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    if conditions.is_some() {
+        ensure_publication_version(store, &input.workspace_id, &input.version_id)?;
     }
     ensure_mutation_version_on_store(
         store,
@@ -813,17 +811,6 @@ fn versioned_text_write_with_publication_on_store(
             result.deduped,
         )
         .map_err(RuntimeError::from)?;
-        if finish_create {
-            if let Some(request_id) = &input.request_id {
-                tx.execute(
-                    "UPDATE engine_requests SET kind = 'authored-create' WHERE request_id = ?1",
-                    [request_id],
-                )
-                .map_err(StorageError::persist_public)?;
-            }
-            tx.execute("DELETE FROM authored_create_intent WHERE singleton = 1", [])
-                .map_err(StorageError::persist_public)?;
-        }
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -863,6 +850,7 @@ fn versioned_binary_write_conditioned_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    ensure_publication_version(store, &input.workspace_id, &input.version_id)?;
     ensure_mutation_version_on_store(
         store,
         &input.workspace_id,
@@ -935,6 +923,26 @@ fn versioned_binary_write_conditioned_on_store(
         materialized,
         materialize_outcome,
     })
+}
+
+fn ensure_publication_version(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<(), RuntimeError> {
+    let active: Option<String> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT version_id FROM active_versions WHERE workspace_id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StorageError::corrupt_public)
+    })?;
+    if version_id != active.as_deref().unwrap_or("main") {
+        return Err(DomainError::InvalidVersion.into());
+    }
+    Ok(())
 }
 
 fn publish_write_job(

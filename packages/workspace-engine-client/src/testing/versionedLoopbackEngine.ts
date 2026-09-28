@@ -179,13 +179,13 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["versionId", "path", "text"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
     optionalI64: ["nowMs"],
-    optionalJson: ["author", "createOnly"],
+    optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textWriteBlob]: {
     requiredStrings: ["versionId", "path", "sha256", "bytesBase64"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
     optionalI64: ["nowMs"],
-    optionalJson: ["author", "createOnly"],
+    optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
   [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"] },
@@ -1280,6 +1280,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const addressablePath = normalizedEnginePath(parsed.path, "addressable");
     if (parsed.momentId !== undefined) validateTextMomentId(parsed.momentId);
     const path = normalizedEnginePath(addressablePath, "storable");
+    if (params.publish !== undefined && typeof params.publish !== "boolean") throw new Error("invalid-params");
+    if (params.publish === true && versionId !== (state.activeVersionId ?? "main")) throw new Error("invalid-version");
+    if (params.publish !== true && (params.createOnly === true || params.expectedSha256 !== undefined)) throw new Error("invalid-params");
     const knownVersion = state.versions.get(versionId);
     if (knownVersion === undefined && versionId !== "main") {
       this.version(state, versionId);
@@ -1350,7 +1353,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
           snapshot: this.textSnapshot(workspace, versionId, path, recorded),
           moment: this.capMoment(existingMoment.wire),
           deduped: true,
-          materialized: true, materializeOutcome: "applied",
+          materialized: params.publish === true, materializeOutcome: params.publish === true ? "applied" : "skipped",
         };
       }
     }
@@ -1412,7 +1415,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       snapshot: this.textSnapshot(workspace, version.id, path, file),
       moment: this.capMoment(moment),
       deduped: false,
-      materialized: true, materializeOutcome: "applied",
+      materialized: params.publish === true, materializeOutcome: params.publish === true ? "applied" : "skipped",
     };
     this.recordReplay(state, requestId, params, result, replayFingerprint);
     return result;
@@ -1528,6 +1531,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (parsed.objectId === "" && versionId === "main" && !state.versions.has(versionId)) {
       throw new Error("invalid-input");
     }
+    if (versionId !== (state.activeVersionId ?? "main")) throw new Error("invalid-version");
     const version = this.mutationVersion(state, workspace, versionId);
     const requestId = parsed.requestId;
     const objectId = parsed.objectId ??
@@ -2822,6 +2826,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       versionId: params.versionId,
       path: params.path,
       text: params.text,
+      publish: params.publish === true,
       createOnly: params.createOnly === true,
       expectedSha256: params.expectedSha256 ?? null,
       momentId,
