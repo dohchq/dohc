@@ -56,12 +56,6 @@ function automation(steps: string, when = "field-changed: Status"): Automation {
 }
 
 describe("dataset automation steps", () => {
-  it("refuses Group-message triggers on datasets", () => {
-    const fromMessage = automation("      - add-record:\n          Status: New\n        operation: invoices.create\n", "group-message: Team");
-    expect(datasetSubscriptionFor(fromMessage, definition))
-      .toEqual({ problem: "This Collection's automations cannot start from Group messages. Choose a record change as the trigger." });
-  });
-
   // Each chat step alone, then inside an If, then in its otherwise branch.
   const everywhere = (chat: Automation["do"], base: Automation["do"]) => [chat, [{ kind: "if" as const, if: "true", do: chat, otherwise: [] }],
     [{ kind: "if" as const, if: "false", do: base, otherwise: chat }]];
@@ -76,11 +70,13 @@ describe("dataset automation steps", () => {
     for (const steps of everywhere(chat, base.do)) expect(datasetAutomationProblem({ ...base, do: steps }, generated)).toBeNull();
   });
 
-  it("claims no ledger subscription for a schedule, whose due times the engine claims", () => {
-    expect(datasetSubscriptionFor(automation("      - notify: Check\n        to: [user_ana]\n", "{schedule: day, timezone: UTC}"), definition)).toBeNull();
+  it("claims no ledger subscription for a schedule or a Group message, which the engine claims", () => {
+    for (const when of ["{schedule: day, timezone: UTC}", "group-message: Team"]) {
+      expect(datasetSubscriptionFor(automation("      - notify: Check\n        to: [user_ana]\n", when), definition)).toBeNull();
+    }
   });
 
-  it("wakes an agent from a button or a schedule, since a commit does not say whether a person or an agent made it", () => {
+  it("wakes an agent from a button, a schedule, or a Group message, since a commit does not say whether a person or an agent made it", () => {
     const wake = automation("      - wake-agent: Review this\n        person: user_ana\n").do;
     const changed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
     for (const steps of everywhere(wake, changed.do)) {
@@ -88,8 +84,10 @@ describe("dataset automation steps", () => {
     }
     const pressed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n", "button: Ask");
     for (const steps of everywhere(wake, pressed.do)) expect(datasetAutomationProblem({ ...pressed, do: steps }, generated)).toBeNull();
-    const due = automation("      - notify: Done\n        to: [user_ana]\n", "{schedule: day, timezone: UTC}");
-    for (const steps of everywhere(wake, due.do)) expect(datasetAutomationProblem({ ...due, do: steps }, generated)).toBeNull();
+    for (const when of ["{schedule: day, timezone: UTC}", "group-message: Team"]) {
+      const started = automation("      - notify: Done\n        to: [user_ana]\n", when);
+      for (const steps of everywhere(wake, started.do)) expect(datasetAutomationProblem({ ...started, do: steps }, generated)).toBeNull();
+    }
   });
 
   it("says which approved operation a step lacks, in the words the step card shows", () => {

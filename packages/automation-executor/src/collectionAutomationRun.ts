@@ -51,16 +51,28 @@ export const GROUP_CHANGED_ERROR =
   "The Group this automation watches changed after this message arrived, so the run stopped before sending anything more.";
 
 /**
- * Why a message claim's Group is not the one the automation watches now,
- * or null when it is.
+ * How a Group message's run ends before it reads anything, or null when the
+ * automation still watches the Group the message came from, on every
+ * attempt: reach reads the Group the file names now, and a saved plan
+ * carries the message it was made from. A run with no plan yet skips; one
+ * with a plan fails, since it may have sent part of it.
  */
-function boundGroup(automation: Automation, claim: AutomationClaim, chat: ChatDirectory | null): string | null {
+export function groupChangedOutcome(
+  automation: Automation,
+  claim: AutomationClaim,
+  chat: ChatDirectory | null,
+  planned: boolean,
+): CollectionAutomationRunOutcome | null {
+  if (claim.change.kind !== "message") return null;
   const trigger = automation.when;
-  const message = claim.change.kind === "message" ? claim.change.message : null;
-  if (trigger.kind !== "group-message" || !message) return "not-a-group-message";
-  const group = chat?.group(trigger.group);
-  if (!group || "problem" in group) return "no-group";
-  return group.channelId === message.groupId ? null : "another-group";
+  const group = trigger.kind === "group-message" ? chat?.group(trigger.group) : undefined;
+  if (group && !("problem" in group) && group.channelId === claim.change.message.groupId) return null;
+  return planned ? failed(GROUP_CHANGED_ERROR) : { kind: "skipped" };
+}
+
+/** Whether a run loads the chat directory: it sends something, or a Group message starts it. */
+export function readsChats(automation: Automation): boolean {
+  return sendsMessages(automation) || automation.when.kind === "group-message";
 }
 // How run history and holds name a wake's destination.
 const WAKE_TARGET_NAME = "your agent";
@@ -319,18 +331,12 @@ export async function runCollectionAutomation(
   // Where the automation's messages go, found once for the reach check and
   // the plan.
   let chat: ChatDirectory | null = null;
-  if (sendsMessages(automation) || automation.when.kind === "group-message") {
+  if (readsChats(automation)) {
     chat = await dependencies.chat.directory(roster, chatNeedsOf([automation]));
     if (chat === null) return { kind: "wait", reason: "engine" };
   }
-  // A Group message runs only while the automation's Group is still the
-  // one the message came from, on every attempt: the reach check below reads
-  // the Group the file names now, and a saved plan carries the message it
-  // was made from.
-  if (claim.change.kind === "message") {
-    const bound = boundGroup(automation, claim, chat);
-    if (bound !== null) return current?.plan ? failed(GROUP_CHANGED_ERROR) : { kind: "skipped" };
-  }
+  const groupChanged = groupChangedOutcome(automation, claim, chat, Boolean(current?.plan));
+  if (groupChanged !== null) return groupChanged;
   // Reach (ADR 0012), before anything is read. The targets are in the file,
   // so the check needs only the roster.
   const steps = reachStepsOf(automation, collection, (path) => ({ path, name: path.split("/").at(-1) ?? path }), chat);
@@ -492,7 +498,7 @@ async function plan(
   if (read.removed) return stop({ kind: "skipped" });
   let message: RunInputs["message"] = null;
   if (claim.change.kind === "message") {
-    const read = await groupMessage(dependencies, input, chat);
+    const read = await groupMessage(dependencies, claim, automation, chat);
     if ("outcome" in read) return stop(read.outcome);
     message = read.message;
   }
@@ -526,12 +532,12 @@ async function plan(
  * watches that Group for such a message. The automation's file may have
  * changed since the engine claimed the message.
  */
-async function groupMessage(
-  dependencies: CollectionAutomationRunDependencies,
-  input: CollectionAutomationRunInput,
+export async function groupMessage(
+  dependencies: Pick<CollectionAutomationRunDependencies, "readMessageBody">,
+  claim: AutomationClaim,
+  automation: Automation,
   chat: ChatDirectory | null,
 ): Promise<{ message: JsonObject } | { outcome: CollectionAutomationRunOutcome }> {
-  const { claim, automation } = input;
   const trigger = automation.when;
   const claimed = claim.change.kind === "message" ? claim.change.message : null;
   if (trigger.kind !== "group-message") return { outcome: { kind: "skipped" } };

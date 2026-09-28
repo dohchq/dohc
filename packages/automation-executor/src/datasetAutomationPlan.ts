@@ -271,14 +271,15 @@ function authoredProblem(automation: Automation, name: string): string | null {
 }
 
 export const DATASET_WAKE_NEEDS_BUTTON =
-  "In this Collection, a record change cannot wake your agent, because dohc cannot tell a person's change from an agent's. Choose a button or a schedule as the trigger.";
+  "In this Collection, a record change cannot wake your agent, because dohc cannot tell a person's change from an agent's. Choose another trigger.";
 
 /** Why dohc cannot run an automation on this dataset, or null. */
 export function datasetAutomationProblem(automation: Automation, dataset: DatasetRules): string | null {
   // Only a person's change wakes an agent. A dataset commit does not say
   // whether a person or an agent made it, and an agent's writes through the
   // CLI commit as the owner, so a record change cannot. A press, which a
-  // person makes, and a due time, which no one makes, can.
+  // person makes, a due time, which no one makes, and a Group message,
+  // which names its author's kind, can.
   const recordChange = "table" in automation.when && automation.when.kind !== "button";
   if (recordChange && stepsInOrder(automation).some(({ step }) => step.kind === "wake-agent")) {
     return DATASET_WAKE_NEEDS_BUTTON;

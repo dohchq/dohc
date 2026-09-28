@@ -30,9 +30,11 @@ import {
   applyChatEffect,
   checkPlannedMessages,
   DEADLINE_ERROR,
+  groupChangedOutcome,
+  groupMessage,
   newRun,
+  readsChats,
   savedRunOf,
-  sendsMessages,
   type CollectionAutomationRunDependencies,
   type CollectionAutomationRunOutcome,
 } from "./collectionAutomationRun";
@@ -62,9 +64,10 @@ import {
 // before value is sent again under a new key at the new version, and a
 // field someone changed to anything else keeps their change.
 //
-// A due time has no record: the engine claims it, as for a document
-// Collection, and the run reads only what its Finds find. Formulas read
-// `now` as the due time.
+// A due time or a Group message has no record: the engine claims it, as
+// for a document Collection, and the run reads only what its Finds find.
+// Formulas read `now` as the due time, and a Group message and its author
+// as a document Collection's run does.
 //
 // A button press's run reads its record as it is now, and formulas see the
 // person who pressed. It runs only the automation the press was checked
@@ -107,7 +110,7 @@ export interface DatasetRunHost {
 
 export interface DatasetAutomationRunDependencies extends Pick<
   CollectionAutomationRunDependencies,
-  "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts"
+  "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody"
 > {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
@@ -123,8 +126,9 @@ export function datasetPresser(claim: Pick<DatasetAutomationClaim, "fact" | "act
 
 /**
  * The claim a dataset run runs: a record change or a press the dataset's
- * ledger claimed, or a due time the engine claimed. An engine claim names
- * only its Collection, so it comes with the dataset the Collection keeps.
+ * ledger claimed, or a due time or a Group message the engine claimed. An
+ * engine claim names only its Collection, so it comes with the dataset the
+ * Collection keeps.
  */
 export type DatasetRunClaim =
   | { source: "dataset"; claim: DatasetAutomationClaim }
@@ -269,9 +273,13 @@ export async function runDatasetAutomation(
   // Where the automation's messages go, found once for the reach check and
   // the plan.
   let chat: ChatDirectory | null = null;
-  if (sendsMessages(automation)) {
+  if (readsChats(automation)) {
     chat = await dependencies.chat.directory(roster, chatNeedsOf([automation]));
     if (chat === null) return { kind: "wait", reason: "engine" };
+  }
+  if (held.source === "engine") {
+    const groupChanged = groupChangedOutcome(automation, held.claim, chat, Boolean(saved.current?.plan));
+    if (groupChanged !== null) return groupChanged;
   }
   // Reach (ADR 0012) against the rules and data grants now, before anything
   // is read: each chat and operation the automation can reach stops the run
@@ -371,9 +379,9 @@ async function plan(
       versions.set(datasetRecordKey(rules.datasetId, table.tableId, row.id), { id: row.id, version: row.version });
       return runRecordOf(row, rules.datasetId, table, readable);
     };
-    // What changed, as planning reads it. A due time is not a record
-    // change, and the reverse, so a claim whose automation changed trigger
-    // since starts nothing.
+    // What changed, as planning reads it. A due time or a message is not a
+    // record change, and the reverse, so a claim whose automation changed
+    // trigger since starts nothing.
     let runClaim: RunClaim;
     let record: RunRecord | null = null;
     if (held.source === "engine") {
@@ -421,9 +429,15 @@ async function plan(
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.skipped) return stop({ kind: "skipped" });
+  let message: RunInputs["message"] = null;
+  if (held.source === "engine" && held.claim.change.kind === "message") {
+    const got = await groupMessage(dependencies, held.claim, automation, chat);
+    if ("outcome" in got) return stop(got.outcome);
+    message = got.message;
+  }
   const pressedBy = held.source === "dataset" ? datasetPresser(held.claim) : null;
   const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
-  const inputs: RunInputs = { person, message: null, chat, automation, claim: read.runClaim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds,
+  const inputs: RunInputs = { person, message, chat, automation, claim: read.runClaim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds,
     // Without a read, the record is its id: a formula that reads a field stops instead of reading nothing.
     ...(datasetRules.generated ? {} : { recordKeys: ["id"] }) };
   if (!datasetRules.generated) {
