@@ -2,6 +2,7 @@ import { jsonResponse, type TokenBucketLimiter } from "@dohc/service-http";
 import type {PublicEditRelease} from "@dohc/security-contract";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
+import {linkRefusal} from "./linkRefusal";
 import {
   DiscussionActivityCapacityError,
   type DiscussionActivityHub,
@@ -298,6 +299,7 @@ export function createDiscussionRoutes(
         linkReadRateLimiter,
         linkGrantReadRateLimiter,
       );
+
       if (request.method === "GET") {
         const url = new URL(request.url);
         const cursor = discussionCursor.decode(url.searchParams.get("cursor"));
@@ -331,6 +333,8 @@ export function createDiscussionRoutes(
       }
 
       const input = parseLinkDiscussionAppendBody(await readJsonObject(request));
+      requireFreshLinkRead(capabilityToken, capability);
+      if (capability.access === "view") return linkRefusal("link_view_access");
       const result = storage.appendLinkDiscussionMessage({
         capabilityHash: capability.session.capabilityHash,
         profileTokenHash: hashLinkProfileSecret(profileSecret!, linkKey),
@@ -343,6 +347,10 @@ export function createDiscussionRoutes(
         },
       });
       if (!result.ok) {
+        if (result.reason === "rate-limit") {
+          requireFreshLinkRead(capabilityToken, capability);
+          return linkRefusal("link_read_rate_limited");
+        }
         if (result.reason === "invalid-input") {
           return privateErrorResponse(badRequest("discussion message is invalid"));
         }
@@ -415,6 +423,7 @@ export function createDiscussionRoutes(
         linkReadRateLimiter,
         linkGrantReadRateLimiter,
       );
+
       const query = parseDiscussionActivityQuery(new URL(request.url).searchParams);
       const observedRevision = storage.getShareDiscussionRevision(capability.shareId);
       if (observedRevision === null) return privateRefused();

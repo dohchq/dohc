@@ -28,6 +28,7 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_list_automation_runs",
   "dohc_read_automation_run",
   "dohc_retry_automation_run",
+  "dohc_press_button",
 ];
 
 const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];

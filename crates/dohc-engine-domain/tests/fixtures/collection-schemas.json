@@ -1,6 +1,191 @@
 {
   "vectors": [
     {
+      "name": "schema-version-1",
+      "yaml": "version: 1\nname: Tasks\nfields:\n  Done:\n    type: checkbox\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": "Tasks",
+          "description": null,
+          "fields": [
+            {
+              "name": "Done",
+              "type": "checkbox"
+            }
+          ],
+          "views": []
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "schema-version-2",
+      "yaml": "version: 2\nname: Tasks\nfields:\n  Done:\n    type: checkbox\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "unsupported-version",
+            "path": "/version"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema-version-0",
+      "yaml": "version: 0\nname: Tasks\nfields:\n  Done:\n    type: checkbox\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-version",
+            "path": "/version"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema-version--1",
+      "yaml": "version: -1\nname: Tasks\nfields:\n  Done:\n    type: checkbox\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-version",
+            "path": "/version"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema-version-1.5",
+      "yaml": "version: 1.5\nname: Tasks\nfields:\n  Done:\n    type: checkbox\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-version",
+            "path": "/version"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema-version-null",
+      "yaml": "version: null\nname: Tasks\nfields:\n  Done:\n    type: checkbox\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-version",
+            "path": "/version"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema-version-true",
+      "yaml": "version: true\nname: Tasks\nfields:\n  Done:\n    type: checkbox\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-version",
+            "path": "/version"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema-version-\"1\"",
+      "yaml": "version: \"1\"\nname: Tasks\nfields:\n  Done:\n    type: checkbox\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-version",
+            "path": "/version"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema-version-float-current",
+      "yaml": "version: 1.0\nname: Tasks\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": "Tasks",
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "schema-version-float-newer",
+      "yaml": "version: 2.0\nname: Tasks\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "unsupported-version",
+            "path": "/version"
+          }
+        ]
+      }
+    },
+    {
       "name": "valid-comment-only-schema",
       "yaml": "# collection schema to be filled in later\n",
       "expected": {

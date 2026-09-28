@@ -38,7 +38,7 @@ export function createWorkspaceEngineIpc<
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceForRegistered">;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
-    work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords">) => Promise<Result>,
+    work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus">) => Promise<Result>,
   ): Promise<Result | null>;
   requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
@@ -215,6 +215,22 @@ export function createWorkspaceEngineIpc<
           activity.getStatus(input.workspaceId),
         ),
       );
+    });
+    registerHandler(CHANNELS.retryFileRecovery, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = WorkspaceIdPayload.parse(payload);
+      return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+        assertWritableWorkspace(operation.workspace);
+        const recovered = await withEngineAdapter(operation.workspace, async adapter => {
+          await adapter.reconcileCapture();
+          if ((await adapter.watcherStatus()).recoveryUnavailable) {
+            throw new Error("dohc still cannot read the recovery folder. Check folder access, then try again.");
+          }
+          return true;
+        });
+        if (!recovered) throw new Error("The workspace engine is not running.");
+        notifyRenderer({ workspaceId: operation.workspace.workspaceId });
+      });
     });
     registerHandler(CHANNELS.retryOwnerLiveDelivery, async (event, payload) => {
       assertTrustedSender(event);

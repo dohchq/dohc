@@ -18,10 +18,11 @@ it('uses actual approved collection authority for list, idempotent create, and w
     const create={id:'create',op:'collection.create',idempotencyKey:'first',fields:{destination:'Tokyo'}};
     const accepted=await call(create);expect(accepted.status).toBe(200);const receipt=await accepted.json();expect(receipt.kind).toBe('accepted');
     expect(await(await call(create)).json()).toEqual(receipt);
-    expect((await call({...create,fields:{destination:'Manila'}})).status).toBe(409);
+    const refused=async(response:Response)=>{expect(response.status).toBe(404);expect(await response.json()).toEqual({ok:false,error:'not found'});};
+    await refused(await call({...create,fields:{destination:'Manila'}}));
     const page=await(await call(list)).json();expect(page.records).toHaveLength(1);expect(page.records[0].fields).toEqual({destination:'Tokyo'});
-    expect((await call({...create,idempotencyKey:'bad',fields:{private:'secret'}})).status).toBe(400);
-    expect((await call({...list,authorityRevision:2})).status).toBe(400);
+    await refused(await call({...create,idempotencyKey:'bad',fields:{private:'secret'}}));
+    await refused(await call({...list,authorityRevision:2}));
     expect((await call(list,{origin:'null'})).status).toBe(404);
     expect((await call(list,{'x-dohc-app-proof':'Z'.repeat(43)})).status).toBe(404);
     f.withdraw();expect((await call(list)).status).toBe(404);expect((await call({...create,idempotencyKey:'after'})).status).toBe(404);

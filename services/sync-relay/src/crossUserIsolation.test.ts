@@ -473,8 +473,8 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
   });
 });
 
-describe("MU-C5 · revocation closes read and append byte-identically", () => {
-  it("after revoke, a chat share read and member append both match an absent share", async () => {
+describe("MU-C5 · revocation closes read and append with a recipient removal message", () => {
+  it("after revoke, explains removal to the member while refusing strangers opaquely", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
@@ -515,8 +515,10 @@ describe("MU-C5 · revocation closes read and append byte-identically", () => {
     const absentAppend = await denialBytes(
       await h(request(MEMBER, "/sync/shares/never-existed/log", jsonBody({ originId: "o", ops: [] }))),
     );
-    // Both surfaces close, byte-identically to a share that never existed.
-    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(absentRead);
+    const removed = `404:${JSON.stringify({ok: false, error: "The owner removed your access.", code: "share_access_removed"})}`;
+    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(removed);
+    expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}`)))).toBe(absentRead);
+    expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log`, jsonBody({ originId: "o", ops: [] }))))).toBe(absentAppend);
     expect(
       await denialBytes(
         await h(
@@ -533,7 +535,7 @@ describe("MU-C5 · revocation closes read and append byte-identically", () => {
           ] })),
         ),
       ),
-    ).toBe(absentAppend);
+    ).toBe(removed);
   });
 });
 

@@ -350,13 +350,15 @@ test("the verdict must name THIS checkout's commit, not any commit", () => {
 
 test("PR workflow uses both canonical jobs and provisions the pinned Rust tools", () => {
   const document = load(workflow);
-  for (const [job, prefix, gate] of [
-    ["javascript", "xvfb-run -a ", "js"],
-    ["rust", "", "rust"],
+  for (const [job, gate] of [
+    ["javascript", "js"],
+    ["rust", "rust"],
   ]) {
     const steps = document.jobs[job].steps;
-    const selected = steps.find(step => step.run?.trim() === `${prefix}pnpm verify:pr --base "$PR_BASE_SHA" --job ${gate}`);
-    const full = steps.find(step => step.run?.trim() === `${prefix}pnpm verify:pr --base HEAD --job ${gate} --full`);
+    assert.ok(steps.some(step => step.run === "pnpm install --frozen-lockfile"));
+    assert.ok(!steps.some(step => /setup:worktree|xvfb-run|playwright install-deps/u.test(step.run ?? "")), "the canonical verifier owns selected desktop setup");
+    const selected = steps.find(step => step.run?.trim() === `pnpm verify:pr --base "$PR_BASE_SHA" --job ${gate}`);
+    const full = steps.find(step => step.run?.trim() === `pnpm verify:pr --base HEAD --job ${gate} --full`);
     assert.ok(selected, `${job} must use affected-package selection for PRs`);
     assert.equal(selected.if, "github.event_name == 'pull_request'");
     assert.equal(selected.env.PR_BASE_SHA, "${{ github.event.pull_request.base.sha }}");

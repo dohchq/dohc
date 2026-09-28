@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
 import {afterEach, expect, it, vi} from "vitest";
 import {openLinkDocument} from "./linkLive";
+import {LINK_REFUSALS, linkRefusalBody, type LinkRefusalCode} from "@dohc/security-contract/link-refusal";
 
 const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384},
   maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384},
   maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
   maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
 afterEach(() => {vi.unstubAllGlobals(); vi.restoreAllMocks();});
+it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("shows the scoped refusal %s", async code => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json(linkRefusalBody(code), {status: LINK_REFUSALS[code].status})));
+  await expect(openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal)).rejects.toThrow(LINK_REFUSALS[code].error);
+});
 it("opens the link socket with a one-use ticket and cookie credentials without account or capability material", async () => {
   const calls: {url: string; protocols: string[]}[] = [];
   class Socket extends EventTarget {

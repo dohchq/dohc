@@ -12,6 +12,11 @@ import {
   type ShareMountRecord,
   type ShareViewIdentity,
 } from "./registryStore";
+import type { CloudCredentials } from "./cloudCredentialStore";
+import {
+  reconcileRecipientShares,
+  type ReceivedShareListing,
+} from "./recipientShareReconciliation";
 import { recordSynced } from "./syncHistory";
 
 // Electron wiring over the pure registry store. The registry lives in
@@ -137,6 +142,19 @@ export function setWorkspaceShareView(
 // back from a caller's pre-pull snapshot. See registryStore.markShareViewEnded.
 export function endWorkspaceShareView(workspaceId: string): void {
   store().markShareViewEnded(workspaceId);
+}
+
+// An authenticated relay listing applied to the workspace's received shares:
+// an ended record whose share is active again resumes, and the owner's
+// confirmed removals are recorded. See recipientShareReconciliation.ts.
+export function reconcileWorkspaceRecipientShares(
+  workspaceId: string,
+  listing: ReceivedShareListing,
+  credentials: CloudCredentials,
+): boolean {
+  return store().reconcileRecipientShares(workspaceId, (entry) =>
+    reconcileRecipientShares(entry, listing, credentials),
+  );
 }
 
 // MU-C4: the workspace's joined shared channels (replace-the-set write).

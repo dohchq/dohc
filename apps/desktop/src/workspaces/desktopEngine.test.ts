@@ -102,7 +102,7 @@ function fixture() {
     recordEngineProblem: vi.fn(),
     workspaceAuthorities: authorities,
     collectionAutomations: { current: (id) => rows.has(id) ? states.get(id)?.collectionAutomations : undefined },
-    notifyRenderer: vi.fn(),
+    notifyRenderer: vi.fn(), noteNoAtomicPlacement: vi.fn(),
     launchMarks: { daemonReady: vi.fn() }, desktopMarks: { markOnce: vi.fn() },
     logLaunchMarksOnce: vi.fn(),
   };
@@ -594,6 +594,8 @@ describe("desktop engine composed sessions and events", () => {
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "failed" });
       expect(collection.notifyClaimed).toHaveBeenCalledOnce();
       expect(collection.failuresChanged).toHaveBeenCalledOnce();
+      f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
+      expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");
       f.rows.delete("workspace");
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
       expect(collection.notifyClaimed).toHaveBeenCalledOnce();

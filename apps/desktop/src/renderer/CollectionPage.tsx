@@ -1,4 +1,5 @@
 import { useRequestSequence } from "./useRequestSequence";
+import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import {
   useCallback,
   useEffect,
@@ -27,6 +28,8 @@ import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { SecondaryButton } from "./ui/controls";
+import { MoreMenu } from "./ui/MoreMenu";
+import { CollectionCustomizeDialog, documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
 import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
 import {
@@ -135,6 +138,12 @@ export function CollectionPage({
         collectionPath,
       });
       if (!detailsRequest.isCurrent(request)) return;
+      const versionError = collectionVersionError(result.reasons, `${collectionPath}/collection.yaml`);
+      if (versionError) {
+        setDetails(null);
+        setLoadError(versionError);
+        return;
+      }
       setDetails({ schema: result.schema });
       setLoadError(null);
     } catch (error) {
@@ -223,6 +232,7 @@ export function CollectionPage({
   // panel mounting after it.
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [automationsOpen, setAutomationsOpen] = useState(false);
+  const [customizing, setCustomizing] = useState(false);
   const [panelFocus, setPanelFocus] = useState<{ automationId: string; seq: number } | null>(null);
   // A button nothing uses opens the builder with its trigger filled in.
   const [panelStart, setPanelStart] = useState<{ automation: Automation; seq: number } | null>(null);
@@ -535,8 +545,19 @@ export function CollectionPage({
       >
         Fields
       </SecondaryButton>
+      <MoreMenu
+        label="Collection actions"
+        items={[{ label: "Customize…", onSelect: () => setCustomizing(true) }]}
+      />
     </>
   );
+  const customizeDialog = customizing ? (
+    <CollectionCustomizeDialog
+      name={schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath}
+      files={documentCollectionFiles(collectionPath)}
+      onClose={() => setCustomizing(false)}
+    />
+  ) : null;
   const fieldsDialog = fieldsOpen ? (
     <FieldsDialog
       schema={schema}
@@ -577,6 +598,7 @@ export function CollectionPage({
           {automationsPanel}
         </div>
         {fieldsDialog}
+        {customizeDialog}
       </div>
     );
   }
@@ -696,6 +718,7 @@ export function CollectionPage({
       {automationsPanel}
       </div>
       {fieldsDialog}
+      {customizeDialog}
       {viewsOpen ? (
         <ViewsDialog
           schema={schema}

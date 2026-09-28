@@ -38,7 +38,7 @@ function viewEntry(view: ViewDefinition): Record<string, unknown> {
 }
 
 export function serializeCollectionSchema(schema: CollectionSchema): string {
-  const document: Record<string, unknown> = {};
+  const document: Record<string, unknown> = { version: 1 };
   if (schema.name !== null) document.name = schema.name;
   if (schema.description !== null) document.description = schema.description;
   document.fields = Object.fromEntries(

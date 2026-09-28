@@ -159,6 +159,72 @@ fn reconcile_does_not_load_unrelated_large_text_snapshot() {
     );
 }
 
+#[test]
+fn unsupported_collection_version_does_not_bind_or_adopt_records() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "tasks/collection.yaml",
+        "version: 2\nname: Tasks\n",
+        2,
+    )
+    .expect("schema");
+    write_text(&mut store, "tasks/new.md", "---\nTitle: New\n---\n", 3).expect("record");
+    write_text(
+        &mut store,
+        "tasks/existing.md",
+        &format!("---\nid: {FIRST_TASK_ID}\n---\n"),
+        4,
+    )
+    .expect("record with id");
+    let result = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile");
+    let TxnOutcome::Committed(result) = result else {
+        panic!("reconciliation crashed")
+    };
+    assert!(result.adoptions.is_empty());
+    let collection = store
+        .read_with(|conn| get_collection(conn, WORKSPACE_ID, "tasks"))
+        .expect("read collection")
+        .expect("diagnostic");
+    assert_eq!(collection.record_count, 0);
+    assert_eq!(
+        collection.reasons[0].code,
+        CollectionSchemaReasonCode::UnsupportedVersion
+    );
+    let error = store
+        .read_with(|conn| {
+            get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, 10, None)
+        })
+        .expect_err("unsupported reader");
+    assert!(
+        error
+            .to_string()
+            .contains("collection.yaml uses a newer version. Update dohc")
+    );
+    write_text_for_object(
+        &mut store,
+        "tasks/collection.yaml",
+        "version: 1\nname: Tasks\n",
+        "object-2",
+        "moment-5",
+        5,
+    )
+    .expect("supported schema");
+    let result = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile supported");
+    let TxnOutcome::Committed(result) = result else {
+        panic!("reconciliation crashed")
+    };
+    assert_eq!(result.adoptions.len(), 2);
+}
+
 fn seeded_store() -> (ScratchDir, EngineStore) {
     let (scratch, mut store) = fresh_store();
 

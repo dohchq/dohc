@@ -1245,3 +1245,27 @@ fn eligible_scan_rolls_back_ledger_and_cursor_together() {
         "splitting ledger/cursor writes can strand exactly one durable half."
     );
 }
+
+#[test]
+fn windows_reserved_names_are_mention_lookup_keys() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start_message(
+        &mut store,
+        "channel",
+        "thread",
+        "message",
+        ChatActorKind::Human,
+        None,
+        None,
+        "@CON @nul @aux.txt",
+        20,
+    );
+    for handle in ["con", "NUL", "aux.txt"] {
+        let mentions = LinkedChatStore::new(&mut store)
+            .list_mentions_for_handle(WS, handle, false, None, 10)
+            .expect("reserved filename is a valid mention key");
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].message_id, "message");
+    }
+}

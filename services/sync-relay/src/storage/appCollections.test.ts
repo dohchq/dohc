@@ -60,6 +60,16 @@ function fixture() {
   return {directory,path,owner,input,write,get storage(){return storage;},get raw(){return (storage as StorageContext).db;},restart(){storage.close();storage=openSyncRelayStorage(path);},accept(patch:Partial<AcceptAppCollectionInput>={},maxCreatesPerGrant=100){return storage.acceptAppCollection({...input,...patch},{maxCreatesPerGrant});}};
 }
 
+it("names the sync service when collection approval needs a newer reader",()=>{
+  const f=fixture();
+  const newer="version: 2\n"+schemaText;
+  f.write("responses/collection.yaml",newer);
+  const newerCapability={...capability,schemaSha256:hash(newer)};
+  const publication=f.storage.publishAppPublication({workspaceId:"w",shareId:"s",grantId:"g",generation:1,ownerUserId:"owner",candidate:{...candidate(),capabilities:[newerCapability]},blobs:[{sha256:hash(script),bytes:script}],limits,nowMs:30});
+  expect(()=>f.storage.approveAppCollection({...f.owner,publicationId:publication.publicationId,expectedAuthorityRevision:1,capability:newerCapability}))
+    .toThrow("responses/collection.yaml uses a newer version. Update the sync service to read this file.");
+});
+
 it("accepts one durable workspace moment and payload-bound receipt across retries and restart",()=>{
   const f=fixture(), receipt=f.accept();
   expect(receipt.kind).toBe("accepted");expect(receipt.path).toMatch(/^responses\/accepted_/);expect(receipt).not.toHaveProperty("recordId");
@@ -383,7 +393,7 @@ it("keeps intentionally shared response files readable without private retry met
   f.storage.revokeShareGrant({ shareId: "s", grantId: "g", revokedAtMs: 21 });
   for (const path of ["/sync/link/current", `/sync/link/blobs/${responseFile.blobSha256}`]) {
     const revoked = await read(path);
-    expect(revoked.status).toBe(401);
+    expect(revoked.status).toBe(404);
     await revoked.body?.cancel();
   }
 });
@@ -391,9 +401,11 @@ it("keeps intentionally shared response files readable without private retry met
 it("keeps collection HTTP off by default and rejects ambient or forged authority",async()=>{
   const off=httpFixture({appCollectionPolicy:undefined});expect((await off.request()).status).toBe(404);
   const f=httpFixture();
-  for(const headers of [{cookie:"owner"},{authorization:"Bearer owner"},{"x-dohc-link-profile-secret":"bad"}] as Record<string,string>[])expect((await f.request("POST",f.body,"",{headers})).status).toBe(headers.authorization?401:404);
+  for(const headers of [{cookie:"owner"},{authorization:"Bearer owner"},{"x-dohc-link-profile-secret":"bad"}] as Record<string,string>[])expect((await f.request("POST",f.body,"",{headers})).status).toBe(404);
   expect((await f.request("PUT",f.body)).status).toBe(405);
-  for(const body of [{...f.body,principalId:"owner"},{...f.body,workspaceId:"w"},{...f.body,authorityRevision:1},{...f.body,fields:{destination:null}}])expect((await f.request("POST",body)).status).toBe(body.authorityRevision===1?404:400);
+  for(const body of [{...f.body,principalId:"owner"},{...f.body,workspaceId:"w"}])expect((await f.request("POST",body)).status).toBe(400);
+  expect((await f.request("POST",{...f.body,authorityRevision:1})).status).toBe(404);
+  expect((await f.request("POST",{...f.body,fields:{destination:null}})).status).toBe(400);
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
 });
 it.each(["?authorityRevision=2&limit=1&limit=2","?authorityRevision=2&afterPath=a&afterPath=b","?authorityRevision=2&ownerUserId=owner","?authorityRevision=02","?authorityRevision=2&limit=101","?authorityRevision=2&afterPath=%00"])("rejects malformed collection query %s",async query=>{
@@ -484,7 +496,7 @@ it("requires both credentials and exact JSON transport before accepting",async()
   const f=httpFixture();
   for(const name of ["authorization","x-dohc-link-profile-secret"]){
     const headers=new Headers({...f.headers,"content-type":"application/json"});headers.delete(name);
-    expect((await f.handler(new Request(`https://relay${f.path}`,{method:"POST",headers,body:JSON.stringify(f.body)}))).status).toBe(name==="authorization"?401:404);
+    expect((await f.handler(new Request(`https://relay${f.path}`,{method:"POST",headers,body:JSON.stringify(f.body)}))).status).toBe(404);
   }
   expect((await f.request("POST",f.body,"",{headers:{"content-type":"text/plain"}})).status).toBe(400);
   expect((await f.request("POST",f.body,"?authorityRevision=2")).status).toBe(400);

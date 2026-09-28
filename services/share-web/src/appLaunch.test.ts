@@ -10,6 +10,13 @@ const issue=()=>handler.handle(request(config.viewerOrigin+'/api/apps/launch',JS
 const redeem=(launch:{action:string;handoff:string})=>handler.handle(request(launch.action,new URLSearchParams({handoff:launch.handoff}).toString(),{origin:config.viewerOrigin,'content-type':'application/x-www-form-urlencoded'}));
 return{handler,requests,request,issue,redeem,refresh(){capability="fresh-capability";},revoke(){active=false;},narrow(){revision++;},advance(ms:number){now+=ms;}};}
 async function launch(f:ReturnType<typeof fixture>){const issued=await f.issue();expect(issued.status).toBe(200);const handoff=await issued.json();const response=await f.redeem(handoff);expect(response.status).toBe(200);const html=await response.text(),proof=/const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!,cookie=response.headers.get('set-cookie')!.split(';')[0]!,origin=new URL(handoff.action).origin;const read=(path='/document',custom:Record<string,string>={})=>f.handler.handle(f.request(origin+path,'',{origin,cookie,'x-dohc-app-proof':proof,...custom}));return{handoff,response,html,proof,cookie,origin,read};}
+it.each(['/collection','/backend'])('uses identical refusal headers for revoked, bad-cookie and unknown launches on %s',async path=>{
+  const f=fixture(),app=await launch(f);f.revoke();
+  const body=path==='/collection'?{id:'list',op:'collection.list',limit:1}:{id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{}};
+  const send=(origin:string,cookie:string)=>f.handler.handle(f.request(origin+path,JSON.stringify(body),{origin,cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
+  const responses=await Promise.all([send(app.origin,app.cookie),send(app.origin,'bad=cookie'),send('https://'+'z'.repeat(43)+'.example.net',app.cookie)]);
+  for(const response of responses){expect(response.status).toBe(404);expect(response.headers.get('referrer-policy')).toBe('no-referrer');expect(Object.fromEntries(response.headers)).toEqual(Object.fromEntries(responses[0]!.headers));expect(await response.json()).toEqual({ok:false,error:'not found'});}
+});
 it('requires separate registrable domains including private PSL suffixes',()=>{expect(parseAppLaunchConfig(config)).toEqual(config);for(const appDomain of ['com','example.com','apps.example.com','localhost','127.0.0.1','github.io','EXAMPLE.NET'])expect(()=>parseAppLaunchConfig({...config,appDomain})).toThrow();expect(()=>parseAppLaunchConfig({viewerOrigin:'https://a.github.io',appDomain:'b.github.io'})).not.toThrow();});
 it('requires viewer cookies and exact origin',async()=>{const f=fixture();for(const custom of [{origin:'null',cookie:'viewer=session'},{origin:config.viewerOrigin,cookie:'bad'}] as Array<Record<string,string>>)expect((await f.handler.handle(f.request(config.viewerOrigin+'/api/apps/launch',JSON.stringify({discriminator:'abcdefghijkl',publicationId}),{...custom,'content-type':'application/json'}))).status).toBe(404);expect(f.requests).toHaveLength(0);});
 it('rechecks relay and keeps credentials out of opaque document',async()=>{const f=fixture(),app=await launch(f);expect(app.response.headers.get('set-cookie')).toContain('Secure; HttpOnly; SameSite=Strict; Path=/');expect(app.html).toContain("frame.sandbox='allow-scripts allow-forms allow-downloads'");expect(app.html).not.toContain('server-capability');expect(app.html).not.toContain('server-profile');const doc=await app.read();expect(doc.status).toBe(200);const text=await doc.text();expect(text).toContain('App loaded');expect(text).not.toContain(app.proof);expect(text).not.toContain(app.cookie);expect(f.requests).toHaveLength(4);});
@@ -60,10 +67,10 @@ it('keeps in-flight launch authorizations independent from status checks', async
   await allAdmitted;release();
   expect((await status).status).toBe(204);await Promise.all(issues);
 });
-it('keeps transport failures distinct from revoked authority', async () => {
+it('keeps unverified transport failures opaque and permits a later authorized retry', async () => {
   let fail = false;
   const f = fixture(async () => {if (fail) throw Error('Relay unavailable');}), app = await launch(f);
-  fail = true;expect((await app.read('/status')).status).toBe(503);
+  fail = true;expect((await app.read('/status')).status).toBe(404);
   fail = false;expect((await app.read('/status')).status).toBe(204);
   f.revoke();expect((await app.read('/status')).status).toBe(404);
 });
@@ -71,7 +78,7 @@ it('keeps transport failures distinct from revoked authority', async () => {
 it('retains staged bytes through transient authorization checks but only delivers once', async () => {
   let fail = false;
   const f = fixture(async () => {if (fail) throw Error('Temporary relay failure');}), app = await launch(f);
-  fail = true;expect((await app.read()).status).toBe(503);
+  fail = true;expect((await app.read()).status).toBe(404);
   fail = false;expect((await app.read()).status).toBe(200);
   expect((await app.read()).status).toBe(404);
   expect(f.requests.filter(request => new URL(request.url).pathname.includes('/blobs/'))).toHaveLength(1);
@@ -96,7 +103,7 @@ it('keeps full collection admission independent from document builds and status'
   hold=async()=>{if(++count===16)admitted();await barrier;};
   const request=(app:typeof apps[number])=>f.handler.handle(f.request(app.origin+'/collection',JSON.stringify({id:'list',op:'collection.list',limit:1}),{origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
   const calls=Array.from({length:16},(_,i)=>request(apps[i%2]!));await ready;
-  expect((await request(apps[0]!)).status).toBe(503);
+  expect((await request(apps[0]!)).status).toBe(404);
   hold=async()=>{};expect((await apps[1]!.read()).status).toBe(200);expect((await apps[0]!.read('/status')).status).toBe(204);
   const issued=await f.issue();expect(issued.status).toBe(200);expect((await f.redeem(await issued.json())).status).toBe(200);
   release();await Promise.all(calls);
@@ -124,7 +131,7 @@ it('routes backend requests through the isolated launch proof and current relay 
   for(const custom of [{origin:'null'},{cookie:''},{'x-dohc-app-proof':''},{host:'wrong.example.net'}] as Array<Record<string,string>>)expect((await send(custom)).status).toBe(404);
   expect((await send({},body,'/backend/invoke')).status).toBe(404);
   expect(f.requests).toHaveLength(before);
-  expect((await send({},{...body,authorityRevision:99})).status).toBe(400);
+  expect((await send({},{...body,authorityRevision:99})).status).toBe(404);
   const response=await send();expect(response.status).toBe(200);expect(await response.json()).toEqual({result:{quantity:2},revision:1,replayed:false});
   f.refresh();expect((await send()).status).toBe(200);expect(f.requests.at(-1)!.headers.get('authorization')).toBe('LinkCapability fresh-capability');
   f.narrow();expect((await send()).status).toBe(404);
@@ -136,8 +143,8 @@ it('bounds backend workflow bursts without changing collection or status admissi
   const send=(path:string,body:unknown)=>f.handler.handle(f.request(app.origin+path,JSON.stringify(body),{origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
   for(let index=0;index<30;index++)expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-'+index,input:{}})).status).toBe(200);
   for(let index=0;index<12;index++)await send('/collection',{id:'list',op:'collection.list',limit:1});
-  expect((await send('/collection',{id:'list',op:'collection.list',limit:1})).status).toBe(503);
-  expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'read',idempotencyKey:'attempt-13',input:{}})).status).toBe(503);
+  expect((await send('/collection',{id:'list',op:'collection.list',limit:1})).status).toBe(404);
+  expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'read',idempotencyKey:'attempt-13',input:{}})).status).toBe(404);
   expect((await app.read('/status')).status).toBe(204);
 });
 
@@ -163,4 +170,14 @@ it('refresh refuses changed authority and never extends the original session dea
   const refresh=()=>f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host,cookie:app.cookie}}));
   const refreshed=await refresh();expect(refreshed.status).toBe(200);expect(refreshed.headers.get('set-cookie')).toContain('Max-Age=10');
   f.advance(10000);expect((await refresh()).status).toBe(404);
+});
+
+it('keeps revoked bootstrap cookies opaque when their local request budget is exhausted',async()=>{
+  const f=fixture(),app=await launch(f);f.revoke();
+  for(let index=0;index<25;index++){
+    const response=await f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host,cookie:app.cookie}}));
+    expect(response.status).toBe(404);expect(await response.json()).toEqual({ok:false,error:'not found'});
+  }
+  const unknown=await f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host}}));
+  expect(unknown.status).toBe(404);expect(await unknown.json()).toEqual({ok:false,error:'not found'});
 });

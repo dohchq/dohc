@@ -2,6 +2,7 @@ import { ipcErrorMessage } from "../ipcError";
 import { useEffect, useRef, useState } from "react";
 import type {
   RelayShareReceivedRow,
+  RelayShareRemovedRow,
   ShareAccess,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -40,8 +41,20 @@ type MountInfo = {
 
 type LoadState =
   | { status: "loading" }
-  | { status: "ready"; shares: RelayShareReceivedRow[]; mounts: MountInfo[] }
+  | {
+      status: "ready";
+      shares: RelayShareReceivedRow[];
+      // Grants their owner removed, as the relay words them. Kept apart from
+      // `shares`, which lists only what this account can still open.
+      removed: RelayShareRemovedRow[];
+      mounts: MountInfo[];
+    }
   | { status: "error"; message: string };
+
+const shortTimestamp = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "short",
+  timeStyle: "short",
+});
 
 // Removal left the folder behind. States what changed, where the files are,
 // and the one thing left for the user to do.
@@ -161,7 +174,6 @@ export function SharedWithMeList(props: {
 
   async function refresh() {
     const token = ++refreshToken.current;
-    const mountsAtStart = mountsCommitted.current;
     try {
       // The registry is local and must render even when the relay listing
       // fails (signed out, offline, different relay) — otherwise the
@@ -169,13 +181,18 @@ export function SharedWithMeList(props: {
       // can't confirm anything. A failed relay listing renders as an empty
       // received set; the registry-only rows already say the share is not
       // listed by the relay right now.
-      const [sharesResult, registry] = await Promise.all([
+      const sharesResult = await
         bridge()
           .listRelayShares()
-          .then((result) => ({ ok: true as const, received: result.received }))
-          .catch(() => ({ ok: false as const, received: [] })),
-        bridge().getWorkspaceRegistry(),
-      ]);
+          .then((result) => ({
+            ok: true as const,
+            received: result.received,
+            removed: result.removed,
+          }))
+          .catch(() => ({ ok: false as const, received: [], removed: [] }));
+      if (token !== refreshToken.current) return;
+      const mountsAtStart = mountsCommitted.current;
+      const registry = await bridge().getWorkspaceRegistry();
       if (token !== refreshToken.current) return;
       const workspace = registry.workspaces.find(
         (entry) => entry.workspaceId === props.workspaceId,
@@ -188,6 +205,7 @@ export function SharedWithMeList(props: {
       setLoad({
         status: "ready",
         shares: sharesResult.received,
+        removed: sharesResult.removed,
         mounts: fresher ?? workspace?.shareMounts ?? [],
       });
     } catch (cause) {
@@ -314,7 +332,17 @@ export function SharedWithMeList(props: {
   const registryOnlyMounts = load.mounts.filter(
     (mount) => !load.shares.some((share) => share.shareId === mount.shareId),
   );
-  if (load.shares.length === 0 && registryOnlyMounts.length === 0) {
+  // A removed grant with a mount explains that mount's row. One without a
+  // mount gets its own row, so the removal is not silent.
+  const removedById = new Map(load.removed.map((row) => [row.shareId, row]));
+  const removedWithoutMount = load.removed.filter(
+    (row) => !load.mounts.some((mount) => mount.shareId === row.shareId),
+  );
+  if (
+    load.shares.length === 0 &&
+    registryOnlyMounts.length === 0 &&
+    removedWithoutMount.length === 0
+  ) {
     return (
       <p data-testid="shared-with-me-empty" className="m-0 text-[11px] text-subtle">
         Nothing shared with you yet. When someone shares files to your account,
@@ -355,9 +383,11 @@ export function SharedWithMeList(props: {
               {`From ${mount.granterEmail ?? "another dohc user"}`}
               {mount.damaged
                 ? " — dohc can't read what this share grants"
-                : mount.ended
-                  ? " — ended; your copy stays readable but won't update"
-                  : " — not listed by the relay right now"}
+                : removedById.has(mount.shareId)
+                  ? ` — ${removedById.get(mount.shareId)!.message} Your copy stays readable but won't update.`
+                  : mount.ended
+                    ? " — ended; your copy stays readable but won't update"
+                    : " — not listed by the relay right now"}
             </div>
             <SkippedLine mount={mount} onDismiss={dismissSkips} />
           </div>
@@ -443,6 +473,22 @@ export function SharedWithMeList(props: {
           </li>
         );
       })}
+      {removedWithoutMount.map((row) => (
+        <li
+          key={`${row.shareId}:${row.grantId}`}
+          data-testid="shared-with-me-row"
+          data-share-id={row.shareId}
+          data-removed
+          className="flex items-center gap-2 bg-panel px-2.5 py-2"
+        >
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[11px] text-ink">{row.message}</div>
+            <div className="truncate text-[11px] text-subtle">
+              {`Removed ${shortTimestamp.format(row.removedAtMs)}`}
+            </div>
+          </div>
+        </li>
+      ))}
     </ul>
     </>
   );

@@ -427,7 +427,9 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     const withdrawn = await fetch(`${enabled}${path}/${published.publicationId}`, {headers: authHeaders()});
     expect((await withdrawn.json() as {active: boolean}).active).toBe(false);
     // Deployment opt-in alone grants neither collection authority nor public Edit.
-    expect((await postJson(enabled, `/sync/link/app-publications/${published.publicationId}/collection`, {fields: {destination: "Tokyo"}})).status).toBe(quota === "2" ? 401 : 404);
+    const collectionRefusal = await postJson(enabled, `/sync/link/app-publications/${published.publicationId}/collection`, {fields: {destination: "Tokyo"}});
+    expect(collectionRefusal.status).toBe(404);
+    expect(await collectionRefusal.json()).toEqual({ok: false, error: "not found"});
     expect((await postJson(enabled, "/sync/live/link-tickets", {})).status).toBe(404);
   });
 

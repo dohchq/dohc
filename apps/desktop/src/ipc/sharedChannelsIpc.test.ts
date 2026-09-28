@@ -74,6 +74,7 @@ async function harness() {
   const rotateAfterLookup = { value: false };
   const mount = vi.fn(async () => undefined);
   const sharesChanged = vi.fn<(workspaceId: string) => void>();
+  const reconcileReceivedShares = vi.fn<(listing: unknown) => void>();
   const store = {
     listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => []),
     getChannelWireId: vi.fn(async (_input: { workspaceId: string; channelId: string }): Promise<string | null> => null),
@@ -108,13 +109,13 @@ async function harness() {
     normalizeServerUrl: (url) => url, peekedReceivedGrantKinds: cache,
     peekReceivedGrantKindForShare: peek, acknowledgeWorkspaceShareSkips: acknowledge,
     notifyRenderer: notify, mountShareFolder: mount, unmountShareFolder: unmount,
-    sharesChanged,
+    sharesChanged, reconcileReceivedShares,
   });
   const invoke = async (channel: string, payload: unknown, trusted = true) =>
     handlers.get(channel)!({ sender: "window", trusted }, payload);
   return {
     handlers, invoke, workspace, other, authorities, helpers, relayListing, warm, peek, cache, write, notify, acknowledge,
-    mount, unmount, push, claim, rotateAfterLookup, store, relayCalls, sharesChanged,
+    mount, unmount, push, claim, rotateAfterLookup, store, relayCalls, sharesChanged, reconcileReceivedShares,
     rotateCredentials: () => { generation += 1; }, retireRenderer: () => { rendererCurrent = false; },
   };
 }
@@ -173,7 +174,7 @@ describe("registered shared-channel handlers", () => {
   it("leaves a local tombstone and rejects a request for another window's workspace", async () => {
     const h = await harness();
     await h.invoke(CHANNELS.leaveSharedChannel, { workspaceId: "workspace", shareId: "shown" });
-    expect(h.workspace.sharedChannels).toEqual([{ ...joined("shown"), ended: true }, joined("history")]);
+    expect(h.workspace.sharedChannels).toEqual([{ ...joined("shown"), ended: true, left: true }, joined("history")]);
     expect(h.other.sharedChannels).toEqual([joined("elsewhere")]);
     await expect(h.invoke(CHANNELS.leaveSharedChannel, { workspaceId: "other", shareId: "elsewhere" })).rejects.toThrow("changed workspaces");
     expect(h.write).toHaveBeenCalledOnce();
@@ -217,6 +218,31 @@ describe("registered shared-channel handlers", () => {
     held.resolve("not-dm");
     await expect(result).rejects.toThrow("session changed");
     expect(h.cache.size).toBe(0);
+  });
+
+  // The listing is applied to this machine's records before the joined lane
+  // is answered, so a row the owner restored answers as live in the same
+  // read. Its removed lane rides with the relay answer.
+  it("applies the listing to the registry before answering the joined lane, and carries the removed lane", async () => {
+    const h = await harness();
+    h.workspace.sharedChannels = [joined("shown"), { ...joined("gone"), ended: true }];
+    const listing = {
+      granted: [], received: [],
+      removed: [{ shareId: "gone", grantId: "grant", message: "The owner removed your access.", removedAtMs: 5 }],
+    };
+    h.relayListing.mockResolvedValue(listing);
+    h.reconcileReceivedShares.mockImplementation(() => {
+      // What main's reconcile does when the listing says the share is back.
+      h.workspace.sharedChannels = h.workspace.sharedChannels!.map((row) =>
+        row.shareId === "gone" ? { ...row, ended: false } : row,
+      );
+    });
+    const result = await h.invoke(CHANNELS.listChatChannelShares, {
+      workspaceId: "workspace", channelWireIds: ["wire-gone"],
+    }) as { joined: Array<{ joined: { ended: boolean } | null }>; relay: { state: string; removed?: string[] } };
+    expect(h.reconcileReceivedShares).toHaveBeenCalledWith(listing);
+    expect(result.relay).toMatchObject({ state: "answered", removed: ["gone"] });
+    expect(result.joined).toEqual([{ channelWireId: "wire-gone", joined: expect.objectContaining({ ended: false }) }]);
   });
 
   it("shares a channel's folder with it, as one group grant", async () => {

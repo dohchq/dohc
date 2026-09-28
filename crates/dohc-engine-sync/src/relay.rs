@@ -24,7 +24,7 @@ use crate::{
 };
 pub use direct_write::{
     DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, ShareCollectionWriteRequest,
-    ShareCollectionWriteResponse,
+    ShareCollectionWriteResponse, collision_key,
 };
 use direct_write::{read_direct_write_marks, read_direct_write_open_objects};
 

@@ -19,7 +19,9 @@ import {
   WorkspaceIdPayload,
   WorkspaceRegistryResult,
   WorkspaceSummary,
+  RevealWorkspaceFolderPayload,
 } from "./bridgeContract";
+import { join } from "node:path";
 import { CHANNELS } from "./channels";
 
 export function createWorkspaceRootApproval(effectiveHome: () => string) {
@@ -224,12 +226,14 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
 
   registerHandler(CHANNELS.revealWorkspaceFolder, (event, payload) => {
     assertTrustedSender(event);
-    const input = WorkspaceIdPayload.parse(payload);
+    const input = RevealWorkspaceFolderPayload.parse(payload);
     const workspace = workspaceSummaries().find(
       (entry) => entry.workspaceId === input.workspaceId,
     );
     if (!workspace) throw new Error("That workspace is not in the registry.");
-    showItemInFolder(workspace.rootPath);
+    showItemInFolder(input.recoveryCopies
+      ? join(workspace.rootPath, ".dohc", "engine", "displaced")
+      : workspace.rootPath);
   });
 }
 
