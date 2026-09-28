@@ -2093,14 +2093,14 @@ describe("Collection automations", () => {
     const hash = file.automations[0]!.definitionHash;
 
     await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: "0000000000000000" }], async () => undefined))
-      .resolves.toEqual({ undone: 0, left: 0 });
+      .resolves.toEqual({ undone: 0, left: 0, kept: 0, errorMessage: null });
     expect(w.fieldsOf(task).Count).toBe(4);
     await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: hash }], async () => undefined))
-      .resolves.toEqual({ undone: 2, left: 0 });
+      .resolves.toEqual({ undone: 2, left: 0, kept: 0, errorMessage: null });
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
     // Runs already undone are passed over.
     await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: hash }], async () => undefined))
-      .resolves.toEqual({ undone: 0, left: 0 });
+      .resolves.toEqual({ undone: 0, left: 0, kept: 0, errorMessage: null });
   });
 
   it("will not run a failed run again after someone undid what it changed", async () => {
@@ -2259,7 +2259,7 @@ describe("Collection automations", () => {
     await expect(w.executor.undoRunsOf(
       [{ automationId: "collection:Tasks#stamp", definitionHash: second.automations[0]!.definitionHash }],
       async () => undefined,
-    )).resolves.toEqual({ undone: 1, left: 0 });
+    )).resolves.toEqual({ undone: 1, left: 0, kept: 0, errorMessage: null });
     expect(w.fieldsOf(task).Count).toBe(3);
     expect(second.automations[0]!.definitionHash).not.toBe(firstHash);
   });

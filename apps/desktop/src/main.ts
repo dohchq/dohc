@@ -5467,6 +5467,10 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, init),
+    endLink: async (credentials, path, init) =>
+      (await relayShareJsonWithCredentials<unknown>(credentials, path, init, { retainDependentSetConflict: true })).kind === "success"
+        ? "ended"
+        : "dependents-changed",
     sharesChanged: shareRosters.sharesChanged,
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),

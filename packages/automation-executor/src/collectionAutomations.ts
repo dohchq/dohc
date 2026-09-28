@@ -2306,17 +2306,33 @@ export class CollectionAutomations {
    * history under one of these definitions, as Undo on each would, newest
    * first as run history lists them, so each field goes back in turn. A
    * claim's runs under other definitions stay. `left` counts the runs Undo
-   * refused, such as one still running.
+   * refused, such as one still running. `kept` counts the changes undone
+   * runs made that stay as they are: dataset records and actions Undo cannot
+   * reverse, and fields someone changed since or whose record is gone.
+   * A failure part way stops there and answers what went before, with it.
    */
   async undoRunsOf(
     definitions: ReadonlyArray<{ automationId: string; definitionHash: string }>,
     trash: (path: string) => Promise<void>,
-  ): Promise<{ undone: number; left: number }> {
+  ): Promise<{ undone: number; left: number; kept: number; errorMessage: string | null }> {
     const hashes = new Map<string, Set<string>>();
     for (const { automationId, definitionHash: hash } of definitions) {
       hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
     }
-    const result = { undone: 0, left: 0 };
+    const result = { undone: 0, left: 0, kept: 0 };
+    try {
+      await this.undoEachRun(hashes, trash, result);
+    } catch (error) {
+      return { ...result, errorMessage: error instanceof Error ? error.message : String(error) };
+    }
+    return { ...result, errorMessage: null };
+  }
+
+  private async undoEachRun(
+    hashes: ReadonlyMap<string, ReadonlySet<string>>,
+    trash: (path: string) => Promise<void>,
+    result: { undone: number; left: number; kept: number },
+  ): Promise<void> {
     for (const [automationId, wanted] of hashes) {
       // A dataset's runs are in its host's ledger, which may not be open yet.
       const parsed = parseCollectionAutomationId(automationId);
@@ -2328,10 +2344,14 @@ export class CollectionAutomations {
           .filter((run) => wanted.has(run.definitionHash));
         if (runs.length === 0 || runs.every((run) => run.undo === "done")) continue;
         const undone = await this.undo({ automationId, claimId: claim.claimId }, trash, wanted);
-        result[undone.status === "undone" ? "undone" : "left"] += 1;
+        if (undone.status !== "undone") {
+          result.left += 1;
+          continue;
+        }
+        result.undone += 1;
+        result.kept += undone.kept + undone.irreversible + undone.actions + undone.changedSince + undone.missing;
       }
     }
-    return result;
   }
 
   /** The name an engine automation id's automation has in its file, or null. */

@@ -209,13 +209,13 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
     const grants = await relayJson(relay.baseUrl, OWNER_TOKEN, "/sync/shares");
     const grantId = (JSON.parse(grants.body) as { granted: Array<{ shareId: string; grantId: string }> })
       .granted.find((row) => row.shareId === shareId)!.grantId;
-    let outcome: Awaited<ReturnType<Api["stopAndRestorePerson"]>> | null = null;
+    let outcome: Awaited<ReturnType<Api["stopAndRestore"]>> | null = null;
     await expect
       .poll(async () => {
         await wakeOwner();
         outcome = await owner!.page.evaluate(async ({ workspaceId, userId }) => {
           const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-          return await api.stopAndRestorePerson({ workspaceId, userId });
+          return await api.stopAndRestore({ workspaceId, target: { kind: "person", userId } });
         }, { workspaceId: ownerWorkspaceId, userId: RECIPIENT_USER });
         return outcome.status;
       }, { timeout: 120_000, intervals: [2_000] })

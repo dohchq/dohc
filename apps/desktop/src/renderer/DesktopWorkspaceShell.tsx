@@ -6016,7 +6016,7 @@ export function DesktopWorkspaceShell(props: {
         <StopAndRestoreDialog
           key={stopAndRestore.session.key}
           workspaceId={workspaceId}
-          person={stopAndRestore.session.person}
+          target={stopAndRestore.session.target}
           start={stopAndRestore.session.start}
           receipts={stopAndRestore.receipts}
           onRetry={stopAndRestore.retry}

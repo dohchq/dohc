@@ -4591,15 +4591,21 @@ export const UndoCollectionAutomationRunPayload = z.object({
 export type UndoCollectionAutomationRunPayload = z.infer<typeof UndoCollectionAutomationRunPayload>;
 export type UndoCollectionAutomationRunResult = CollectionAutomationUndo;
 
-// Stop and restore (ADR 0013): the owner stops a person they shared with and
-// puts back what that person wrote directly. Main finds the person's grants
-// on this workspace from the relay; the renderer names only the person.
-export const StopAndRestorePersonPayload = z.object({
+// Stop and restore (ADR 0013): the owner stops a person they shared with,
+// or ends an Edit share link, and puts back what it wrote directly. Main
+// finds the grants on this workspace from the relay; the renderer names only
+// the person or the link's grant.
+export const StopAndRestoreTarget = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("person"), userId: z.string().min(1).max(256) }).strict(),
+  z.object({ kind: z.literal("link"), grantId: OPAQUE_ID }).strict(),
+]);
+export type StopAndRestoreTarget = z.infer<typeof StopAndRestoreTarget>;
+export const StopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
-  userId: z.string().min(1).max(256),
+  target: StopAndRestoreTarget,
 }).strict();
-export type StopAndRestorePersonPayload = z.infer<typeof StopAndRestorePersonPayload>;
-export const StopAndRestorePersonResult = z.discriminatedUnion("status", [
+export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
+export const StopAndRestoreResult = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("restored"),
     // Each file put back, with the forward moment its Undo restores before.
@@ -4613,6 +4619,12 @@ export const StopAndRestorePersonResult = z.discriminatedUnion("status", [
     // Runs of the person's automations undone, and those Undo could not undo.
     runsUndone: z.number().int().nonnegative(),
     runsLeft: z.number().int().nonnegative(),
+    // Changes the undone runs made that stay as they are.
+    runChangesKept: z.number().int().nonnegative(),
+    // They wrote automations: runs another computer holds are not undone here.
+    wroteAutomations: z.boolean(),
+    // One of those automations sends messages, which no Undo takes back.
+    sendsMessages: z.boolean(),
     // What stopped the restore part way; the files above were restored.
     errorMessage: z.string().nullable(),
   }).strict(),
@@ -4620,7 +4632,7 @@ export const StopAndRestorePersonResult = z.discriminatedUnion("status", [
   // person wrote yet. Nothing was restored; trying again continues.
   z.object({ status: z.literal("waiting") }).strict(),
 ]);
-export type StopAndRestorePersonResult = z.infer<typeof StopAndRestorePersonResult>;
+export type StopAndRestoreResult = z.infer<typeof StopAndRestoreResult>;
 export const UndoStopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
@@ -6060,7 +6072,7 @@ export interface DohcDesktopBridge
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
   checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
-  stopAndRestorePerson(payload: StopAndRestorePersonPayload): Promise<StopAndRestorePersonResult>;
+  stopAndRestore(payload: StopAndRestorePayload): Promise<StopAndRestoreResult>;
   undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
