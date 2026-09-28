@@ -485,6 +485,8 @@ describe("notices on one person's computers", () => {
     for (const signedIn of [null, account(server, "ana")]) {
       const laptop = await computer(signedIn);
       await laptop.store.postNotice(notice({ noticeId: "first", title: "First" }));
+      // Sync saves the account outbox before sending, even when the relay is offline.
+      await laptop.store.sync();
       const name = (await readdir(laptop.directory)).find((entry) => entry.endsWith(".json"))!;
       const where = signedIn ? "account" : "local";
       // A folder where the save writes its temporary file makes the save fail.
