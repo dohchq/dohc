@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -76,9 +76,9 @@ test("file selection reaches Vitest and refuses unsupported or empty scopes", ()
   assert.throws(() => testPlan([{name: "fixture", manifest: {scripts: {test: "node tests.js"}}}], {fixture: files}), /Invalid test file selection/);
 });
 
-for (const {name, cancel = false, selectedPackages, testFiles, missingFile = false, repoFail = false} of [
-  {name:"workspace runner completes prerequisites first and repository tests before the packaging step"},
-  {name:"cancellation rejects queued packages before launching their commands",cancel:true},
+for (const {name, cancel = false, selectedPackages, testFiles, missingFile = false, repoFail = false, packageFail = false, overlap = false} of [
+  {name:"repository tests run beside the package tests and finish before the packaging step",overlap:true},
+  {name:"cancellation rejects queued packages before launching their commands",cancel:true,overlap:true},
   {name:"selected packages run without unrelated desktop or runtime tests",selectedPackages:["@dohc/new-package"]},
   {name:"selected desktop tests retain their final script tests",selectedPackages:["@dohc/desktop"]},
   {name:"an explicit empty selection still runs repository checks",selectedPackages:[]},
@@ -86,7 +86,8 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
   {name:"a selected package missing from inventory fails before any package runs",selectedPackages:["@dohc/missing"]},
   {name:"selected test files reach the command and the evidence",selectedPackages:["@dohc/new-package"],testFiles:{"@dohc/new-package":["src/selected.test.ts"]}},
   {name:"a missing selected test file fails before any package runs",selectedPackages:["@dohc/new-package"],testFiles:{"@dohc/new-package":["src/selected.test.ts"]},missingFile:true},
-  {name:"a repository failure is reported after every package finishes and skips the packaging step",repoFail:true},
+  {name:"a repository failure stops new commands and skips the packaging step",repoFail:true,overlap:true},
+  {name:"the first failure in time is the one reported",repoFail:true,packageFail:true,overlap:true},
 ]) test(name, () => {
   const missing = selectedPackages?.includes("@dohc/missing");
   const expectedPackages = (selectedPackages ?? ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"])
@@ -111,11 +112,17 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
       export const repoRoot=resolve(import.meta.dirname,'../..');
       export const pnpm=args=>['pnpm',args];
       const completed=new Set();
+      const waitFor=async file=>{for(let i=0;i<200&&!existsSync(file);i++)await new Promise(r=>setTimeout(r,50));};
       export async function run(command,args) {
         appendFileSync('commands.jsonl',JSON.stringify(args)+'\\n');
         if(args.includes('build')){completed.add(args[1]);return {stdout:''};}
         assert.ok(completed.has('@dohc/app-backend-runtime'));
         if(args[1]==='test:repo'){
+          // Held open until a package starts (or fails), so the lanes must overlap.
+          if(process.env.FIXTURE_OVERLAP==='1'){
+            await waitFor(process.env.FIXTURE_PACKAGE_FAIL==='1'?'package-failed':'package-started');
+            if(existsSync('package-started'))writeFileSync('repository-saw-package','yes');
+          }
           if(process.env.FIXTURE_REPO_FAIL==='1')throw Error('fixture repository failed');
           writeFileSync('repository-complete','yes');return {stdout:''};
         }
@@ -125,6 +132,8 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
           {name:'@dohc/new-package',path:resolve('packages/new-package')},
           {name:'@dohc/no-tests',path:resolve('packages/no-tests')}
         ])};
+        if(args[2]==='run')writeFileSync('package-started','yes');
+        if(args[1]==='@dohc/new-package' && process.env.FIXTURE_PACKAGE_FAIL==='1'){writeFileSync('package-failed','yes');throw Error('fixture package failed');}
         if(args.includes('test:unit') && process.env.FIXTURE_CANCEL==='1') {
           process.emit('SIGINT');
           throw Error('fixture command interrupted');
@@ -140,12 +149,15 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
       catch(error){console.error(error.message);process.exitCode=1;}
     `];
     const result = spawnSync(process.execPath, args, {
-      cwd:root, encoding:"utf8", timeout:20_000, env:{...process.env, FIXTURE_CANCEL:cancel ? "1" : "0", FIXTURE_REPO_FAIL:repoFail ? "1" : "0"},
+      cwd:root, encoding:"utf8", timeout:20_000, env:{...process.env, FIXTURE_CANCEL:cancel ? "1" : "0", FIXTURE_REPO_FAIL:repoFail ? "1" : "0",
+        FIXTURE_PACKAGE_FAIL:packageFail ? "1" : "0", FIXTURE_OVERLAP:overlap ? "1" : "0"},
     });
     assert.equal(result.error, undefined);
-    assert.equal(result.status, cancel ? 130 : missing || missingFile || repoFail ? 1 : 0, result.stderr);
+    const failed = missing || missingFile || repoFail || packageFail;
+    assert.equal(result.status, cancel ? 130 : failed ? 1 : 0, result.stderr);
     const report = JSON.parse(readFileSync(join(root, "evidence/result.json"), "utf8"));
-    assert.equal(report.verdict, cancel || missing || missingFile || repoFail ? "FAIL" : "PASS");
+    assert.equal(report.verdict, cancel || failed ? "FAIL" : "PASS");
+    if (overlap && !cancel) assert.ok(existsSync(join(root, "repository-saw-package")), "the repository lane must still be open when a package starts");
     const commands = readFileSync(join(root,"commands.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
     if (missing || missingFile) {
       assert.match(report.error,missing ? /selected workspace package is missing/ : /Selected test file is missing/);
@@ -156,8 +168,7 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
       assert.equal(commands.some(args => args.includes("test:scripts") || args.includes("test:prepared") || args.includes("test")), false);
       assert.equal(report.steps.at(-1).verdict, "FAIL");
     } else if (repoFail) {
-      assert.match(report.error, /fixture repository failed/);
-      assert.deepEqual(commands.filter(args=>args[2]==="run" && args[3]!=="test:scripts").map(args=>args[1]).sort(),expectedPackages.toSorted());
+      assert.match(report.error, packageFail ? /fixture package failed/ : /fixture repository failed/);
       assert.equal(commands.some(args=>args.includes("test:scripts")),false);
     } else if (!missing && !missingFile) {
       if (selectedPackages !== undefined) assert.deepEqual(report.selectedPackages,selectedPackages);
