@@ -5398,6 +5398,8 @@ export const RetryAutomationNoticeResult = z.union([
 const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
 const ScheduleHostComputer = z.object({
   installId: z.string().min(1).max(256),
+  // "server" for the dohc server, listed first while it runs automations.
+  kind: z.enum(["computer", "server"]),
   label: z.string().min(1).max(64),
   lastSeenMs: z.number().int().nonnegative(),
   thisComputer: z.boolean(),
