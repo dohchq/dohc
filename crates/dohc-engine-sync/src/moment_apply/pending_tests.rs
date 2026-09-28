@@ -176,6 +176,7 @@ fn reopened_pending_report_replays_collection_facts_and_rejects_stale_ack() {
     let (scratch, mut store) = test_store();
     let facts = CollectionRecordApplyFacts {
         shared_author: None,
+        live_cursor: None,
         collection_path: "tasks".into(),
         record_id: "record-1".into(),
         created: false,

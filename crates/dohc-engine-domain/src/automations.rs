@@ -279,7 +279,9 @@ pub struct AutomationGroupMessage<'a> {
 /// names them: the author origin, and the declared actor kind and the
 /// principal it acted for. Each is `None` when the write did not declare it.
 /// `shared_author` is the person the owner shared with, or the Edit share
-/// link, the relay accepted the change from.
+/// link, the relay accepted the change from. `live_cursor` is the relay's
+/// live journal cursor of the frame a live-shared record's change came in,
+/// so the relay can tell when a settlement has carried it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationChange {
     pub kind: AutomationChangeKind,
@@ -287,6 +289,7 @@ pub struct AutomationChange {
     pub actor_kind: Option<ChangeActorKind>,
     pub on_behalf_of: Option<String>,
     pub shared_author: Option<SharedChangeAuthor>,
+    pub live_cursor: Option<i64>,
 }
 
 /// One side of a changed field on a claim.
@@ -511,7 +514,7 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 const CLAIM_COLUMNS: &str = "claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
      trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
      created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of, run, \
-     trigger_moment_order, trigger_key, change_author_json";
+     trigger_moment_order, trigger_key, change_author_json, change_live_cursor";
 
 fn claim_from_row(
     row: &rusqlite::Row<'_>,
@@ -537,6 +540,7 @@ fn claim_from_row(
     let trigger_moment_order: Option<i64> = row.get(18)?;
     let trigger_key: Option<String> = row.get(19)?;
     let change_author_json: Option<String> = row.get(20)?;
+    let live_cursor: Option<i64> = row.get(21)?;
     let claim = (|| {
         let shared_author = change_author_json
             .map(|json| {
@@ -594,6 +598,7 @@ fn claim_from_row(
                 actor_kind,
                 on_behalf_of,
                 shared_author,
+                live_cursor,
             },
             state: AutomationClaimState::parse(&state)?,
             attempts,
@@ -1023,6 +1028,7 @@ fn decide_group_message(
             actor_kind: ChangeActorKind::parse(message.author_kind),
             on_behalf_of: message.author_user_id.map(str::to_owned),
             shared_author: None,
+            live_cursor: None,
         },
         // A stopped chain never runs, so its claim keeps no message.
         fields: AutomationFieldFacts {
@@ -1837,6 +1843,11 @@ fn insert_claims(
             }
             None => None,
         };
+    if claimed.change.live_cursor.is_some_and(|cursor| cursor < 1) {
+        return Err(DomainError::InvalidInput {
+            reason: "automation claim live cursor is not positive",
+        });
+    }
     let mut inserted = Vec::new();
     for automation_id in automation_ids {
         let claim_id = mint_claim_id()?;
@@ -1847,9 +1858,10 @@ fn insert_claims(
                   trigger_history_id, trigger_moment_order, record_id, collection_path, depth, \
                   state, attempts, error, created_at_ms, updated_at_ms, change_kind, \
                   author_origin_id, actor_kind, on_behalf_of, change_fields_json, \
-                  change_fields_omitted, trigger_key, message_json, change_author_json) \
+                  change_fields_omitted, trigger_key, message_json, change_author_json, \
+                  change_live_cursor) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?13, ?14, \
-                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 params![
                     workspace_id,
                     claim_id,
@@ -1873,6 +1885,7 @@ fn insert_claims(
                     key,
                     message_json,
                     shared_author_json,
+                    claimed.change.live_cursor,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -1980,6 +1993,7 @@ pub fn claim_automation_triggers_in_tx(
                 .as_ref()
                 .and_then(|attribution| attribution.on_behalf_of.clone()),
             shared_author: facts.shared_author.clone(),
+            live_cursor: facts.live_cursor,
         },
         // A stopped chain never runs, so its claim keeps no facts.
         fields: if chain_stopped {
@@ -2208,6 +2222,7 @@ fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (Auto
             .and_then(|attribution| attribution.on_behalf_of.clone()),
         // A moment a claim is made from was committed on this computer.
         shared_author: None,
+        live_cursor: None,
     };
     (
         change,
@@ -2580,6 +2595,7 @@ pub fn press_automation_in_tx(
                     actor_kind: Some(actor_kind),
                     on_behalf_of: Some(pressed_by.clone()),
                     shared_author: None,
+                    live_cursor: None,
                 },
                 fields: AutomationFieldFacts::default(),
                 chain_stopped: depth >= AUTOMATION_CHAIN_DEPTH_CAP,
@@ -2727,6 +2743,7 @@ pub fn claim_automation_schedule_in_tx(
                         actor_kind: None,
                         on_behalf_of: None,
                         shared_author: None,
+                        live_cursor: None,
                     },
                     fields: AutomationFieldFacts::default(),
                     chain_stopped: false,
@@ -2816,6 +2833,7 @@ pub fn claim_automation_run_now_in_tx(
             actor_kind: None,
             on_behalf_of: None,
             shared_author: None,
+            live_cursor: None,
         },
         fields: AutomationFieldFacts::default(),
         chain_stopped: false,

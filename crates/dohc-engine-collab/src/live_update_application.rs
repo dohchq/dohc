@@ -857,6 +857,11 @@ pub fn apply_committed(
             // the relay's authority and nothing the frame says.
             let mut automation_claims = Vec::new();
             if let Some(mut facts) = append.record_facts {
+                // The relay journals every frame it accepts at a cursor, and a
+                // settlement carries the frames through its terminal cursor to
+                // the relay's log. The claim keeps its history-row key, so it
+                // dedupes as before, and the cursor lets the relay place it.
+                facts.live_cursor = Some(event.metadata.accepted.receipt.journal_cursor);
                 match own_draft_attribution(tx, &key, &event.metadata.accepted.receipt)? {
                     Some((actor, attribution)) => {
                         facts.author_origin_id = actor;
@@ -2996,5 +3001,49 @@ mod tests {
         elsewhere.metadata.accepted.received_at_ms = 40;
         ack(apply(&mut store, &mut cache, &handle, elsewhere));
         assert_eq!(newest(&store), (Some("owner-1".to_owned()), 0));
+
+        // Each claim keeps the relay journal cursor of the frame it came in,
+        // the host's own drafts' too, so the relay can place it in the
+        // settlement that carried it. The body-only frame at 4 claimed nothing.
+        let cursors = |store: &EngineStore| -> Vec<Option<i64>> {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT change_live_cursor FROM automation_claims \
+                         ORDER BY created_at_ms, claim_id",
+                    )?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, rusqlite::Error>(rows)
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            cursors(&store),
+            vec![Some(1), Some(2), Some(3), Some(5), Some(6)]
+        );
+
+        // The claim still keys on its history row, so a frame retried after a
+        // restart claims nothing more, and the same change delivered again
+        // under another delivery id and cursor claims nothing either.
+        let final_edit = source.frontmatter_set("status", "final").unwrap();
+        let mut last = event("final-edit", 7, final_edit.clone());
+        last.metadata.accepted.received_at_ms = 50;
+        ack(apply(&mut store, &mut cache, &handle, last.clone()));
+        assert_eq!(cursors(&store).len(), 6);
+        assert_eq!(cursors(&store).last(), Some(&Some(7)));
+        store = reopen(store, &dir);
+        let mut cache = WriterDocCache::new();
+        let retried = ack(apply(&mut store, &mut cache, &handle, last));
+        assert!(retried.application_replayed);
+        let mut again = event("final-edit-again", 8, final_edit);
+        again.metadata.accepted.received_at_ms = 60;
+        ack(apply(&mut store, &mut cache, &handle, again));
+        assert_eq!(
+            cursors(&store).len(),
+            6,
+            "a retried or re-delivered frame claims once"
+        );
     }
 }

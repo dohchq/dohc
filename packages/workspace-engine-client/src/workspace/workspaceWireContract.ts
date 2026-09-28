@@ -1018,6 +1018,8 @@ const automationChangeFields = {
   actorKind: Schema.NullOr(Schema.Literals(["human", "agent", "automation"])),
   onBehalfOf: NullableString,
   sharedAuthor: Schema.NullOr(SharedChangeAuthorSchema),
+  /** The relay's live journal cursor of the frame a live-shared change came in; null for any other change. */
+  liveCursor: NullableInt,
 };
 
 /**

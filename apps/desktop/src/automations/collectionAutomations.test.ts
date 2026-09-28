@@ -297,7 +297,7 @@ async function world(options: {
           const created: AutomationClaim = {
             claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `schedule:${due}` },
             recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
-            change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, fields: [], fieldsOmitted: 0 },
+            change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
             state: "pending", attempts: 0, run: 1, createdAtMs: due + 1_000, updatedAtMs: 0,
           };
           claims.set(created.claimId, created);
@@ -318,7 +318,7 @@ async function world(options: {
       const created: AutomationClaim = {
         claimId: `atc_claim${claimCount}`, automationId, trigger: { key },
         recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
-        change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, fields: [], fieldsOmitted: 0 },
+        change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
         state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 12), updatedAtMs: 0,
       };
       claims.set(created.claimId, created);
@@ -344,7 +344,7 @@ async function world(options: {
           claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `press:${pressId}` },
           recordId, collectionPath: record.collection, depth: by.kind === "agent" ? by.depth : 0,
           change: {
-            kind: "button", authorOriginId: by.kind === "agent" ? by.originId : null, actorKind: by.kind, onBehalfOf: pressedBy, sharedAuthor: null, fields: [], fieldsOmitted: 0,
+            kind: "button", authorOriginId: by.kind === "agent" ? by.originId : null, actorKind: by.kind, onBehalfOf: pressedBy, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
           },
           state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 2, 0), updatedAtMs: 0,
         };
@@ -565,7 +565,7 @@ async function world(options: {
       claimId: `atc_claim${claimCount}`, automationId, trigger: { historyId: claimCount },
       recordId: record.id, collectionPath: record.collection, depth: 0,
       change: {
-        kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null,
+        kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null,
         fields: [{ field: "Status", historyId: claimCount, previous: { value: "Doing" }, next: { value: "Done" } }],
         fieldsOmitted: 0, ...change,
       },

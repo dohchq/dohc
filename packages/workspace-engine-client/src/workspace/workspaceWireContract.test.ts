@@ -574,6 +574,7 @@ describe("automations wire schemas", () => {
       actorKind: "agent",
       onBehalfOf: "user:ice",
       sharedAuthor: null,
+      liveCursor: null,
     },
     state: "pending",
     attempts: 1,
@@ -691,6 +692,15 @@ describe("automations wire schemas", () => {
     }
   });
 
+  it("decodes the live journal cursor a live change came in, and nothing but a whole number", () => {
+    const claim = { ...summary, change: { ...summary.change, liveCursor: 41 } };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim)).toEqual(claim);
+    for (const liveCursor of [1.5, "41", undefined]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, { ...summary, change: { ...summary.change, liveCursor } }))
+        .toThrow(ProtocolShapeError);
+    }
+  });
+
   it("decodes a history-keyed failed claim from settle and retry without facts", () => {
     const failed = {
       ...summary,
@@ -701,6 +711,7 @@ describe("automations wire schemas", () => {
         actorKind: null,
         onBehalfOf: null,
         sharedAuthor: null,
+        liveCursor: null,
       },
       state: "failed",
       error: "handler threw",
@@ -839,7 +850,7 @@ describe("automations wire schemas", () => {
       ...summary,
       automationId: "collection:Invoices#mark-paid",
       trigger: { key: "press:press-1" },
-      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada", sharedAuthor: null },
+      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada", sharedAuthor: null, liveCursor: null },
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: false, claim: pressed }),
@@ -859,7 +870,7 @@ describe("automations wire schemas", () => {
       automationId: mark.automationId,
       trigger: { key: "schedule:2000" },
       recordId: null,
-      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null },
+      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null },
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [due], mark }),

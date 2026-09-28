@@ -200,7 +200,7 @@ describe("a due time on a dataset", () => {
   const dueTime: AutomationClaim = {
     claimId: "atc_due", automationId: "collection:Budget#close", trigger: { key: `schedule:${due}` }, recordId: null, collectionPath: "Budget",
     depth: 0, state: "running", attempts: 1, run: 1, createdAtMs: due + 5, updatedAtMs: due + 5,
-    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, fields: [], fieldsOmitted: 0 },
+    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
   };
 
   it("resumes its saved edit under the same key, and stops before any write once its Collection keeps another dataset", async () => {
@@ -316,7 +316,7 @@ describe("a Group message on a dataset", () => {
       claimId: "atc_message", automationId: "collection:Budget#heard", trigger: { key: "message:m1" }, recordId: null, collectionPath: "Budget",
       depth: 0, state: "running", attempts: 1, run: 1, createdAtMs: 5, updatedAtMs: 5,
       change: {
-        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, fields: [], fieldsOmitted: 0,
+        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
         message: { id: "m1", threadId: "t1", groupId: TEAM.id, lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 5, body: "Hi", authorUserId: "user-ana" },
       },
     };
@@ -380,7 +380,7 @@ describe("a Find's formulas", () => {
       claimId: "atc_named", automationId: "collection:Budget#named", trigger: { key: "message:m1" }, recordId: null, collectionPath: "Budget",
       depth: 0, state: "running", attempts: 1, run: 1, createdAtMs: 5, updatedAtMs: 5,
       change: {
-        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, fields: [], fieldsOmitted: 0,
+        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
         message: { id: "m1", threadId: "t1", groupId: TEAM.id, lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 5, body: "/done 12", authorUserId: "user-ana" },
       },
     };
@@ -1054,7 +1054,7 @@ describe("a dataset action a run invokes", () => {
     const dueTime: AutomationClaim = {
       claimId: "atc_due", automationId: "collection:Budget#mark", trigger: { key: `schedule:${due}` }, recordId: null, collectionPath: "Budget",
       depth: 0, state: "running", attempts: 1, run: 1, createdAtMs: due + 5, updatedAtMs: due + 5,
-      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, fields: [], fieldsOmitted: 0 },
+      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
     };
     const alone = { kind: "owner" as const, ownerUserId: "u-owner", grants: [] };
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
