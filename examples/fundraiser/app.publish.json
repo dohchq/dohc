@@ -11,7 +11,6 @@
   "packageMap": {},
   "dataset": {
     "kind": "dataset",
-    "datasetId": "f0010000-0000-4000-8000-000000000001",
     "revision": 1,
     "revisionSha256": "af220142e4ed4dfdacf9cf6267f959148073e76c5593aaa0f1e1db277daa6381",
     "operationIds": [
@@ -32,6 +31,7 @@
       "f0010000-0000-4000-8000-000000000047",
       "f0010000-0000-4000-8000-000000000048",
       "f0010000-0000-4000-8000-000000000049"
-    ]
+    ],
+    "datasetPath": "fundraiser/dataset.json"
   }
 }

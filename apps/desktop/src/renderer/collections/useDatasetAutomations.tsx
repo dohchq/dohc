@@ -96,8 +96,8 @@ export function useDatasetAutomations(props: {
     }
   }, [workspaceId, datasetId, onError]);
   useEffect(() => {
-    void find();
-  }, [find]);
+    if (datasetId) void find();
+  }, [find, datasetId]);
   const collectionPath = found !== null && found !== "failed" && found.status === "found" ? found.collectionPath : null;
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [open, setOpen] = useState(false);

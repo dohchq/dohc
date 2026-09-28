@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -38,5 +38,5 @@ export function sourceCaptureAdapter(sources: ReadonlyMap<string, string | Uint8
     }
     const bytes = blobs.get(String(params.sha256))!;
     return { id: request.id, result: { bytesBase64: Buffer.from(bytes).toString("base64"), byteLength: bytes.byteLength } };
-  } }, "owner", { workspaceId });
+  } }, randomUUID(), { workspaceId });
 }

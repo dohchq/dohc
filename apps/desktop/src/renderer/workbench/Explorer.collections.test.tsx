@@ -59,7 +59,7 @@ function treeRow(path: string): HTMLElement {
 
 describe("Explorer collection folders", () => {
   it("uses the human table label for open data Collections and a neutral loading label",()=>{
-    const path=transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001","00000000-0000-4000-8000-000000000002");
+    const path=transactionalCollectionTabPath("data/dataset.json","00000000-0000-4000-8000-000000000002");
     expect(editorTitle(path,"Registrations")).toBe("Registrations");expect(editorTitle(path)).toBe("Collection");
   });
   it("offers recovery before the workspace has any data Collections", () => {
