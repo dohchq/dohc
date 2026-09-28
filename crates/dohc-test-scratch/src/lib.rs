@@ -42,6 +42,9 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug)]
 pub struct ScratchDir {
     path: PathBuf,
+    /// This process's generated run root, removed with the last scratch
+    /// directory in it. A handed-down or named root belongs to its owner.
+    owned_run_root: Option<PathBuf>,
 }
 
 impl ScratchDir {
@@ -61,7 +64,12 @@ impl ScratchDir {
             let nonce = RandomState::new().build_hasher().finish();
             let path = run_root.join(format!("{name}-{sequence}-{nonce:016x}"));
             match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        owned_run_root: generated_run_root().then(|| run_root.clone()),
+                    });
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     fs::create_dir_all(&run_root)?;
@@ -103,8 +111,24 @@ impl Drop for ScratchDir {
                 cleanup_attempts(),
                 self.path.display()
             );
+            return;
+        }
+        // nextest runs every test in its own process. A run root left behind
+        // per process grew the shared parent by thousands of entries a run, and
+        // every later process's sweep read them all. Removal fails while
+        // another scratch directory is still inside, and `new_named` recreates
+        // a root removed under it.
+        if let Some(root) = &self.owned_run_root {
+            let _ = fs::remove_dir(root);
         }
     }
+}
+
+/// Whether this process generated its run root rather than being handed one.
+fn generated_run_root() -> bool {
+    ["DOHC_TEST_SCRATCH_ROOT", "DOHC_TEST_SCRATCH_RUN"]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none_or(|value| value.is_empty()))
 }
 
 /// The run root, preferring an absolute path handed down by the caller.
@@ -351,6 +375,38 @@ mod tests {
     /// every other entry is about that entry, never about the current run's
     /// name.
     const THIS_RUN: &str = "current-run-4821-0000000000000003";
+
+    #[test]
+    fn the_last_scratch_directory_removes_its_owned_run_root() {
+        let parent = ScratchDir::new_named("owned-root").expect("parent");
+        let root = parent.join("process-1-0000000000000001");
+        let scratch = |name: &str, owned: bool| {
+            let path = root.join(name);
+            fs::create_dir_all(&path).expect("scratch");
+            ScratchDir {
+                path,
+                owned_run_root: owned.then(|| root.clone()),
+            }
+        };
+
+        let (first, second) = (scratch("a", true), scratch("b", true));
+        drop(first);
+        assert!(
+            root.exists(),
+            "a sibling scratch directory keeps the run root"
+        );
+        drop(second);
+        assert!(
+            !root.exists(),
+            "the last scratch directory removes its run root"
+        );
+
+        drop(scratch("c", false));
+        assert!(
+            root.exists(),
+            "a handed-down or named root is its owner's to remove"
+        );
+    }
 
     #[test]
     fn drop_removes_the_scratch_directory() {

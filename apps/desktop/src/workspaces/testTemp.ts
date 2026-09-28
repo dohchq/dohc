@@ -1,5 +1,5 @@
 import { errorMessage } from "./workspaceError.ts";
-import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmdirSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -257,6 +257,7 @@ export async function prepareTestScratch({ sweep = true } = {}): Promise<void> {
   startup ??= (async () => {
     if (sweep) await sweepOldTestScratch();
     await mkdir(testScratchRunRoot(), { recursive: true });
+    removeEmptyRunRootOnExit();
   })();
   await startup;
 }
@@ -267,6 +268,25 @@ export async function prepareTestScratch({ sweep = true } = {}): Promise<void> {
 // Playwright never reaches here: its helpers are async.
 function ensureScratchRunSync(): void {
   mkdirSync(testScratchRunRoot(), { recursive: true });
+  removeEmptyRunRootOnExit();
+}
+
+let exitCleanup = false;
+
+// Not every worker reaches `cleanupSuiteTestScratch`. A run root left behind
+// per worker grew the shared parent by thousands of entries, and every later
+// sweep read them all. `rmdir` fails while anything is still inside.
+function removeEmptyRunRootOnExit(): void {
+  if (exitCleanup || process.env.DOHC_TEST_SCRATCH_ROOT) return;
+  exitCleanup = true;
+  const root = testScratchRunRoot();
+  process.once("exit", () => {
+    try {
+      rmdirSync(root);
+    } catch {
+      // Not empty or already gone: the sweep owns what remains.
+    }
+  });
 }
 
 async function cleanupRegistered(paths: Set<string>): Promise<void> {

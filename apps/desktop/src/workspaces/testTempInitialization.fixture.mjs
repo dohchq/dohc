@@ -54,6 +54,11 @@ if (mode.endsWith("failure")) {
   const first = await helper.createTestScratch("first-").catch((error) => error);
   const second = await helper.createTestScratch("second-").catch((error) => error);
   console.log(JSON.stringify({ scans, rootCreates, sameFailure: first === failure && second === failure }));
+} else if (mode.startsWith("exit")) {
+  // A worker whose suite never reaches cleanupSuiteTestScratch.
+  helper.createTestScratchSync("exit-");
+  if (mode === "exit") await helper.cleanupTestScratch();
+  console.log(JSON.stringify({ root: helper.testScratchRunRoot() }));
 } else {
   if (mode === "setup") {
     await import(setupUrl);
