@@ -184,16 +184,15 @@ function runStateText(run: Omit<AutomationRunLine, "changes">): string {
 }
 
 function renderAutomationRuns(result: AutomationRunsResult): string {
-  return result.runs
-    .map((run) => [
-      run.run,
-      dateTime(run.createdAtMs),
-      runStateText(run),
-      triggerText(run.trigger),
-      countLabel(run.changes, "change"),
-      ...(run.error === null ? [] : [lineSafe(run.error)]),
-    ].join(" · "))
-    .join("\n");
+  const lines = result.runs.map((run) => [
+    run.run,
+    dateTime(run.createdAtMs),
+    runStateText(run),
+    triggerText(run.trigger),
+    countLabel(run.changes, "change"),
+    ...(run.error === null ? [] : [lineSafe(run.error)]),
+  ].join(" · "));
+  return [...lines, ...(result.next === null ? [] : [`Older runs: --page ${lineSafe(result.next)}`])].join("\n");
 }
 
 function json(value: unknown): string {

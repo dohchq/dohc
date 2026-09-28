@@ -4,6 +4,7 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
+  GetCollectionAutomationRunResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
   ListAutomationTargetsResult,
@@ -94,7 +95,8 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       }
       return result;
     }),
-    listCollectionAutomationRuns: vi.fn(async (): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs })),
+    listCollectionAutomationRuns: vi.fn(async (_payload?: { before?: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs, next: null })),
+    getCollectionAutomationRun: vi.fn(async (): Promise<GetCollectionAutomationRunResult> => ({ status: "missing" })),
     listAutomationHolds: vi.fn(async () => ({ holds: [], unreadable: holdsUnreadable })),
     resetAutomationHolds: vi.fn(async () => {
       holdsUnreadable = false;
@@ -148,12 +150,14 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
   return { bridge, written, writeResults, replaceFile, hostChanged };
 }
 
+const ignoreError = () => undefined;
+
 function Panel(props: {
   workspaceId?: string;
   table?: AutomationTable;
   onRunUndone?: () => void;
   fields?: FieldDefinition[];
-  focus?: { automationId: string; seq: number } | null;
+  focus?: { automationId: string; run: string | null; seq: number } | null;
   onNotice?: (message: string, undo?: () => void) => void;
   onError?: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onOpenFile?: (path: string) => void;
@@ -163,7 +167,8 @@ function Panel(props: {
   start?: { automation: Automation; seq: number } | null;
   onStarted?: () => void;
 }) {
-  const onError = props.onError ?? (() => undefined);
+  // The shell passes one handler for the page's life; a new one each render would read the file again each render.
+  const onError = props.onError ?? ignoreError;
   const workspaceId = props.workspaceId ?? "ws-1";
   const automations = useCollectionAutomations(workspaceId, "Tasks", onError);
   return (
@@ -565,7 +570,7 @@ describe("a dataset table's ⚡ panel", () => {
     makeBridge(read([summary(onInvoices)]), [run({ writes: [{ kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", version: 2,
       fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] }] })]);
     const onRunUndone = vi.fn();
-    render(<Panel table={INVOICES} onRunUndone={onRunUndone} focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
+    render(<Panel table={INVOICES} onRunUndone={onRunUndone} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
     await userEvent.click(within(await screen.findByTestId("automation-run-atc_1")).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(onRunUndone).toHaveBeenCalledOnce());
   });
@@ -766,10 +771,69 @@ describe("an automation's runs", () => {
   const TOO_LARGE = "This change was too large for dohc to start automations for every record. Change fewer records at a time.";
   const unclaimed = run({ claimId: "atc_unclaimed", state: "failed", error: TOO_LARGE, neverStarted: true });
 
+  it("reads only the next page for older runs, shows it loading, and keeps it through a refresh", async () => {
+    const { bridge } = makeBridge(read([summary(stamp)]));
+    let older: (() => void) | null = null;
+    const newest = run({ claimId: "atc_new", createdAtMs: 2, writes: [{ kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Done", before: null, after: true }] });
+    bridge.listCollectionAutomationRuns.mockImplementation(async (payload) => {
+      if (payload?.before === undefined) return { status: "listed", runs: [newest], next: "2:atc_new" };
+      await new Promise<void>((resolve) => { older = resolve; });
+      return { status: "listed", runs: [run({ claimId: "atc_older", createdAtMs: 1 })], next: null };
+    });
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    await screen.findByTestId("automation-run-atc_new");
+    const calls = () => bridge.listCollectionAutomationRuns.mock.calls.length;
+    const shown = calls();
+    await userEvent.click(screen.getByRole("button", { name: "Older runs" }));
+    const button = screen.getByRole("button", { name: "Older runs" });
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => older!());
+    await screen.findByTestId("automation-run-atc_older");
+    // One read, of the next page only.
+    expect(calls()).toBe(shown + 1);
+    expect(bridge.listCollectionAutomationRuns).toHaveBeenLastCalledWith({ workspaceId: "ws-1", automationId: "collection:Tasks#stamp", before: "2:atc_new" });
+    expect(screen.queryByRole("button", { name: "Older runs" })).toBeNull();
+    // The refresh after an Undo reads the newest page only, and the older page stays.
+    await userEvent.click(within(screen.getByTestId("automation-run-atc_new")).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(calls()).toBe(shown + 2));
+    expect(bridge.listCollectionAutomationRuns).toHaveBeenLastCalledWith({ workspaceId: "ws-1", automationId: "collection:Tasks#stamp" });
+    expect(screen.getByTestId("automation-run-atc_older")).toBeDefined();
+  });
+
+  it("says so when the run a notice names is no longer in run history", async () => {
+    const onError = vi.fn();
+    const { bridge } = makeBridge(read([summary(stamp)]), [run({ claimId: "atc_new" })]);
+    render(<Panel onError={onError} focus={{ automationId: "collection:Tasks#stamp", run: "atc_gone", seq: 1 }} />);
+    await screen.findByTestId("automation-run-atc_new");
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "This run is no longer in run history. dohc keeps runs for 30 days after they end.", expect.any(Error),
+    ));
+    expect(bridge.getCollectionAutomationRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the run a notice names, first and marked when no page shown holds it, though its automation was deleted", async () => {
+    const scrolled = vi.fn();
+    const scrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrolled;
+    onTestFinished(() => { Element.prototype.scrollIntoView = scrollIntoView; });
+    const { bridge } = makeBridge(read([summary(stamp)]), [run({ claimId: "atc_new" })]);
+    bridge.getCollectionAutomationRun.mockResolvedValue({ status: "found", run: failed });
+    render(<Panel focus={{ automationId: "collection:Tasks#gone", run: "atc_failed", seq: 1 }} />);
+    const opened = await screen.findByTestId("automation-run-atc_failed");
+    expect(bridge.getCollectionAutomationRun).toHaveBeenCalledWith({ workspaceId: "ws-1", automationId: "collection:Tasks#gone", claimId: "atc_failed" });
+    expect(screen.getByTestId("automation-runs").firstElementChild).toBe(opened);
+    expect(opened.getAttribute("aria-current")).toBe("true");
+    // Its changes show without a click.
+    expect(opened.textContent).toContain("Plan · Finished on: empty → 2026-09-25");
+    expect(scrolled).toHaveBeenCalled();
+    expect(screen.getByTestId("automation-run-atc_new").getAttribute("aria-current")).toBeNull();
+  });
+
   it("opens from a notice, offers Try again except for a run that never started, and confirms a changed automation first", async () => {
     const { bridge } = makeBridge(read([summary(stamp, { lastRun: { state: "failed", atMs: Date.now() } })]), [failed, stopped, unclaimed]);
     bridge.retryCollectionAutomation.mockResolvedValueOnce({ status: "definition-changed", repeatsMessages: false });
-    render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
 
     const failedRow = await screen.findByTestId("automation-run-atc_failed");
     expect(failedRow.textContent).toContain("ana@dohc.test cannot edit Budget.");
@@ -799,7 +863,7 @@ describe("an automation's runs", () => {
       { kind: "dataset-kept", recordId: "invoice-3", fieldId: "status", field: "Status", planned: "Closed", current: "Pending" },
       { kind: "dataset-skipped", recordId: "invoice-4", reason: "The record was removed" },
     ] })]);
-    render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
     const row = await screen.findByTestId("automation-run-atc_1");
     expect(row.textContent).toContain("Changed 1 field and added 1 record");
     await userEvent.click(within(row).getByRole("button", { name: "Show 4 changes" }));
@@ -820,7 +884,7 @@ describe("an automation's runs", () => {
       status: "undone", reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 1, actions: 0, actionsReversed: 0,
     });
     const onNotice = vi.fn();
-    render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} onNotice={onNotice} />);
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} onNotice={onNotice} />);
     // A run that only added records has nothing Undo can put back.
     expect(within(await screen.findByTestId("automation-run-atc_added")).queryByRole("button", { name: "Undo" })).toBeNull();
     await userEvent.click(within(screen.getByTestId("automation-run-atc_1")).getByRole("button", { name: "Undo" }));
@@ -842,7 +906,7 @@ describe("an automation's runs", () => {
       status: "undone", reverted: 1, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 1, actionsReversed: 0,
     });
     const onNotice = vi.fn();
-    render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} onNotice={onNotice} />);
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} onNotice={onNotice} />);
     const row = await screen.findByTestId("automation-run-atc_1");
     expect(row.textContent).toContain("Ran 1 action and changed 1 field");
     await userEvent.click(within(row).getByRole("button", { name: "Show 2 changes" }));
@@ -862,7 +926,7 @@ describe("an automation's runs", () => {
       status: "undone", reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 1,
     });
     const onNotice = vi.fn();
-    render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} onNotice={onNotice} />);
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} onNotice={onNotice} />);
     const row = await screen.findByTestId("automation-run-atc_1");
     await userEvent.click(within(row).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid 1 action."));
@@ -1117,7 +1181,7 @@ describe("the builder", () => {
     expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Stamp the finish date!");
 
     // A notice asks to open runs: the builder asks too, and stays open.
-    rerender(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
+    rerender(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
     expect(await screen.findByTestId("automation-unsaved")).toBeTruthy();
     await user.click(within(screen.getByTestId("automation-unsaved")).getByRole("button", { name: "Keep editing" }));
     expect(screen.getByRole("textbox", { name: "Name" })).toBeTruthy();

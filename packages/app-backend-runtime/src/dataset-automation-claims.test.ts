@@ -406,6 +406,8 @@ it("lists an automation's runs newest first, and offers the failure it settled l
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
   f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  // Claims made in one moment list by id; these are made a moment apart.
+  f.tick(1);
   f.commit("INSERT INTO tasks VALUES('b','Open','')");
   const [first, second] = drain(f.claims);
   f.claims.settle(second!, { state: "failed", error: "Second." });
@@ -413,7 +415,7 @@ it("lists an automation's runs newest first, and offers the failure it settled l
   f.claims.settle(first!, { state: "failed", error: "First." });
   expect(f.claims.claims(scope.workspaceId, "collection:tasks#a").claims.map(claim => claim.claimId)).toEqual([second!.claimId, first!.claimId]);
   expect(f.claims.failures(scope.workspaceId)).toEqual([{ automationId: "collection:tasks#a", claimId: first!.claimId,
-    datasetInstance: JSON.stringify([scope.datasetId, "host-1"]), neverStarted: false, chainStopped: false, error: "First.", updatedAtMs: 1_001, generation: 2 }]);
+    datasetInstance: JSON.stringify([scope.datasetId, "host-1"]), neverStarted: false, chainStopped: false, error: "First.", updatedAtMs: 1_002, generation: 2 }]);
   expect(f.claims.claims(scope.workspaceId, "collection:tasks#b")).toEqual({ claims: [], next: null });
 });
 

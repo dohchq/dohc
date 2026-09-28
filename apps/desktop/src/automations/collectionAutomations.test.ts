@@ -17,7 +17,7 @@ import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { definitionHash, localIsoTime, stepKey } from "@dohc/automation-executor/automation-plan";
 import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
-import { createAutomationRunStore, type AutomationRunStore, type ReportedFailure, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
+import { createAutomationRunStore, type AutomationRunStore, type ReportedFailure, type StoredRun, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
 import { automationHostGeneration, createAutomationHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
 import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import {
@@ -269,7 +269,15 @@ async function world(options: {
       pending.push(claim);
       return claim;
     },
-    listAutomationClaims: async ({ automationId }) => ({ claims: [...claims.values()].filter((claim) => claim.automationId === automationId).reverse(), next: null }),
+    // Pages as the engine does: newest first by when each claim was made, then by id.
+    listAutomationClaims: async ({ automationId, before, limit = 20 }) => {
+      const [atMs, id] = before === undefined ? [Infinity, ""] : [Number(before.slice(0, before.indexOf(":"))), before.slice(before.indexOf(":") + 1)];
+      const listed = [...claims.values()]
+        .filter((claim) => claim.automationId === automationId && (claim.createdAtMs < atMs || (claim.createdAtMs === atMs && claim.claimId < id)))
+        .sort((left, right) => right.createdAtMs - left.createdAtMs || (left.claimId < right.claimId ? 1 : -1));
+      const last = listed[limit - 1];
+      return { claims: listed.slice(0, limit), next: listed.length > limit && last ? `${last.createdAtMs}:${last.claimId}` : null };
+    },
     getAutomationClaim: async (input: { claimId: string } | { automationId: string; key: string }) => {
       const claim = [...claims.values()].find((candidate) => "claimId" in input
         ? candidate.claimId === input.claimId
@@ -440,11 +448,13 @@ async function world(options: {
   let beforeRoster: (() => Promise<void>) | null = null;
   let rosterCalls = 0;
   let beforeRead: (() => void) | null = null;
-  let prunes = 0;
+  // Each pass over the saved runs that reached their end.
+  let expiries = 0;
+  // Each claim's run as the executor last saved it.
+  const lastSaved = new Map<string, StoredRun>();
   // The claims each run history prune kept.
   const historyPrunes: string[][] = [];
   let updates = 0;
-  const resumable: Array<ReadonlySet<string> | null> = [];
   const baseStore = createAutomationRunStore(root, resolveWorkspaceMetadataDir);
   let failRecordAt: number | null = null;
   let beforeRecord: (() => void) | null = null;
@@ -472,15 +482,19 @@ async function world(options: {
       reportedFailures = [...failures];
       wake();
     },
-    prune: async (automationId, resumableClaims) => {
-      resumable.push(await resumableClaims());
-      prunes += 1;
-      wake();
-      await baseStore.prune(automationId, resumableClaims);
+    expire: async (before, keeps, from) => {
+      const next = await baseStore.expire(before, keeps, from);
+      if (next === null) {
+        expiries += 1;
+        wake();
+      }
+      return next;
     },
     save: async (run) => {
       saves += 1;
       await baseStore.save(run);
+      lastSaved.set(run.claimId, run);
+      wake();
     },
     appendEffect: async (run, applied) => {
       records_ += 1;
@@ -586,7 +600,7 @@ async function world(options: {
         fields: [{ field: "Status", historyId: claimCount, previous: { value: "Doing" }, next: { value: "Done" } }],
         fieldsOmitted: 0, ...change,
       },
-      state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 1, 30), updatedAtMs: 0,
+      state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 1, 30) + claimCount, updatedAtMs: 0,
     };
     claims.set(created.claimId, created);
     pending.push(created);
@@ -610,9 +624,9 @@ async function world(options: {
     groupSkips,
     skipNotices,
     rosterCalls: () => rosterCalls,
-    prunes: () => prunes,
+    expiries: () => expiries,
+    lastSaved: (claimId: string) => lastSaved.get(claimId),
     historyPrunes,
-    resumable,
     beforeNextRead: (hook: () => void) => { beforeRead = hook; },
     moveRecord: (record: FakeRecord, name: string) => { record.path = `${record.collection}/${name}.md`; },
     /**
@@ -1334,7 +1348,7 @@ describe("Collection automations", () => {
     expect(w.authored).toEqual([{ path: added.path, author: {
       kind: "automation", automationId: "collection:Tasks#sweep", depth: 1,
     } }]);
-    const [run] = await w.executor.runs("collection:Tasks#sweep");
+    const [run] = (await w.executor.runs("collection:Tasks#sweep")).runs;
     expect(run!.writes).toContainEqual({ kind: "field", recordId: sibling.id, path: sibling.path, field: "Points", before: 5, after: 10 });
     expect(run!.writes).toContainEqual({ kind: "created", recordId: added.id, path: added.path });
   });
@@ -1556,7 +1570,7 @@ describe("Collection automations", () => {
     await w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false });
     await w.until(() => claim.state === "done");
     expect(w.fieldsOf(task).Count).toBe(3);
-    const [run] = await w.executor.runs(TASKS);
+    const [run] = (await w.executor.runs(TASKS)).runs;
     // The step that landed before the stop is recorded with what it changed.
     expect(run!.writes).toContainEqual({ kind: "field", recordId: task.id, path: task.path, field: "Count", before: 2, after: 3 });
   });
@@ -1578,7 +1592,7 @@ describe("Collection automations", () => {
     expect(claim.state).toBe("failed");
     // Starting over makes new messages too, so the person hears that first.
     expect(DEFINITION_CHANGED_ERROR).toContain("It may repeat changes, posts, direct messages, and notices the earlier run already made.");
-    expect((await w.executor.runs(TASKS))[0]).toMatchObject({ definitionChanged: true });
+    expect(((await w.executor.runs(TASKS)).runs)[0]).toMatchObject({ definitionChanged: true });
     // Reading the run says Try again starts over, as the refusal above does.
     expect(await w.executor.run(TASKS, claim.claimId)).toMatchObject({ state: "failed", startsOver: true });
 
@@ -1877,7 +1891,7 @@ describe("Collection automations", () => {
     await w.executor.retry({ automationId: "collection:Tasks#chain", claimId: claim.claimId, startOver: false });
     await w.until(() => claim.state === "done");
     expect(w.fieldsOf(task).Count).toBe(2);
-    const [run] = await w.executor.runs("collection:Tasks#chain");
+    const [run] = (await w.executor.runs("collection:Tasks#chain")).runs;
     expect(run!.writes.filter((write) => write.kind === "field").map((write) => write.kind === "field" && [write.before, write.after]))
       .toEqual([[0, 1], [1, 2]]);
   });
@@ -1903,7 +1917,7 @@ describe("Collection automations", () => {
       startsOver: false,
     });
     expect(read).not.toHaveProperty("writes");
-    const [listed] = await w.executor.runs("collection:Tasks#two");
+    const [listed] = (await w.executor.runs("collection:Tasks#two")).runs;
     expect(listed!.trigger).toEqual(read!.trigger);
     // Another computer's run, or one history no longer shows, is not here.
     await expect(w.executor.run("collection:Tasks#two", "atc_elsewhere")).resolves.toBeNull();
@@ -1923,7 +1937,7 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
     expect(claim.state).toBe("done");
     expect(w.fieldsOf(task).Note).toBe("link");
-    const [listed] = await w.executor.runs("collection:Tasks#note");
+    const [listed] = (await w.executor.runs("collection:Tasks#note")).runs;
     expect(listed!.trigger).toEqual({ kind: "changed", recordId: task.id, by: null, sharedAuthor: link, depth: 0 });
   });
 
@@ -2080,7 +2094,7 @@ describe("Collection automations", () => {
     w.records.delete(gone.id);
     await w.executor.retry({ automationId: "collection:Tasks#note", claimId: second.claimId, startOver: false });
     await w.until(() => second.state === "done");
-    const [run] = await w.executor.runs("collection:Tasks#note");
+    const [run] = (await w.executor.runs("collection:Tasks#note")).runs;
     expect(run!.writes).toEqual([{ kind: "skipped", recordId: gone.id, path: gone.path, reason: "The record is no longer in the Collection." }]);
   });
 
@@ -2095,7 +2109,7 @@ describe("Collection automations", () => {
     await w.executor.retry({ automationId: "collection:Tasks#two", claimId: claim.claimId, startOver: false });
     await w.until(() => claim.state === "done");
     expect(w.fieldsOf(task)).toMatchObject({ Count: 1, Note: "theirs" });
-    const [run] = await w.executor.runs("collection:Tasks#two");
+    const [run] = (await w.executor.runs("collection:Tasks#two")).runs;
     expect(run!.writes).toContainEqual({ kind: "kept", recordId: task.id, path: task.path, field: "Note", planned: "done", current: "theirs" });
     expect(run!.writes.some((write) => write.kind === "field" && write.field === "Note")).toBe(false);
   });
@@ -2172,7 +2186,7 @@ describe("Collection automations", () => {
     expect(w.journaled.at(-1)).toMatchObject({ path: task.path, attribution: { actorKind: "human" } });
     expect(w.journaled.at(-1)!.actorOriginId).toBeUndefined();
 
-    const [run] = await w.executor.runs("collection:Tasks#stamp");
+    const [run] = (await w.executor.runs("collection:Tasks#stamp")).runs;
     expect(run).toMatchObject({ state: "done", undone: true, chainStopped: false });
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, trash))
       .resolves.toEqual({ status: "refused", reason: "You already undid this run." });
@@ -2242,7 +2256,7 @@ describe("Collection automations", () => {
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
       .rejects.toThrow("The record is open in a live session elsewhere.");
     expect(w.fieldsOf(task)).toMatchObject({ Count: 3, Note: "done" });
-    const [stopped] = await w.executor.runs("collection:Tasks#stamp");
+    const [stopped] = (await w.executor.runs("collection:Tasks#stamp")).runs;
     expect(stopped).toMatchObject({ undone: false });
     await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false }))
       .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
@@ -2266,7 +2280,7 @@ describe("Collection automations", () => {
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
       .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0, actions: 0, actionsReversed: 0 });
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
-    const [finished] = await w.executor.runs("collection:Tasks#stamp");
+    const [finished] = (await w.executor.runs("collection:Tasks#stamp")).runs;
     expect(finished).toMatchObject({ undone: true });
   });
 
@@ -2288,7 +2302,7 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
     expect(claim.state).toBe("failed");
     const added = [...w.records.values()].find((record) => record.collection === "Log")!;
-    const [run] = await w.executor.runs("collection:Tasks#log");
+    const [run] = (await w.executor.runs("collection:Tasks#log")).runs;
     expect(run!.writes).toEqual([{ kind: "created", recordId: added.id, path: added.path }]);
   });
 
@@ -2326,7 +2340,7 @@ describe("Collection automations", () => {
     await w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: true });
     await w.until(() => claim.state === "done");
     expect(w.fieldsOf(task).Count).toBe(13);
-    const [run] = await w.executor.runs("collection:Tasks#stamp");
+    const [run] = (await w.executor.runs("collection:Tasks#stamp")).runs;
     expect(run!.writes.filter((write) => write.kind === "field" && write.field === "Count")
       .map((write) => write.kind === "field" && [write.before, write.after])).toEqual([[2, 3], [3, 13]]);
 
@@ -2387,7 +2401,7 @@ describe("Collection automations", () => {
     // The engine inserts a chain stop failed, and never serves it.
     w.claims.get(claim.claimId)!.state = "failed";
     w.claims.get(claim.claimId)!.error = "chain-stopped";
-    const [run] = await w.executor.runs("collection:Tasks#stamp");
+    const [run] = (await w.executor.runs("collection:Tasks#stamp")).runs;
     expect(run).toMatchObject({ state: "failed", neverStarted: true, chainStopped: true, undone: false, writes: [] });
     // Try again by its id, as the CLI and MCP ask, is refused with a reason, not an error.
     await w.executor.open();
@@ -2480,7 +2494,7 @@ describe("Collection automations", () => {
     await w.executor.retry({ automationId: "collection:Tasks#steps", claimId: claim.claimId, startOver: false });
     await w.until(() => claim.state === "done");
     expect(w.fieldsOf(task)).toMatchObject({ Count: 99, Note: "a" });
-    const [run] = await w.executor.runs("collection:Tasks#steps");
+    const [run] = (await w.executor.runs("collection:Tasks#steps")).runs;
     expect(run!.writes.filter((write) => write.kind === "kept").map((write) => write.kind === "kept" && write.planned)).toEqual([1, 2]);
   });
 
@@ -2662,16 +2676,6 @@ describe("Collection automations", () => {
     expect(w.executor.holds()).toEqual([]);
   });
 
-  it("trims saved runs after a failure the engine took, as after a done run", async () => {
-    const w = await world({ automations: { Tasks: "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: seen}}]\n" } });
-    w.failures.openSession = 1;
-    const claim = w.claim("collection:Tasks#note", w.addRecord("Tasks", "one", { Status: "Done" }));
-    await w.executor.open();
-    await w.settledClaim(claim);
-    await w.until(() => w.prunes() === 1);
-    expect(claim.state).toBe("failed");
-  });
-
   it("expires run history at open, then at most hourly after a run settles, keeping each run an unfinished Undo names", async () => {
     const note = "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: seen}}]\n";
     const w = await world({ automations: { Tasks: note } });
@@ -2681,14 +2685,14 @@ describe("Collection automations", () => {
     const first = w.claim("collection:Tasks#note", task);
     await executor.open();
     await w.settledClaim(first);
-    await w.until(() => w.prunes() === 1);
+    await w.until(() => w.expiries() === 1 && w.lastSaved(first.claimId)?.settled === true);
     expect(w.historyPrunes).toEqual([[]]);
     const [saved] = (await w.baseStore.runsOf("collection:Tasks#note", first.claimId)).runs;
     await w.baseStore.save({ ...saved!, undo: "started" });
     now += 60 * 60 * 1000 - 1;
-    w.claim("collection:Tasks#note", task);
+    const second = w.claim("collection:Tasks#note", task);
     executor.notifyClaimed();
-    await w.until(() => w.prunes() === 2);
+    await w.settledClaim(second);
     expect(w.historyPrunes).toHaveLength(1);
     now += 1;
     w.claim("collection:Tasks#note", task);
@@ -2709,55 +2713,46 @@ describe("Collection automations", () => {
     expect(claim.state).toBe("done");
     expect(w.journaled).toHaveLength(1);
     expect(w.errors.filter((entry) => entry.context.startsWith("settle"))).toEqual([]);
-    // Only the settle the engine took marks the run done and trims.
-    await w.until(() => w.prunes() === 1);
+    // Only the settle the engine took marks the run done.
+    await w.until(() => w.lastSaved(claim.claimId)?.settled === true);
   });
-  it("keeps the plan of the failure its notice offers, even behind 20 newer runs", async () => {
+  it("expires saved runs 30 days after they ended once the engine let their claim go, and keeps a failure it may still try again", async () => {
     const note = "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: seen}}]\n";
     const w = await world({ automations: { Tasks: note } });
+    let now = Date.UTC(2026, 8, 1);
+    const executor = w.makeExecutor({ nowMs: () => now });
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const saved = async (claim: AutomationClaim) => (await w.baseStore.runsOf("collection:Tasks#note", claim.claimId)).runs.length;
+    const settle = async () => {
+      const claim = w.claim("collection:Tasks#note", task);
+      executor.notifyClaimed();
+      return await w.settledClaim(claim);
+    };
+    await executor.open();
+    const done = await settle();
     w.failures.openSession = 1;
-    const old = w.claim("collection:Tasks#note", task);
-    await w.executor.open();
-    await w.settledClaim(old);
-    w.failures.openSession = 1;
-    const newer = w.claim("collection:Tasks#note", task);
-    w.executor.notifyClaimed();
-    await w.settledClaim(newer);
-    // The older claim is tried again and fails last, so its notice is the current one.
-    w.failures.openSession = 1;
-    await w.executor.retry({ automationId: "collection:Tasks#note", claimId: old.claimId, startOver: false });
-    await w.until(() => old.state === "failed");
-    for (let index = 0; index < 20; index += 1) {
-      const claim = w.claim("collection:Tasks#note", w.addRecord("Tasks", `more-${index}`, { Status: "Done" }));
-      w.executor.notifyClaimed();
-      await w.settledClaim(claim);
-    }
-    await w.until(() => w.resumable.length >= 23);
-    const kept = w.resumable.at(-1)!;
-    expect(kept.has(old.claimId)).toBe(true);
-    expect(kept.has(newer.claimId)).toBe(false);
+    const failed = await settle();
+    expect(failed.state).toBe("failed");
+    await w.until(() => w.expiries() === 1);
+    expect([await saved(done), await saved(failed)]).toEqual([1, 1]);
+    // The first pass after 30 days removes the done run the engine let go. The engine still offers the failure's Try again.
+    now += 30 * 24 * 60 * 60 * 1000 + 1;
+    w.claims.delete(done.claimId);
+    const later = await settle();
+    await w.until(() => w.expiries() === 2);
+    expect([await saved(done), await saved(failed), await saved(later)]).toEqual([0, 1, 1]);
+    // Once the engine lets the failure go, its run goes too.
+    w.claims.delete(failed.claimId);
+    now += 60 * 60 * 1000;
+    await settle();
+    await w.until(() => w.expiries() === 3);
+    expect(await saved(failed)).toBe(0);
+    await executor.dispose();
   });
 
-  it("asks before starting over a failure whose progress dohc dropped, and refuses one run history no longer shows", async () => {
+  it("refuses to run again a run that run history no longer shows", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
-    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
-    w.failures.authoredWrite = 1;
-    const claim = w.claim(TASKS, task);
     await w.executor.open();
-    await w.settledClaim(claim);
-    const [saved] = (await w.baseStore.runsOf(TASKS, claim.claimId)).runs;
-    await w.baseStore.save({ ...saved!, plan: null, applied: [], compacted: true });
-
-    await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false }))
-      .resolves.toEqual({ status: "progress-gone", repeatsMessages: false });
-    expect(claim.state).toBe("failed");
-    await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: true }))
-      .resolves.toEqual({ status: "queued", press: false });
-    await w.until(() => claim.state === "done");
-    // The person chose to run it from the start, so its first step ran again.
-    expect(w.fieldsOf(task).Count).toBe(4);
-
     await expect(w.executor.retry({ automationId: TASKS, claimId: "atc_forgotten", startOver: true }))
       .resolves.toEqual({ status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." });
   });
@@ -3169,7 +3164,7 @@ describe("Collection automations that post", () => {
         effectId: dmId, messageId: automationMessageId(dmId), automation, body: "Your task is done",
       }),
     ]);
-    const [run] = await w.executor.runs("collection:Tasks#tell");
+    const [run] = (await w.executor.runs("collection:Tasks#tell")).runs;
     expect(run!.writes).toEqual([
       { kind: "message", messageId: automationMessageId(postId), name: "Trip" },
       { kind: "message", messageId: automationMessageId(dmId), name: "your direct message with ana@dohc.test" },
@@ -3399,7 +3394,7 @@ describe("Collection automations that post", () => {
     expect(claim).toMatchObject({ state: "failed", error: "This automation's Collection is gone." });
     expect(w.messages).toHaveLength(1);
     expect(w.events).not.toContain(`released ${claim.claimId}`);
-    expect(await w.executor.runs("collection:Tasks#tell")).toMatchObject([
+    expect((await w.executor.runs("collection:Tasks#tell")).runs).toMatchObject([
       { state: "failed", error: "This automation's Collection is gone." },
     ]);
   });
@@ -3469,7 +3464,7 @@ describe("Collection automations that notify", () => {
     // Each notice goes out under the run's signal, so a stop ends it before it sends.
     expect(w.noticeSignals).toHaveLength(2);
     expect(w.noticeSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
-    const [run] = await w.executor.runs("collection:Tasks#tell");
+    const [run] = (await w.executor.runs("collection:Tasks#tell")).runs;
     expect(run!.writes).toEqual([
       { kind: "notice", noticeId: automationNoticeId(key, "user-owner"), name: "you" },
       { kind: "notice", noticeId: automationNoticeId(key, "user-ana@dohc.test"), name: "ana@dohc.test" },
@@ -3579,7 +3574,7 @@ describe("Collection automations that wake your agent", () => {
       automation: { automationId: "collection:Tasks#ask", name: "Ask my agent", depth: 1 },
       body: "Plan Done",
     })]);
-    const [run] = await w.executor.runs("collection:Tasks#ask");
+    const [run] = (await w.executor.runs("collection:Tasks#ask")).runs;
     expect(run!.writes).toEqual([{ kind: "message", messageId: w.messages[0]!.messageId, name: "your agent" }]);
   });
 
@@ -4269,7 +4264,7 @@ describe("Collection automations that a Group message starts", () => {
       await w.renameCollection("Tasks", "Voyage");
       await movedTo(w, TASKS, "Voyage");
       expect(await w.executor.automationsIn("Voyage")).toMatchObject({ status: "read", automations: [{ automationId: TASKS }] });
-      expect((await w.executor.runs(TASKS)).map((run) => run.claimId)).toEqual([claim.claimId]);
+      expect(((await w.executor.runs(TASKS)).runs).map((run) => run.claimId)).toEqual([claim.claimId]);
       expect(w.executor.locate(TASKS)).toEqual({ collectionPath: "Voyage", id: "bump" });
 
       // A change in the moved Collection runs there, and a restart finds its history too.
@@ -4280,7 +4275,7 @@ describe("Collection automations that a Group message starts", () => {
       await w.executor.dispose();
       const restarted = w.makeExecutor();
       await restarted.open();
-      expect((await restarted.runs(TASKS)).map((run) => run.claimId)).toEqual([next.claimId, claim.claimId]);
+      expect((await restarted.runs(TASKS)).runs.map((run) => run.claimId)).toEqual([next.claimId, claim.claimId]);
       await restarted.dispose();
     });
 
@@ -4369,9 +4364,9 @@ describe("Collection automations that a Group message starts", () => {
         ["collection.yaml", "automations.yaml"].map((name) => ({ operation: "create" as const, path: `${folder}/${name}` }))));
       await w.until(() => w.subscriptions.has("collection:object-new-tasks#bump") && w.subscriptions.has("collection:object-copy#bump"));
       expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ automationId: "collection:object-new-tasks#bump" }] });
-      expect(await w.executor.runs("collection:object-new-tasks#bump")).toEqual([]);
-      expect(await w.executor.runs("collection:object-copy#bump")).toEqual([]);
-      expect((await w.executor.runs(TASKS)).map((run) => run.claimId)).toEqual([claim.claimId]);
+      expect((await w.executor.runs("collection:object-new-tasks#bump")).runs).toEqual([]);
+      expect((await w.executor.runs("collection:object-copy#bump")).runs).toEqual([]);
+      expect(((await w.executor.runs(TASKS)).runs).map((run) => run.claimId)).toEqual([claim.claimId]);
     });
 
     it("checks reach again where the Collection is now", async () => {

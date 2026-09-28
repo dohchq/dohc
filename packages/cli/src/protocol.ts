@@ -304,7 +304,8 @@ const automationArgs = {
   automation: z.string().min(1).max(200),
 };
 const automationRunIdArg = z.string().min(1).max(256);
-const automationRunsArgsSchema = z.object(automationArgs).strict();
+// `page` is the `next` of an earlier listing: the runs older than it.
+const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional() }).strict();
 const automationRunArgsSchema = z
   .object({ ...automationArgs, run: automationRunIdArg })
   .strict();
@@ -972,6 +973,8 @@ const automationRunsResultSchema = z.discriminatedUnion("ok", [
     .object({
       ok: z.literal(true),
       runs: z.array(z.object({ ...automationRunFields, changes: z.number().int().nonnegative() }).strict()),
+      // The `page` that lists the older runs, or null after the oldest.
+      next: z.string().min(1).nullable(),
     })
     .strict(),
   rawFailureSchema,
@@ -1011,7 +1014,7 @@ const automationRetryResultSchema = z.union([
   z
     .object({
       ok: z.literal(false),
-      status: z.enum(["definition-changed", "progress-gone"]),
+      status: z.literal("definition-changed"),
       repeatsMessages: z.boolean(),
       reason: z.string().min(1),
     })

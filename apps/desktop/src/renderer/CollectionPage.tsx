@@ -88,9 +88,9 @@ export interface CollectionPageProps {
   // Notices. A success notice can carry an Undo.
   onError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onNotice: (message: string, undo?: () => void) => void;
-  // A notice asked to open one automation's runs here; `seq` rises with
-  // each ask. The page reports when it has taken the ask.
-  automationFocus: { automationId: string; seq: number } | null;
+  // A notice asked to open one automation's runs here, at the run it names;
+  // `seq` rises with each ask. The page reports when it has taken the ask.
+  automationFocus: { automationId: string; run: string | null; seq: number } | null;
   onAutomationFocused: () => void;
 }
 
@@ -233,7 +233,7 @@ export function CollectionPage({
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [customizing, setCustomizing] = useState(false);
-  const [panelFocus, setPanelFocus] = useState<{ automationId: string; seq: number } | null>(null);
+  const [panelFocus, setPanelFocus] = useState<{ automationId: string; run: string | null; seq: number } | null>(null);
   // A button nothing uses opens the builder with its trigger filled in.
   const [panelStart, setPanelStart] = useState<{ automation: Automation; seq: number } | null>(null);
   const panelStarts = useRef(0);

@@ -226,6 +226,7 @@ export const CHANNELS = {
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
+  getCollectionAutomationRun: "desktop:get-collection-automation-run",
   retryCollectionAutomation: "desktop:retry-collection-automation",
   undoCollectionAutomationRun: "desktop:undo-collection-automation-run",
   listAutomationTargets: "desktop:list-automation-targets",

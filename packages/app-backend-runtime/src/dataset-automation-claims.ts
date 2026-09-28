@@ -369,7 +369,7 @@ export function createDatasetAutomationClaims(options: {
       storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
       UNIQUE(workspace_id,dataset_id,automation_id,host_epoch,revision,table_id,record_id)) STRICT;
     CREATE INDEX IF NOT EXISTS dohc_dataset_automation_claims_state ON dohc_dataset_automation_claims(workspace_id,state);
-    CREATE INDEX IF NOT EXISTS dohc_dataset_automation_claims_history ON dohc_dataset_automation_claims(workspace_id,automation_id);
+    CREATE INDEX IF NOT EXISTS dohc_dataset_automation_claims_pages ON dohc_dataset_automation_claims(workspace_id,automation_id,created_at_ms,claim_id);
     CREATE INDEX IF NOT EXISTS dohc_dataset_automation_claims_expiring ON dohc_dataset_automation_claims(workspace_id,updated_at_ms) WHERE state IN('done','failed');
     CREATE INDEX IF NOT EXISTS dohc_dataset_automation_claims_failed ON dohc_dataset_automation_claims(workspace_id,automation_id,updated_at_ms) WHERE state='failed';
     CREATE TABLE IF NOT EXISTS dohc_dataset_automation_failure_generations(
@@ -491,18 +491,21 @@ export function createDatasetAutomationClaims(options: {
     /**
      * One page of an automation's run history: its claims in every state,
      * newest first, after `before`, the `next` of the page before. `next`
-     * is null after the oldest.
+     * is null after the oldest. Claims are paged as the engine pages its
+     * own, by when each was made and then by id, and `before` has the same
+     * form, so the two ledgers' pages merge.
      */
     claims(workspaceId: string, automationId: string, page: { before?: string; limit?: number } = {}): { claims: DatasetAutomationClaim[]; next: string | null } {
       const limit = page.limit ?? 20;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > DATASET_AUTOMATION_CLAIM_PAGE) throw new Error("Invalid automation claim page.");
-      const before = page.before === undefined ? Number.MAX_SAFE_INTEGER : Number(page.before);
-      if (!Number.isSafeInteger(before) || before < 1) throw new Error("Invalid automation claim page.");
-      const rows = tx(() => db.prepare(`SELECT rowid,${COLUMNS} FROM dohc_dataset_automation_claims WHERE workspace_id=? AND automation_id=? AND rowid<? ORDER BY rowid DESC LIMIT ?`)
-        .all(workspaceId, automationId, before, limit + 1));
-      const more = rows.length > limit;
-      if (more) rows.length = limit;
-      return { claims: rows.map(claim), next: more ? String(rows.at(-1)!.rowid) : null };
+      const cursor = page.before === undefined ? null : /^(\d{1,15}):(.+)$/s.exec(page.before);
+      if (page.before !== undefined && cursor === null) throw new Error("Invalid automation claim page.");
+      const after = cursor === null ? "" : "AND (created_at_ms,claim_id)<(?,?)";
+      const rows = tx(() => db.prepare(`SELECT ${COLUMNS} FROM dohc_dataset_automation_claims WHERE workspace_id=? AND automation_id=? ${after} ORDER BY created_at_ms DESC,claim_id DESC LIMIT ?`)
+        .all(workspaceId, automationId, ...(cursor === null ? [] : [Number(cursor[1]), cursor[2]]), limit + 1));
+      const claims = rows.slice(0, limit).map(claim);
+      const last = claims.at(-1);
+      return { claims, next: rows.length > limit && last !== undefined ? `${last.createdAtMs}:${last.claimId}` : null };
     },
     /**
      * Expire the workspace's done and failed claims settled more than 30

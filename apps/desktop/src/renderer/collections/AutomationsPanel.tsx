@@ -466,8 +466,8 @@ export function AutomationsPanel(props: {
   fields: readonly FieldDefinition[];
   /** Rises each time the page's header asks the panel to close. */
   closeAsk?: number;
-  /** A notice asked to open one automation's runs; `seq` rises with each ask. */
-  focus: { automationId: string; seq: number } | null;
+  /** A notice asked to open one automation's runs, at the run it names; `seq` rises with each ask. */
+  focus: { automationId: string; run: string | null; seq: number } | null;
   /**
    * The page asked to build a new automation from this draft, as for a button
    * nothing uses yet; `seq` rises with each ask.
@@ -492,7 +492,7 @@ export function AutomationsPanel(props: {
   const runsOn = otherHostName(relayHost);
   const fileRef = useRef(file);
   fileRef.current = file;
-  const [runsOf, setRunsOf] = useState<{ automationId: string; name: string } | null>(null);
+  const [runsOf, setRunsOf] = useState<{ automationId: string; name: string; run?: string | null } | null>(null);
   // Runs replaces the list, so focus moves to Back, and Back returns it to
   // the actions of the row that opened Runs.
   const backButton = useRef<HTMLButtonElement | null>(null);
@@ -561,10 +561,10 @@ export function AutomationsPanel(props: {
       ? file.automations.find((entry) => entry.valid && entry.automationId === props.focus?.automationId)
       : undefined;
     const name = summary?.valid ? summary.automation.name : (props.focus.automationId.split("#").at(-1) ?? "");
-    const automationId = props.focus.automationId;
+    const { automationId, run } = props.focus;
     leave(() => {
       setEditing(null);
-      setRunsOf({ automationId, name });
+      setRunsOf({ automationId, name, run });
     });
     // Only a new ask moves the panel; a reload does not.
   }, [props.focus?.seq]);
@@ -907,8 +907,11 @@ export function AutomationsPanel(props: {
           />
         ) : runsOf ? (
           <AutomationRuns
+            // A new automation or opened run starts from its first page.
+            key={JSON.stringify([workspaceId, runsOf.automationId, runsOf.run ?? null])}
             workspaceId={workspaceId}
             automationId={runsOf.automationId}
+            run={runsOf.run ?? null}
             refreshKey={version}
             onRetry={retry}
             onError={onError}

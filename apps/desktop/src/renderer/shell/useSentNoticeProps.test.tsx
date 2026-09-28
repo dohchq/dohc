@@ -81,7 +81,7 @@ function setup(
     workspaceId,
     workspaces,
     openFile: vi.fn(),
-    openAutomation: vi.fn(async (_automationId: string): Promise<string | null> => null),
+    openAutomation: vi.fn(async (_automationId: string, _run: string | null): Promise<string | null> => null),
     onSwitchWorkspace: vi.fn(),
     onOpenShare: vi.fn(),
     reportShellError: vi.fn(),
@@ -201,14 +201,18 @@ describe("opening a sent notice", () => {
 
 describe("a failed run's notice", () => {
   const failed = notice({
-    kind: "automation-failed", workspaceId: "notes", recipientShareId: null,
+    kind: "automation-failed", workspaceId: "notes", recipientShareId: null, postedHere: true,
     target: { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml", run: "atc_1" },
   });
 
   it("opens its automation in the panel here, and its file from another workspace", async () => {
     const { result, openAutomation, openFile, onSwitchWorkspace } = setup([failed], [workspace("notes")]);
     await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBeNull();
-    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp");
+    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1");
+    // Another computer ran it, so its run is not here to open.
+    openAutomation.mockClear();
+    await result.current.onOpenSentNotice({ ...failed, postedHere: false }, live());
+    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", null);
     expect(openFile).not.toHaveBeenCalled();
     cleanup();
     const trip = workspace("trip");

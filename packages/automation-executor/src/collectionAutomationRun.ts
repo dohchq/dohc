@@ -97,8 +97,6 @@ export const UNREADABLE_RUN_ERROR =
   "dohc could not read this run's saved progress in .dohc/automations, so it did not run again. Move that folder aside, then try again.";
 export const UNDONE_RUN_ERROR = "You undid this run, so dohc does not run it again.";
 export const LOST_COLLECTION_ERROR = "A Collection this run changes is no longer in this workspace, so the run stopped.";
-export const COMPACTED_RUN_ERROR =
-  "This run failed too long ago for dohc to finish it. Change the records by hand, or wait for the automation's next run.";
 
 /** The engine reads a run makes. VersionedLiveAdapter satisfies it. */
 export interface CollectionAutomationReads {
@@ -331,7 +329,6 @@ export async function savedRunOf(
   // Running another definition from the start could repeat the changes the
   // earlier one made. A person has to choose that with Try again.
   if (current === null && changedSince !== null) return { outcome: failed(DEFINITION_CHANGED_ERROR) };
-  if (current?.compacted) return { outcome: failed(COMPACTED_RUN_ERROR) };
   // The ledger handed the claim out again without a Try again, as after a
   // crash before the failure reached it: the run stays failed.
   if (current?.outcome?.state === "failed" && current.outcome.run === claim.run) {
@@ -343,13 +340,13 @@ export async function savedRunOf(
 /** A new run's record, before its plan is saved. */
 export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, plan: StoredStep[], nowMs: number): StoredRun {
   return {
-    version: 3,
+    version: 4,
     claimId: claim.claimId,
     automationId: claim.automationId,
     definitionHash: definitionHash(automation),
     keySeed,
     startedAtMs: nowMs,
-    updatedAtMs: nowMs,
+    finishedAtMs: null,
     plan,
     applied: [],
     created: [],
@@ -361,7 +358,6 @@ export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">,
     superseded: false,
     undo: null,
     settled: false,
-    compacted: false,
     outcome: null,
   };
 }
@@ -447,7 +443,7 @@ export async function runCollectionAutomation(
     run.outcome = { state: "done" };
     run.plan = null;
   }
-  run.updatedAtMs = dependencies.nowMs();
+  run.finishedAtMs = dependencies.nowMs();
   await store.save(run);
   return outcome;
 }
@@ -864,7 +860,6 @@ async function applyPlan(
     const applied = { ordinal, writes };
     await dependencies.store.appendEffect(run, applied);
     run.applied.push(applied);
-    run.updatedAtMs = dependencies.nowMs();
   }
   // A stop that came during the last write or its record leaves the run to
   // the next drain, which finds every effect recorded and completes it.

@@ -13,6 +13,7 @@ import {
   ListAutomationHoldsPayload,
   ResetAutomationHoldsPayload,
   RevealAutomationHoldsPayload,
+  GetCollectionAutomationRunPayload,
   ListCollectionAutomationRunsPayload,
   ListCollectionAutomationsPayload,
   ListCollectionFieldMarksPayload,
@@ -29,6 +30,7 @@ import {
   type ListAutomationHoldsResult,
   type ResetAutomationHoldsResult,
   type CreateWorkspaceFilePayload,
+  type GetCollectionAutomationRunResult,
   type ListCollectionAutomationRunsResult,
   type ListCollectionAutomationsResult,
   type ListCollectionFieldMarksResult,
@@ -98,7 +100,17 @@ export function registerCollectionAutomationsIpc<
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListCollectionAutomationRunsResult> =>
       dependencies.sharedViewOf(input.workspaceId)
         ? { status: "unavailable" }
-        : { status: "listed", runs: await operation.state.collectionAutomations.runs(input.automationId) });
+        : { status: "listed", ...await operation.state.collectionAutomations.runs(input.automationId, input.before) });
+  });
+
+  registerHandler(CHANNELS.getCollectionAutomationRun, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetCollectionAutomationRunPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<GetCollectionAutomationRunResult> => {
+      if (dependencies.sharedViewOf(input.workspaceId)) return { status: "unavailable" };
+      const run = await operation.state.collectionAutomations.listedRun(input.automationId, input.claimId);
+      return run === null ? { status: "missing" } : { status: "found", run };
+    });
   });
 
   // Try again. The executor wakes its drain and the failure notices after
