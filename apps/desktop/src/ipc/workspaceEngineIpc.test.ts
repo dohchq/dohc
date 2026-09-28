@@ -82,6 +82,7 @@ async function harness() {
   } satisfies WorkspaceEngineYDocProviderSession;
   const openYDocSession = vi.fn<WorkspaceEngineCapture["openYDocSession"]>(async () => provider);
   const ydoc = createEngineYDocSessionIpc({
+    localPersonId: () => "person-local",
     sessionFor: (value) => value === sender ? renderers.current(sender) : undefined,
     acquireWorkspace: (id) => {
       const lease = authority.acquire(id);
@@ -99,7 +100,7 @@ async function harness() {
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({ collections: [] })),
     getCollection: vi.fn<VersionedLiveAdapter["getCollection"]>(async () => { throw new Error("get boundary"); }),
     queryCollectionRecords: vi.fn<VersionedLiveAdapter["queryCollectionRecords"]>(async () => ({
-      collection: { path: "data", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
+      collection: { path: "data", objectId: "object-data", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
     })),
   };
   const capture = {
@@ -141,6 +142,7 @@ async function harness() {
   const retryOwnerLiveDelivery = vi.fn();
   const retryCloudSync = vi.fn(async (_workspaceId: string, _reason: "person" | "reconnect") => undefined);
   const registrations = createWorkspaceEngineIpc({
+    localPersonId: () => "person-local",
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
     withRendererWorkspaceOperation, receivedShareEngine,
@@ -290,10 +292,10 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.getCollection, { workspaceId: "workspace", collectionPath: "data" })).rejects.toThrow("get boundary");
     expect(h.adapter.getCollection).toHaveBeenCalledWith({ collectionPath: "data" });
-    h.adapter.listCollections.mockResolvedValue({ collections: [{ path: "", status: "valid", reasons: [] }] });
+    h.adapter.listCollections.mockResolvedValue({ collections: [{ path: "", objectId: "object-data", status: "valid", reasons: [] }] });
     await expect(h.invoke(CHANNELS.listCollections)).rejects.toThrow();
     h.adapter.queryCollectionRecords.mockResolvedValue({
-      collection: { path: "", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
+      collection: { path: "", objectId: "object-data", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
     });
     await expect(h.invoke(CHANNELS.queryCollectionRecords, { workspaceId: "workspace", collectionPath: "data" })).rejects.toThrow();
   });
@@ -336,29 +338,27 @@ describe("workspace engine IPC registrations", () => {
     expect(h.notify).not.toHaveBeenCalled();
   });
 
-  it("maps engine authors using the current local display name", async () => {
+  it("names this computer's agent by its display name, and any other agent as Agent, never by its person", async () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue({
-      moments: ["local", "Pat"].map((onBehalfOf, index) => ({
+      moments: ["person-local", "user-pat"].map((onBehalfOf, index) => ({
         id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
         author: { kind: "agent", agentId: "agent", onBehalfOf },
       })),
       nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
     });
-    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
-      moments: [{ agentAuthorName: "You" }, { agentAuthorName: "Pat" }],
-    });
+    const names = async () => ((await h.invoke(CHANNELS.listEngineMoments)) as { moments: Array<{ agentAuthorName?: string }> })
+      .moments.map((moment) => moment.agentAuthorName);
+    await expect(names()).resolves.toEqual(["You", "Agent"]);
     h.displayName.mockReturnValue("ice@example.com");
-    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
-      moments: [{ agentAuthorName: "ice@example.com" }, { agentAuthorName: "Pat" }],
-    });
+    await expect(names()).resolves.toEqual(["ice@example.com", "Agent"]);
     h.capture.readMoment.mockResolvedValue({
       protected: false,
       moment: {
         id: "detail", workspaceId: "workspace", versionId: "main", objectId: "object",
         path: "notes/a.md", recordedAtMs: 1, operation: "write", metadata: { origin: "local-file" },
-        author: { kind: "agent", agentId: "agent", onBehalfOf: "local" },
+        author: { kind: "agent", agentId: "agent", onBehalfOf: "person-local" },
         payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
       },
     });
@@ -509,7 +509,7 @@ describe("registered engine Y.Doc ownership", () => {
     await expect(h.ydoc.fileMutationPort().withDocumentUnowned(h.physical.attachmentId, openPayload.path, async () => true)).rejects.toThrow("engine owns this live document");
     const update = new Uint8Array([1]);
     expect(h.invoke(CHANNELS.engineYDocApplyUpdate, { sessionId: openPayload.sessionId, update, lineageGeneration: 1, seq: 1 })).toEqual({ accepted: true });
-    expect(h.provider.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), { attribution: { actorKind: "human" } });
+    expect(h.provider.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), { attribution: { actorKind: "human", onBehalfOf: "person-local" } });
     await expect(h.invoke(CHANNELS.engineYDocReadArtifactAsset, { sessionId: openPayload.sessionId, descriptor })).resolves.toEqual({ descriptor, bytes: new Uint8Array([1, 2, 3]) });
     h.openYDocSession.mock.calls[0]![0].onLineageReplaced?.(new Uint8Array([9]), []);
     expect(h.invoke(CHANNELS.engineYDocAcknowledgeLineageReplacement, { sessionId: openPayload.sessionId, lineageGeneration: 2 })).toEqual({ accepted: true, updates: [] });

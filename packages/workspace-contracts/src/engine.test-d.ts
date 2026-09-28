@@ -33,6 +33,7 @@ for (const author of [agent, automation]) {
 for (const author of [
   { kind: "public", principalId: "principal", grantId: "grant" },
   { kind: "named", userId: "user", grantId: "grant", grantGeneration: 1 },
+  { kind: "link", grantId: "grant", grantGeneration: 1, principalId: "principal" },
 ] as const satisfies readonly MomentAuthor[]) {
   // @ts-expect-error Relay attribution cannot author a local write.
   store.writeTextFile({ ...input, text: "text", author });

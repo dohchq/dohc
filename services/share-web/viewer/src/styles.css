@@ -75,6 +75,12 @@ nav { padding: 24px 16px; border-right: 1px solid #d6d0c3; background: #efeae0; 
 .comment-submit-row button:hover { opacity: .9; }
 .comment-submit-row button:disabled { cursor: default; opacity: .5; }
 .comment-submit-status { min-height: 18px; margin: 0; }
+.collection-file-editor { display: grid; align-content: start; gap: 12px; }
+.collection-file-editor p { margin: 0; }
+.collection-file-editor [role="alert"] { display: grid; justify-items: start; gap: 8px; color: #7a2f22; }
+.collection-file-editor textarea { width: 100%; min-height: 60vh; border: 1px solid #bdb8ad; border-radius: 6px; padding: 12px; background: #fff; color: #272923; font-family: ui-monospace, monospace; font-size: 13px; line-height: 1.5; resize: vertical; }
+.collection-file-editor textarea:read-only { opacity: .75; }
+.handoff-button:disabled { cursor: default; opacity: .5; }
 
 @media (max-width: 720px) {
   header { align-items: flex-start; flex-direction: column; padding: 20px; }

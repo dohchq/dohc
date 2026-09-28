@@ -83,12 +83,12 @@ function messageAutomation(authorKind: string, value: unknown): ChatMessage["aut
   }
   if (authorKind !== "automation" || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-input");
   const { automationId, chainDepth, ...rest } = value as Record<string, unknown>;
-  const match = typeof automationId === "string" ? /^collection:(.+)#([^#]+)$/su.exec(automationId) : null;
+  const match = typeof automationId === "string" ? /^collection:[A-Za-z0-9_-]+#.+$/su.exec(automationId) : null;
   if (Object.keys(rest).length > 0 || !match || automationId !== (automationId as string).trim() ||
     typeof chainDepth !== "number" || !Number.isInteger(chainDepth) || chainDepth < 1 || chainDepth > 64) {
     throw new Error("invalid-input");
   }
-  return { automationId: automationId as string, collectionPath: match[1]! };
+  return { automationId: automationId as string };
 }
 
 function strictObject(

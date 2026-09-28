@@ -55,6 +55,7 @@ import type {
   SyncRelayLinkHandoffCodeRow,
   LinkHandoffRedeemResult,
   SyncRelayShareWithGrantRow,
+  SyncRelayGrantedShareRow,
   SyncRelayLinkInventoryCursor,
   SyncRelayLinkInventoryPage,
   SyncRelayIndependentGrantInventoryCursor,
@@ -168,6 +169,7 @@ export {
   type ShareGrantTransitionResult,
   type LinkGrantTransitionResult,
   type SyncRelayShareWithGrantRow,
+  type SyncRelayGrantedShareRow,
   type SyncRelayLinkInventoryRow,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
@@ -204,7 +206,7 @@ export {
   currentFileBlobByteLengthQuery,
 } from "./storage/currentFiles";
 export { normalizeDiscussionDisplayName } from "./storage/discussion";
-export { CollectionWriteStaleError, type CollectionWriteReceipt } from "./storage/collectionWrites";
+export { CollectionWriteStaleError, type CollectionWriteReceipt, type CommitCollectionWriteInput } from "./storage/collectionWrites";
 export { referencedBlobShas } from "./storage/blobReferences";
 export { SyncRelayConflictError, SyncRelayQuotaExceededError, SyncRelayBlobMissingError } from "./storage/errors";
 
@@ -571,6 +573,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return automationHostStorage.readAutomationGroupHandover(this, input);
   }
 
+  authorizeLinkCollectionWrite(input: Parameters<typeof collectionWriteStorage.authorizeLinkCollectionWrite>[1]) {
+    return this.readTx(() => collectionWriteStorage.authorizeLinkCollectionWrite(this, input).authorized);
+  }
+
   commitCollectionWrite(input: collectionWriteStorage.CommitCollectionWriteInput) {
     return collectionWriteStorage.commitCollectionWrite(this, input);
   }
@@ -931,7 +937,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return sharesStorage.listActiveShareGrantsForRecipient(this, shareId, recipientUserId);
   }
 
-  listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[] {
+  listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[] {
     return sharesStorage.listSharesGrantedBy(this, granterUserId);
   }
 

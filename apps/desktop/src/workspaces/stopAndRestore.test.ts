@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
-import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
+import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { restoreDirectWrites, type DirectWriteFile, type StopAndRestoreDependencies } from "./stopAndRestore";
 
 const SCHEMA = "name: Packing\nfields:\n  Title:\n    type: text\n";
@@ -71,7 +71,7 @@ function engine(moments: VersionedTextMoment[], folders: Record<string, string[]
     }),
     folderEntries: vi.fn(async (path: string) => folders[path] ?? []),
     removeEmptyFolder: vi.fn(async () => undefined),
-    undoRuns: vi.fn(async (_definitions: ReadonlyArray<{ automationId: string; definitionHash: string }>) => ({ undone: 2, left: 1 })),
+    undoRuns: vi.fn(async (_definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>) => ({ undone: 2, left: 1, kept: 3, errorMessage: null as string | null })),
   };
   return { dependencies, restored, refused, changedAtRestore, failing, addedAtRestore, all };
 }
@@ -112,13 +112,43 @@ describe("restoring what a person wrote directly", () => {
       review: [],
       runsUndone: 2,
       runsLeft: 1,
+      runChangesKept: 3,
+      wroteAutomations: true,
+      sendsMessages: false,
       errorMessage: null,
     });
-    const wipe = collectionAutomationId("trip/packing", "wipe");
+    const wipe = { collectionPath: "trip/packing", id: "wipe" };
     expect(dependencies.undoRuns.mock.calls[0]![0]).toEqual([
-      { automationId: wipe, definitionHash: definitionOf(automations(WIPE), "wipe") },
-      { automationId: wipe, definitionHash: definitionOf(automations(WIPE_TWO), "wipe") },
+      { ...wipe, definitionHash: definitionOf(automations(WIPE), "wipe") },
+      { ...wipe, definitionHash: definitionOf(automations(WIPE_TWO), "wipe") },
     ]);
+  });
+
+  it("says an automation they wrote sends messages, which no Undo takes back", async () => {
+    const NOTIFY = "  - id: tell\n    name: Tell\n    when: record-added\n    do:\n      - notify: Packed\n        to: [user_owner]\n";
+    const auto = moment("m-auto", "o-auto", "trip/packing/automations.yaml", automations(STAMP), automations(STAMP, NOTIFY));
+    expect(parseAutomationsFile(automations(NOTIFY))).toMatchObject({ status: "read", entries: [{ status: "valid" }] });
+    const { dependencies } = engine([auto]);
+    await expect(restoreDirectWrites(dependencies, [file("m-auto", "o-auto", "trip/packing/automations.yaml")]))
+      .resolves.toMatchObject({ wroteAutomations: true, sendsMessages: true });
+    // A schema alone wrote no automation.
+    const schema = moment("m-schema", "o-schema", "trip/packing/collection.yaml", SCHEMA, SCHEMA_TWO);
+    const other = engine([schema]);
+    await expect(restoreDirectWrites(other.dependencies, [file("m-schema", "o-schema", "trip/packing/collection.yaml")]))
+      .resolves.toMatchObject({ wroteAutomations: false, sendsMessages: false, runsUndone: 0, runChangesKept: 0 });
+    expect(other.dependencies.undoRuns).not.toHaveBeenCalled();
+  });
+
+  it("keeps what undoing some runs found when a later run's Undo fails", async () => {
+    const auto = moment("m-auto", "o-auto", "trip/packing/automations.yaml", automations(STAMP), automations(STAMP, WIPE));
+    const { dependencies } = engine([auto]);
+    dependencies.undoRuns.mockResolvedValueOnce({ undone: 1, left: 0, kept: 4, errorMessage: "The workspace engine is not running." });
+    await expect(restoreDirectWrites(dependencies, [file("m-auto", "o-auto", "trip/packing/automations.yaml")])).resolves.toMatchObject({
+      restored: [{ path: "trip/packing/automations.yaml" }],
+      runsUndone: 1,
+      runChangesKept: 4,
+      errorMessage: "The workspace engine is not running.",
+    });
   });
 
   it("does not blame the person for an automation the owner added between their writes", async () => {
@@ -135,9 +165,9 @@ describe("restoring what a person wrote directly", () => {
     // The owner's change between theirs keeps the file for review.
     expect(restored).toEqual([]);
     expect(outcome).toMatchObject({ review: [{ path: "trip/packing/automations.yaml", reason: "changed-since" }] });
-    const definitions = dependencies.undoRuns.mock.calls[0]![0].map((definition) => definition.automationId);
-    expect(definitions).not.toContain(collectionAutomationId("trip/packing", "owners"));
-    expect(definitions).toEqual([collectionAutomationId("trip/packing", "wipe"), collectionAutomationId("trip/packing", "wipe")]);
+    const definitions = dependencies.undoRuns.mock.calls[0]![0].map((definition) => `${definition.collectionPath}#${definition.id}`);
+    expect(definitions).not.toContain("trip/packing#owners");
+    expect(definitions).toEqual(["trip/packing#wipe", "trip/packing#wipe"]);
   });
 
   it("lists a file someone changed since for review, and passes over one already as it was", async () => {

@@ -42,6 +42,9 @@ describe("an automation in plain words", () => {
       when: { kind: "record-changed", fields: ["Status", "Owner", "Due"], table: null },
       do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: null } }], records: null, operation: null }],
     })))).toBe("When Status, Owner or Due changes, clear Done on");
+    // The builder names no field until someone ticks one.
+    expect(sentenceText(automationSentence(automation({ when: { kind: "record-changed", fields: [], table: null } }))))
+      .toBe("When a chosen field changes, set Finished on to today");
   });
 
   it("names the action a button runs", () => {

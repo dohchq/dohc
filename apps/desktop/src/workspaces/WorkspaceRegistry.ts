@@ -17,7 +17,7 @@ import {
   reconcileRecipientShares,
   type ReceivedShareListing,
 } from "./recipientShareReconciliation";
-import { recordSynced } from "./syncHistory";
+import { recordReceivedShare, recordSynced } from "./syncHistory";
 
 // Electron wiring over the pure registry store. The registry lives in
 // userData; in test mode it lives under DOHC_TEST_HOME so E2E runs are
@@ -162,6 +162,7 @@ export function setWorkspaceSharedChannels(
   workspaceId: string,
   sharedChannels: JoinedSharedChannel[],
 ): void {
+  recordReceivedShareIn(workspaceId, sharedChannels);
   store().setSharedChannels(workspaceId, sharedChannels);
 }
 
@@ -170,5 +171,13 @@ export function setWorkspaceShareMounts(
   workspaceId: string,
   shareMounts: ShareMountRecord[],
 ): void {
+  recordReceivedShareIn(workspaceId, shareMounts);
   store().setShareMounts(workspaceId, shareMounts);
+}
+
+// The folder keeps that a share came in, so leaving or removing it later
+// cannot make the workspace look never shared. See syncHistory.ts.
+function recordReceivedShareIn(workspaceId: string, received: readonly unknown[]): void {
+  const workspace = findWorkspace(workspaceId);
+  if (workspace && received.length > 0) recordReceivedShare(workspace.rootPath);
 }

@@ -149,7 +149,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
   };
   const automations = useDatasetAutomations({ workspaceId, datasetId, tableId, dataset, refreshKey: recordsVersion, onError,
     onRecordsChanged: () => setRecordsVersion(value => value + 1),
-    onNotice: (message, undo) => onNotice?.(message, undo), onOpenFile, onOpenScheduleSettings });
+    onNotice: (message, undo) => onNotice?.(message, undo), onOpenFile, onOpenScheduleSettings,
+    onOpenFields: owner ? () => { setViewingHistory(false); setEditingFields(true); } : undefined });
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
     const result = await bridge().dataset({ action: "export", workspaceId, datasetPath, expectedDatasetId: datasetId });

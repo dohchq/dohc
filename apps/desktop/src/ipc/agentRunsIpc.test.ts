@@ -60,6 +60,7 @@ async function harness(shared = false) {
   const setAgentRun = vi.fn(() => undefined);
   let nextRun = 0;
   const integration = createAgentIntegration({
+    localPersonId: () => "person-local",
     acquire: (id) => {
       const lease = authority.acquire(id);
       return {

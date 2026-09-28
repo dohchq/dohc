@@ -1800,7 +1800,7 @@ describe("workspace graph IPC contract", () => {
 describe("collection IPC contracts", () => {
   it("round-trips a queried record with a bigint value and a flagged validation", () => {
     const result = QueryCollectionRecordsResult.parse({
-      collection: { path: "tasks", status: "valid", reasons: [] },
+      collection: { path: "tasks", objectId: "object-tasks", status: "valid", reasons: [] },
       records: [
         {
           id: "rec-1",
@@ -1828,6 +1828,7 @@ describe("collection IPC contracts", () => {
   it("keeps every field kind and view definition through the details result", () => {
     const details = GetCollectionResult.parse({
       path: "tasks",
+      objectId: "object-tasks",
       status: "degraded",
       reasons: [{ code: "unknown-field-type", path: "fields.mystery" }],
       schema: {
@@ -1864,6 +1865,7 @@ describe("collection IPC contracts", () => {
 
     const details = GetCollectionResult.parse({
       path: "tasks",
+      objectId: "object-tasks",
       status: "valid",
       reasons: [],
       schema: {
@@ -1881,6 +1883,7 @@ describe("collection IPC contracts", () => {
   it("accepts more than 1,000 canonical schema reasons", () => {
     const details = GetCollectionResult.parse({
       path: "tasks",
+      objectId: "object-tasks",
       status: "degraded",
       reasons: Array.from({ length: 1_001 }, (_, index) => ({
         code: "unknown-property",
@@ -1913,6 +1916,7 @@ describe("collection IPC contracts", () => {
     expect(() =>
       GetCollectionResult.parse({
         path: "tasks",
+        objectId: "object-tasks",
         status: "valid",
         reasons: [],
         schema: {

@@ -18,7 +18,7 @@ import { useRequestSequence } from "../useRequestSequence";
 import { AutomationBuilder } from "./AutomationBuilder";
 import { AutomationRuns } from "./AutomationRuns";
 import { newAutomation, type AutomationTable } from "./automationDraft";
-import { Sentence, StatusLine } from "./AutomationParts";
+import { RUN_TIME, Sentence, StatusLine } from "./AutomationParts";
 import {
   automationSentence,
   collectionName,
@@ -259,9 +259,6 @@ function LastRun(props: { lastRun: ValidAutomationSummary["lastRun"]; onOpen: ()
 }
 
 // How a next run shows: the person's local time, down to the minute.
-const RUN_TIME: Intl.DateTimeFormatOptions = {
-  weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
-};
 // The longest delay setTimeout keeps; a longer one fires at once.
 const LONGEST_TIMEOUT_MS = 2 ** 31 - 1;
 
@@ -466,8 +463,8 @@ export function AutomationsPanel(props: {
   fields: readonly FieldDefinition[];
   /** Rises each time the page's header asks the panel to close. */
   closeAsk?: number;
-  /** A notice asked to open one automation's runs; `seq` rises with each ask. */
-  focus: { automationId: string; seq: number } | null;
+  /** A notice asked to open one automation's runs, at the run it names; `seq` rises with each ask. */
+  focus: { automationId: string; run: string | null; seq: number } | null;
   /**
    * The page asked to build a new automation from this draft, as for a button
    * nothing uses yet; `seq` rises with each ask.
@@ -479,20 +476,17 @@ export function AutomationsPanel(props: {
   onOpenFile: (path: string) => void;
   /** Opens the setting where the owner chooses which computer runs schedules. */
   onOpenScheduleSettings: () => void;
+  /** Opens the dialog that adds fields, such as a Button field; undefined where this person cannot. */
+  onOpenFields?: () => void;
   onError: ErrorReport;
   onNotice: (message: string, undo?: () => void) => void;
 }) {
   const { workspaceId, collectionPath, table, onError, onNotice } = props;
   const { file, holdsUnreadable, version, reload: load } = props.automations;
   const nextRuns = useNextRuns(file);
-  const scheduleHost = useScheduleHost(workspaceId, nextRuns.size > 0, onError);
-  const relayHost = scheduleHost.host?.relay ?? null;
-  // Without a computer to run them, schedules have no next run to show.
-  const noHost = relayHost?.hostInstallId === null;
-  const runsOn = otherHostName(relayHost);
   const fileRef = useRef(file);
   fileRef.current = file;
-  const [runsOf, setRunsOf] = useState<{ automationId: string; name: string } | null>(null);
+  const [runsOf, setRunsOf] = useState<{ automationId: string; name: string; run?: string | null } | null>(null);
   // Runs replaces the list, so focus moves to Back, and Back returns it to
   // the actions of the row that opened Runs.
   const backButton = useRef<HTMLButtonElement | null>(null);
@@ -505,6 +499,12 @@ export function AutomationsPanel(props: {
   // asking, such as on a workspace switch, opens again here.
   const draftKey = JSON.stringify([workspaceId, collectionPath, table?.name ?? null]);
   const [editing, setEditing] = useState<Editing | null>(() => keptDrafts.get(draftKey) ?? null);
+  // The builder shows it under a schedule it edits.
+  const scheduleHost = useScheduleHost(workspaceId, nextRuns.size > 0 || editing !== null, onError);
+  const relayHost = scheduleHost.host?.relay ?? null;
+  // Without a computer to run them, schedules have no next run to show.
+  const noHost = relayHost?.hostInstallId === null;
+  const runsOn = otherHostName(relayHost);
   const editingRef = useRef(editing);
   editingRef.current = editing;
   const latestDraft = useRef<{ automation: Automation; dirty: boolean } | null>(null);
@@ -561,10 +561,10 @@ export function AutomationsPanel(props: {
       ? file.automations.find((entry) => entry.valid && entry.automationId === props.focus?.automationId)
       : undefined;
     const name = summary?.valid ? summary.automation.name : (props.focus.automationId.split("#").at(-1) ?? "");
-    const automationId = props.focus.automationId;
+    const { automationId, run } = props.focus;
     leave(() => {
       setEditing(null);
-      setRunsOf({ automationId, name });
+      setRunsOf({ automationId, name, run });
     });
     // Only a new ask moves the panel; a reload does not.
   }, [props.focus?.seq]);
@@ -886,9 +886,11 @@ export function AutomationsPanel(props: {
             baseline={editing.baseline}
             cannotRun={editing.cannotRun}
             reach={editing.reach}
+            addsStay={file?.status === "read" ? file.addsStay : []}
             takenIds={new Set(editable?.automations.map((automation) => automation.id) ?? [])}
             saving={saving}
             readOnly={editable === null}
+            you={(file?.status === "read" || file?.status === "missing" ? file.you : undefined) ?? null}
             leaveRequested={leaving !== null}
             onLeave={() => {
               forgetDraft();
@@ -903,12 +905,23 @@ export function AutomationsPanel(props: {
             onSave={saveEdited}
             onCancel={() => leave(() => setEditing(null))}
             onOpenFile={props.onOpenFile}
+            onOpenFields={props.onOpenFields}
+            scheduleHost={
+              <ScheduleHostNote
+                host={scheduleHost.host}
+                onCheckAgain={() => void scheduleHost.read()}
+                onChooseComputer={props.onOpenScheduleSettings}
+              />
+            }
             onError={onError}
           />
         ) : runsOf ? (
           <AutomationRuns
+            // A new automation or opened run starts from its first page.
+            key={JSON.stringify([workspaceId, runsOf.automationId, runsOf.run ?? null])}
             workspaceId={workspaceId}
             automationId={runsOf.automationId}
+            run={runsOf.run ?? null}
             refreshKey={version}
             onRetry={retry}
             onError={onError}

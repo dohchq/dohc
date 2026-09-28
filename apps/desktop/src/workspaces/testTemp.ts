@@ -166,15 +166,42 @@ export async function sweepScratchParent(
       if (errorCode(error) === "ENOENT") continue;
       throw error;
     }
-    if (!metadata.isDirectory() || !(await isIdleSince(path, nowMs))) {
-      continue;
-    }
+    if (!metadata.isDirectory()) continue;
+    // An empty root whose creating process has exited can never be written
+    // again. The Vitest pool kills its workers before they can clean up, and
+    // nextest runs each Rust test as its own process, so these roots arrive by
+    // the thousand. `rmdir` refuses a root that still holds anything.
+    if (!processAlive(runRootPid(name)) && (await removeEmptyDirectory(path))) continue;
+    if (!(await isIdleSince(path, nowMs))) continue;
     const error = await removeTreeWithRetry(path);
     if (error) {
       console.error(
         `scratch sweep could not remove aged run ${path} after ${cleanupAttempts()} attempts: ${error.message}`,
       );
     }
+  }
+}
+
+function runRootPid(name: string): number {
+  return Number(/-(\d+)-[0-9a-f]{16}$/u.exec(name)?.[1]);
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: the process exists but belongs to someone else.
+    return errorCode(error) === "EPERM";
+  }
+}
+
+async function removeEmptyDirectory(path: string): Promise<boolean> {
+  try {
+    await rmdir(path);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -292,7 +319,7 @@ async function removeTreeWithRetry(path: string): Promise<Error | undefined> {
 async function removeEmptyRunRoot(): Promise<void> {
   // A handed-down root belongs to whoever handed it down. The Rust gate writes
   // a sentinel into it and reclaims it once every test binary has exited, and
-  // the Rust helper never removes a run root either. One suite removing a root
+  // the Rust helper removes only a root it generated. One suite removing a root
   // its sibling workers still allocate under would ENOENT their next mkdtemp.
   if (process.env.DOHC_TEST_SCRATCH_ROOT) return;
   try {

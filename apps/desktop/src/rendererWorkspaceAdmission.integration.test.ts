@@ -74,6 +74,7 @@ describe("renderer reload admission", () => {
 
     const openYDocSession = vi.fn();
     const yDoc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
       sessionFor: (requestSender) =>
         sessions.current(requestSender as typeof renderer),
       acquireWorkspace: () => ({

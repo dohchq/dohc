@@ -55,7 +55,7 @@ it("does not offer shared restore for other text formats", async () => {
   expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
 });
 
-it("offers Stop and restore only for a change a person the owner shared with wrote directly", async () => {
+it("offers Stop and restore only for a change a person the owner shared with, or an Edit link, wrote directly", async () => {
   await open(textDetail);
   expect(screen.queryByTestId("engine-diff-stop-and-restore")).toBeNull();
   cleanup();
@@ -65,5 +65,12 @@ it("offers Stop and restore only for a change a person the owner shared with wro
   const {moment} = await open(named);
   expect(moment.namedAuthor).toEqual({userId: "user_ana", label: "Someone you shared with"});
   fireEvent.click(screen.getByTestId("engine-diff-stop-and-restore"));
-  expect(stopAndRestore).toHaveBeenCalledWith({userId: "user_ana", label: "Someone you shared with"});
+  expect(stopAndRestore).toHaveBeenCalledWith({target: {kind: "person", userId: "user_ana"}, label: "Someone you shared with"});
+  cleanup();
+  const linked: WorkspaceEngineMomentDetail = {protected: false, moment: {...base, path: "docs/collection.yaml",
+    author: {kind: "link", grantId: "grant-link", grantGeneration: 2, principalId: "holder"},
+    payload: {before: null, after: {...text, path: "docs/collection.yaml"}}}};
+  await open(linked);
+  fireEvent.click(screen.getByTestId("engine-diff-stop-and-restore"));
+  expect(stopAndRestore).toHaveBeenLastCalledWith({target: {kind: "link", grantId: "grant-link"}, label: "Edit link"});
 });
