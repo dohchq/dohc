@@ -167,7 +167,6 @@ import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { useAskAgent } from "./shell/useAskAgent";
 import { NoticeCenter } from "./workbench/NoticeCenter";
-import { WorkspaceSyncStatus } from "./workbench/WorkspaceSyncStatus";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { AUTOMATION_NOT_HERE_NOTE, useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
