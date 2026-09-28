@@ -83,6 +83,7 @@ interface Successor {
 interface LineageTransition {
   predecessorClaimId: string;
   predecessorStateVectorSha256: string;
+  predecessorDeleteSetSha256: string;
   artifactPreimageSha256: string;
   successor: Successor | null;
 }
@@ -439,6 +440,7 @@ function lineageTransition(value: unknown): LineageTransition | null {
     [
       "predecessorClaimId",
       "predecessorStateVectorSha256",
+      "predecessorDeleteSetSha256",
       "artifactPreimageSha256",
       "successor",
     ],
@@ -448,6 +450,10 @@ function lineageTransition(value: unknown): LineageTransition | null {
     predecessorClaimId: sha256(
       record.predecessorClaimId,
       "lineageTransition.predecessorClaimId",
+    ),
+    predecessorDeleteSetSha256: sha256(
+      record.predecessorDeleteSetSha256,
+      "lineageTransition.predecessorDeleteSetSha256",
     ),
     predecessorStateVectorSha256: sha256(
       record.predecessorStateVectorSha256,
@@ -473,6 +479,11 @@ function sameProjectedContent(left: Side, right: Side): boolean {
     left.blobSha256 === right.blobSha256 &&
     left.byteLength === right.byteLength
   );
+}
+
+function sameObjectAndProjectedContent(left: Side, right: Side): boolean {
+  if (!left.present || !right.present) return left.present === right.present;
+  return left.objectId === right.objectId && sameProjectedContent(left, right);
 }
 
 function canonicalAuthor(value: AgentAuthor | null): Record<string, unknown> | null {
@@ -613,7 +624,10 @@ function validateBindings(payload: ParsedResolve): void {
     invalid("one object has conflicting creation times");
   }
 
-  if (payload.resolution === "kept-current" && !sameSide(payload.current, payload.result)) {
+  if (
+    payload.resolution === "kept-current" &&
+    !sameObjectAndProjectedContent(payload.current, payload.result)
+  ) {
     invalid("kept-current result must equal current");
   }
   if (

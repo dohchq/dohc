@@ -96,7 +96,7 @@ class MockDaemon implements EngineDaemonClient {
             nextCursor: null,
             pendingCursor: null,
             changedPaths: [],
-            sharingDeclined: [],
+            sharingDeclined: [], refusals: [],
           };
         case "sync.pull":
           return {
@@ -123,7 +123,7 @@ class MockDaemon implements EngineDaemonClient {
                 contentKind: "secret",
               },
             ],
-            sharingDeclined: [],
+            sharingDeclined: [], refusals: [],
           };
         case "sync.commitCursor":
           return { committed: true, sharingDeclined: [] };
@@ -202,7 +202,7 @@ afterEach(async () => {
   );
 });
 
-async function harness(daemon = new MockDaemon()) {
+async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void) {
   const rootPath = await createTestScratch("dohc-relay-client-unit-");
   const attachmentId = Symbol("test-workspace-attachment");
   roots.push(rootPath);
@@ -218,6 +218,7 @@ async function harness(daemon = new MockDaemon()) {
     sessions,
     routes,
     requestDeadlineMs: 1_000,
+    onRefusalsChanged,
   });
   const relay = { baseUrl: "https://relay.test/", token: "secret-token" };
   const client = live.bind({
@@ -249,6 +250,18 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
 }
 
 describe("EngineRelayClient", () => {
+  it("commits engine-owned refusals before notifying Notices", async () => {
+    const refusal = { originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input", reason: "Review this conflict." };
+    const daemon = new MockDaemon(request => request.method === "sync.pull" ? {
+      status: "complete", fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
+      nextCursor: 9, pendingCursor: {kind: "relay", token: "cursor-9"}, changedPaths: [], sharingDeclined: [], refusals: [refusal],
+    } : undefined);
+    const changed = vi.fn(() => expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true));
+    const { client } = await harness(daemon, changed);
+    await client.pull(async () => undefined);
+    expect(changed).toHaveBeenCalledOnce();
+  });
+
   it("claims after reopening a refused workspace under another account", async () => {
     let refusalAccount: string | null = null;
     let pending = true;
@@ -492,7 +505,7 @@ describe("EngineRelayClient", () => {
               contentKind: "text",
             },
           ],
-          sharingDeclined: [],
+          sharingDeclined: [], refusals: [],
         };
       }
       if (request.method === "sync.commitCursor") {
@@ -566,7 +579,7 @@ describe("EngineRelayClient", () => {
             contentKind: "secret",
           },
         ],
-        sharingDeclined: [],
+        sharingDeclined: [], refusals: [],
       };
     });
     const { sessions, client } = await harness(daemon);
@@ -647,7 +660,7 @@ describe("EngineRelayClient", () => {
           nextCursor: 0,
           pendingCursor: { kind: "relay", token: "cursor-enrollment" },
           changedPaths: [],
-          sharingDeclined: [],
+          sharingDeclined: [], refusals: [],
         };
       }
       if (request.method === "sync.commitCursor") {
@@ -2106,7 +2119,7 @@ describe("EngineRelayClient", () => {
               contentKind: "text",
             },
           ],
-          sharingDeclined: [],
+          sharingDeclined: [], refusals: [],
         };
       }
       if (request.method === "share.channel.pull") {

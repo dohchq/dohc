@@ -633,7 +633,7 @@ pub(crate) fn recover_lineage_in_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_recovery_in_tx(
+pub(crate) fn create_recovery_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     original_path: &str,
@@ -643,8 +643,33 @@ fn create_recovery_in_tx(
     recorded_at_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<CreatedRecovery, SyncError> {
+    create_recovery_with_correlation_in_tx(
+        tx,
+        key,
+        original_path,
+        losing_claim_id,
+        markdown,
+        first_collision_ordinal,
+        recorded_at_ms,
+        search_policy,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_recovery_with_correlation_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    losing_claim_id: &str,
+    markdown: &str,
+    first_collision_ordinal: u64,
+    recorded_at_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+    correlation: Option<&str>,
+) -> Result<CreatedRecovery, SyncError> {
     let mut collision_ordinal = first_collision_ordinal;
-    let identity = loop {
+    let mut identity = loop {
         let candidate = recovery_identity(
             key,
             original_path,
@@ -659,6 +684,9 @@ fn create_recovery_in_tx(
             .checked_add(1)
             .ok_or_else(|| local_corruption("Y.Doc recovery identity sequence overflowed"))?;
     };
+    if let Some(correlation) = correlation {
+        identity.correlation_id = correlation.to_owned();
+    }
     let mut path_ordinal = 1_u64;
     let projection_sha256 = dohc_engine_storage::hex_sha256(markdown.as_bytes());
     let recovered_path = loop {
@@ -734,6 +762,95 @@ fn create_recovery_in_tx(
         moment_id: identity.moment_id,
         collision_ordinal,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recover_inactive_projection_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    claim: &str,
+    content: &str,
+    previous_sha: &str,
+    state_sha: &str,
+    now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<(), SyncError> {
+    let identity = dohc_engine_storage::hex_sha256(
+        format!(
+            "{}\0{}\0{}\0{}",
+            key.workspace_id, key.version_id, key.object_id, claim
+        )
+        .as_bytes(),
+    );
+    let correlation = format!("ydoc-inactive-recovery:{identity}");
+    let existing: Option<(String,String)> = tx.query_row(
+        "SELECT object_id,path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 \
+         AND metadata_correlation_id=?3 AND blob_sha256=?4 \
+         AND NOT EXISTS (SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=snapshots.workspace_id \
+          AND d.version_id=snapshots.version_id AND d.object_id=snapshots.object_id) ORDER BY updated_at_ms DESC LIMIT 1",
+        params![key.workspace_id,key.version_id,correlation,previous_sha],|row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(SyncError::corrupt)?;
+    let Some((object_id, path)) = existing else {
+        create_recovery_with_correlation_in_tx(
+            tx,
+            key,
+            path,
+            claim,
+            content,
+            0,
+            now_ms,
+            search_policy,
+            Some(&correlation),
+        )?;
+        return Ok(());
+    };
+    let moment =
+        dohc_engine_storage::hex_sha256(format!("{identity}\0{object_id}\0{state_sha}").as_bytes());
+    let result = write_text_in_tx(
+        tx,
+        &WriteText {
+            workspace_id: key.workspace_id.clone(),
+            version_id: key.version_id.clone(),
+            object_id,
+            path: path.clone(),
+            text: content.to_owned(),
+            moment_id: format!("ydoc-inactive-recovery-{moment}"),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: Some(recovery_summary(path.as_str())),
+            metadata_correlation_id: Some(correlation),
+            author_json: None,
+            now_ms,
+            request_id: None,
+        },
+    )
+    .map_err(|error| map_domain_payload_error(error, "Y.Doc recovery update failed"))?;
+    if !result.deduped {
+        enqueue_write(
+            tx,
+            &result,
+            Preimage::Present(previous_sha.to_owned()),
+            "sync",
+        )
+        .map_err(map_domain_hard_error)?;
+        upsert_file_search_index(
+            tx,
+            &key.workspace_id,
+            &key.version_id,
+            &result.snapshot.object_id,
+            &result.snapshot.path,
+            Some(content),
+            search_policy,
+        )?;
+        if crate::journal::workspace_journals_file_moments_in_tx(tx, &key.workspace_id)? {
+            crate::outbound::journal_moment_append_in_tx(
+                tx,
+                &key.workspace_id,
+                &result.moment.moment_id,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Select the recovery jobs that must reach disk before their paths are
@@ -984,9 +1101,17 @@ pub(crate) fn redelivered_change(
 
 fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncError {
     match error {
+        DomainError::PayloadTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        } => SyncError::ProjectionTooLarge {
+            constraint,
+            limit_bytes,
+            actual_bytes: observed_bytes,
+        },
         DomainError::InvalidText { .. }
         | DomainError::InvalidPath { .. }
-        | DomainError::PayloadTooLarge { .. }
         | DomainError::InvalidInput { .. } => SyncError::InvalidInput { reason },
         hard => map_domain_hard_error(hard),
     }
