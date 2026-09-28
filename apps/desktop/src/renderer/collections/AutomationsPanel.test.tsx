@@ -947,6 +947,28 @@ describe("the builder", () => {
     expect(written[0]!.automations).toEqual([{ ...edited, if: "record.Points == -5" }]);
   });
 
+  it("shows a code step's code, opens the file a step runs, and keeps both steps as the file wrote them", async () => {
+    const code = "const total = record => record.Count * 2;\nreturn { output: total(ctx.record) };";
+    const coded: Automation = { ...stamp, do: [...stamp.do, { kind: "run", code, as: "total" }, { kind: "run-file", file: "scripts/notify.js", as: null }] };
+    const { written } = makeBridge(read([summary(coded)]));
+    const onOpenFile = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onOpenFile={onOpenFile} />);
+    await openBuilder(user);
+
+    expect(within(screen.getByTestId("builder-step-1")).getByText("Run code")).toBeTruthy();
+    expect(screen.getByLabelText("Step 2, code").textContent).toBe(code);
+    const file = screen.getByTestId("builder-step-2");
+    expect(within(file).getByText("scripts/notify.js")).toBeTruthy();
+    await user.click(within(file).getByRole("button", { name: "Open file" }));
+    expect(onOpenFile).toHaveBeenCalledWith("Tasks/scripts/notify.js");
+
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations).toEqual([{ ...coded, name: "Stamp the finish date!" }]);
+  });
+
   it("shows a formula's syntax error beside it and does not save until it is fixed", async () => {
     const { written, bridge } = makeBridge(read([summary(stamp)]));
     const user = userEvent.setup();

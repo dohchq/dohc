@@ -4,6 +4,7 @@ import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts
 import { chatDirectoryOf } from "./automationChat";
 import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
 import {
+  DATASET_CODE_UNSUPPORTED,
   DATASET_WAKE_NEEDS_BUTTON,
   datasetAutomationProblem,
   datasetEffectKey,
@@ -89,6 +90,12 @@ describe("dataset automation steps", () => {
       const started = automation("      - notify: Done\n        to: [user_ana]\n", when);
       for (const steps of everywhere(wake, started.do)) expect(datasetAutomationProblem({ ...started, do: steps }, generated)).toBeNull();
     }
+  });
+
+  it("does not run code steps on datasets yet, in branches too", () => {
+    const code = automation("      - run: \"return { set: { Status: 'Done' } }\"\n").do;
+    const base = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
+    for (const steps of everywhere(code, base.do)) expect(datasetAutomationProblem({ ...base, do: steps }, generated)).toBe(DATASET_CODE_UNSUPPORTED);
   });
 
   it("says which approved operation a step lacks, in the words the step card shows", () => {

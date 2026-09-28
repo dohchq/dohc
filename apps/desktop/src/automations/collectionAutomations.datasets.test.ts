@@ -456,6 +456,7 @@ describe("Collection automations on a dataset", () => {
     const base = sharedEvaluator.forWorkspace("workspace");
     // Someone edits the record after the run read it and before it writes.
     const evaluator: AutomationFormulaEvaluator = {
+      runCode: base.runCode,
       evaluate: async (automationId, scope, formulas) => {
         const change = interfere;
         interfere = null;
@@ -630,6 +631,7 @@ describe("Collection automations on a dataset", () => {
     const running = new Promise<void>((resolve) => { started = resolve; });
     const base = sharedEvaluator.forWorkspace("workspace");
     const evaluator: AutomationFormulaEvaluator = {
+      runCode: base.runCode,
       evaluate: async (automationId, scope, formulas) => {
         started();
         await new Promise<void>((resolve) => { release = resolve; });
@@ -653,6 +655,7 @@ describe("Collection automations on a dataset", () => {
     let fail = true;
     const base = sharedEvaluator.forWorkspace("workspace");
     const evaluator: AutomationFormulaEvaluator = {
+      runCode: base.runCode,
       evaluate: async (automationId, scope, formulas) => fail
         ? formulas.map(() => ({ ok: false as const, error: { code: "runtime" as const, message: "Not yet." } }))
         : await base.evaluate(automationId, scope, formulas),
@@ -1404,6 +1407,7 @@ describe("dataset automation claims in both ledgers", () => {
     let fail = false;
     const base = sharedEvaluator.forWorkspace("workspace");
     const evaluator: AutomationFormulaEvaluator = {
+      runCode: base.runCode,
       evaluate: async (automationId, scope, formulas) => fail
         ? formulas.map(() => ({ ok: false as const, error: { code: "runtime" as const, message: "Not yet." } }))
         : await base.evaluate(automationId, scope, formulas),

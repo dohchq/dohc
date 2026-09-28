@@ -272,9 +272,11 @@ function authoredProblem(automation: Automation, name: string): string | null {
 
 export const DATASET_WAKE_NEEDS_BUTTON =
   "In this Collection, a record change cannot wake your agent, because dohc cannot tell a person's change from an agent's. Choose another trigger.";
+export const DATASET_CODE_UNSUPPORTED = "dohc cannot run code steps in this Collection yet. Use Set fields or Add a record instead.";
 
 /** Why dohc cannot run an automation on this dataset, or null. */
 export function datasetAutomationProblem(automation: Automation, dataset: DatasetRules): string | null {
+  if (stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")) return DATASET_CODE_UNSUPPORTED;
   // Only a person's change wakes an agent. A dataset commit does not say
   // whether a person or an agent made it, and an agent's writes through the
   // CLI commit as the owner, so a record change cannot. A press, which a

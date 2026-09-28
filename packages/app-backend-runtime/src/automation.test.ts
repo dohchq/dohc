@@ -388,6 +388,20 @@ describe("code steps", () => {
     expect(await evaluator.runCode(scope, "if (ctx.record.Status !== 'Done') return { set: { Status: 'Done' } };")).toEqual({ ok: true, value: {} });
   });
 
+  it("share one run's time budget with the formulas around them", async () => {
+    const spent = { prepareMs: 0, runMs: 0 };
+    expect(await evaluator.runCode(scope, "return { output: 1 };", spent)).toEqual({ ok: true, value: { output: 1 } });
+    expect(spent.runMs).toBeGreaterThan(0);
+    const [formula] = await evaluator.evaluate(scope, [expression("1")], spent);
+    expect(formula).toEqual({ ok: true, value: 1 });
+    // Once the run has spent its budget in earlier requests, a later one runs nothing.
+    spent.runMs = AUTOMATION_LIMITS.requestMs;
+    expect(await evaluator.evaluate(scope, [expression("1")], spent)).toEqual([{ ok: false, error: runSpent }]);
+    expect(await evaluator.runCode(scope, "return {};", spent)).toEqual({ ok: false, error: {
+      code: "timeout", message: "The code did not run because the run took longer than 8 s.",
+    } });
+  });
+
   it("reject a result the executor cannot use", async () => {
     const invalid = async (source: string) => {
       const result = await evaluator.runCode(scope, source);

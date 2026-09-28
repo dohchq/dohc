@@ -71,6 +71,22 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 // Collection's folder and cannot leave it, so the people who can edit the
 // automation are the people who can edit its code.
 //
+// A run step's code, or a run-file step's file, is the body of a function
+// that reads `ctx`: `ctx.record`, `ctx.previous`, `ctx.trigger`,
+// `ctx.person`, `ctx.message`, each earlier step's result by its `as` name,
+// and the formula helpers. It returns nothing, or an object with any of
+// `set`, the fields to set on the trigger record; `records`, a list of
+// `{ action: "add", collection, fields }` and
+// `{ action: "change", collection, id, fields }`; and `output`, the value
+// `as` binds. It runs synchronously, for at most 1 second, with no network
+// or files. The executor applies its changes with the checks a set or
+// add-record step gets. Only document Collections run code steps for now.
+//
+//       - run: |
+//           const total = ctx.record.Price * ctx.record.Quantity;
+//           return { set: { Total: total }, output: total };
+//         as: total
+//
 // A dataset Collection changes its records only through its approved
 // operations. A set, add-record, or find step on one names the operation it
 // invokes with `operation`, and that operation's table is the step's table:
