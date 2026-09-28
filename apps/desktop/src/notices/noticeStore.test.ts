@@ -911,7 +911,7 @@ describe("notices for another person", () => {
     await ana.store.sync();
     expect(await titles(ana)).toEqual([
       "account:Stamp the finish date failed (read)",
-      "account:Name owner shared trip with you",
+      "account:Name owner (owner@dohc.test) shared a folder or file with you",
     ]);
 
     await expect(owner.store.postNotice({ ...failed, noticeId: "x", target: { path: "budget" } }))

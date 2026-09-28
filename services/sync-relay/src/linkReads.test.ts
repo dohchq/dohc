@@ -5110,5 +5110,5 @@ it("exposes only the subject label to a valid link capability and stays opaque t
   expect(result).toMatchObject({subjectName: "Trip plans", access: "view"});
   expect(result).not.toHaveProperty("sharerName");
   const probe = await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share"));
-  expect(probe.status).toBe(401); expect(await probe.text()).toBe(LINK_REFUSAL_BODY);
+  expect(probe.status).toBe(404); expect(await probe.text()).toBe(LINK_REFUSAL_BODY);
 });
