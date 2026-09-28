@@ -5,9 +5,11 @@ import {
   FileCode2,
   Globe2,
   Pin,
+  Plus,
 } from "lucide-react";
 import { useState } from "react";
 import { APP_CHECK_FALLBACK_MESSAGE } from "../appCopy";
+import { AskAgentButton, type AskAgent } from "../askAgent";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { IconButton, PrimaryButton } from "../ui/controls";
@@ -78,6 +80,8 @@ export function AppsView(props: {
   // A received share workspace rejects folder creation in main, including
   // for edit grants. Mounted shares inside a normal workspace do not set it.
   receivedShareWorkspace?: boolean;
+  // Hands making an app to the person's agent. Absent while chats are off.
+  askAgent?: AskAgent;
 }) {
   const state = useApps(props.workspaceId, props.filesSettledRevision);
   const apps = state.status === "ready" ? state.apps : [];
@@ -100,6 +104,18 @@ export function AppsView(props: {
         <output data-testid="sites-count" className="font-mono text-[11px] text-muted">
           {state.status === "ready" ? `${apps.length} app${apps.length === 1 ? "" : "s"}` : null}
         </output>
+        {state.status === "ready" && apps.length > 0 && !props.receivedShareWorkspace ? (
+          <IconButton
+            data-testid="sites-create"
+            aria-label="Create app"
+            title="Create app"
+            disabled={creating}
+            onClick={() => void createFirstApp()}
+            className="ml-auto"
+          >
+            <Plus size={13} aria-hidden />
+          </IconButton>
+        ) : null}
       </div>
 
       {state.status === "loading" ? (
@@ -219,6 +235,15 @@ export function AppsView(props: {
           })}
         </ul>
       )}
+      {props.askAgent && !props.receivedShareWorkspace && state.status === "ready" ? (
+        <div className="shrink-0 border-t border-line px-3 py-2">
+          <AskAgentButton
+            askAgent={props.askAgent}
+            request={{ kind: "app" }}
+            label="Ask my agent for an app"
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
