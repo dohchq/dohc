@@ -14,6 +14,7 @@ import {
   codeChangesOf,
   codeFilesOf,
   codeRecordKey,
+  codeStepOrdinals,
   definitionHash,
   evaluateRequest,
   evaluationRequest,
@@ -622,8 +623,8 @@ async function plan(
 }
 
 /** The text of each code file the steps run, by the path its step names, or why one cannot run. */
-async function readCodeFiles(
-  dependencies: CollectionAutomationRunDependencies,
+export async function readCodeFiles(
+  dependencies: Pick<CollectionAutomationRunDependencies, "readCode">,
   automation: Automation,
   collectionPath: string,
 ): Promise<Map<string, string> | string> {
@@ -644,7 +645,7 @@ type CodeTarget = { ordinal: number; collection: string; fields: readonly string
 
 /** The Collections the code steps of a saved plan change records in. */
 function savedCodeTargets(automation: Automation, run: StoredRun): CodeTarget[] {
-  const code = new Set(stepsInOrder(automation).flatMap(({ ordinal, step }) => step.kind === "run" || step.kind === "run-file" ? [ordinal] : []));
+  const code = codeStepOrdinals(automation);
   return (run.plan ?? []).filter((step) => code.has(step.ordinal)).flatMap(({ ordinal, effects }) => effects.flatMap((effect): CodeTarget[] => {
     if (effect.kind === "add") return [{ ordinal, collection: effect.collectionPath, fields: effect.fields.map(({ field }) => field) }];
     if (effect.kind === "set" && !("addedBy" in effect.target)) {

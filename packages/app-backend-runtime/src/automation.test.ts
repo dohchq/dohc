@@ -285,7 +285,7 @@ describe("formulas", () => {
 
   it("stops a formula that reads a record key it may not, however it reaches the record", async () => {
     const idOnly: AutomationScope = { record: { id: "inv-1" }, trigger: { kind: "button", record: { id: "inv-1" } }, person: null, now: scope.now, recordKeys: ["id"] };
-    const refused = { code: "runtime", message: "TypeError: Formulas can read only this record's id, not Status." };
+    const refused = { code: "runtime", message: "TypeError: The formula can read only this record's id, not Status." };
     expect(await evaluator.evaluate(idOnly, [
       "record.id", 'record["id"]', "trigger.record.id", "String(record)", "Object.keys(record)",
       '"id" in record', 'Object.hasOwn(record, "id")',

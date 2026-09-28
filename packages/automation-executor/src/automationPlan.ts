@@ -174,6 +174,11 @@ function bindingsOf(steps: readonly OrderedStep[]): Map<string, Binding> {
   return bindings;
 }
 
+/** The places of an automation's code steps among all its steps. */
+export function codeStepOrdinals(automation: Automation): Set<number> {
+  return new Set(stepsInOrder(automation).flatMap(({ ordinal, step }) => step.kind === "run" || step.kind === "run-file" ? [ordinal] : []));
+}
+
 /** Workspace paths of the code files an automation's steps run, once each. */
 export function codeFilesOf(automation: Automation, collectionPath: string): string[] {
   return [...new Set(stepsInOrder(automation).flatMap(({ step }) => step.kind === "run-file" ? [`${collectionPath}/${step.file}`] : []))];
@@ -1348,7 +1353,8 @@ export function codeChangesOf(
       ...(answer.records ?? []).map((change): CodeChange => ({
         ordinal, action: change.action, collection: change.collection, id: change.action === "change" ? change.id : null, fields: change.fields,
       })),
-    ];
+    // A change of no fields changes nothing. An added record with none still adds one.
+    ].filter((change) => change.action === "add" || Object.keys(change.fields).length > 0);
     const subject = `The code in step ${ordinal + 1}`;
     if (own.length > MAX_CODE_RECORD_CHANGES) {
       return { problem: `${subject} changes more than ${MAX_CODE_RECORD_CHANGES} records. Change at most ${MAX_CODE_RECORD_CHANGES} in one step.` };
