@@ -116,6 +116,7 @@ export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
   runs: "automationRuns",
   run: "automationRun",
   retry: "automationRetry",
+  press: "automationPress",
 };
 
 // Command lines for every `dohc chat` verb. reference.test.ts parses each one
@@ -175,6 +176,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_automation_runs: { cli: "automationRuns" },
   dohc_read_automation_run: { cli: "automationRun" },
   dohc_retry_automation_run: { cli: "automationRetry" },
+  dohc_press_button: { cli: "automationPress" },
 };
 
 // One request per operation an app page can send over its app channel. The

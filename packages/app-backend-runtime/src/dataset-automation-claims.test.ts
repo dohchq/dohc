@@ -14,6 +14,7 @@ import type { JsonValue } from "./protocol.ts";
 import {
   createDatasetAutomationClaims,
   DATASET_AUTOMATION_ATTRIBUTED_REVISIONS,
+  DATASET_AUTOMATION_CHAIN_DEPTH,
   DATASET_AUTOMATION_CHAIN_STOPPED,
   DATASET_AUTOMATION_CLAIM_LIMIT,
   DATASET_AUTOMATION_CLAIMS_PER_COMMIT,
@@ -516,6 +517,25 @@ it("claims a press for the person who pressed, answers the same press sent again
   const again = press("press-7", "a", BEN);
   expect(again).toMatchObject({ kind: "claimed", claim: { actor: BEN, state: "pending" } });
   expect(again.kind !== "busy" && again.claim.claimId).not.toBe(first.claim.claimId);
+  expect(f.charged).toBe(retained(f.db));
+});
+
+it("claims an agent's press for its person at the agent run's depth, and stops it at once at depth 4", () => {
+  const f = ledger();
+  const press = presses(f);
+  f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  f.commit("INSERT INTO tasks VALUES('b','Open','')");
+  const agent = { ...ANA, agent: { depth: 2 } };
+  const pressed = press("press-1", "a", agent);
+  expect(pressed).toMatchObject({ kind: "claimed", claim: { state: "pending", depth: 2, actor: agent } });
+  // The run acts for Ana, so her own press joins it.
+  expect(press("press-2", "a", ANA)).toMatchObject({ kind: "joined" });
+  const stopped = press("press-3", "b", { ...ANA, agent: { depth: DATASET_AUTOMATION_CHAIN_DEPTH + 2 } });
+  expect(stopped).toMatchObject({ kind: "claimed", claim: { state: "failed", attempts: 0, depth: DATASET_AUTOMATION_CHAIN_DEPTH,
+    error: DATASET_AUTOMATION_CHAIN_STOPPED } });
+  // A stop counts as a failure, as a commit's stop does.
+  expect(f.claims.failures(scope.workspaceId)).toEqual([expect.objectContaining({ claimId: stopped.kind === "busy" ? "" : stopped.claim.claimId, neverStarted: true })]);
+  expect(() => press("press-4", "b", { ...ANA, agent: { depth: -1 } })).toThrow("Invalid automation presser");
   expect(f.charged).toBe(retained(f.db));
 });
 

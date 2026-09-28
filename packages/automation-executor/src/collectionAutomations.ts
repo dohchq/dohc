@@ -27,6 +27,7 @@ import {
   type AutomationClaim,
   type AutomationClaimSummary,
   type AutomationGroupRelayRecord,
+  type AutomationPressActor,
   type AutomationReleaseGroupsResult,
   type AutomationWatchGroupsParams,
   type VersionedLiveAdapter,
@@ -88,7 +89,13 @@ import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomat
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
 import type { GroupMessagesSkipped } from "./groupMessagesNotice";
-import { automationFailureKey, type AutomationFailure, type ReportedRun } from "./automationFailedNotice";
+import {
+  AUTOMATION_CHAIN_STOPPED,
+  automationFailureKey,
+  CHAIN_STOPPED_PRESS,
+  type AutomationFailure,
+  type ReportedRun,
+} from "./automationFailedNotice";
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
 // 0012). It keeps an index of every Collection's automations.yaml, keeps the
@@ -177,7 +184,7 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   listAutomationScheduleMarks(): Promise<{ marks: AutomationScheduleMark[] }>;
   /** Claims Run now from a skipped-run notice; a repeat answers the same claim. */
   runAutomationNow(input: { automationId: string; noticeId: string }): Promise<unknown>;
-  pressAutomation(input: { pressId: string; automationId: string; recordId: string; pressedBy: string }): Promise<AutomationPressResult>;
+  pressAutomation(input: { pressId: string; automationId: string; recordId: string; pressedBy: string; by: AutomationPressActor }): Promise<AutomationPressResult>;
 }
 
 /** An enabled schedule this executor can run. */
@@ -212,8 +219,8 @@ export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
   failures(): DatasetAutomationFailure[];
   /** Throws why the host cannot take a press of this button, as `press` would. */
   assertPressable(datasetId: string, button: Pick<DatasetPressInput, "tableId" | "fieldId">): void;
-  /** Records a press by `pressedBy` and answers the claim that runs it. */
-  press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string }): DatasetPressed;
+  /** Records a press by `pressedBy`, made by `by`, and answers the claim that runs it. */
+  press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string; by: AutomationPressActor }): DatasetPressed;
   /** A press the ledger remembers, with its claim, or null. */
   pressed(pressId: string): DatasetRememberedPress | null;
 }
@@ -574,13 +581,14 @@ function stepsOf(runs: readonly StoredRun[]): CollectionAutomationRunDetail["ste
 }
 
 /**
- * Who made a dataset change, when the ledger says. A press is a person's,
- * as the run reads it; any other change the owner or an app made could be
- * a person's or an agent's.
+ * Who made a dataset change, when the ledger says. A press is its agent's
+ * when one pressed for the person, and otherwise the person's; any other
+ * change the owner or an app made could be a person's or an agent's.
  */
 function datasetActorKind(claim: DatasetAutomationClaim): CollectionAutomationTrigger["by"] {
   if (claim.actor.kind === "automation" || claim.actor.kind === "agent") return claim.actor.kind;
-  return claim.fact?.kind === "button" ? "human" : null;
+  if (claim.fact?.kind !== "button") return null;
+  return "agent" in claim.actor && claim.actor.agent !== undefined ? "agent" : "human";
 }
 
 /**
@@ -1813,7 +1821,7 @@ export class CollectionAutomations {
    * the drain wakes, so the pressing window hears how the run settles.
    */
   async press(
-    input: { collectionPath: string; field: string; recordId: string; pressId: string; pressedBy: string },
+    input: { collectionPath: string; field: string; recordId: string; pressId: string; pressedBy: string; by: AutomationPressActor },
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
     /** Checks a new press the way the caller must, such as that the field is still a button. */
     checkNew: () => Promise<void> = async () => undefined,
@@ -1844,7 +1852,7 @@ export class CollectionAutomations {
           throw error;
         }
       }
-      return engine.pressAutomation({ pressId: input.pressId, automationId, recordId: input.recordId, pressedBy: input.pressedBy });
+      return engine.pressAutomation({ pressId: input.pressId, automationId, recordId: input.recordId, pressedBy: input.pressedBy, by: input.by });
     });
     if (pressed === null) throw new Error("The workspace engine is not running.");
     if (pressed.busy) return { busy: true };
@@ -1864,7 +1872,10 @@ export class CollectionAutomations {
     claim: Pick<AutomationClaimSummary, "automationId" | "claimId" | "state"> & { error?: string | null },
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
   ): Promise<CollectionAutomationPress> {
-    if (claim.state === "failed") return { busy: false, claimId: claim.claimId, settled: { outcome: "failed", error: claim.error ?? null } };
+    if (claim.state === "failed") {
+      const error = claim.error === AUTOMATION_CHAIN_STOPPED ? CHAIN_STOPPED_PRESS : claim.error ?? null;
+      return { busy: false, claimId: claim.claimId, settled: { outcome: "failed", error } };
+    }
     if (claim.state === "done") return { busy: false, claimId: claim.claimId, settled: { outcome: await this.doneOutcome(claim), error: null } };
     // A press never waits for a dataset to open: its ledger claimed it there.
     const waiting = this.waitingFor.get(claim.claimId) ?? null;
@@ -1878,6 +1889,24 @@ export class CollectionAutomations {
    * table's name. `description` is the dataset as its host describes it to
    * the person asking, so the access is theirs.
    */
+  /**
+   * The approved dataset a Collection folder holds, or null for a document
+   * Collection or a folder with no approved dataset. A closed dataset host
+   * opens, as it does for a person opening the Collection.
+   */
+  async datasetIn(collectionPath: string): Promise<string | null> {
+    await this.indexCollection(collectionPath);
+    return this.datasets.get(collectionPath)?.definition.datasetId ?? null;
+  }
+
+  /** Whether the dataset ledger remembers a press by this id, so sending it again answers its claim. */
+  async datasetPressed(pressId: string): Promise<boolean> {
+    await this.ready();
+    const known = await this.withLiveHost((ledger) => ledger.pressed(pressId) !== null, true);
+    if (known === null) throw new Error("The workspace's dataset host is not open.");
+    return known;
+  }
+
   async datasetButtons(
     datasetId: string,
     buttons: ReadonlyArray<{ field: string; table: string }>,
@@ -1905,7 +1934,7 @@ export class CollectionAutomations {
    * since, a renamed button included; only a new press is checked.
    */
   async pressDataset(
-    input: { datasetId: string; table: string; field: string; recordId: string; pressId: string; pressedBy: string;
+    input: { datasetId: string; table: string; field: string; recordId: string; pressId: string; pressedBy: string; by: AutomationPressActor;
       /** The names of the actions the person was told can't be undone and chose to run. */
       confirmed: readonly string[] },
     description: DatasetDescription,
@@ -1940,11 +1969,13 @@ export class CollectionAutomations {
       }
       return ledger.press(datasetId, {
         pressId: input.pressId, request, automationId: button.state.automationId, definitionHash: definitionDigest(automation),
-        tableId, fieldId, recordId, pressedBy: input.pressedBy,
+        tableId, fieldId, recordId, pressedBy: input.pressedBy, by: input.by,
       });
     }, true);
     if (pressed === null) throw new Error("The workspace's dataset host is not open.");
     if (pressed.kind === "busy") return { busy: true };
+    // A press the chain cap stopped is a new failure: run history and its notice learn it now.
+    if (pressed.kind === "claimed" && pressed.claim.state === "failed") this.failuresChanged();
     return await this.answerPress(pressed.claim, watch);
   }
 
@@ -2101,7 +2132,8 @@ export class CollectionAutomations {
     // The engine's press id carries that definition, so the claim stays
     // bound to it through a restart; the run refuses any other.
     const pressId = relayedPressId(input.pressId, input.definitionHash);
-    const pressed = await this.press({ collectionPath: id.collectionPath, field, recordId: input.recordId, pressId, pressedBy: input.pressedBy }, watch);
+    // The relay carries a person's press; no agent presses through it.
+    const pressed = await this.press({ collectionPath: id.collectionPath, field, recordId: input.recordId, pressId, pressedBy: input.pressedBy, by: { kind: "human" } }, watch);
     return { pressed, field };
   }
 

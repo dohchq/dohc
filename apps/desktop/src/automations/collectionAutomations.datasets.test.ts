@@ -11,6 +11,7 @@ import type { Automation } from "@dohc/workspace-contracts/automations";
 import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
+import { createPressWindows, registerAutomationButtonsIpc } from "../ipc/automationButtonsIpc";
 import { createTestScratch } from "../workspaces/testTemp";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel } from "@dohc/automation-executor/automation-chat";
@@ -587,6 +588,16 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
+  it("names the dataset a Collection folder holds, opening a closed host, and none for a document folder", async () => {
+    const f = await world({ hostOpen: false });
+    await f.executor.open();
+    const folder = AUTOMATION.slice("collection:".length, AUTOMATION.lastIndexOf("#"));
+    await expect(f.executor.datasetIn(folder)).resolves.toBe(definition.datasetId);
+    expect(f.opened).toContain(true);
+    await expect(f.executor.datasetIn("Notes")).resolves.toBeNull();
+    await f.executor.dispose();
+  });
+
   it("runs a claim made while the workspace was closed when it opens", async () => {
     const f = await world();
     await f.executor.open();
@@ -939,7 +950,7 @@ ${step}`;
   const pressId = (number: number) => `4f2d3c1a-9b8e-4c7d-a6f5-${String(number).padStart(12, "0")}`;
   const owner = (f: Awaited<ReturnType<typeof world>>) => f.host.describe(definition.datasetId);
   const press = (f: Awaited<ReturnType<typeof world>>, input: { recordId: string; pressId: string; pressedBy?: string; field?: string; confirmed?: string[] }, description = owner(f)) =>
-    f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, confirmed: [], ...input, recordId: JSON.stringify(input.recordId) },
+    f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, by: { kind: "human" }, confirmed: [], ...input, recordId: JSON.stringify(input.recordId) },
       description, () => undefined);
 
   it("runs a press on a dataset whose operations someone wrote, calling none of them for its own checks", async () => {
@@ -1010,6 +1021,51 @@ ${step}`;
     // Settle ran last and cannot go back, so Hold's reverse finds the invoice not on hold and refuses.
     await expect(f.executor.undo({ automationId: BUTTON_AUTOMATION, claimId: pressed.claimId }, async () => undefined))
       .rejects.toThrow("Hold was not undone. Release refused: This invoice is no longer on hold.");
+    await f.executor.dispose();
+  });
+
+  it("presses by folder as the CLI does: a reversible action runs unasked, and one dohc cannot undo runs once confirmed by name", async () => {
+    const hold = "      - invoke: invoices.hold\n        input:\n          id: '=record.id'\n";
+    const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
+    await f.writeAutomations(markPaid(hold + settle));
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    // The window's press path, as main hands it to the CLI, over this computer's executor.
+    type Operation = { workspace: { workspaceId: string; rootPath: string }; state: { collectionAutomations: typeof f.executor } };
+    const { pressNamed } = registerAutomationButtonsIpc<{ isDestroyed(): boolean; send(): void }, { sender: { isDestroyed(): boolean; send(): void } }, Operation>({
+      registerHandler: () => undefined,
+      assertTrustedSender: () => undefined,
+      withRendererWorkspaceOperation: async () => { throw new Error("No window presses here."); },
+      readText: async () => null,
+      buttonFields: async () => [],
+      recordAt: async () => null,
+      describeDataset: async () => { throw new Error("The CLI describes the dataset itself."); },
+      pressedBy: async () => PRESSER,
+      relayPress: async () => { throw new Error("Nothing relays here."); },
+      pressWindows: createPressWindows(() => null),
+    });
+    const operation: Operation = { workspace: { workspaceId: "workspace", rootPath: f.root }, state: { collectionAutomations: f.executor } };
+    const caller = { by: { kind: "human" as const }, withOperation: async <Result>(work: (op: Operation) => Promise<Result>) => await work(operation),
+      describeDataset: async () => owner(f), watch: () => undefined };
+    const input = { workspaceId: "workspace", collectionPath: "Budget", field: "Mark paid", recordId: JSON.stringify(invoice), confirm: [] as string[], pressKey: "cli-1" };
+    // Hold names its reverse, so only Settle is asked about.
+    await expect(pressNamed(input, caller)).resolves.toEqual({ confirm: [{ name: "invoices.settle", label: "Settle" }] });
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    const pressed = await pressNamed({ ...input, confirm: ["invoices.settle"] }, caller);
+    if ("confirm" in pressed || pressed.busy || "relayed" in pressed) throw new Error("The press ran.");
+    await f.until(() => f.settled.length === 1);
+    expect((await f.record(invoice))?.values[STATUS]).toBe(`Settled by ${BUTTON_AUTOMATION}: pressed`);
+    // The same key sent again answers the first run, and asks nothing.
+    await expect(pressNamed(input, caller)).resolves.toEqual({ busy: false, claimId: pressed.claimId, settled: { outcome: "done", error: null } });
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toHaveLength(1);
+    // A button that runs only a reversible action presses with nothing to confirm.
+    await f.writeAutomations(markPaid(hold));
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
+    const { id: other } = await f.create({ [STATUS]: "Open" });
+    const held = await pressNamed({ ...input, recordId: JSON.stringify(other), pressKey: "cli-2" }, caller);
+    if ("confirm" in held || held.busy || "relayed" in held) throw new Error("The press ran.");
+    await f.until(() => f.settled.length === 2);
+    expect((await f.record(other))?.values[STATUS]).toBe("On hold");
     await f.executor.dispose();
   });
 
@@ -1088,11 +1144,14 @@ ${step}`;
     expect(f.host.automations.subscriptions()).toEqual([]);
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     const watched: string[] = [];
-    const pressed = await f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(invoice), pressId: pressId(1), pressedBy: PRESSER, confirmed: [] },
+    const pressed = await f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(invoice), pressId: pressId(1), pressedBy: PRESSER, by: { kind: "human" }, confirmed: [] },
       owner(f), (claimId) => watched.push(claimId));
     if (pressed.busy) throw new Error("The press ran.");
     expect(pressed.settled).toBeNull();
     expect(watched).toEqual([pressed.claimId]);
+    // The ledger remembers the press by its id, so the CLI answers a resend with this run.
+    await expect(f.executor.datasetPressed(pressId(1))).resolves.toBe(true);
+    await expect(f.executor.datasetPressed(pressId(2))).resolves.toBe(false);
     await f.until(() => f.settled.length === 1);
     expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "done", error: null }]);
     expect((await f.record(invoice))?.values[STATUS]).toBe(`Paid by Person ${PRESSER} with Mark paid`);
@@ -1105,6 +1164,31 @@ ${step}`;
     expect(f.host.automations.claims(BUTTON_AUTOMATION)).toHaveLength(1);
     // History names the automation, which wrote as the owner.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: BUTTON_AUTOMATION, depth: 1 } });
+    await f.executor.dispose();
+  });
+
+  it("runs an agent's press for its person one step deeper, reads it as the agent's, and stops one at the cap in words", async () => {
+    const f = await world();
+    await f.writeAutomations(markPaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    const { id: other } = await f.create({ [STATUS]: "Open" });
+    const agent = (depth: number) => ({ kind: "agent" as const, originId: "dohc-mcp", depth });
+    const input = { datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, confirmed: [] };
+    const pressed = await f.executor.pressDataset({ ...input, recordId: JSON.stringify(invoice), pressId: pressId(1), by: agent(2) }, owner(f), () => undefined);
+    if (pressed.busy) throw new Error("The press ran.");
+    await f.until(() => f.settled.length === 1);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([expect.objectContaining({ depth: 2, actor: { kind: "owner", userId: PRESSER, agent: { depth: 2 } } })]);
+    // The run writes one step deeper than the press, and run history names the agent.
+    expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: BUTTON_AUTOMATION, depth: 3 } });
+    expect(await f.executor.run(BUTTON_AUTOMATION, pressed.claimId)).toMatchObject({ trigger: { kind: "button", by: "agent", depth: 2 } });
+    const reports = f.failureReports.length;
+    const stopped = await f.executor.pressDataset({ ...input, recordId: JSON.stringify(other), pressId: pressId(2), by: agent(4) }, owner(f), () => undefined);
+    expect(stopped).toMatchObject({ busy: false, settled: { outcome: "failed", error: "dohc stops a chain of automations after 4 steps, so this press did not run." } });
+    // The stop is a failure the owner hears about, without waiting for another change.
+    await f.until(() => f.failureReports.length > reports);
+    expect(f.failureReports.at(-1)).toMatchObject({ failure: { automationId: BUTTON_AUTOMATION, chainStopped: true } });
+    expect((await f.record(other))?.values[STATUS]).toBe("Open");
     await f.executor.dispose();
   });
 
@@ -1122,7 +1206,7 @@ ${step}`;
       await expect(press(f, { recordId: invoice, pressId: pressId(2) }, description)).rejects.toThrow(refusal);
       expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], description)).toEqual([{ kind: "disabled", reason: refusal }]);
     }
-    await expect(f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: "not json", pressId: pressId(3), pressedBy: PRESSER, confirmed: [] },
+    await expect(f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: "not json", pressId: pressId(3), pressedBy: PRESSER, by: { kind: "human" }, confirmed: [] },
       described, () => undefined)).rejects.toThrow("This record is not in Invoices.");
     // A record the table does not hold gets no claim.
     await expect(press(f, { recordId: "missing", pressId: pressId(3) })).rejects.toThrow("This record is no longer in Invoices.");

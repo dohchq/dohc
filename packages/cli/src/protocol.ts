@@ -313,6 +313,21 @@ const automationRunArgsSchema = z
 const automationRetryArgsSchema = z
   .object({ ...automationArgs, run: automationRunIdArg, startOver: z.boolean() })
   .strict();
+// A press of a Button field on one record. `record` is a document record's
+// id, or a dataset record's primary key as JSON. `confirm` names the actions
+// dohc cannot undo that the caller chose to run. A `requestId` sent again
+// answers the same press instead of pressing twice.
+const automationPressArgsSchema = z
+  .object({
+    ...argsBase,
+    collectionPath: collectionPathArg,
+    field: z.string().min(1).max(256),
+    record: z.string().min(1).max(1024),
+    table: z.string().min(1).max(256).optional(),
+    confirm: z.array(z.string().min(1).max(256)).max(64),
+    requestId: requestIdSchema.optional(),
+  })
+  .strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("dataset"), args: z.object({ ...argsBase, request: DatasetRequest }).strict() }).strict(),
@@ -363,6 +378,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("automationRuns"), args: automationRunsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationRun"), args: automationRunArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationRetry"), args: automationRetryArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("automationPress"), args: automationPressArgsSchema }).strict(),
 ]);
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
@@ -988,6 +1004,32 @@ const automationRetryResultSchema = z.union([
     .strict(),
 ]);
 
+const automationPressResultSchema = z.union([
+  // The run the press started. `outcome` is set when a press sent again
+  // finds its run already ended; `waiting` says why the run waits, if it does.
+  z
+    .object({
+      ok: z.literal(true),
+      run: automationRunIdArg,
+      outcome: z.enum(["done", "skipped", "failed", "ended"]).nullable(),
+      error: z.string().nullable(),
+      waiting: z.string().nullable(),
+    })
+    .strict(),
+  // A shared view's press went to the owner's computer, which runs it. Its
+  // changes arrive as synced edits, and a failure as a notice.
+  z.object({ ok: z.literal(true), relayed: z.literal(true) }).strict(),
+  // The press would run actions dohc cannot undo. Name each in confirm to run them.
+  z
+    .object({
+      ok: z.literal(false),
+      reason: z.string().min(1),
+      confirm: z.array(z.object({ name: z.string().min(1), label: z.string().min(1) }).strict()).min(1),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+
 export const cliResultSchemas = {
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
@@ -1017,6 +1059,7 @@ export const cliResultSchemas = {
   automationRuns: automationRunsResultSchema,
   automationRun: automationRunResultSchema,
   automationRetry: automationRetryResultSchema,
+  automationPress: automationPressResultSchema,
 } as const;
 
 export type CliResultByVerb = {
