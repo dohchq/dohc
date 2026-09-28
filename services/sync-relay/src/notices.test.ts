@@ -131,6 +131,33 @@ function stored(storage: SyncRelayStorage, userId: string, noticeId: string, at 
   storage.postNotice(input);
 }
 
+// Fill a new list without running posting and retention work for every fixture row.
+function seedFullList(storage: SyncRelayStorage, userId: string, idPrefix: string): void {
+  const db = inspectDatabase(storagePath(storage));
+  try {
+    db.exec("BEGIN");
+    db.prepare(
+      `INSERT INTO sync_relay_notice_lists (recipient_user_id, change_seq, floor_seq, reach_token)
+       VALUES (?, ?, 0, NULL)`,
+    ).run(userId, NOTICE_LIST_ROW_LIMIT);
+    const insert = db.prepare(
+      `INSERT INTO sync_relay_notices (
+         recipient_user_id, notice_id, change_seq, workspace_id, recipient_share_id,
+         kind, sender_kind, sender_user_id, sender_label, title, body, target_json,
+         origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms
+       ) VALUES (?, ?, ?, ?, NULL, 'mention', 'person', ?, 'Self', 'Mentioned', '', '{}',
+                 'install-a', ?, NULL, NULL, ?, NULL)`,
+    );
+    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) {
+      const at = clock + index;
+      insert.run(userId, `${idPrefix}${index}`, index + 1, WORKSPACE, userId, at, at + NOTICE_UNREAD_RETENTION_MS);
+    }
+    db.exec("COMMIT");
+  } finally {
+    db.close();
+  }
+}
+
 async function post(h: SyncRelayHandler, sender: string, body: PostNoticeRequest): Promise<Response> {
   return h(request(sender, "/sync/notices", jsonBody(body)));
 }
@@ -504,7 +531,7 @@ describe("limits on notices from other people", () => {
 
   it("keeps a bounded number of tombstones and starts over only for a cursor older than them", async () => {
     const { h, storage } = await relay();
-    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) stored(storage, "owner", `n${index}`, clock + index);
+    seedFullList(storage, "owner", "n");
     clock += NOTICE_LIST_ROW_LIMIT;
     // 1,000 posts to a new list leave its head at 1,000.
     const behind = String(NOTICE_LIST_ROW_LIMIT);
@@ -524,7 +551,7 @@ describe("limits on notices from other people", () => {
 
   it("makes room in a list full of read rows for anyone who may send", async () => {
     const { h, storage } = await sharedTrip();
-    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) stored(storage, "ana", `own-${index}`, clock + index);
+    seedFullList(storage, "ana", "own-");
     for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 100) {
       await mark(h, "ana", Array.from({ length: 100 }, (_, offset) => ({ noticeId: `own-${index + offset}`, mark: "read" as const })));
     }
@@ -540,7 +567,7 @@ describe("limits on notices from other people", () => {
 
   it("refuses a sender when only other senders' unread rows could make room", async () => {
     const { h, storage } = await sharedTrip();
-    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) stored(storage, "ana", `own-${index}`, clock + index);
+    seedFullList(storage, "ana", "own-");
     clock += NOTICE_LIST_ROW_LIMIT;
 
     const refused = await post(h, "owner", notice({ recipientUserId: "ana" }));
@@ -558,7 +585,7 @@ describe("limits on notices from other people", () => {
 
   it("removes read and dismissed rows before unread ones when your own notice needs room", async () => {
     const { h, storage } = await relay();
-    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) stored(storage, "owner", `n${index}`, clock + index);
+    seedFullList(storage, "owner", "n");
     await mark(h, "owner", [{ noticeId: "n500", mark: "read" }, { noticeId: "n700", mark: "dismissed" }]);
     clock += NOTICE_LIST_ROW_LIMIT;
     for (const id of ["newest", "newer still", "last"]) {
