@@ -35,6 +35,7 @@ import {
 import { changedSincePressed, datasetButtonAccess, namesButton, noAccessReason, resolveButton, type AutomationButtonState } from "./automationButtons";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
+  codeFilesOf,
   collectionAutomationId,
   COLLECTION_AUTOMATION_PREFIX,
   datasetSubscriptionFor,
@@ -397,7 +398,7 @@ export interface CollectionAutomationHold {
   /** A Collection, a Group, or a direct message. */
   target: string;
   action: "change" | "find" | "post" | "notify" | "wake" | "read";
-  /** A person a formula named: the hold is theirs, not the step's. */
+  /** A person a formula named, or a Collection a code step named: the hold is theirs, not the step's. */
   recipient?: string;
   /** The editor whose reach stopped the step. */
   stoppedFor: string | null;
@@ -824,7 +825,7 @@ export class CollectionAutomations {
       this.timeouts = timeouts;
       this.verdictsUnreadable = unreadable;
       for (const verdict of verdicts) {
-        this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step, verdict.recipient?.userId), verdict);
+        this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step, verdict.recipient?.id), verdict);
         this.verdictSeq = Math.max(this.verdictSeq, verdict.seq);
       }
       await this.loadIndex();
@@ -1231,7 +1232,7 @@ export class CollectionAutomations {
       }
       const reachSteps = this.reachSteps(collectionPath, automation);
       const steps = checkAutomationReach(roster, {
-        id: automation.id, collection, codeFiles: [], steps: reachSteps,
+        id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps: reachSteps,
       }).map((reach, step): CollectionAutomationStepReach => {
         if (!reach.allowed) return { verdict: "stopped", reason: reach.reason };
         const stored = this.verdicts.get(reachVerdictKey(automationId, hash, reachStepId(reachSteps[step]!, step)));
@@ -1388,7 +1389,7 @@ export class CollectionAutomations {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
         const steps = this.reachSteps(collectionPath, automation);
-        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, index) => {
+        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps }).forEach((reach, index) => {
           const step = reachStepId(steps[index]!, index);
           this.verdicts.set(reachVerdictKey(automationId, hash, step), {
             automationId, definitionHash: hash, step,
@@ -1487,7 +1488,7 @@ export class CollectionAutomations {
     }
     const reach = automations.map(({ automationId, collectionPath, automation }) => {
       const collection = collectionNamed(collectionPath);
-      return { id: automationId, collection, codeFiles: [], steps: this.reachSteps(collectionPath, automation) };
+      return { id: automationId, collection, codeFiles: codeFilesOf(automation, collectionPath), steps: this.reachSteps(collectionPath, automation) };
     });
     const stopped = shareImpactOf(await this.options.roster(), share, reach);
     return stopped.flatMap(({ automationId, step }): CollectionAutomationShareStop[] => {
@@ -1527,7 +1528,7 @@ export class CollectionAutomations {
         steps.push({
           automationId, automationName: automation.name, definitionHash: hash, step: stored.step, seq: stored.seq,
           collection: collection.name, target: stored.recipient.name, action: stored.recipient.action,
-          recipient: stored.recipient.userId, stoppedFor: stored.stoppedFor,
+          recipient: stored.recipient.id, stoppedFor: stored.stoppedFor,
         });
       }
     }
@@ -2177,7 +2178,7 @@ export class CollectionAutomations {
     const automationId = collectionAutomationId(collectionPath, automation.id);
     if (roster.kind === "unknown") return { kind: "ready", automationId };
     const steps = this.reachSteps(collectionPath, automation);
-    for (const [index, reach] of checkAutomationReach(roster, { id: automation.id, collection: collectionNamed(collectionPath), codeFiles: [], steps }).entries()) {
+    for (const [index, reach] of checkAutomationReach(roster, { id: automation.id, collection: collectionNamed(collectionPath), codeFiles: codeFilesOf(automation, collectionPath), steps }).entries()) {
       if (!reach.allowed && steps[index]!.kind !== "dataset-field") return { kind: "disabled", reason: reach.reason };
     }
     if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }])) {
@@ -2435,23 +2436,28 @@ export class CollectionAutomations {
         if (entry.status !== "valid") continue;
         for (const { collection } of fieldsNamedBy(entry.automation, collectionPath)) {
           if (this.schemaFields.has(collection)) continue;
-          const read = await this.options.readText(`${collection}/${COLLECTION_SCHEMA_FILENAME}`);
-          if (read === null) continue;
-          const parsed = read.truncated ? null : parseCollectionSchema(read.text);
-          const versionError = parsed && collectionVersionError(parsed.reasons, `${collection}/${COLLECTION_SCHEMA_FILENAME}`);
-          // A degraded schema still lists the fields it could read; a file
-          // that is not a schema at all lists none.
-          const unreadable = parsed === null ||
-            parsed.reasons.some((reason) => reason.code === "invalid-yaml" || reason.code === "root-not-mapping");
-          this.schemaFields.set(
-            collection,
-            versionError ?? (unreadable
-              ? `dohc cannot read the fields of ${collectionNamed(collection).name}. Fix ${collection}/${COLLECTION_SCHEMA_FILENAME} to run this automation.`
-              : new Set(parsed.schema.fields.map((field) => field.name))),
-          );
+          const fields = await this.readSchemaFields(collection);
+          if (fields !== null) this.schemaFields.set(collection, fields);
         }
       }
     }
+  }
+
+  /**
+   * The field names a Collection's schema defines, or the reason dohc cannot
+   * read them; null when it has no schema.
+   */
+  private async readSchemaFields(collection: string): Promise<Set<string> | string | null> {
+    const read = await this.options.readText(`${collection}/${COLLECTION_SCHEMA_FILENAME}`);
+    if (read === null) return null;
+    const parsed = read.truncated ? null : parseCollectionSchema(read.text);
+    const versionError = parsed && collectionVersionError(parsed.reasons, `${collection}/${COLLECTION_SCHEMA_FILENAME}`);
+    if (versionError) return versionError;
+    // A degraded schema still lists the fields it could read; a file that is
+    // not a schema at all lists none.
+    const unreadable = parsed === null ||
+      parsed.reasons.some((reason) => reason.code === "invalid-yaml" || reason.code === "root-not-mapping");
+    return unreadable ? unreadableSchema(collection) : new Set(parsed.schema.fields.map((field) => field.name));
   }
 
   /**
@@ -2788,7 +2794,7 @@ export class CollectionAutomations {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
         const steps = this.reachSteps(collectionPath, automation);
-        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, index) => {
+        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps }).forEach((reach, index) => {
           const step = reachStepId(steps[index]!, index);
           const key = reachVerdictKey(automationId, hash, step);
           const previous = this.verdicts.get(key);
@@ -3173,7 +3179,7 @@ export class CollectionAutomations {
       if (wakesAgent(automation)) {
         const collection = collectionNamed(id.collectionPath);
         const steps = this.reachSteps(id.collectionPath, automation);
-        const stopped = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps })
+        const stopped = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, id.collectionPath), steps })
           .find((reach) => !reach.allowed);
         const error = stopped && !stopped.allowed ? stopped.reason : "dohc could not check who can edit this Collection.";
         return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
@@ -3342,17 +3348,17 @@ export class CollectionAutomations {
    * waits for Allow.
    */
   private async recipientVerdicts(input: Parameters<CollectionAutomationRunDependencies["recipientVerdicts"]>[0]) {
-    return await this.updateVerdicts(() => input.recipients.map(({ step: ordinal, userId, name, action, reach }) => {
+    return await this.updateVerdicts(() => input.recipients.map(({ step: ordinal, id, name, action, reach }) => {
       const step = String(ordinal);
       // Without the saved verdicts every step waits.
       if (this.verdictsUnreadable) return "held" as const;
-      const key = reachVerdictKey(input.automationId, input.definitionHash, step, userId);
+      const key = reachVerdictKey(input.automationId, input.definitionHash, step, id);
       const previous = this.verdicts.get(key);
       const next = nextReachVerdict(previous, reach, true);
       if (previous?.verdict !== next.verdict || previous.stoppedFor !== next.stoppedFor) {
         this.verdicts.set(key, {
           automationId: input.automationId, definitionHash: input.definitionHash, step,
-          recipient: { userId, name, action }, ...next, seq: ++this.verdictSeq,
+          recipient: { id, name, action }, ...next, seq: ++this.verdictSeq,
         });
       }
       return next.verdict;
@@ -3377,6 +3383,15 @@ export class CollectionAutomations {
       withRecordWrites: this.options.withRecordWrites,
       isCollection: (path) => this.collections.has(path),
       isDatasetCollection: (path) => this.options.pathExists(`${path}/dataset.json`),
+      collectionFields: async (path) => {
+        // Read now: a code step can name any Collection, not only those the file names.
+        const fields = await this.readSchemaFields(path);
+        return typeof fields === "string" ? { problem: fields } : fields;
+      },
+      readCode: async (path) => {
+        const read = await this.options.readText(path);
+        return read === null ? null : { text: read.text, truncated: read.truncated };
+      },
       personName: this.options.personName,
       evaluator: this.options.evaluator,
       store: this.options.store,
@@ -3459,6 +3474,9 @@ export class CollectionAutomations {
     }
   }
 }
+
+const unreadableSchema = (collection: string) =>
+  `dohc cannot read the fields of ${collectionNamed(collection).name}. Fix ${collection}/${COLLECTION_SCHEMA_FILENAME} to run this automation.`;
 
 type RecordSubscription = Extract<StoredSubscription, { path: string }>;
 type GroupSubscription = Extract<StoredSubscription, { groupId: string }>;

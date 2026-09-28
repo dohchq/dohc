@@ -24,10 +24,12 @@ export interface StoredReachVerdict {
   /** The step's place among the steps the reach check sees, or, with `recipient`, the step's place in the automation. */
   step: string;
   /**
-   * A person a formula named, whose message the step sends: each gets a
-   * verdict of their own the first time a run names them.
+   * A person a formula named, whose message the step sends, or a Collection
+   * a code step named, whose records it changes. Each gets a verdict of its
+   * own the first time a run names it. `id` is the person's user id or the
+   * Collection's path.
    */
-  recipient?: { userId: string; name: string; action: "post" | "notify" };
+  recipient?: { id: string; name: string; action: "post" | "notify" | "change" };
   verdict: ReachVerdict;
   /** The editor whose reach stopped the step, kept while it is held. */
   stoppedFor: string | null;

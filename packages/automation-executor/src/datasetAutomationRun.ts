@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
+import type { AutomationTimeSpent, JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { DatasetColumnFieldType, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
@@ -10,6 +10,7 @@ import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-con
 import {
   definitionDigest,
   definitionHash,
+  evaluateRequest,
   evaluationRequest,
   filterValue,
   FIND_OVERFLOW_ERROR,
@@ -418,6 +419,8 @@ async function plan(
     message = got.message;
   }
   const pressedBy = held.source === "dataset" ? datasetPresser(held.claim) : null;
+  // One evaluator budget for the whole run: its Finds' values, then its formulas.
+  const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
   const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
   const read = await dependencies.withHost(async (host) => {
     const steps = datasetStepsOf(automation, datasetRules);
@@ -455,7 +458,7 @@ async function plan(
     }
     const computed = await evaluateFindValues(dependencies.evaluator, { automation, claim: runClaim, record, message, person },
       [...steps.finds].map(([ordinal, filters]) => ({ ordinal, values: filters.map((filter) => filter.value) })),
-      scheduleDueAt(runClaim) ?? claim.createdAtMs);
+      scheduleDueAt(runClaim) ?? claim.createdAtMs, spent);
     if ("outcome" in computed) return { skipped: false, stopped: computed.outcome } as const;
     const found = new Map<number, RunRecord[]>();
     const unreadFinds = new Map(computed.failed);
@@ -511,7 +514,7 @@ async function plan(
   // Formulas read `now` as the time of the change, or a schedule's due
   // time, so every attempt plans the same values.
   const request = evaluationRequest(inputs, scheduleDueAt(read.runClaim) ?? claim.createdAtMs);
-  const results = request.formulas.length === 0 ? [] : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
+  const results = await evaluateRequest(dependencies.evaluator, claim.automationId, request, spent);
   if (results === "busy") return stop({ kind: "wait", reason: "busy" });
   // Only the conversations of the people the formulas named are read.
   const named = formulaPeople(request, results);

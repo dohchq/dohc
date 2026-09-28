@@ -350,7 +350,13 @@ export function checkAutomationReach(roster: ReachRoster, automation: ReachAutom
   if (roster.kind === "unknown") return automation.steps.map(() => stop(problemReason(roster.problem, collection)));
   const people = roster.kind === "owner" ? peopleOf(roster) : [];
   const editors = editorsOf(people, sources);
-  return automation.steps.map((step) => {
+  // Formulas and code read the Collection's records, so everyone who can
+  // change them, even through automations.yaml or a code file alone, must
+  // be able to view the Collection. A step that stops for its own reason
+  // keeps that reason.
+  const blind = editors.find((person) => !reaches(person, collection.path, "view"));
+  const unseen = blind && stop(`${nameOf(blind)} cannot view ${collection.name}.`, nameOf(blind));
+  const checkStep = (step: ReachStep): StepReach => {
     const target = step.kind === "change-records" || step.kind === "find-records" || step.kind === "dataset-operation" || step.kind === "dataset-field" ? step.collection : null;
     const targetProblem = target && pathProblem(target.path, target.name, "target");
     if (targetProblem) return stop(targetProblem);
@@ -359,6 +365,10 @@ export function checkAutomationReach(roster: ReachRoster, automation: ReachAutom
     return target && within(target.path, collection.path)
       ? ALLOWED
       : stop(`In a shared view, automations can use only ${collection.name}.`);
+  };
+  return automation.steps.map((step) => {
+    const verdict = checkStep(step);
+    return verdict.allowed && unseen ? unseen : verdict;
   });
 }
 

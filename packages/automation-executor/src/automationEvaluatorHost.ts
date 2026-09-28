@@ -4,16 +4,24 @@ import {
   type AutomationFormula,
   type AutomationOutcome,
   type AutomationScope,
+  type AutomationTimeSpent,
+  type CodeStepReturn,
   type JsonValue,
 } from "@dohc/app-backend-runtime/automation";
 
-/** One workspace's view of the shared evaluator. */
+/**
+ * One workspace's view of the shared evaluator. A run that makes several
+ * requests passes the same `spent` to each, so its time budgets cover them all.
+ */
 export interface AutomationFormulaEvaluator {
   evaluate(
     automationId: string,
     scope: AutomationScope,
     formulas: readonly AutomationFormula[],
+    spent?: AutomationTimeSpent,
   ): Promise<AutomationOutcome<JsonValue>[] | "busy">;
+  /** Runs one code step. It says what to change; nothing is written. */
+  runCode(automationId: string, scope: AutomationScope, source: string, spent?: AutomationTimeSpent): Promise<AutomationOutcome<CodeStepReturn> | "busy">;
 }
 
 /**
@@ -36,19 +44,27 @@ export function createAutomationFormulaEvaluator(
 ): SharedAutomationEvaluator {
   let evaluator: AutomationEvaluator | null = null;
   const waiting = new Set<string>();
+  const isBusy = (result: AutomationOutcome<unknown>) => !result.ok && result.error.code === "busy";
+  const alone = async <T>(workspaceId: string, automationId: string, work: (evaluator: AutomationEvaluator) => Promise<T>): Promise<T | "busy"> => {
+    const key = JSON.stringify([workspaceId, automationId]);
+    if (waiting.has(key)) return "busy";
+    waiting.add(key);
+    try {
+      evaluator ??= create();
+      return await work(evaluator);
+    } finally {
+      waiting.delete(key);
+    }
+  };
   return {
     forWorkspace: (workspaceId) => ({
-      async evaluate(automationId, scope, formulas) {
-        const key = JSON.stringify([workspaceId, automationId]);
-        if (waiting.has(key)) return "busy";
-        waiting.add(key);
-        try {
-          evaluator ??= create();
-          const results = await evaluator.evaluate(scope, formulas);
-          return results.some((result) => !result.ok && result.error.code === "busy") ? "busy" : results;
-        } finally {
-          waiting.delete(key);
-        }
+      async evaluate(automationId, scope, formulas, spent) {
+        const results = await alone(workspaceId, automationId, (shared) => shared.evaluate(scope, formulas, spent));
+        return results === "busy" || results.some(isBusy) ? "busy" : results;
+      },
+      async runCode(automationId, scope, source, spent) {
+        const result = await alone(workspaceId, automationId, (shared) => shared.runCode(scope, source, spent));
+        return result === "busy" || isBusy(result) ? "busy" : result;
       },
     }),
     async close() {
