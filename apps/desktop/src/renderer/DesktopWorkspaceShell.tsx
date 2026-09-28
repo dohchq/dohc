@@ -164,7 +164,7 @@ import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { useAskAgent } from "./shell/useAskAgent";
-import { collectionAutomationOf, NoticeCenter } from "./workbench/NoticeCenter";
+import { NoticeCenter } from "./workbench/NoticeCenter";
 import { WorkspaceSyncStatus } from "./workbench/WorkspaceSyncStatus";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
