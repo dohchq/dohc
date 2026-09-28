@@ -657,6 +657,7 @@ test("verification selects packages and proofs and prepares the engine after Rus
         assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
         assert.ok(report.steps.every(step => step.startedAt && step.finishedAt && step.seconds >= 0));
         assert.ok(report.timings.every(phase => phase.startedAt && phase.finishedAt && phase.seconds >= 0));
+        assert.equal(report.timings.some(phase => phase.name === "queue"), mode === "pr");
         assert.equal(report.timings.some(phase => phase.name === "prepare"), prepare);
         assert.equal(report.timings.some(phase => phase.name === "postgres-start"), database);
         assert.equal(report.timings.some(phase => phase.name === "postgres-stop"), database);
