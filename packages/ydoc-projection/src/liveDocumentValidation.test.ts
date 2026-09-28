@@ -944,12 +944,23 @@ describe('journal real cut counterexamples and checkpoint feasibility', () => {
     expect(result.kind).toBe('accepted')
     if (result.kind !== 'accepted') return
     const registration = createLiveMarkdownRegistrationValidator(policy)(input(result.evidence.stateUpdate))
-    if (suffixCount <= 1) {
-      expect(registration).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
-      expect(createLiveMarkdownJournalValidator(policy)({
-        ...input(result.evidence.stateUpdate), suffix: [], candidate: new Uint8Array([0, 0]),
-      })).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'admitted-cut' })
-    } else expect(registration.kind).toBe('accepted')
+    expect(registration).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
+    expect(createLiveMarkdownJournalValidator(policy)({
+      ...input(result.evidence.stateUpdate), suffix: [], candidate: new Uint8Array([0, 0]),
+    })).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'admitted-cut' })
+
+    // Each shape must charge its own work under the same policy.
+    const checkpoint = ordered.validateRegistrationCutForProjection({
+      mode: 'registration', checkpoint: result.evidence.stateUpdate,
+    }, fixturePolicy)
+    expect(checkpoint.kind).toBe('accepted')
+    if (checkpoint.kind !== 'accepted') return
+    const checkpointFinal = checkpoint.cut.finishAfterProjection()
+    checkpoint.cut.document.destroy()
+    expect(checkpointFinal.kind).toBe('accepted')
+    expect(createLiveMarkdownRegistrationValidator({
+      ...policy, maxIndexOperations: checkpointFinal.usage.indexOperations,
+    })(input(result.evidence.stateUpdate)).kind).toBe('accepted')
   })
 
   it('applies the final public body limit and repaired attribute domains to journal cuts', () => {
