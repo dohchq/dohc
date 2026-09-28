@@ -63,7 +63,7 @@ export function isReservedPath(relativePath: string): boolean {
 // dot/space aliases from on-disk names.
 export function hasEngineIgnoredSegment(
   relativePath: string,
-  platform: NodeJS.Platform,
+  platform: string,
 ): boolean {
   return relativePath.split("/").some((segment) => isIgnoredPathSegment(segment, platform === "win32"));
 }
@@ -137,7 +137,7 @@ export function validateUserWritePath(
 // (Check A runs first).
 export function validateUserMaterializePath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean; platform: NodeJS.Platform },
+  options: { allowIgnoredSegments?: boolean; platform: string },
 ): WritePathValidation {
   return validateWorkspacePath(relativePath, {
     allowIgnoredSegments: options.allowIgnoredSegments,
@@ -158,7 +158,7 @@ export function validateUserMaterializePath(
 // reads accept it. The caller names the platform whose disk it reads.
 export function validateUserReadPath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean; platform: NodeJS.Platform },
+  options: { allowIgnoredSegments?: boolean; platform: string },
 ): WritePathValidation {
   return validateWorkspacePath(relativePath, {
     allowIgnoredSegments: options.allowIgnoredSegments,
