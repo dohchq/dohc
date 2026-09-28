@@ -187,6 +187,28 @@ describe("the rules a dataset run uses", () => {
     })).toEqual({ kind: "done" });
     expect(script.sent.map((sent) => [sent.operationId, sent.revision])).toEqual([[LIST, 3], [EDIT, 3]]);
   });
+
+  it("skips a record change once its automation starts on a schedule instead, before it reads anything", async () => {
+    const scheduled = automationFrom(`  - id: close
+    name: Close
+    when: {schedule: day, timezone: UTC}
+    do:
+      - find: 'true'
+        as: all
+        operation: invoices.list
+      - set:
+          Status: Closed
+        records: all
+        operation: invoices.edit
+`);
+    const script = host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } });
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
+      claim, automation: scheduled, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
+      signal: new AbortController().signal, stopped: new AbortController().signal,
+    })).toEqual({ kind: "skipped" });
+    expect(script.sent).toEqual([]);
+  });
 });
 
 describe("a dataset Find over its limit", () => {

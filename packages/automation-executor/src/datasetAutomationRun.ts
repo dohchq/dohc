@@ -227,10 +227,10 @@ export async function datasetRecordExists(
   recordId: DatasetRecordId,
 ): Promise<boolean> {
   const approved = host.revision(datasetId);
-  const { triggerRead, table } = datasetStepsOf(automation, { definition: approved.definition, generated: true });
-  if (triggerRead === null) return false;
+  const { trigger } = datasetStepsOf(automation, { definition: approved.definition, generated: true });
+  if (trigger?.read == null) return false;
   const rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
-  return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), triggerRead, table, recordId)) !== null;
+  return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), trigger.read, trigger.table, recordId)) !== null;
 }
 
 export async function runDatasetAutomation(
@@ -261,10 +261,9 @@ export async function runDatasetAutomation(
   });
   if (checked === null) return { kind: "wait", reason: "engine" };
   const { approved, datasetRules, steps } = checked;
-  // An automation that resolves under these rules has a field to check at
-  // least, since every table has its primary key. None means it no longer
-  // resolves, so reach cannot vouch for a saved step such as a wake.
-  if (steps.length === 0) return failed(RULES_CHANGED_ERROR);
+  // An automation that no longer resolves under these rules runs nothing,
+  // so reach cannot vouch for a saved step such as a wake.
+  if (steps === null) return failed(RULES_CHANGED_ERROR);
   const readable = new Set<string>();
   const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps });
   for (const [index, verdict] of verdicts.entries()) {
@@ -345,17 +344,20 @@ async function plan(
       versions.set(datasetRecordKey(rules.datasetId, table.tableId, row.id), { id: row.id, version: row.version });
       return runRecordOf(row, rules.datasetId, table, readable);
     };
+    // A change to a record cannot start an automation that now waits for a
+    // schedule or a Group message.
+    if (steps.trigger === null) return { skipped: true } as const;
     let record: RunRecord | null = null;
-    if (steps.triggerRead !== null && claim.fact !== null && claim.fact.kind !== "removed") {
-      const row = await readRecord(host, context, rules, steps.triggerRead, steps.table, claim.fact.recordId, signal);
+    if (steps.trigger.read !== null && claim.fact !== null && claim.fact.kind !== "removed") {
+      const row = await readRecord(host, context, rules, steps.trigger.read, steps.trigger.table, claim.fact.recordId, signal);
       // The record was removed before its automation ran.
-      if (row === null) return { removed: true } as const;
-      record = remember(row, steps.table);
+      if (row === null) return { skipped: true } as const;
+      record = remember(row, steps.trigger.table);
     } else if (!datasetRules.generated && claim.fact !== null && claim.fact.kind !== "removed") {
       // Operations someone wrote are not read for the run's own purposes, so
       // the record is its id alone.
       const { recordId } = claim.fact;
-      record = { id: String(recordId), key: recordId, path: datasetRecordKey(rules.datasetId, steps.table.tableId, recordId), values: {} };
+      record = { id: String(recordId), key: recordId, path: datasetRecordKey(rules.datasetId, steps.trigger.table.tableId, recordId), values: {} };
     }
     const found = new Map<number, RunRecord[]>();
     const truncatedFinds = new Set<number>();
@@ -379,13 +381,13 @@ async function plan(
         found.set(ordinal, rows.map((row) => remember(row, table)));
       }
     }
-    return { removed: false, record, found, truncatedFinds, steps, rules, versions } as const;
+    return { skipped: false, record, found, truncatedFinds, steps, table: steps.trigger.table, rules, versions } as const;
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
-  if (read.removed) return stop({ kind: "skipped" });
+  if (read.skipped) return stop({ kind: "skipped" });
   const pressedBy = datasetPresser(claim);
   const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
-  const runClaim = datasetRunClaim(claim, collection.path, read.steps.table, readable);
+  const runClaim = datasetRunClaim(claim, collection.path, read.table, readable);
   const inputs: RunInputs = { person, message: null, chat, automation, claim: runClaim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds,
     // Without a read, the record is its id: a formula that reads a field stops instead of reading nothing.
     ...(datasetRules.generated ? {} : { recordKeys: ["id"] }) };
@@ -489,6 +491,8 @@ async function reachNow(
   if (roster.kind === "unknown") return { kind: "wait", reason: "roster" };
   const { automation, collection, claim } = input;
   const steps = datasetReachSteps(automation, collection, datasetRules, host.dataGrants(claim.datasetId), chat);
+  // The rules reach checked at the start no longer resolve the automation.
+  if (steps === null) return failed(RULES_CHANGED_ERROR);
   const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps });
   for (const [index, verdict] of verdicts.entries()) {
     // A field an editor can no longer read stops the plan through readableFields; it is checked at resume.
