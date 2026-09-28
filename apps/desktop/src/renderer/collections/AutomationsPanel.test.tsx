@@ -1028,6 +1028,146 @@ describe("a schedule's next run", () => {
   });
 });
 
+describe("the builder's If", () => {
+  const openBuilder = async (user: ReturnType<typeof userEvent.setup>, name = "Stamp the finish date") =>
+    await user.click(await screen.findByRole("button", { name }));
+  const title = (value: string) => [{ field: "Title", value: { kind: "literal" as const, value } }];
+  const setTitle = (value: string) => ({ kind: "set" as const, values: title(value), records: null, operation: null });
+  const group = (name: string) => screen.getByRole("group", { name });
+
+  it("adds an If with a condition and a step in Do, and saves an empty Otherwise as none", async () => {
+    const { written } = makeBridge(read([summary(stamp)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    await user.click(screen.getByRole("button", { name: "If" }));
+    const mode = screen.getByRole("combobox", { name: "Step 2, if" }) as HTMLSelectElement;
+    expect(document.activeElement).toBe(mode);
+    expect(mode.value).toBe("rows");
+    // An If always has a condition, so it offers no Always.
+    expect(within(mode).getAllByRole("option").map((option) => option.textContent)).toEqual(["Fields match", "Formula"]);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, condition 1, field" }), "Status");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, condition 1, value" }), "Done");
+
+    // An empty Do is a problem; an empty Otherwise is not.
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await within(group("Step 2, Do")).findByText("Add a step.")).toBeTruthy();
+    expect(within(group("Step 2, Otherwise")).queryByText("Add a step.")).toBeNull();
+    expect(written).toEqual([]);
+
+    await user.click(within(group("Step 2, Do")).getByRole("button", { name: "Set fields" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 3, field 1" }), "Title");
+    await user.type(screen.getByRole("textbox", { name: "Step 3, Title" }), "Closed");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do[1]).toEqual({ kind: "if", if: 'record.Status == "Done"', do: [setTitle("Closed")], otherwise: [] });
+  }, 30_000);
+
+  it("offers every step in either branch, and no fourth If inside three, saying why", async () => {
+    const nested: Automation = { ...stamp, do: [
+      { kind: "if", if: "record.Points > 1", otherwise: [], do: [
+        { kind: "if", if: "record.Points > 2", otherwise: [], do: [
+          { kind: "if", if: "record.Points > 3", otherwise: [], do: [setTitle("Deep")] },
+        ] },
+      ] },
+    ] };
+    makeBridge(read([summary(nested)]));
+    const user = userEvent.setup();
+    render(<Panel table={{ name: "Tasks", tables: new Map([["Tasks", datasetTable(FIELDS)]]),
+      actions: [{ name: "tasks.close", label: "Close", table: "Tasks", reversible: true }] }} />);
+    await openBuilder(user);
+    const outer = group("Step 1, Otherwise");
+    for (const kind of ["Set fields", "Add a record", "Find records", "Run an action", "If"]) {
+      expect((within(outer).getByRole("button", { name: kind }) as HTMLButtonElement).disabled).toBe(false);
+    }
+    const innermost = group("Step 3, Do");
+    const add = within(innermost).getByRole("button", { name: "If" }) as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    expect(document.getElementById(add.getAttribute("aria-describedby")!)?.textContent)
+      .toBe("An If here would sit inside three others, and an automation allows three.");
+    expect((within(innermost).getByRole("button", { name: "Set fields" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((within(group("Step 3, Otherwise")).getByRole("button", { name: "If" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(group("Step 2, Otherwise")).getByRole("button", { name: "If" }) as HTMLButtonElement).disabled).toBe(false);
+  }, 30_000);
+
+  it("keeps an If's formula as written, shows its syntax error beside it, and keeps a result named in a branch inside it", async () => {
+    const branched: Automation = { ...stamp, do: [
+      { kind: "if", if: "record.Points >", otherwise: [], do: [
+        { kind: "find", condition: "true", collection: null, as: "inner", operation: null },
+        { kind: "set", values: title("Seen"), records: "inner", operation: null },
+      ] },
+      setTitle("After"),
+    ] };
+    const { written } = makeBridge(read([summary(branched)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const formula = screen.getByRole("textbox", { name: "Step 1, condition formula" }) as HTMLInputElement;
+    expect(formula.value).toBe("record.Points >");
+    await waitFor(() => expect(formula.getAttribute("aria-invalid")).toBe("true"), SLOW);
+    expect(document.getElementById(formula.getAttribute("aria-describedby")!)?.textContent).toMatch(/^This formula has a syntax error\./u);
+    // The Set inside Do can change what the Find found; the step after the If cannot.
+    expect((screen.getByRole("combobox", { name: "Step 3, record" }) as HTMLSelectElement).value).toBe("inner");
+    expect(screen.queryByRole("combobox", { name: "Step 4, record" })).toBeNull();
+    await user.type(formula, " 3");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual([{ ...branched.do[0], if: "record.Points > 3" }, branched.do[1]]);
+  }, 30_000);
+
+  it("saves an If whose unchanged rows compare a number field with text, as the file wrote them", async () => {
+    const compared: Automation = { ...stamp, do: [{ kind: "if", if: 'record.Points == ""', do: [setTitle("Blank")], otherwise: [] }] };
+    const { written } = makeBridge(read([summary(compared)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    expect((screen.getByRole("combobox", { name: "Step 1, if" }) as HTMLSelectElement).value).toBe("rows");
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual(compared.do);
+  }, 30_000);
+
+  it("starts an If on a schedule as a formula, and says a schedule has no record before what rows lack", async () => {
+    makeBridge(read([summary({ ...stamp, when: { kind: "schedule", every: "day", at: "09:00", timezone: "UTC" }, if: "record.Points == 3", do: [
+      { kind: "add-record", values: title("Daily"), collection: null, as: null, operation: null },
+    ] })]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    await user.click(screen.getByRole("button", { name: "If" }));
+    expect((screen.getByRole("combobox", { name: "Step 2, if" }) as HTMLSelectElement).value).toBe("formula");
+    // Field rows, emptied, still say first that a schedule has no record.
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, if" }), "rows");
+    await user.click(screen.getByRole("button", { name: "Remove step 2, condition 1" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("This trigger has no record to compare. Write a formula.")).toBeTruthy();
+    expect(screen.queryByText("Add a condition.")).toBeNull();
+  }, 30_000);
+
+  it("moves through an If's condition into its Do with Tab, and asks for a formula on a schedule", async () => {
+    makeBridge(read([summary({ ...stamp, when: { kind: "schedule", every: "day", at: "09:00", timezone: "UTC" }, do: [
+      { kind: "add-record", values: title("Daily"), collection: null, as: null, operation: null },
+    ] })]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    await user.click(screen.getByRole("button", { name: "If" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, if" }), "rows");
+    await user.click(within(screen.getByTestId("builder-step-1")).getByRole("button", { name: "Add condition" }));
+    await user.click(within(screen.getByTestId("builder-step-1")).getByRole("button", { name: "Remove step 2, condition 2" }));
+    // Focus goes back to the first condition's remove button; Tab reaches Add condition, then Do's first choice.
+    await user.tab();
+    expect(document.activeElement).toBe(within(screen.getByTestId("builder-step-1")).getByRole("button", { name: "Add condition" }));
+    await user.tab();
+    expect(document.activeElement).toBe(within(group("Step 2, Do")).getByRole("button", { name: "Set fields" }));
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("This trigger has no record to compare. Write a formula.")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Step 2, if" })));
+  }, 30_000);
+});
+
 describe("the builder's Find and results", () => {
   const openBuilder = async (user: ReturnType<typeof userEvent.setup>, name = "Stamp the finish date") =>
     await user.click(await screen.findByRole("button", { name }));
