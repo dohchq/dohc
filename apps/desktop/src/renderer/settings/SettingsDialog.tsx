@@ -20,8 +20,11 @@ import {
 import {
   DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
+  EDITOR_FONTS,
   type DesktopUserSettingsResult,
+  MAX_EDITOR_FONT_SIZE,
   MAX_ZOOM_LEVEL,
+  MIN_EDITOR_FONT_SIZE,
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
   zoomPercent,
@@ -37,14 +40,26 @@ import {
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
-import { applyAppearanceSettings } from "../theme";
+import { applyLookSettings } from "../theme";
+import { palette } from "../tokens";
+import { ChatAvatar } from "../workbench/ChatAvatar";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
+import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
+import type { CustomizeTarget } from "./customize";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { ScheduleHostRow } from "./ScheduleHostRow";
-import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
+import {
+  ColorControl,
+  HueControl,
+  SegmentedControl,
+  SettingRow,
+  SwitchControl,
+  TextControl,
+} from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
 import { SharedWithMeList } from "./SharedWithMeList";
+import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { SidebarViewsControl } from "./SidebarViewsControl";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -106,6 +121,11 @@ export function SettingsDialog(props: {
    */
   sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
+  // The part a Customize… command opened Settings for: its row is marked and
+  // takes focus.
+  focus?: CustomizeTarget;
+  // Hands a settings change to the person's agent. Absent while chats are off.
+  askAgent?: AskAgent;
   onClose: () => void;
   onAgentActiveChange?: (update: {
     active: boolean;
@@ -127,6 +147,8 @@ export function SettingsDialog(props: {
     // shell needs the id before its reload sees the record vanish.
     folderLeftShareId?: string;
   }) => void;
+  // Ending a share under Shared by me: the shell shows the notice and its Undo.
+  shareRemovals?: ShareRemovalNotices;
 }) {
   const { onWorkspaceSettingsRead } = props;
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -183,7 +205,15 @@ export function SettingsDialog(props: {
   }, [clearSaveStateTimer]);
 
   useEffect(() => {
-    closeRef.current?.focus();
+    const row = props.focus
+      ? dialogRef.current?.querySelector<HTMLElement>(`[data-testid="${props.focus.row}"]`)
+      : null;
+    if (!row) {
+      closeRef.current?.focus();
+      return;
+    }
+    row.focus({ preventScroll: true });
+    row.scrollIntoView?.({ block: "center" });
   }, []);
 
   useEffect(() => () => clearSaveStateTimer(), [clearSaveStateTimer]);
@@ -243,8 +273,10 @@ export function SettingsDialog(props: {
     ])
       .then(([nextUser, nextWorkspace]) => {
         if (cancelled) return;
+        // The window already shows these settings: DesktopRoot applies each
+        // read and each change. Applying this read again could undo a change
+        // that arrived while it was in flight.
         if (!settingsEventFiredRef.current) setUserResult(nextUser);
-        applyAppearanceSettings(nextUser.settings.appearance);
         if (!workspaceTokenRef.isCurrent(token)) return;
         setWorkspaceResult(nextWorkspace);
         onWorkspaceSettingsRead?.(nextWorkspace);
@@ -286,7 +318,7 @@ export function SettingsDialog(props: {
       source: current?.source ?? "default",
       ...(current?.warning ? { warning: current.warning } : {}),
     }));
-    applyAppearanceSettings(settings.appearance);
+    applyLookSettings(settings);
     markSaving();
     setError(null);
     try {
@@ -297,7 +329,7 @@ export function SettingsDialog(props: {
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(previous);
-      applyAppearanceSettings(previous.settings.appearance);
+      applyLookSettings(previous.settings);
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
@@ -392,7 +424,7 @@ export function SettingsDialog(props: {
       const next = await bridge().resetUserSettings();
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(next);
-      applyAppearanceSettings(next.settings.appearance);
+      applyLookSettings(next.settings);
       markSaved();
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
@@ -493,6 +525,31 @@ export function SettingsDialog(props: {
     error ? `Settings error: ${error}` : null,
   ].filter((message): message is string => Boolean(message));
 
+  const saveAppearance = (patch: Partial<DesktopUserSettings["appearance"]>) =>
+    saveUserSettings({ ...userSettings, appearance: { ...userSettings.appearance, ...patch } });
+  const saveEditor = (patch: Partial<DesktopUserSettings["editor"]>) =>
+    saveUserSettings({ ...userSettings, editor: { ...userSettings.editor, ...patch } });
+  // Setting up an agent stays in this dialog, and clears a search that
+  // would hide the Agents section.
+  const askAgent = props.askAgent
+    ? {
+        ...props.askAgent,
+        setUp: () => {
+          setQuery("");
+          setActiveSection("agents");
+        },
+      }
+    : undefined;
+  const askAgentAside = (target?: CustomizeTarget) =>
+    askAgent ? (
+      <AskAgentButton
+        askAgent={askAgent}
+        request={target ? { kind: "settings", target } : { kind: "settings" }}
+      />
+    ) : null;
+  const customizeRow = (row: string) =>
+    props.focus?.row === row ? { highlighted: true, aside: askAgentAside(props.focus) } : {};
+
   const renderSection = () => {
     if (query.trim() && filteredSections.length === 0) {
       return (
@@ -578,6 +635,103 @@ export function SettingsDialog(props: {
               </div>
             </SettingRow>
             <SettingRow
+              title="Accent color"
+              description="dohc adjusts it in each theme so labels on it stay readable."
+              modified={userSettings.appearance.accentColor !== null}
+              onReset={() => void saveAppearance({ accentColor: null })}
+              testId="settings-row-accent"
+            >
+              <ColorControl
+                label="Accent color"
+                value={userSettings.appearance.accentColor ??
+                  palette[document.documentElement.dataset.theme === "dark" ? "dark" : "light"].accent}
+                onChange={(accentColor) => void saveAppearance({ accentColor })}
+              />
+            </SettingRow>
+            <SettingRow
+              title="Your color"
+              description="How this computer shows you in chat. Collaborators see the color their computer picks."
+              modified={userSettings.appearance.yourColor !== null}
+              onReset={() => void saveAppearance({ yourColor: null })}
+              testId="settings-row-your-color"
+              {...customizeRow("settings-row-your-color")}
+            >
+              <ChatAvatar name={userSettings.profile.preferredName ?? "You"} kind="human" own size="comment" />
+              <HueControl
+                label="Your color"
+                shape="person"
+                value={userSettings.appearance.yourColor}
+                onChange={(yourColor) => void saveAppearance({ yourColor })}
+              />
+            </SettingRow>
+            <SettingRow
+              title="Your agent's color"
+              description="How this computer shows your agent in chat."
+              modified={userSettings.appearance.yourAgentColor !== null}
+              onReset={() => void saveAppearance({ yourAgentColor: null })}
+              testId="settings-row-your-agent-color"
+            >
+              <ChatAvatar name={userSettings.profile.agentName ?? "Agent"} kind="agent" own size="comment" />
+              <HueControl
+                label="Your agent's color"
+                shape="agent"
+                value={userSettings.appearance.yourAgentColor}
+                onChange={(yourAgentColor) => void saveAppearance({ yourAgentColor })}
+              />
+            </SettingRow>
+            <SettingRow
+              title="Editor font"
+              modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}
+              onReset={() => void saveEditor({ fontFamily: DEFAULT_USER_SETTINGS.editor.fontFamily })}
+              testId="settings-row-editor-font"
+              {...customizeRow("settings-row-editor-font")}
+            >
+              <SegmentedControl
+                label="Editor font"
+                value={userSettings.editor.fontFamily}
+                options={[
+                  { value: "sans", label: "Sans" },
+                  { value: "serif", label: "Serif" },
+                  { value: "mono", label: "Mono" },
+                  // A font installed on this computer that the file names.
+                  ...((EDITOR_FONTS as readonly string[]).includes(userSettings.editor.fontFamily)
+                    ? []
+                    : [{ value: userSettings.editor.fontFamily, label: userSettings.editor.fontFamily }]),
+                ]}
+                onChange={(fontFamily) => void saveEditor({ fontFamily })}
+              />
+            </SettingRow>
+            <SettingRow
+              title="Editor text size"
+              modified={isModified(userSettings.editor.fontSize, DEFAULT_USER_SETTINGS.editor.fontSize)}
+              onReset={() => void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize })}
+              testId="settings-row-editor-size"
+            >
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-label="Smaller editor text"
+                  disabled={userSettings.editor.fontSize <= MIN_EDITOR_FONT_SIZE}
+                  onClick={() => void saveEditor({ fontSize: userSettings.editor.fontSize - 1 })}
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                >
+                  <Minus size={14} strokeWidth={1.9} />
+                </button>
+                <span className="min-w-12 text-center font-mono text-[12px] text-ink">
+                  {userSettings.editor.fontSize}px
+                </span>
+                <button
+                  type="button"
+                  aria-label="Larger editor text"
+                  disabled={userSettings.editor.fontSize >= MAX_EDITOR_FONT_SIZE}
+                  onClick={() => void saveEditor({ fontSize: userSettings.editor.fontSize + 1 })}
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                >
+                  <Plus size={14} strokeWidth={1.9} />
+                </button>
+              </div>
+            </SettingRow>
+            <SettingRow
               title="Sidebar"
               modified={
                 isModified(userSettings.sidebar.order, DEFAULT_SIDEBAR_SETTINGS.order) ||
@@ -594,6 +748,7 @@ export function SettingsDialog(props: {
                 })
               }
               testId="settings-row-sidebar"
+              {...customizeRow("settings-row-sidebar")}
             >
               <SidebarViewsControl
                 sidebar={userSettings.sidebar}
@@ -671,7 +826,10 @@ export function SettingsDialog(props: {
               <span aria-hidden />
             </SettingRow>
             <div className="px-1 pb-2">
-              <SharedByMeList workspaceId={props.workspaceId} />
+              <SharedByMeList
+                workspaceId={props.workspaceId}
+                {...(props.shareRemovals ? { shareRemovals: props.shareRemovals } : {})}
+              />
             </div>
             <SettingRow
               title="Shared with me"
@@ -881,6 +1039,7 @@ export function SettingsDialog(props: {
               title="Settings file"
               description="Changes apply when you save the file."
               testId="settings-row-settings-file"
+              aside={askAgentAside()}
             >
               {settingsFilePath ? (
                 <code
@@ -1144,6 +1303,15 @@ export function SettingsDialog(props: {
             <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-subtle">
               {activeMeta.scope}
             </span>
+            {activeSection === "appearance" ? (
+              <button
+                type="button"
+                onClick={() => void openSettingsFile()}
+                className="ml-auto rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+              >
+                Open settings file
+              </button>
+            ) : null}
           </div>
           {renderSection()}
         </section>

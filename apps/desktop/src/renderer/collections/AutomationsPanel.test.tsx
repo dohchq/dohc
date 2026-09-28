@@ -8,6 +8,7 @@ import type {
   ListCollectionAutomationsResult,
   ListAutomationTargetsResult,
   RetryCollectionAutomationResult,
+  ScheduleHostComputer,
   ScheduleHostResult,
   UndoCollectionAutomationRunResult,
   WriteCollectionAutomationsPayload,
@@ -62,7 +63,7 @@ function read(automations: ValidAutomationSummary[]): ListCollectionAutomationsR
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
 const run = (overrides: Partial<Run>): Run => ({
   claimId: "atc_1", state: "done", error: null, createdAtMs: Date.now(), updatedAtMs: Date.now(),
-  writes: [], definitionChanged: false, chainStopped: false, undone: false, ...overrides,
+  trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, chainStopped: false, undone: false, ...overrides,
 });
 
 function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean; roundTripWrites?: boolean } = {}) {
@@ -102,7 +103,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     revealAutomationHolds: vi.fn(async () => undefined),
     retryCollectionAutomation: vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false })),
     undoCollectionAutomationRun: vi.fn(async (): Promise<UndoCollectionAutomationRunResult> =>
-      ({ status: "undone", reverted: 1, removed: 0, changedSince: 1, missing: 0, kept: 0, irreversible: 0, actions: 0 })),
+      ({ status: "undone", reverted: 1, removed: 0, changedSince: 1, missing: 0, kept: 0, irreversible: 0, actions: 0, actionsReversed: 0 })),
     confirmCollectionAutomationStep: vi.fn(async () => ({ status: "confirmed" as const })),
     listAutomationTargets: vi.fn(async (): Promise<ListAutomationTargetsResult> => ({ collections: [
       { path: "Tasks", name: "Tasks", stopped: null },
@@ -121,7 +122,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
         formulaProblems: formulas.map(expressionProblem),
       };
     }),
-    onAutomationFailuresChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
+    onAutomationRunsChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
       failureListeners.push(listener);
       return () => undefined;
     }),
@@ -159,6 +160,8 @@ function Panel(props: {
   onOpenScheduleSettings?: () => void;
   closeAsk?: number;
   onClose?: () => void;
+  start?: { automation: Automation; seq: number } | null;
+  onStarted?: () => void;
 }) {
   const onError = props.onError ?? (() => undefined);
   const workspaceId = props.workspaceId ?? "ws-1";
@@ -172,6 +175,8 @@ function Panel(props: {
       automations={automations}
       fields={props.fields ?? FIELDS}
       focus={props.focus ?? null}
+      start={props.start ?? null}
+      onStarted={props.onStarted}
       closeAsk={props.closeAsk ?? 0}
       onClose={props.onClose ?? (() => undefined)}
       onOpenFile={props.onOpenFile ?? (() => undefined)}
@@ -288,7 +293,7 @@ describe("the ⚡ panel", () => {
 
     rerender(<Panel workspaceId="ws-2" onError={onError} onNotice={onNotice} />);
     answerWrite({ status: "reformats" });
-    answerUndo({ status: "undone", reverted: 1, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0, actions: 0 });
+    answerUndo({ status: "undone", reverted: 1, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0, actions: 0, actionsReversed: 0 });
     await waitFor(() => expect(bridge.listCollectionAutomations).toHaveBeenCalledWith({ workspaceId: "ws-2", collectionPath: "Tasks" }));
     expect(screen.queryByTestId("automations-reformat")).toBeNull();
     expect(onNotice).not.toHaveBeenCalled();
@@ -372,7 +377,7 @@ describe("a dataset table's ⚡ panel", () => {
   const onRefunds: Automation = { ...nudge, id: "refund", name: "Log refunds", when: { kind: "record-added", table: "Refunds" } };
   const anyTable: Automation = { ...nudge, id: "any", name: "Any table" };
   const file = read([summary(onInvoices), summary(onRefunds), summary(anyTable)]);
-  const INVOICES: AutomationTable = { name: "Invoices", operations: new Set(["invoices.create", "invoices.edit"]), tables: new Set(["Invoices", "Refunds"]) };
+  const INVOICES: AutomationTable = { name: "Invoices", operations: new Set(["invoices.create", "invoices.edit"]), tables: new Set(["Invoices", "Refunds"]), actions: [] };
   const REFUNDS: AutomationTable = { ...INVOICES, name: "Refunds" };
 
   it("lists and counts the automations that watch this table or name none, and saves the whole file", async () => {
@@ -415,6 +420,123 @@ describe("a dataset table's ⚡ panel", () => {
     await waitFor(() => expect(written).toHaveLength(1), SLOW);
     expect(written[0]!.automations).toEqual([onRefunds, expect.objectContaining({ when: { kind: "record-added", table: "Invoices" } })]);
     expect(bridge.listAutomationTargets).not.toHaveBeenCalled();
+  });
+
+  it("runs an action on the record, with its id as input, says it can't be undone, and saves the step", async () => {
+    const withActions: AutomationTable = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }, { name: "invoices.remind", label: "Remind", table: "Invoices", reversible: false }] };
+    const { written } = makeBridge(read([]));
+    const user = userEvent.setup();
+    render(<Panel table={withActions} />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.click(screen.getByRole("button", { name: "Run an action" }));
+    const picker = screen.getByRole("combobox", { name: "Step 2, action" });
+    expect(document.activeElement).toBe(picker);
+    expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toEqual(["Settle", "Remind"]);
+    expect(screen.getByText("Settle can't be undone.")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Step 2, input 1 name" }) as HTMLInputElement).value).toBe("id");
+    await user.selectOptions(picker, "invoices.remind");
+    await user.click(screen.getByRole("button", { name: "Add input" }));
+    // A name the step already has, and an empty one, are problems to fix before Save.
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Name this input.")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Step 2, input 2 name" }), "id");
+    expect(await screen.findByText("id is in this step twice.")).toBeTruthy();
+    await user.clear(screen.getByRole("textbox", { name: "Step 2, input 2 name" }));
+    await user.type(screen.getByRole("textbox", { name: "Step 2, input 2 name" }), "note");
+    await user.type(screen.getByRole("textbox", { name: "Step 2, note" }), "Due soon");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do[1]).toEqual({ kind: "invoke", operation: "invoices.remind", input: [
+      { key: "id", value: { kind: "formula", expression: "record.id" } },
+      { key: "note", value: { kind: "literal", value: "Due soon" } },
+    ] });
+  }, 30_000);
+
+  it("keeps a saved action input's number as the file wrote it, shows it as its formula, and keeps a typed today() in view", async () => {
+    const withActions: AutomationTable = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] };
+    const saved: Automation = { ...onInvoices, id: "settle", name: "Settle it", do: [{ kind: "invoke", operation: "invoices.settle", input: [
+      { key: "amount", value: { kind: "literal", value: 12 } },
+      { key: "due", value: { kind: "formula", expression: "today()" } },
+    ] }] };
+    const { written } = makeBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel table={withActions} />);
+    await user.click(await screen.findByRole("button", { name: "Settle it" }));
+    expect((screen.getByRole("combobox", { name: "Step 1, amount, kind" }) as HTMLSelectElement).value).toBe("formula");
+    expect((screen.getByRole("textbox", { name: "Step 1, amount, formula" }) as HTMLInputElement).value).toBe("12");
+    expect((screen.getByRole("textbox", { name: "Step 1, due, formula" }) as HTMLInputElement).value).toBe("today()");
+    await user.type(screen.getByRole("textbox", { name: "Name" }), " now");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual(saved.do);
+  }, 30_000);
+
+  it("shows the label and the can't be undone line for another table's action a step runs, and offers only this table's", async () => {
+    const withActions: AutomationTable = { ...INVOICES, actions: [
+      { name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false },
+      { name: "refunds.issue", label: "Issue refund", table: "Refunds", reversible: false },
+    ] };
+    const saved: Automation = { ...onInvoices, id: "refund", name: "Refund it", do: [{ kind: "invoke", operation: "refunds.issue", input: [] }] };
+    makeBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel table={withActions} />);
+    await user.click(await screen.findByRole("button", { name: "Refund it" }));
+    const picker = screen.getByRole("combobox", { name: "Step 1, action" });
+    expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toEqual(["Settle", "Issue refund (Refunds)"]);
+    expect(screen.getByText("Issue refund can't be undone.")).toBeTruthy();
+  }, 30_000);
+
+  it("opens the builder on a draft the page asks for, says it took it, and gives Name focus", async () => {
+    makeBridge(read([]));
+    const onStarted = vi.fn();
+    const draft: Automation = { id: "", name: "Settle", enabled: true, when: { kind: "button", field: "Settle", table: "Invoices" }, if: null,
+      do: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
+    render(<Panel table={{ ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] }}
+      start={{ automation: draft, seq: 1 }} onStarted={onStarted} />);
+    await waitFor(() => expect(onStarted).toHaveBeenCalledTimes(1));
+    const name = await screen.findByRole("textbox", { name: "Name" }) as HTMLInputElement;
+    expect(name.value).toBe("Settle");
+    await waitFor(() => expect(document.activeElement).toBe(name));
+    expect((screen.getByRole("combobox", { name: "Step 1, action" }) as HTMLSelectElement).value).toBe("invoices.settle");
+  });
+
+  it("asks before Back drops the steps a page filled in, and a new panel does not take a request it already took", async () => {
+    makeBridge(read([]));
+    const user = userEvent.setup();
+    const draft: Automation = { id: "", name: "Settle", enabled: true, when: { kind: "button", field: "Settle", table: "Invoices" }, if: null,
+      do: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
+    const table = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] };
+    let start: { automation: Automation; seq: number } | null = { automation: draft, seq: 1 };
+    const { rerender, unmount } = render(<Panel table={table} start={start} onStarted={() => { start = null; }} />);
+    await screen.findByRole("combobox", { name: "Step 1, action" });
+    await user.click(screen.getByRole("button", { name: "Back to automations" }));
+    expect(await screen.findByTestId("automation-unsaved")).toBeTruthy();
+    await user.click(within(screen.getByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull());
+    // The page forgot the request it saw taken, so a panel that mounts again shows the list.
+    rerender(<Panel table={table} start={start} onStarted={() => { start = null; }} />);
+    unmount();
+    render(<Panel table={table} start={start} />);
+    expect(await screen.findByRole("button", { name: "New automation" })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+  });
+
+  it("says nothing about undo for an action whose rules name its reverse", async () => {
+    makeBridge(read([]));
+    const user = userEvent.setup();
+    render(<Panel table={{ ...INVOICES, actions: [{ name: "invoices.hold", label: "Hold", table: "Invoices", reversible: true }] }} />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.click(screen.getByRole("button", { name: "Run an action" }));
+    expect(screen.getByRole("combobox", { name: "Step 2, action" })).toBeTruthy();
+    expect(screen.queryByText(/can't be undone/)).toBeNull();
+  });
+
+  it("offers no action step on a table without actions", async () => {
+    makeBridge(read([]));
+    const user = userEvent.setup();
+    render(<Panel table={INVOICES} />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    expect(screen.queryByRole("button", { name: "Run an action" })).toBeNull();
   });
 
   it("leaves an Add record that adds to another table as the file wrote it", async () => {
@@ -463,9 +585,9 @@ describe("a schedule's next run", () => {
   }).format(ms);
   const tomorrow = `Next run ${localTime(Date.UTC(2026, 8, 26, 9))}`;
   const computers = [
-    { installId: "me", label: "DESKTOP-1", lastSeenMs: NOW, thisComputer: true },
-    { installId: "laptop", label: "Ice's laptop", lastSeenMs: NOW - 86_400_000, thisComputer: false },
-  ];
+    { installId: "me", kind: "computer", label: "DESKTOP-1", lastSeenMs: NOW, thisComputer: true },
+    { installId: "laptop", kind: "computer", label: "Ice's laptop", lastSeenMs: NOW - 86_400_000, thisComputer: false },
+  ] satisfies ScheduleHostComputer[];
   const relay = (hostInstallId: string | null, handoverFrom: string | null = null): ScheduleHostResult =>
     ({ kind: "relay", generation: 3, hostInstallId, handoverFrom, computers });
 
@@ -689,7 +811,7 @@ describe("an automation's runs", () => {
       run({ claimId: "atc_added", writes: [{ kind: "dataset-created", rules, operationId: "create", tableId: "table-1", recordId: "invoice-2", version: 1 }] }),
     ]);
     bridge.undoCollectionAutomationRun.mockResolvedValueOnce({
-      status: "undone", reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 1, actions: 0,
+      status: "undone", reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 1, actions: 0, actionsReversed: 0,
     });
     const onNotice = vi.fn();
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} onNotice={onNotice} />);
@@ -711,7 +833,7 @@ describe("an automation's runs", () => {
       run({ claimId: "atc_action", writes: [{ kind: "dataset-action", rules, operationId: "settle", tableId: "table-1", name: "Settle", revision: 5 }] }),
     ]);
     bridge.undoCollectionAutomationRun.mockResolvedValueOnce({
-      status: "undone", reverted: 1, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 1,
+      status: "undone", reverted: 1, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 1, actionsReversed: 0,
     });
     const onNotice = vi.fn();
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} onNotice={onNotice} />);
@@ -723,6 +845,21 @@ describe("an automation's runs", () => {
     expect(within(screen.getByTestId("automation-run-atc_action")).queryByRole("button", { name: "Undo" })).toBeNull();
     await userEvent.click(within(row).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid 1 change. 1 action can't be undone."));
+  });
+
+  it("offers Undo for a run whose action has a reverse, and says it undid the action", async () => {
+    const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
+    const { bridge } = makeBridge(read([summary(stamp)]), [
+      run({ writes: [{ kind: "dataset-action", rules, operationId: "hold", tableId: "table-1", name: "Hold", revision: 4, undo: { id: "invoice-1", status: "Open" } }] }),
+    ]);
+    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({
+      status: "undone", reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 1,
+    });
+    const onNotice = vi.fn();
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} onNotice={onNotice} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    await userEvent.click(within(row).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid 1 action."));
   });
 
   it("shows a sent message without offering record Undo", async () => {

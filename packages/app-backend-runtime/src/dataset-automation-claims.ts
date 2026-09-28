@@ -73,14 +73,19 @@ export type DatasetChangeKind = DatasetChangeFact["kind"];
  * who pressed.
  */
 export type DatasetActor =
-  | { kind: "owner"; userId?: string; appId?: string }
-  | { kind: "named"; userId: string; appId?: string }
+  | { kind: "owner"; userId?: string; appId?: string; agent?: PressingAgent }
+  | { kind: "named"; userId: string; appId?: string; agent?: PressingAgent }
   | { kind: "link"; appId?: string }
   | { kind: "automation"; automationId: string; depth: number }
   // The owner's agent, in a run an automation started, at the run's chain depth.
   | { kind: "agent"; depth: number };
-/** The person who pressed a button: the owner or a named person, by account. */
-export type DatasetPresser = { kind: "owner" | "named"; userId: string };
+/**
+ * An agent that pressed a button for its person, from a run at `depth`. The
+ * press claims at that depth, and stops at once at the chain cap.
+ */
+export interface PressingAgent { depth: number }
+/** The person who pressed a button: the owner or a named person, by account, and the agent that pressed for them, if one did. */
+export type DatasetPresser = { kind: "owner" | "named"; userId: string; agent?: PressingAgent };
 export interface DatasetAutomationSubscription {
   automationId: string;
   tableId: string;
@@ -499,7 +504,12 @@ export function createDatasetAutomationClaims(options: {
         recordId: input.recordId, fieldId: text(input.fieldId, "field", 256), definitionHash: input.definitionHash };
       if ((typeof fact.recordId !== "string" && !Number.isSafeInteger(fact.recordId)) || bytes(fact.recordId) > RECORD_ID_BYTES) throw new Error("Invalid automation record.");
       if (input.presser.kind !== "owner" && input.presser.kind !== "named") throw new Error("Invalid automation presser.");
-      const presser: DatasetPresser = { kind: input.presser.kind, userId: text(input.presser.userId, "presser") };
+      const agent = input.presser.agent;
+      if (agent !== undefined && (!Number.isSafeInteger(agent.depth) || agent.depth < 0)) throw new Error("Invalid automation presser.");
+      const presser: DatasetPresser = { kind: input.presser.kind, userId: text(input.presser.userId, "presser"),
+        ...(agent === undefined ? {} : { agent: { depth: Math.min(agent.depth, DATASET_AUTOMATION_CHAIN_DEPTH) } }) };
+      // A press claims at its agent's depth, as the agent's own commits do, and stops at once at the cap.
+      const depth = presser.agent?.depth ?? 0, stopped = depth >= DATASET_AUTOMATION_CHAIN_DEPTH;
       const samePresser = ({ actor }: DatasetAutomationClaim) =>
         (actor.kind === "owner" || actor.kind === "named") && actor.kind === presser.kind && actor.userId === presser.userId;
       const another = () => new Error("This press id already names another press.");
@@ -532,9 +542,11 @@ export function createDatasetAutomationClaims(options: {
           } else {
             const factJson = JSON.stringify(fact), actorJson = JSON.stringify(presser);
             const storageBytes = bytes([claimId, ...key, factJson, actorJson]) + ERROR_BYTES + ROW_BYTES;
-            db.prepare("INSERT INTO dohc_dataset_automation_claims VALUES(?,?,?,?,?,?,?,?,?,?,0,'pending',0,1,NULL,?,?,?)")
-              .run(claimId, ...key, factJson, actorJson, at, at, storageBytes);
+            db.prepare("INSERT INTO dohc_dataset_automation_claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?,?,?)")
+              .run(claimId, ...key, factJson, actorJson, depth, stopped ? "failed" : "pending", stopped ? DATASET_AUTOMATION_CHAIN_STOPPED : null, at, at, storageBytes);
             delta += storageBytes;
+            // A stop is a failure, counted and trimmed as a commit's stop is.
+            if (stopped) delta += countFailure(scope, cursor.hostEpoch, automationId) - trim(scope, automationId);
             pressed = claim(read(scope.workspaceId, claimId)!);
           }
         }

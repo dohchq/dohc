@@ -40,6 +40,7 @@ export function createLinkAppPublicationRoutes(options: {
         limits, publicEditRelease: options.publicEditRelease, cursor};
       const signal = AbortSignal.any([request.signal, options.storage.unavailable]);signal.throwIfAborted();
       const {page, assertCurrent} = options.storage.listLinkAppPublications({...input, nowMs: options.nowMs()});
+
       const body = JSON.stringify(page), bytes = new TextEncoder().encode(body);
       const release = options.streams.admitLinkBlobBytes(capability.grantId, bytes.byteLength);
       if (!release) throw relayError("link_read_rate_limited");
@@ -66,6 +67,7 @@ export function createLinkAppPublicationRoutes(options: {
     const pinned = {...input, expectedAuthorityRevision: admitted.descriptor.authorityRevision};
     const file = route.sha256 ? admitted.descriptor.files.find(file => file.sha256 === route.sha256) : undefined;
     if (route.sha256 && (!file || file.byteLength > MAX_BLOB_BYTES)) throw notFound();
+
     const metadata = file ? null : new TextEncoder().encode(JSON.stringify(admitted.descriptor));
     const byteLength = file?.byteLength ?? metadata!.byteLength;
     const retainedByteLength = byteLength + limits.maxMetadataBytes;

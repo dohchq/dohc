@@ -1,0 +1,127 @@
+[
+  {
+    "name": "Cyrillic",
+    "input": "Команда Москва",
+    "slug": "команда-москва"
+  },
+  {
+    "name": "Chinese",
+    "input": "项目 会议１２３",
+    "slug": "项目-会议１２３"
+  },
+  {
+    "name": "Arabic",
+    "input": "فريق عربي ١٢٣",
+    "slug": "فريق-عربي-١٢٣"
+  },
+  {
+    "name": "Hindi",
+    "input": "हिन्दी टीम १२३",
+    "slug": "हिन्दी-टीम-१२३"
+  },
+  {
+    "name": "Emoji only",
+    "input": "💥🎉👩‍💻",
+    "slug": ""
+  },
+  {
+    "name": "Mixed",
+    "input": "Équipe_東京-Москва 42!",
+    "slug": "équipe-東京-москва-42"
+  },
+  {
+    "name": "Decomposed",
+    "input": "Café İ ΟΣ",
+    "slug": "café-i̇-ος"
+  },
+  {
+    "name": "Unsafe characters",
+    "input": " ..A<>:\"/\\|?*B\u0000C.. ",
+    "slug": "abc"
+  },
+  {
+    "name": "Whitespace",
+    "input": "ab﻿c",
+    "slug": "a-bc"
+  },
+  {
+    "name": "Reserved",
+    "input": "CON",
+    "slug": "name-con"
+  },
+  {
+    "name": "Reserved number",
+    "input": "LPT¹",
+    "slug": "name-lpt¹"
+  },
+  {
+    "name": "Reserved extension",
+    "input": "NUL.txt",
+    "slug": "nultxt"
+  },
+  {
+    "name": "Long multibyte",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界",
+    "slug": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "Long ASCII",
+    "input": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "Supplementary",
+    "input": "𐐀𐐁 𠀀",
+    "slug": "𐐨𐐩-𠀀"
+  },
+  {
+    "name": "Detached marks",
+    "input": "́ 💥️",
+    "slug": ""
+  },
+  {
+    "name": "Marks after removed punctuation",
+    "input": "A!́",
+    "slug": "á"
+  },
+  {
+    "name": "Letter symbols",
+    "input": "Ⓐⓑ🄰🅑🅲",
+    "slug": ""
+  },
+  {
+    "name": "Unicode 17 letters",
+    "input": "𖺠𖺻",
+    "slug": "𖺻𖺻"
+  },
+  {
+    "name": "Hangul fillers",
+    "input": "ㅤᅟᅠﾠ",
+    "slug": ""
+  },
+  {
+    "name": "Invisible marks",
+    "input": "a️͏",
+    "slug": "a"
+  },
+  {
+    "name": "Other default ignorables",
+    "input": "a­؜឴឵᠋᠏​‍‪⁥﻿￰𛲠𝅳󠄀b",
+    "slug": "ab"
+  },
+  {
+    "name": "Vowel at byte limit",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界कि",
+    "slug": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "Virama at byte limit",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界क्ष",
+    "slug": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "Ignorable between base and mark",
+    "input": "a͏́",
+    "slug": "á"
+  }
+]

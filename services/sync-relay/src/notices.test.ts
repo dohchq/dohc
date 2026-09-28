@@ -79,6 +79,9 @@ async function relay(
   clock = 10_000;
   shares = 0;
   const storage = await testStorage();
+  // These tests fill lists with 1,000 rows, one commit each. None tests crash
+  // durability, so skip the per-commit disk flush.
+  (storage as unknown as StorageContext).db.exec("PRAGMA synchronous = OFF");
   current = storage;
   const h = testHandler(storage, {
     nowMs: () => clock,
@@ -310,6 +313,21 @@ describe("notices for someone else", () => {
     await expectRefused(await post(h, "ana", notice()));
   });
 
+  it("finds the owner for a grantee who does not know the owner's id", async () => {
+    const { h, shareId } = await sharedTrip();
+    const { noticeId, kind, title, body, target, originInstallId } = notice();
+    const toOwner: PostNoticeRequest = { noticeId, kind, title, body, target, originInstallId, shareId, toWorkspaceOwner: true };
+    expect((await post(h, "ana", toOwner)).status).toBe(200);
+    expect((await pull(h, "owner")).notices).toEqual([expect.objectContaining({
+      noticeId: "from:ana:automation-failed:run-1", senderUserId: "ana", workspaceId: WORKSPACE,
+    })]);
+    // Only through a share the sender holds, and never beside a named recipient.
+    await expectRefused(await post(h, "ben", toOwner));
+    expect((await post(h, "ana", { ...toOwner, shareId: "share-unknown" })).status).toBe(403);
+    expect((await post(h, "ana", { ...toOwner, recipientUserId: "owner" } as unknown as PostNoticeRequest)).status).toBe(400);
+    expect((await post(h, "owner", { ...notice(), recipientUserId: undefined, toWorkspaceOwner: true } as unknown as PostNoticeRequest)).status).toBe(400);
+  });
+
   it("lets one grantee send to another when both can read the target", async () => {
     const { h } = await sharedTrip();
     const benShare = grant({ paths: ["trip/tasks"], recipientUserId: "ben" });
@@ -502,7 +520,7 @@ describe("limits on notices from other people", () => {
     const fromRecent = await pull(h, "owner", recent, 5);
     expect(fromRecent.replace).toBe(false);
     expect(fromRecent.notices[0]).toMatchObject({ removed: true });
-  }, 60_000);
+  });
 
   it("makes room in a list full of read rows for anyone who may send", async () => {
     const { h, storage } = await sharedTrip();

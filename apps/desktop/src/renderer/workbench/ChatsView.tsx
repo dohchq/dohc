@@ -2,9 +2,11 @@ import { MessageReactions } from "./chatMessages";
 import { chatEditorPath } from "../shell/chatsNav";
 import { parseChatTabPath } from "./workbenchState";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
+import { agentIsSetUp } from "../askAgent";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
 import { ActionButton, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
+import { useIsOwnAuthor } from "./AgentBadge";
 import { ChatAvatar } from "./ChatAvatar";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
@@ -38,6 +40,7 @@ import { SectionLabel } from "../ui/controls";
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
+import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import {
   AtSign,
   Bot,
@@ -452,6 +455,10 @@ export function ChatsView(props: {
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   onError: (message: string, cause?: unknown) => void;
+  // Removing a member is undoable for a while. The shell shows that notice
+  // and holds the Undo, so it outlives this panel; a refused removal goes to
+  // the same shell with Try again.
+  shareRemovals?: ShareRemovalNotices;
   // @-mention roster for this workspace (the user + available agents). When
   // provided, the composer offers autocomplete and messages render chips.
   mentionCandidates?: readonly MentionCandidate[];
@@ -481,6 +488,9 @@ export function ChatsView(props: {
   // Unsent drafts to restore alongside initialNav (same handoff, same
   // apply-once timing).
   initialDrafts?: ChatsDrafts;
+  // The new-post composer takes focus when it mounts, such as after dohc put
+  // a request to the person's agent in it.
+  focusNewPost?: boolean;
   // Reports every navigation so the shell can seed the next mount (panel or
   // expanded tab) with this instance's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
@@ -523,6 +533,7 @@ export function ChatsView(props: {
   // pass refreshes what the missed activity events would have.
   suspendPolling?: boolean;
 }) {
+  const isOwn = useIsOwnAuthor();
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
     props;
   const collaboration = props.collaboration ?? null;
@@ -912,12 +923,14 @@ export function ChatsView(props: {
               joined: value.joined,
               granted: value.relay.granted,
               received: value.relay.received,
+              removed: value.relay.removed,
               sessionKey: value.sessionKey,
             }
           : {
               joined: value.joined,
               granted: [],
               received: [],
+              removed: [],
               sessionKey: value.sessionKey,
             };
       // Claim each lane independently, even when nothing has resolved yet:
@@ -1159,6 +1172,7 @@ export function ChatsView(props: {
                       {
                         granted: [],
                         received: [],
+                        removed: [],
                         joined: refreshed.joined,
                         sessionKey: null,
                       },
@@ -3101,11 +3115,21 @@ export function ChatsView(props: {
   ]);
 
   const revokeShare = useCallback(
-    async (shareId: string) => {
+    async (shareId: string, member: string, group: string) => {
       const token = liveToken.current;
       const session = sessionGeneration.current;
       try {
-        await bridge().revokeRelayShare({ shareId });
+        const result = await bridge().revokeRelayShare({ shareId });
+        props.shareRemovals?.removed({
+          workspaceId,
+          shareId,
+          undo: result.undo,
+          message: result.undo ? `Removed ${member} from ${group}.` : `${member} no longer has access to ${group}.`,
+          restoredMessage: `Restored ${member} to ${group}.`,
+          restored: () => {
+            if (token === liveToken.current) void refreshShares();
+          },
+        });
         if (token !== liveToken.current) return;
         // The revocation landed, so apply it to the cached relay lane before
         // asking the relay to confirm it. The follow-up listing can resolve
@@ -3138,10 +3162,37 @@ export function ChatsView(props: {
         await refreshShares();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not remove that person."), error);
+        const message = "Could not remove that person.";
+        if (props.shareRemovals) {
+          props.shareRemovals.failed({
+            workspaceId,
+            message,
+            cause: error,
+            retry: () => void revokeShare(shareId, member, group),
+          });
+        } else {
+          props.onError(ipcErrorMessage(error, message), error);
+        }
       }
     },
-    [claimLanes, props.onError, refreshShares, takeCommitTicket],
+    [claimLanes, props.onError, props.shareRemovals, refreshShares, takeCommitTicket, workspaceId],
+  );
+
+  // Only the relay's removed lane may say the owner did it. A grant that is
+  // still listed as active is one the person left, with Join as the way
+  // back. Anything else, including no listing at all, stays neutral.
+  const ownerRemoved = useCallback(
+    (shareId: string) => channelShares?.removed.includes(shareId) === true,
+    [channelShares],
+  );
+  const endedGroupNotice = useCallback(
+    (joined: JoinedSharedChannelRow) =>
+      ownerRemoved(joined.shareId)
+        ? "The owner removed your access to this group. You can still read it."
+        : channelShares?.received.some((row) => row.shareId === joined.shareId)
+          ? "You left this group. You can still read it."
+          : "This group is no longer shared with you. You can still read it.",
+    [channelShares, ownerRemoved],
   );
 
   const joinShared = useCallback(
@@ -3713,6 +3764,7 @@ export function ChatsView(props: {
                         <ChatAvatar
                           name={item.message.authorDisplayName}
                           kind={isAgent ? "agent" : "human"}
+                          own={isOwn(isAgent ? "agent" : "human", item.message, itemViewer)}
                         />
                         <span className="flex min-w-0 flex-1 flex-col leading-tight">
                           <span
@@ -4102,7 +4154,7 @@ export function ChatsView(props: {
           {threadLocked ? (
             <ComposerNotice testId="chats-readonly-note">
               {threadJoined?.ended
-                ? "This group is no longer shared with you. You can still read it."
+                ? endedGroupNotice(threadJoined)
                 : "This group is read-only for you."}
             </ComposerNotice>
           ) : (
@@ -4189,8 +4241,7 @@ export function ChatsView(props: {
     );
   }
 
-  // An agent is set up when it has a name to post as and something runs it.
-  const agentReady = Boolean(props.agentSetup?.agentName && props.agentSetup.runnerEnabled);
+  const agentReady = props.agentSetup ? agentIsSetUp(props.agentSetup) : false;
 
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
@@ -4374,7 +4425,7 @@ export function ChatsView(props: {
           >
             <ChatAvatar name={channelJoined.granterEmail ?? "?"} kind="human" size="strip" />
             <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
-              {joinedChannelLabel(channelJoined)}
+              {joinedChannelLabel(channelJoined, ownerRemoved(channelJoined.shareId))}
             </span>
             <button
               type="button"
@@ -4420,7 +4471,13 @@ export function ChatsView(props: {
                     <button
                       type="button"
                       data-testid="chats-share-revoke"
-                      onClick={() => void revokeShare(grant.shareId)}
+                      onClick={() =>
+                        void revokeShare(
+                          grant.shareId,
+                          grant.recipientEmail ?? "the invited person",
+                          nav.channel.name,
+                        )
+                      }
                       className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
                     >
                       Remove
@@ -4500,6 +4557,7 @@ export function ChatsView(props: {
                 <MentionComposer
                   testIdPrefix="chats-new-thread"
                   composerId="chats-new-thread-composer"
+                  autoFocus={props.focusNewPost}
                   value={newThreadBody}
                   sending={startingThread}
                   surface="post"
@@ -4583,7 +4641,7 @@ export function ChatsView(props: {
         {channelLocked && !showLane ? (
           <ComposerNotice testId="chats-readonly-note">
             {channelJoined?.ended
-              ? "This group is no longer shared with you. You can still read it."
+              ? endedGroupNotice(channelJoined)
               : "This group is read-only for you."}
           </ComposerNotice>
         ) : null}
@@ -4664,7 +4722,7 @@ export function ChatsView(props: {
                 const joined = joinedFor(channel);
                 const grants = channel.wireId ? grantedByWire.get(channel.wireId) ?? [] : [];
                 const sharedLabel = joined
-                  ? joinedChannelLabel(joined)
+                  ? joinedChannelLabel(joined, ownerRemoved(joined.shareId))
                   : grants.length > 0
                     ? `Shared with ${grants.length}`
                     : null;
@@ -4862,7 +4920,7 @@ export function ChatsView(props: {
                   data={{ "data-channel-id": agentChannel.id }}
                   active={selectedChannelId === agentChannel.id}
                   onClick={() => openConversation({ level: "channel", channel: agentChannel })}
-                  icon={<ChatAvatar name={agentLabel} kind="agent" size="strip" />}
+                  icon={<ChatAvatar name={agentLabel} kind="agent" own size="strip" />}
                   label={agentLabel}
                   labelTestId="chats-my-agent-name"
                   trailing={

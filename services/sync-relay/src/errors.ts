@@ -1,5 +1,6 @@
 import { jsonResponse } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
+import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
 
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
@@ -41,6 +42,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   self_share: 400,
   share_op_rejected: 403,
   share_read_only: 403,
+  share_access_removed: 404,
   stale: 409,
   stream_identity_mismatch: 409,
   too_many_paths: 400,
@@ -95,7 +97,7 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   key_envelope_not_found: "key envelope not found",
   link_discussion_blocked: "link discussion writes are blocked",
   link_discussion_paused: "link discussion writes are paused",
-  link_read_rate_limited: "too many link reads",
+  link_read_rate_limited: LINK_REFUSALS.link_read_rate_limited.error,
   method_not_allowed: "method not allowed",
   not_found: "not found",
   notice_list_full: "the recipient has too many unread notices",
@@ -108,6 +110,7 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   self_share: "a share needs a recipient other than yourself",
   share_op_rejected: "an op is outside this share",
   share_read_only: "this share does not accept appends",
+  share_access_removed: "The owner removed your access.",
   stale: "the file changed since you read it",
   stream_identity_mismatch: "stream identity does not match",
   too_many_paths: "too many paths",
@@ -164,8 +167,6 @@ export function errorResponse(error: unknown): Response {
   return errorBody("internal_error");
 }
 
-// A link credential that does not resolve answers 401 with the not-found body:
-// the status tells the viewer to re-exchange, and the body says nothing more.
 export function invalidLinkCapability(): RelayError {
-  return new RelayError("not_found", undefined, 401);
+  return notFound();
 }

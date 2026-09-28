@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { useFocusReturn } from "./ui/focusReturn";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
 import { trapModalTabKey } from "./modalFocus";
 
@@ -34,6 +35,7 @@ export function OverlayFrame(props: {
         {...props.panelProps}
         ref={props.panelRef}
         tabIndex={-1}
+        data-focus-surface="dialog"
         className={props.panelProps?.className ?? "dohc-pop-in"}
         onClick={(event) => event.stopPropagation()}
       >
@@ -55,6 +57,7 @@ export function Overlay(props: {
 }) {
   const defaultPanelRef = useRef<HTMLDivElement>(null);
   const panelRef = props.panelRef ?? defaultPanelRef;
+  useFocusReturn(true, panelRef);
   // A ref, not a dependency, so Escape and Tab always call this render's
   // onClose even though the keydown listener itself is only ever attached
   // once.

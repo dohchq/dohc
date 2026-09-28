@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { bridge } from "./bridge";
 import { rendererMarks } from "../performance/rendererMarks";
-import { applyAppearanceSettings, toggleTheme } from "./theme";
+import { applyLookSettings, toggleTheme } from "./theme";
 import { IconButton } from "./ui/controls";
 import { openStatesPage } from "./dev/statesRoute";
 
@@ -70,12 +70,12 @@ export function DevPanel(props: { workspaceId?: string }) {
   function setAppearance(patch: { themeMode?: "light" | "dark" | "system" }) {
     run("Appearance", async () => {
       const result = await bridge().getUserSettings();
-      const appearance = { ...result.settings.appearance, ...patch };
-      applyAppearanceSettings(appearance);
-      await bridge().setUserSettings({
-        settings: { ...result.settings, appearance },
-        base: result.settings,
-      });
+      const settings = {
+        ...result.settings,
+        appearance: { ...result.settings.appearance, ...patch },
+      };
+      applyLookSettings(settings);
+      await bridge().setUserSettings({ settings, base: result.settings });
     });
   }
 

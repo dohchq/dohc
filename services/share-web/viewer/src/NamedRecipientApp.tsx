@@ -1,6 +1,6 @@
 import {useCallback, useEffect, useRef, useState, type FormEvent} from "react";
 import {createNamedLiveBrowserTransport, type NamedLiveBrowserState, type NamedLiveSelection} from "@dohc/ydoc-projection/named-live-browser-transport";
-import {accountUser, namedFiles, namedRequest, type NamedRecipientFiles} from "./namedRecipient";
+import {accountUser, namedFiles, namedRequest, ShareAccessRemovedError, type NamedRecipientFiles} from "./namedRecipient";
 import {NamedDocumentEditor, type NamedDocumentSession} from "./NamedDocumentEditor";
 import {DiscardDraft} from "./DiscardDraft";
 
@@ -28,7 +28,7 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
   };
   const refresh = () => {
     clearSelection(); const controller = start();
-    void load(controller).catch(() => {if (!controller.signal.aborted) setError("dohc could not open this invitation. Retry or sign in with the invited account.");})
+    void load(controller).catch((cause: unknown) => {if (!controller.signal.aborted) setError(cause instanceof ShareAccessRemovedError ? cause.message : "dohc could not open this invitation. Retry or sign in with the invited account.");})
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});
   };
   useEffect(() => {
@@ -62,7 +62,7 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
     const email = String(values.get("email") ?? ""), password = String(values.get("password") ?? "");
     form.reset();
     void namedRequest("/api/account/sign-in", controller.signal, {email, password}).then(
-      () => load(controller).catch(() => {if (!controller.signal.aborted) setError("dohc could not open this invitation. Retry or sign in with the invited account.");}),
+      () => load(controller).catch((cause: unknown) => {if (!controller.signal.aborted) setError(cause instanceof ShareAccessRemovedError ? cause.message : "dohc could not open this invitation. Retry or sign in with the invited account.");}),
       () => {if (!controller.signal.aborted) setError("dohc could not sign you in. Check your email and password, then retry.");},
     )
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});

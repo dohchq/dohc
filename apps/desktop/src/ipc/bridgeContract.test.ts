@@ -12,6 +12,8 @@ import {
   ListPersonalChatFeedResult,
   ListChatFileMentionsResult,
   ChatChannelRecord,
+  ChatFeedItemRecord,
+  ChatFileMentionRecord,
   ChatAttachmentRecord,
   ChatBookmarkRecord,
   ChatFileReferenceInput,
@@ -131,10 +133,13 @@ import {
   RelayShareDiscussionPauseResponse,
   RelayShareGrantPromotionResponse,
   RelayShareGrantRevokeResponse,
+  RelayShareLinkEndResponse,
+  RelayShareRevokeResponse,
   ResumeRelayShareDiscussionPayload,
   ResumeRelayShareDiscussionResult,
   RevokeRelayShareGrantPayload,
   RevokeRelayShareGrantResult,
+  RevokeRelayShareResult,
   RotateRelayShareLinkPayload,
   RotateRelayShareLinkResult,
   RevokeRelayShareLinkPayload,
@@ -173,6 +178,42 @@ import {
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
+
+const shareUndoReceipt = { undoId: "undo-1", expiresAtMs: 600_020 };
+const malformedShareUndoReceipts = [
+  null,
+  {},
+  { expiresAtMs: 600_020 },
+  { undoId: "undo-1" },
+  { ...shareUndoReceipt, undoId: "" },
+  { ...shareUndoReceipt, undoId: "x".repeat(257) },
+  { ...shareUndoReceipt, expiresAtMs: -1 },
+  { ...shareUndoReceipt, expiresAtMs: 1.5 },
+  { ...shareUndoReceipt, expiresAtMs: "600020" },
+  { ...shareUndoReceipt, credential: "must-not-cross" },
+];
+
+describe("owner relay share removal IPC contract", () => {
+  it("allows no receipt for a no-op whole-share stop and validates any receipt returned", () => {
+    for (const [schema, base] of [
+      [RevokeRelayShareResult, {}],
+      [RelayShareRevokeResponse, { ok: true }],
+    ] as const) {
+      expect(schema.parse(base)).toEqual(base);
+      const removed = { ...base, undo: shareUndoReceipt };
+      expect(schema.parse(removed)).toEqual(removed);
+      for (const undo of malformedShareUndoReceipts) {
+        expect(schema.safeParse({ ...base, undo }).success).toBe(false);
+      }
+    }
+    expect(
+      RelayShareRevokeResponse.parse({ ok: true, shareId: "share-1" }),
+    ).toEqual({ ok: true });
+    expect(
+      RevokeRelayShareResult.safeParse({ undo: shareUndoReceipt, credential: "must-not-cross" }).success,
+    ).toBe(false);
+  });
+});
 
 describe("owner relay share link IPC contract", () => {
   const readable = {
@@ -461,9 +502,38 @@ describe("owner relay share link IPC contract", () => {
         }).success,
       ).toBe(false);
     }
-    expect(RevokeRelayShareLinkResult.parse({ outcome: "ended" })).toEqual({
-      outcome: "ended",
-    });
+    for (const [schema, base] of [
+      [RevokeRelayShareLinkResult, { outcome: "ended" }],
+      [RelayShareLinkEndResponse, { ok: true }],
+    ] as const) {
+      const ended = { ...base, undo: shareUndoReceipt };
+      expect(schema.parse(ended)).toEqual(ended);
+      expect(schema.safeParse(base).success).toBe(false);
+      for (const undo of malformedShareUndoReceipts) {
+        expect(schema.safeParse({ ...base, undo }).success).toBe(false);
+      }
+    }
+    expect(
+      RelayShareLinkEndResponse.parse({
+        ok: true,
+        shareId: "share-1",
+        grantId: "grant-1",
+        principalKind: "link",
+        access: "view",
+        generation: 3,
+        status: "revoked",
+        createdAtMs: 10,
+        revokedAtMs: 20,
+        parentGrantId: null,
+        undo: shareUndoReceipt,
+      }),
+    ).toEqual({ ok: true, undo: shareUndoReceipt });
+    for (const malformed of [
+      { outcome: "ended", undo: shareUndoReceipt, dependents: [] },
+      { outcome: "dependents-changed", dependents: [], undo: shareUndoReceipt },
+    ]) {
+      expect(RevokeRelayShareLinkResult.safeParse(malformed).success).toBe(false);
+    }
     expect(
       RetuneRelayShareLinkResult.parse({
         outcome: "widened",
@@ -505,6 +575,7 @@ describe("owner relay share link IPC contract", () => {
     expect(
       RevokeRelayShareLinkResult.safeParse({
         outcome: "ended",
+        undo: shareUndoReceipt,
         url: "https://share.example.test/s/#must-not-cross",
       }).success,
     ).toBe(false);
@@ -916,7 +987,7 @@ describe("owner relay share discussion IPC contract", () => {
     }
   });
 
-  it("pins promotion and direct named revoke to closed permanent transitions", () => {
+  it("pins promotion and reversible direct named revoke to closed transitions", () => {
     const promotion = {
       workspaceId: "workspace-1",
       shareId: "share-1",
@@ -958,6 +1029,7 @@ describe("owner relay share discussion IPC contract", () => {
       generation: 3,
       status: "revoked" as const,
       revokedAtMs: 20,
+      undo: shareUndoReceipt,
     };
     expect(PromoteRelayShareGrantResult.parse(promoted)).toEqual(promoted);
     expect(RevokeRelayShareGrantResult.parse(revoked)).toEqual(revoked);
@@ -969,6 +1041,16 @@ describe("owner relay share discussion IPC contract", () => {
       ok: true,
       ...revoked,
     });
+    const { undo: _undo, ...withoutUndo } = revoked;
+    for (const [schema, base] of [
+      [RevokeRelayShareGrantResult, withoutUndo],
+      [RelayShareGrantRevokeResponse, { ok: true, ...withoutUndo }],
+    ] as const) {
+      expect(schema.safeParse(base).success).toBe(false);
+      for (const undo of malformedShareUndoReceipts) {
+        expect(schema.safeParse({ ...base, undo }).success).toBe(false);
+      }
+    }
     expect(
       RelayShareGrantPromotionResponse.safeParse({
         ok: true,
@@ -985,6 +1067,7 @@ describe("owner relay share discussion IPC contract", () => {
     ).toBe(false);
     for (const [schema, malformed] of [
       [PromoteRelayShareGrantResult, { ...promoted, ok: true }],
+      [PromoteRelayShareGrantResult, { ...promoted, undo: shareUndoReceipt }],
       [PromoteRelayShareGrantResult, { ...promoted, status: "revoked" }],
       [PromoteRelayShareGrantResult, { ...promoted, access: "owner" }],
       [PromoteRelayShareGrantResult, { ...promoted, parentGrantId: "link-grant-1" }],
@@ -4362,4 +4445,21 @@ describe("share changes IPC contract", () => {
       WithdrawShareChangesPayload.parse({ workspaceId: "ws-1", proposalId: "p".repeat(129) }),
     ).toThrow();
   });
+});
+
+it("accepts expanded Unicode slugs up to 200 UTF-8 bytes", () => {
+  const record = { id: "channel-unicode", name: "İ".repeat(60), slug: "i\u0307".repeat(60), kind: "channel", createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0 };
+  expect(ChatChannelRecord.safeParse(record).success).toBe(true);
+  expect(ChatChannelRecord.safeParse({ ...record, slug: "界".repeat(67) }).success).toBe(false);
+});
+
+it("uses the engine slug byte bound in feed, mentions, and graph results", () => {
+  const feedChannel = ChatFeedItemRecord.shape.channel.unwrap();
+  const mentionChannel = ChatFileMentionRecord.pick({ channelSlug: true });
+  for (const [slug, valid] of [["i\u0307".repeat(60), true], ["a".repeat(200), true], ["界".repeat(67), false]] as const) {
+    expect(feedChannel.safeParse({ id: "channel", name: "Group", slug, kind: "channel" }).success).toBe(valid);
+    expect(mentionChannel.safeParse({ channelSlug: slug }).success).toBe(valid);
+    const graph = { nodes: [{ path: "chat-thread/thread", title: "Thread", outgoing: 0, incoming: 0, kind: "chat-thread", threadId: "thread", channelSlug: slug }], edges: [], unresolvedLinks: 0, scannedFileCount: 0, omittedFileCount: 0, truncatedFileCount: 0 };
+    expect(WorkspaceGraphResult.safeParse(graph).success).toBe(valid);
+  }
 });

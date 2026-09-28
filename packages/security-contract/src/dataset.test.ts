@@ -84,6 +84,28 @@ describe("dataset publication binding", () => {
     }
     expect(() => parseDatasetDefinition({ ...value, operations: [{ ...value.operations[0], reversible: false }] })).toThrow();
   });
+  it("accepts an action whose reverse is an action that changes records, in the same dataset", () => {
+    const value = definition();
+    const settle = { operationId: id(8), name: "settle", label: "Settle", tableId: id(2), kind: "action" as const, access: "owner" as const, readOnly: false, fieldIds: [id(4)] };
+    const unsettle = { ...settle, operationId: id(9), name: "unsettle", label: "Unsettle" };
+    const withActions = (...operations: DatasetDefinition["operations"]) => ({ ...value, operations: [...value.operations, ...operations] });
+    expect(parseDatasetDefinition(withActions({ ...settle, reversedBy: "unsettle" }, unsettle)).operations[3]!.reversedBy).toBe("unsettle");
+    // An action may reverse itself, as a toggle does.
+    expect(parseDatasetDefinition(withActions({ ...settle, reversedBy: "settle" })).operations[3]!.reversedBy).toBe("settle");
+    for (const refused of [
+      withActions({ ...settle, reversedBy: "gone" }),
+      withActions({ ...settle, reversedBy: "list" }),
+      withActions({ ...settle, reversedBy: "unsettle" }, { ...unsettle, readOnly: true }),
+      withActions({ ...settle, readOnly: true, reversedBy: "settle" }),
+      withActions({ ...settle, reversedBy: "a.__proto__" }),
+      { ...value, operations: [{ ...value.operations[0]!, reversedBy: "submit" }, ...value.operations.slice(1)] },
+    ]) expect(() => parseDatasetDefinition(refused)).toThrow();
+    // A reverse is part of the approved contract, so changing it changes access.
+    const before = revision(), after = revision();
+    before.definition = withActions({ ...settle, reversedBy: "unsettle" }, unsettle);
+    after.definition = withActions(settle, unsettle);
+    expect(datasetRevisionsPreserveAccess(before, after)).toBe(false);
+  });
   it("accepts archived owner metadata with no runnable actions but still validates its fields", () => {
     const approved = revision();
     const archived = { datasetId: approved.datasetId, name: approved.definition.name, revision: 1, revisionSha256: approved.revisionSha256,

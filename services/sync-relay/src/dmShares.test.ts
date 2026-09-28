@@ -490,7 +490,7 @@ describe("DM grants over the relay", () => {
     expect(bucketProbe.status).toBe(404);
   });
 
-  it("closes a revoked participant's access on the next fetch and append, byte-identically to never-existed", async () => {
+  it("explains removal to a revoked participant on fetch and append while refusing strangers opaquely", async () => {
     const h = handler(await testStorage());
     await createWorkspace(h);
     await appendOwnerOps(h, [dmChannelCreate(), dmThreadCreate(), dmMessage("hello bob")]);
@@ -509,11 +509,14 @@ describe("DM grants over the relay", () => {
     const absentLog = await denialBytes(
       await h(request(MEMBER, "/sync/shares/never-existed/log?since=0")),
     );
-    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(absent);
+    const removed = `404:${JSON.stringify({ok: false, error: "The owner removed your access.", code: "share_access_removed"})}`;
+    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(removed);
+    expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}`)))).toBe(absent);
     expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`)))).toBe(
-      absentLog,
+      removed,
     );
-    expect((await memberAppend(h, shareId, [memberMessage(1)])).status).toBe(404);
+    expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`)))).toBe(absentLog);
+    expect(await denialBytes(await memberAppend(h, shareId, [memberMessage(1)]))).toBe(removed);
 
     // The revoked DM disappears from the member's received listing.
     const listing = await json(await h(request(MEMBER, "/sync/shares")));

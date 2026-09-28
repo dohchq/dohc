@@ -175,6 +175,7 @@ export const CHANNELS = {
   listRelayShares: "desktop:list-relay-shares",
   getRelayReceivedShare: "desktop:get-relay-received-share",
   revokeRelayShare: "desktop:revoke-relay-share",
+  undoRelayShare: "desktop:undo-relay-share",
   createRelayShareLink: "desktop:create-relay-share-link",
   addRelayShareLink: "desktop:add-relay-share-link",
   listRelayShareLinks: "desktop:list-relay-share-links",
@@ -214,12 +215,8 @@ export const CHANNELS = {
   openSharedView: "desktop:open-shared-view",
   refreshSharedView: "desktop:refresh-shared-view",
   dismissShareSkips: "desktop:dismiss-share-skips",
-  // Automation failures (ADR 0008): the engine's failed claim rows minus
-  // what the owner acknowledged; the push poke tells the renderer to
-  // re-list.
-  listAutomationFailures: "desktop:list-automation-failures",
-  dismissAutomationFailure: "desktop:dismiss-automation-failure",
-  automationFailuresChanged: "desktop:automation-failures-changed",
+  // An automation claim failed or a retry queued one: run history reads again.
+  automationRunsChanged: "desktop:automation-runs-changed",
   // The crash report changed; the renderer reads it again.
   crashReportChanged: "desktop:crash-report-changed",
   noticesChanged: "desktop:notices-changed",
@@ -305,6 +302,7 @@ export const CHANNELS = {
   presenceCancel: "desktop:presence-cancel",
   getSyncStatus: "desktop:get-sync-status",
   retryOwnerLiveDelivery: "desktop:retry-owner-live-delivery",
+  retryFileRecovery: "desktop:retry-file-recovery",
   retryCloudSync: "desktop:retry-cloud-sync",
   rebuildEngineStore: "desktop:rebuild-engine-store",
   startAgentRun: "desktop:start-agent-run",

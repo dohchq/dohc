@@ -541,7 +541,7 @@ describe("AutomationScheduler with an automation host", () => {
     // where its own coverage does.
     time.advance(50 * MINUTE);
     host.runs = true;
-    scheduler.startedHere("ws", NINE + 10 * MINUTE);
+    scheduler.startedHere("ws", NINE + 10 * MINUTE, NINE + 10 * MINUTE);
     await idle(scheduler);
     expect(work.steps).toEqual([
       { automationId: hourly.automationId, run: [NINE + HOUR], throughMs: NINE + 80 * MINUTE },
@@ -559,9 +559,31 @@ describe("AutomationScheduler with an automation host", () => {
     await idle(scheduler);
     time.advance(50 * MINUTE);
     host.runs = true;
-    scheduler.startedHere("ws", null);
+    scheduler.startedHere("ws", null, NINE - 5 * HOUR);
     await idle(scheduler);
     expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [], throughMs: NINE + 80 * MINUTE }]);
+    scheduler.dispose();
+  });
+
+  it("starts without a release no earlier than the host's recorded progress", async () => {
+    // This computer's clock reads 9:59; an earlier host recorded 10:00:30.
+    const time = fakeClock(NINE + 59 * MINUTE);
+    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const host = movableHost();
+    const work = fakeSource([hourly], [markOf(hourly, NINE)]);
+    scheduler.add("ws", work.source, host);
+    await idle(scheduler);
+    host.runs = true;
+    scheduler.startedHere("ws", null, NINE + HOUR + 30_000);
+    await idle(scheduler);
+    time.advance(2 * MINUTE);
+    scheduler.wake();
+    await idle(scheduler);
+    expect(work.steps.flatMap((step) => step.run), "ten o'clock may have run there").toEqual([]);
+    time.advance(HOUR);
+    scheduler.wake();
+    await idle(scheduler);
+    expect(work.steps.flatMap((step) => step.run)).toEqual([NINE + 2 * HOUR]);
     scheduler.dispose();
   });
 
@@ -595,7 +617,7 @@ describe("AutomationScheduler with an automation host", () => {
     await idle(scheduler);
     // The last host ran ten o'clock and released at its own 10:00:30.
     host.runs = true;
-    scheduler.startedHere("ws", NINE + HOUR + 30_000);
+    scheduler.startedHere("ws", NINE + HOUR + 30_000, NINE + HOUR + 30_000);
     await idle(scheduler);
     time.advance(2 * MINUTE);
     scheduler.wake();

@@ -29,7 +29,7 @@ const SHARE_ID = "share-link-handoff";
  const HANDOFF_TTL_MS = 5 * 60 * 1_000;
 const GENERIC_REFUSAL = {
   status: 404,
-  body: '{"ok":false,"error":"not found","code":"not_found"}',
+  body: '{"ok":false,"error":"not found"}',
 };
 
 afterEach(async () => {
@@ -261,8 +261,8 @@ describe("single-use authenticated link handoff", () => {
     expect(counted.redeems).toHaveLength(1);
 
     expect(await serialized(await h(redeemRequest(RECIPIENT, codes[1]!.code)))).toEqual({
-      status: 429,
-      body: '{"ok":false,"error":"too many link reads","code":"link_read_rate_limited"}',
+      status: 404,
+      body: '{"ok":false,"error":"not found"}',
     });
     expect(counted.probes).toHaveLength(1);
     expect(counted.redeems).toHaveLength(1);
@@ -362,7 +362,7 @@ describe("single-use authenticated link handoff", () => {
     expect((await state.h(handoffRequest(state.capability))).status).toBe(200);
     expect(await serialized(await state.h(handoffRequest(state.capability)))).toEqual({
       status: 429,
-      body: '{"ok":false,"error":"too many link reads","code":"link_read_rate_limited"}',
+      body: '{"ok":false,"error":"This link has reached its request limit. Try again later.","code":"link_read_rate_limited"}',
     });
     expect(codeCount(database)).toBe(1);
 
@@ -1076,7 +1076,7 @@ describe("single-use authenticated link handoff", () => {
     await expectGeneric(
       await state.h(redeemRequest(RECIPIENT, minted.code, { accountId: "victim" })),
     );
-    expect((await state.h(redeemRequest(null, minted.code))).status).toBe(401);
+    expect((await state.h(redeemRequest(null, minted.code))).status).toBe(404);
 
     const redeemed = await state.h(redeemRequest(RECIPIENT, minted.code));
     expect(redeemed.status).toBe(200);

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
-import type { AutomationRunSettledEvent, AutomationRunWaitingEvent } from "../../ipc/bridgeContract";
+import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
+import type { AutomationRunSettledEvent } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
 // Button fields for one Collection in one window: what each button shows,
@@ -49,12 +50,6 @@ interface Run {
 
 type Outcome = Pick<AutomationRunSettledEvent, "outcome" | "error">;
 
-const WAITING: Record<AutomationRunWaitingEvent["reason"], string> = {
-  roster: "Waiting to check who can edit this Collection.",
-  held: "Waiting for someone who can edit this Collection to allow a step.",
-  busy: "Waiting for other automations to finish.",
-  session: "Sign in to send this automation's chat messages.",
-};
 // Events that arrive before their press answer; only the newest are kept.
 const EARLY_EVENTS = 20;
 // Idle stores the window keeps for Collections it showed before.
@@ -168,10 +163,10 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     if (closed || event.workspaceId !== workspaceId) return;
     const found = find(event.claimId);
     if (!found) {
-      remember(earlyWaits, event.claimId, WAITING[event.reason]);
+      remember(earlyWaits, event.claimId, PRESS_WAITING[event.reason]);
       return;
     }
-    found[1].waiting = WAITING[event.reason];
+    found[1].waiting = PRESS_WAITING[event.reason];
     changed(found[0]);
   });
 
@@ -232,7 +227,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
      * Presses a button on one record. The press id stays with this press, so
      * Try again after a lost answer sends the same press, not a second one.
      */
-    async press(field: string, record: PressedRecord, pressId: string = crypto.randomUUID()): Promise<void> {
+    async press(field: string, record: PressedRecord, pressId: string = crypto.randomUUID(), confirmed: readonly string[] = []): Promise<void> {
       const key = runKey(field, record.id);
       if (closed || runs.has(key)) return;
       const state = states?.get(field);
@@ -241,7 +236,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       notes.delete(key);
       changed(key);
       try {
-        const result = await bridge().pressAutomationButton({ workspaceId, ...of, field, recordId: record.id, pressId });
+        const result = await bridge().pressAutomationButton({ workspaceId, ...of, field, recordId: record.id, pressId, ...("datasetId" in of ? { confirmed: [...confirmed] } : {}) });
         if (closed) return;
         if (result.busy) {
           notes.set(key, result.reason);
@@ -265,7 +260,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       } catch (error) {
         if (closed) return;
         finish(key);
-        report().onError(`${field} did not start.`, error, () => void live()?.press(field, record, pressId));
+        report().onError(`${field} did not start.`, error, () => void live()?.press(field, record, pressId, confirmed));
       }
     },
 

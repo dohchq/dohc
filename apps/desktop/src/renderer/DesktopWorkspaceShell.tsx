@@ -1,4 +1,4 @@
-import { AgentSettingsContext } from "./workbench/AgentBadge";
+import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { hasBlockingModal } from "./modalFocus";
@@ -71,11 +71,9 @@ import {
   DEFAULT_SIDEBAR_SETTINGS,
   type DesktopUserSettings,
 } from "../settings/userSettings";
-import { useAutomationFailures } from "./shell/useAutomationFailures";
 import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
-import { useAutomationRetry } from "./collections/useAutomationRetry";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
@@ -83,8 +81,11 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
+import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
+import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
+import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -161,7 +162,11 @@ import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 // user clicked to open the panel — queries arrived with their first letters
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "./workbench/SearchView";
+import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { SidePanel } from "./workbench/SidePanel";
+import { MoreMenu } from "./ui/MoreMenu";
+import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
+import { useAskAgent } from "./shell/useAskAgent";
 import { collectionAutomationOf, NoticeCenter } from "./workbench/NoticeCenter";
 import { WorkspaceSyncStatus } from "./workbench/WorkspaceSyncStatus";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -587,6 +592,8 @@ export function DesktopWorkspaceShell(props: {
   // to reopen the connection dialog, and cleared when that dialog closes.
   const [cloudRetryServerUrl, setCloudRetryServerUrl] = useState("");
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
+  // The part a Customize… command opened Settings for, if one did.
+  const [settingsFocus, setSettingsFocus] = useState<CustomizePart | null>(null);
   // The owner's live-document list, holding the workspace it was opened for
   // rather than a bare flag. The render below only matches the current
   // workspace, so a switch cannot leave the previous workspace's list — or
@@ -619,10 +626,21 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const openSettings = useCallback(
-    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
+    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => {
+      setSettingsFocus(null);
+      setSettingsSection(section);
+    },
     [],
   );
-  const closeSettings = useCallback(() => setSettingsSection(null), []);
+  const customize = useCallback((part: CustomizePart) => {
+    setSettingsFocus(part);
+    setSettingsSection(CUSTOMIZE_TARGETS[part].section);
+  }, []);
+  const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
+  const closeSettings = useCallback(() => {
+    setSettingsSection(null);
+    setSettingsFocus(null);
+  }, []);
 
   const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
     props.workspace.workspaceId,
@@ -631,6 +649,9 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const workspaceId = props.workspace.workspaceId;
+  const focusRoot = useRef<HTMLDivElement>(null);
+  useFocusReturn(true, focusRoot, () => document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'));
+  useFocusSurface(focusRoot, () => null);
   // Read by callbacks that outlive a render: the global key handler and a
   // slow update check must not act for a workspace this window has left.
   const workspaceIdRef = useRef(workspaceId);
@@ -789,6 +810,9 @@ export function DesktopWorkspaceShell(props: {
     clearSearchError,
     reportSyncFailure,
     clearSyncFailure,
+    reportDriveLimit,
+    reportKeptFiles,
+    reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -801,6 +825,13 @@ export function DesktopWorkspaceShell(props: {
     runShellErrorAction,
   } = useShellError(workspaceId);
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
+  // Share removals from Chats, Settings and the share dialog: one notice
+  // with Undo, held here so it outlives the surface that removed the access.
+  const shareRemovals = useShareRemovalNotices({
+    workspaceId,
+    showSuccessNotice,
+    reportShellFailure,
+  });
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
   // polls and subscriptions off onError, so a fresh arrow per shell render
@@ -2401,6 +2432,19 @@ export function DesktopWorkspaceShell(props: {
     setChatsThreadRevision((current) => current + 1);
   }, []);
   const openChatsNavInTab = chatEditors.open;
+  const askAgent = useAskAgent({
+    workspaceId,
+    agentSetup,
+    chatsAvailable: captureAvailable,
+    openChat: chatEditors.open,
+    onOpenChat: closeSettings,
+    onSetUp: openAgentSettings,
+    reportShellError,
+  });
+  const customizeContext = useMemo(
+    () => ({ customize, ...(askAgent ? { askAgent } : {}) }),
+    [askAgent, customize],
+  );
   const openChatsTab = useCallback(() => {
     openChatsNavInTab({ level: "feed" });
   }, [openChatsNavInTab]);
@@ -3873,27 +3917,6 @@ export function DesktopWorkspaceShell(props: {
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [props.refreshWorkspaceRegistry, workspaceId]);
   const {
-    automationFailures,
-    dismissAutomationFailure,
-    reloadAutomationFailures,
-    automationFailureToast,
-    hideAutomationFailureToast,
-  } = useAutomationFailures(
-    workspaceId,
-    workspaceIsReady,
-    reportShellError,
-  );
-  // A notice's Try again. Main wakes the drain; the notices read again here
-  // too, because a repeated retry sends no failure event.
-  const rereadAutomationFailures = useCallback(() => {
-    void reloadAutomationFailures().catch(() => undefined);
-  }, [reloadAutomationFailures]);
-  const automationFailureRetry = useAutomationRetry({
-    workspaceId,
-    onError: reportShellError,
-    onQueued: rereadAutomationFailures,
-  });
-  const {
     automationHolds, automationHoldsUnreadable, allowAutomationHold, resetAutomationHolds, revealAutomationHolds,
     automationStops, dismissAutomationStops,
   } = useAutomationHolds(
@@ -4161,11 +4184,12 @@ export function DesktopWorkspaceShell(props: {
     reloadShareProposals,
     workspaceIsReady,
   ]);
-  const sentNoticeProps = useSentNoticeProps({
+  const { retryDialog: sentNoticeRetryDialog, ...sentNoticeProps } = useSentNoticeProps({
     sentNotices: props.sentNotices,
     workspaceId,
     workspaces: props.workspaces,
     openFile,
+    openAutomation,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,
@@ -4339,10 +4363,6 @@ export function DesktopWorkspaceShell(props: {
         })),
     [props.workspaces],
   );
-  const openAgentSettings = useCallback(
-    () => openSettings("agents"),
-    [openSettings],
-  );
   // The add-agent form writes the same settings file the dialog does. The
   // root hears the write through the settings-changed broadcast and the
   // agent setup summary follows.
@@ -4362,6 +4382,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportFailureMessage,
+    shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
     collaboration: chatCollaboration,
@@ -4396,6 +4417,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportFailureMessage,
+    shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
     collaboration: null,
@@ -4578,21 +4600,60 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
-  // A dismissed sync failure stays dismissed until it ends, across remounts.
+  const driveLimitNotice = useDriveLimitNotice({
+    workspaceId,
+    unavailable: syncStatus?.atomicPlacementUnavailable === true,
+    report: reportDriveLimit,
+  });
+  const revealRecoveryWorkspace = useCallback(() => {
+    const askedFor = workspaceId;
+    void bridge().revealWorkspaceFolder({ workspaceId: askedFor, recoveryCopies: true }).catch((error) => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportShellError("Could not show the recovery folder.", error);
+    });
+  }, [workspaceId, reportShellError]);
+  const retryFileRecovery = useCallback(() => {
+    const askedFor = workspaceId;
+    if (workspaceIdRef.current !== askedFor) return;
+    void bridge().retryFileRecovery({ workspaceId: askedFor }).then(() => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportRecoveryUnavailable(false, () => undefined, revealRecoveryWorkspace);
+    }).catch((error) => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportShellError("dohc could not retry file recovery.", error, retryFileRecovery, "file-recovery-unavailable");
+    });
+  }, [workspaceId, reportRecoveryUnavailable, revealRecoveryWorkspace, reportShellError]);
+  useEffect(() => {
+    if (syncStatus?.recoveryUnavailable === undefined) return;
+    reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
+  }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
+  const keptFilesNotice = useKeptFilesNotice({
+    workspaceId,
+    paths: syncStatus?.keptFiles,
+    report: reportKeptFiles,
+    openFolder: revealRecoveryWorkspace,
+  });
+  // A dismissed sync failure stays dismissed until it ends, and a dismissed
+  // drive limit for the session, across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
-      if (shellErrors.find((error) => error.id === id)?.kind === "cloud-sync") {
-        syncFailureNotice.noteDismissed();
-      }
+      const kind = shellErrors.find((error) => error.id === id)?.kind;
+      if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
+      if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
+      if (kind === "kept-files") keptFilesNotice.noteDismissed();
       dismissShellError(id);
     },
-    [dismissShellError, shellErrors, syncFailureNotice],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, syncFailureNotice],
   );
   return (
-    <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
+    <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
+    <CustomizeContext.Provider value={customizeContext}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <div
       data-testid="workspace-shell"
+      ref={focusRoot}
+      tabIndex={-1}
+      data-focus-surface="workspace"
       // Flips to "true" only once openWorkspace has resolved — which in main
       // awaits the file watcher's initial scan (workspaceActivity.open races
       // handle.ready). The shell element itself mounts immediately, so a test
@@ -4858,13 +4919,7 @@ export function DesktopWorkspaceShell(props: {
                 : {
                     onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
                   })}
-              automationFailures={automationFailures}
-              onDismissAutomationFailure={dismissAutomationFailure}
               {...crashReportNotice}
-              onRetryAutomationFailure={automationFailureRetry.retry}
-              onOpenAutomation={openAutomation}
-              automationFailureToast={automationFailureToast}
-              onHideAutomationFailureToast={hideAutomationFailureToast}
               automationHolds={automationHolds}
               onAllowAutomationHold={allowAutomationHold}
               automationHoldsUnreadable={automationHoldsUnreadable}
@@ -4889,40 +4944,53 @@ export function DesktopWorkspaceShell(props: {
             width={wb.sidebarWidth}
             onWidthChange={(width) => mutateWb((state) => setSidebarWidth(state, width))}
             actions={
-              wb.activeView === "history" ? (
-                <button
-                  type="button"
-                  data-testid="history-open-tab"
-                  aria-label="Open history in tab"
-                  title="Open history in tab"
-                  onClick={openHistoryTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-                >
-                  <Maximize2 size={13} aria-hidden />
-                </button>
-              ) : wb.activeView === "graph" ? (
-                <button
-                  type="button"
-                  data-testid="graph-open-tab"
-                  aria-label="Open graph in tab"
-                  title="Open graph in tab"
-                  onClick={openGraphTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-                >
-                  <Maximize2 size={13} aria-hidden />
-                </button>
-              ) : wb.activeView === "sites" ? (
-                <button
-                  type="button"
-                  data-testid="sites-refresh"
-                  aria-label="Refresh apps"
-                  title="Refresh apps"
-                  onClick={refreshSites}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-                >
-                  <RefreshCw size={13} aria-hidden />
-                </button>
-              ) : undefined
+              <>
+                {wb.activeView === "history" ? (
+                  <button
+                    type="button"
+                    data-testid="history-open-tab"
+                    aria-label="Open history in tab"
+                    title="Open history in tab"
+                    onClick={openHistoryTab}
+                    className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+                  >
+                    <Maximize2 size={13} aria-hidden />
+                  </button>
+                ) : wb.activeView === "graph" ? (
+                  <button
+                    type="button"
+                    data-testid="graph-open-tab"
+                    aria-label="Open graph in tab"
+                    title="Open graph in tab"
+                    onClick={openGraphTab}
+                    className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+                  >
+                    <Maximize2 size={13} aria-hidden />
+                  </button>
+                ) : wb.activeView === "sites" ? (
+                  <button
+                    type="button"
+                    data-testid="sites-refresh"
+                    aria-label="Refresh apps"
+                    title="Refresh apps"
+                    onClick={refreshSites}
+                    className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+                  >
+                    <RefreshCw size={13} aria-hidden />
+                  </button>
+                ) : null}
+                <MoreMenu
+                  label="Sidebar actions"
+                  testId="side-panel-menu"
+                  items={[
+                    { label: "Customize…", onSelect: () => customize("sidebar") },
+                    // Pinned apps open here. The Apps view pins one or makes one.
+                    ...(wb.activeView === "sites"
+                      ? []
+                      : [{ label: "Add an app here…", onSelect: () => mutateWb((state) => setView(state, "sites")) }]),
+                  ]}
+                />
+              </>
             }
           >
             {/* One island: a crash inside any panel view (or a failed lazy
@@ -4956,6 +5024,7 @@ export function DesktopWorkspaceShell(props: {
                   onOpenPath={openPathWithHeading}
                   onCreateFirstApp={createFirstApp}
                   receivedShareWorkspace={shareView !== null}
+                  {...(askAgent ? { askAgent } : {})}
                 />
               </Suspense>
             ) : wb.activeView === "history" ? (
@@ -5214,6 +5283,7 @@ export function DesktopWorkspaceShell(props: {
                     onDraftsChange={chatEditors.get(tabPath).onDraftsChange}
                     initialNav={chatEditors.get(tabPath).nav}
                     initialDrafts={chatEditors.get(tabPath).drafts}
+                    focusNewPost={chatEditors.get(tabPath).focusNewPost}
                     editorTabPath={tabPath}
                     onOpenInTab={openChatsNavInTab}
                     variant="page"
@@ -5438,20 +5508,27 @@ export function DesktopWorkspaceShell(props: {
             tab={chatsPanelActiveTab}
             onTabChange={setChatsPanelTab}
             actions={
-              captureAvailable &&
-              chatsPanelActiveTab === "all" &&
-              !isChatsTabPath(focusedTabPath) ? (
-                <button
-                  type="button"
-                  data-testid="chats-open-tab"
-                  aria-label="Open chats in tab"
-                  title="Open chats in tab"
-                  onClick={openChatsTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-                >
-                  <Maximize2 size={13} aria-hidden />
-                </button>
-              ) : undefined
+              <>
+                {captureAvailable &&
+                chatsPanelActiveTab === "all" &&
+                !isChatsTabPath(focusedTabPath) ? (
+                  <button
+                    type="button"
+                    data-testid="chats-open-tab"
+                    aria-label="Open chats in tab"
+                    title="Open chats in tab"
+                    onClick={openChatsTab}
+                    className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+                  >
+                    <Maximize2 size={13} aria-hidden />
+                  </button>
+                ) : null}
+                <MoreMenu
+                  label="Chats actions"
+                  testId="chats-panel-menu"
+                  items={[{ label: "Customize…", onSelect: () => customize("chats") }]}
+                />
+              </>
             }
           >
             {/* Chats island: a crash in either panel view stays contained;
@@ -5708,7 +5785,7 @@ export function DesktopWorkspaceShell(props: {
         </Overlay>
       ) : null}
 
-      {automationFailureRetry.dialog}
+      {sentNoticeRetryDialog}
 
       {engineRebuild ? (
         <Overlay
@@ -5976,9 +6053,12 @@ export function DesktopWorkspaceShell(props: {
               syncStatus ? !statusSaysNoRecorder(syncStatus) : undefined
             }
             initialSection={settingsSection}
+            {...(settingsFocus ? { focus: CUSTOMIZE_TARGETS[settingsFocus] } : {})}
+            {...(askAgent ? { askAgent } : {})}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
             onWorkspaceFilesChanged={onSettingsFilesChanged}
+            shareRemovals={shareRemovals}
             onOpenCloud={() => {
               closeSettings();
               setCloudOpen(true);
@@ -6019,6 +6099,7 @@ export function DesktopWorkspaceShell(props: {
               workspaceId={workspaceId}
               target={shareTarget}
               onClose={() => setShareTarget(null)}
+              shareRemovals={shareRemovals}
             />
           </Suspense>
         </Overlay>
@@ -6071,6 +6152,7 @@ export function DesktopWorkspaceShell(props: {
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
     </CollectionFieldMarksProvider>
-    </AgentSettingsContext.Provider>
+    </CustomizeContext.Provider>
+    </AgentSettingsProvider>
   );
 }

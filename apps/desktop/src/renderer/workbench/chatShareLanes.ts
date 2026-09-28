@@ -14,6 +14,9 @@ import type {
 export interface ShareListing {
   granted: ChatChannelShareGrantRow[];
   received: ChatChannelShareReceivedRow[];
+  // Share ids whose owner removed this account, as the relay confirms. The
+  // only source for saying so.
+  removed: string[];
   // One answer per channel the read covered. A channel the read did not cover
   // is absent, which is unknown, and unknown locks it — see channelIsLocked.
   joined: JoinedChannelAnswer[];
@@ -197,6 +200,7 @@ export function mergeShareLanes(
     joined: lanes.joined ? lanes.joined.write(current.joined) : current.joined,
     granted: lanes.relay ? next.granted : current.granted,
     received: lanes.relay ? next.received : current.received,
+    removed: lanes.relay ? next.removed : current.removed,
     sessionKey: lanes.relay ? next.sessionKey : current.sessionKey,
   };
 }

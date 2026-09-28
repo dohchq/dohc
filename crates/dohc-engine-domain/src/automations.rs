@@ -2365,7 +2365,8 @@ pub const AUTOMATION_SCHEDULE_KEY_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// normally runs one.
 pub const MAX_AUTOMATION_SCHEDULE_RUNS: usize = 100;
 
-/// A person pressed a Button field on a record.
+/// A person pressed a Button field on a record, themselves or through an
+/// agent acting for them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationPress {
     /// The pressing window's id for this press. A press sent again after a
@@ -2376,6 +2377,21 @@ pub struct AutomationPress {
     pub record_id: String,
     /// The person who pressed. The run acts for them.
     pub pressed_by: String,
+    pub by: PressActor,
+}
+
+/// Who made a press for the person who pressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PressActor {
+    Human,
+    /// An agent acting for the person, named by its origin id. A press
+    /// claims at the depth of the agent's run, as the agent's own writes do,
+    /// so an agent an automation woke cannot start the chain over by
+    /// pressing; at the cap the press stops at once.
+    Agent {
+        origin_id: String,
+        depth: u32,
+    },
 }
 
 /// What `automations.press` did.
@@ -2430,6 +2446,17 @@ pub fn press_automation_in_tx(
         &press.pressed_by,
         "The person who pressed the button is invalid.",
     )?;
+    let (actor_kind, author_origin_id, depth) = match &press.by {
+        PressActor::Human => (ChangeActorKind::Human, None, 0),
+        PressActor::Agent { origin_id, depth } => (
+            ChangeActorKind::Agent,
+            Some(normalize_automation_identifier(
+                origin_id,
+                "The agent that pressed the button is invalid.",
+            )?),
+            (*depth).min(AUTOMATION_CHAIN_DEPTH_CAP),
+        ),
+    };
     let another_press = DomainError::InvalidInput {
         reason: "This press id already names another person's press, or another button or record.",
     };
@@ -2512,15 +2539,15 @@ pub fn press_automation_in_tx(
                 trigger: AutomationTrigger::Key { key },
                 record_id: Some(record_id.as_str()),
                 collection_path,
-                depth: 0,
+                depth,
                 change: AutomationChange {
                     kind: AutomationChangeKind::Button,
-                    author_origin_id: None,
-                    actor_kind: Some(ChangeActorKind::Human),
+                    author_origin_id,
+                    actor_kind: Some(actor_kind),
                     on_behalf_of: Some(pressed_by.clone()),
                 },
                 fields: AutomationFieldFacts::default(),
-                chain_stopped: false,
+                chain_stopped: depth >= AUTOMATION_CHAIN_DEPTH_CAP,
             };
             let claim = insert_claims(
                 conn,

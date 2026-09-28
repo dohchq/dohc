@@ -260,6 +260,7 @@ const bridge: DohcDesktopBridge = {
   getRelayReceivedShare: (payload) =>
     ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
   revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
+  undoRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.undoRelayShare, payload),
   createRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
   addRelayShareLink: (payload) =>
@@ -313,10 +314,6 @@ const bridge: DohcDesktopBridge = {
   openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
   refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
   dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
-  listAutomationFailures: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listAutomationFailures, payload),
-  dismissAutomationFailure: (payload) =>
-    ipcRenderer.invoke(CHANNELS.dismissAutomationFailure, payload),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
   listCollectionAutomationRuns: (payload) =>
@@ -359,7 +356,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.findDatasetCollection, payload),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
-  onAutomationFailuresChanged: (
+  onAutomationRunsChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {
     // Validate at the boundary like every main-sent event: the listener
@@ -376,9 +373,9 @@ const bridge: DohcDesktopBridge = {
         });
       }
     };
-    ipcRenderer.on(CHANNELS.automationFailuresChanged, handler);
+    ipcRenderer.on(CHANNELS.automationRunsChanged, handler);
     return () =>
-      ipcRenderer.removeListener(CHANNELS.automationFailuresChanged, handler);
+      ipcRenderer.removeListener(CHANNELS.automationRunsChanged, handler);
   },
   ...operationBridge(crashReportOperations, invoke),
   onCrashReportChanged: (listener) =>
@@ -515,6 +512,7 @@ const bridge: DohcDesktopBridge = {
   presenceCancel: (payload) => ipcRenderer.invoke(CHANNELS.presenceCancel, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
   retryOwnerLiveDelivery: (payload) => ipcRenderer.invoke(CHANNELS.retryOwnerLiveDelivery, payload),
+  retryFileRecovery: (payload) => ipcRenderer.invoke(CHANNELS.retryFileRecovery, payload),
   retryCloudSync: (payload) => ipcRenderer.invoke(CHANNELS.retryCloudSync, payload),
   rebuildEngineStore: (payload) =>
     ipcRenderer.invoke(CHANNELS.rebuildEngineStore, payload),

@@ -10,9 +10,11 @@ import { createDatasetJournal, type DatasetScope, type JournalDb } from "./journ
 import { decodeChangeset } from "./dataset-change-facts.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost, type DatasetAuthority } from "./dataset-host.ts";
+import type { JsonValue } from "./protocol.ts";
 import {
   createDatasetAutomationClaims,
   DATASET_AUTOMATION_ATTRIBUTED_REVISIONS,
+  DATASET_AUTOMATION_CHAIN_DEPTH,
   DATASET_AUTOMATION_CHAIN_STOPPED,
   DATASET_AUTOMATION_CLAIM_LIMIT,
   DATASET_AUTOMATION_CLAIMS_PER_COMMIT,
@@ -518,6 +520,25 @@ it("claims a press for the person who pressed, answers the same press sent again
   expect(f.charged).toBe(retained(f.db));
 });
 
+it("claims an agent's press for its person at the agent run's depth, and stops it at once at depth 4", () => {
+  const f = ledger();
+  const press = presses(f);
+  f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  f.commit("INSERT INTO tasks VALUES('b','Open','')");
+  const agent = { ...ANA, agent: { depth: 2 } };
+  const pressed = press("press-1", "a", agent);
+  expect(pressed).toMatchObject({ kind: "claimed", claim: { state: "pending", depth: 2, actor: agent } });
+  // The run acts for Ana, so her own press joins it.
+  expect(press("press-2", "a", ANA)).toMatchObject({ kind: "joined" });
+  const stopped = press("press-3", "b", { ...ANA, agent: { depth: DATASET_AUTOMATION_CHAIN_DEPTH + 2 } });
+  expect(stopped).toMatchObject({ kind: "claimed", claim: { state: "failed", attempts: 0, depth: DATASET_AUTOMATION_CHAIN_DEPTH,
+    error: DATASET_AUTOMATION_CHAIN_STOPPED } });
+  // A stop counts as a failure, as a commit's stop does.
+  expect(f.claims.failures(scope.workspaceId)).toEqual([expect.objectContaining({ claimId: stopped.kind === "busy" ? "" : stopped.claim.claimId, neverStarted: true })]);
+  expect(() => press("press-4", "b", { ...ANA, agent: { depth: -1 } })).toThrow("Invalid automation presser");
+  expect(f.charged).toBe(retained(f.db));
+});
+
 it("keeps a claim a remembered press names past the run history, until the press is 30 days old", () => {
   const f = ledger();
   const press = presses(f);
@@ -596,8 +617,8 @@ const hostDefinition: DatasetDefinition = {
 type Context = "owner" | "visitor" | { automationId: string; depth: number; visitor?: true } | { authority: DatasetAuthority };
 
 const hostSchema = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);";
-async function host(operationSource = hostSource) {
-  const revision = describeDatasetRevision({ definition: hostDefinition, revision: 1, schemaSql: hostSchema, operationSource });
+async function host(operationSource = hostSource, definition = hostDefinition) {
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: hostSchema, operationSource });
   const directory = mkdtempSync(join(tmpdir(), "dohc-automation-host-"));
   const db = new DatabaseSync(join(directory, "host.sqlite")); db.exec("PRAGMA journal_mode=WAL;");
   const transaction = transactions(db);
@@ -744,4 +765,29 @@ it("replays a receipt an automation wrote when the host still called it the owne
   expect(await f.invoke(before, CREATE, "step-1")).toMatchObject({ replayed: false });
   expect(await f.invoke({ automationId: "collection:signups#a", depth: 1 }, CREATE, "step-1")).toMatchObject({ replayed: true });
   expect(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_events").get()).toEqual({ count: 1 });
+});
+
+it("commits a reversible action only when it returns a bounded undo, and keeps no receipt for one it refuses", async () => {
+  const SETTLE = id(20);
+  const settle = { operationId: SETTLE, name: "settle", label: "Settle", tableId: ITEMS, kind: "action" as const, access: "owner" as const, readOnly: false, fieldIds: [id(14)], reversedBy: "settle" };
+  const f = await host(`globalThis.operations={
+    create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.value]);return {id:ctx.requestId};},
+    read(ctx){return ctx.db.query('SELECT id,value FROM items ORDER BY id');},
+    settle(ctx,input){
+      ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,'settled']);
+      if(input.shape==='none')return {id:ctx.requestId};
+      if(input.shape==='large')return {undo:'x'.repeat(20000)};
+      return {undo:{id:ctx.requestId}};
+    }
+  };`, { ...hostDefinition, operations: [...hostDefinition.operations, settle] });
+  const call = (input: JsonValue, idempotencyKey: string) => f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: f.revision.revisionSha256, operationId: SETTLE, input, idempotencyKey });
+  const events = () => f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_events").get();
+  for (const [shape, key] of [["none", "k-none"], ["large", "k-large"]] as const) {
+    await expect(call({ shape }, key)).rejects.toMatchObject({ refusal: { code: "undo_missing", message: "Settle is reversed by settle, so it must return undo: the input settle takes to reverse it, at most 16 KB." } });
+  }
+  expect(events()).toEqual({ count: 0 });
+  expect(await f.invoke("owner", READ, "read-1")).toMatchObject({ result: [] });
+  // The same key runs again once the action returns what it must: nothing was kept for it.
+  expect(await call({ shape: "ok" }, "k-none")).toMatchObject({ replayed: false, result: { undo: { id: expect.any(String) } } });
+  expect(events()).toEqual({ count: 1 });
 });

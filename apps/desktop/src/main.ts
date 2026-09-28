@@ -121,6 +121,7 @@ import {
   chatDispatchNoticeOperations,
   type ScheduleHostResult,
   type NoticeRef,
+  type NoticeRow,
   workspaceSearchOperations,
   workspaceVersionOperations,
 } from "./ipc/bridgeContract";
@@ -192,7 +193,6 @@ import {
   registerWorkspace,
   removeWorkspace,
   setWorkspaceRemote,
-  acknowledgeWorkspaceAutomationFailure,
   acknowledgeWorkspaceShareSkips,
   endWorkspaceShareView,
   setWorkspaceShareMounts,
@@ -201,10 +201,20 @@ import {
   setWorkspaceAutomationHost,
   setWorkspaceShareView,
   setWorkspaceSharedChannels,
+  reconcileWorkspaceRecipientShares,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
+import {
+  recipientShareNeedsRecheck,
+  readReceivedShareListing,
+} from "./workspaces/recipientShareReconciliation";
 import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
-import { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import {
+  CollectionAutomations,
+  type AutomationSwitchedOff,
+  type CollectionAutomationRetry,
+  type PressWaitReason,
+} from "@dohc/automation-executor/collection-automations";
 import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { AutomationScheduler } from "@dohc/automation-executor/automation-scheduler";
 import {
@@ -223,6 +233,16 @@ import { createRunNowIntents, type RunNowIntent } from "./automations/runNowInte
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
+import {
+  retryAutomationRun,
+  retryFromFailureNotice,
+  sendFailureNotices,
+  switchedOffNotice,
+  switcherNameFor,
+  whoChangedLast,
+  whoSwitchedOff,
+} from "./automations/automationNotices";
+import { automationFailedNoticeId } from "@dohc/automation-executor/automation-failed-notice";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import { resolveWorkspaceMetadataDir } from "./workspaces/workspaceMetadata";
@@ -306,7 +326,7 @@ import {
   WorkspaceActivityState,
 } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
-import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
+import { AuthoredTextChangedError, probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
@@ -384,6 +404,7 @@ import {
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
   writeWorkspaceText,
+  withOrderedWorkspaceTextPath,
 } from "./workspaces/workspaceAssets";
 import {
   createShareViewFiles,
@@ -597,12 +618,10 @@ function resourcesBasePath(): string {
     : join(desktopPackageRootInDev(), "resources");
 }
 
-// An automation claim failed (settled by this desktop's executor, or
-// inserted failed by the engine at the depth cap): poke the windows on that
-// workspace to re-read the failure notices. A poke, not the record — the
-// renderer re-lists through CHANNELS.listAutomationFailures, so nothing
-// here can go stale or leak across workspaces.
-function notifyAutomationFailuresChanged(workspaceId: string): void {
+// An automation claim failed or a retry queued one: poke the windows on
+// that workspace to read its run history again. A poke, not the record, so
+// nothing here can go stale or leak across workspaces.
+function notifyAutomationRunsChanged(workspaceId: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (
       rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
@@ -610,7 +629,7 @@ function notifyAutomationFailuresChanged(workspaceId: string): void {
     ) {
       continue;
     }
-    win.webContents.send(CHANNELS.automationFailuresChanged, { workspaceId });
+    win.webContents.send(CHANNELS.automationRunsChanged, { workspaceId });
   }
 }
 
@@ -1019,7 +1038,9 @@ type RelayShareRetainedDependentSetResult<T> =
 
 type RelayShareRetainedNotFoundResult<T> =
   | { kind: "success"; body: T }
-  | { kind: "missing" };
+  // `removed`: the relay said the owner removed this account's access, as
+  // opposed to a share it does not know.
+  | { kind: "missing"; removed: boolean };
 
 type RelayShareJsonOptions =
   | { retainDependentSetConflict: true }
@@ -1142,9 +1163,9 @@ async function relayShareJsonWithCredentials<T>(
       "retainNotFound" in options &&
       response.status === 404 &&
       data?.ok === false &&
-      data.code === "not_found"
+      (data.code === "not_found" || data.code === "share_access_removed")
     ) {
-      return { kind: "missing" };
+      return { kind: "missing", removed: data.code === "share_access_removed" };
     }
     throw new Error(relayShareErrorCopy(response.status, data));
   }
@@ -1158,6 +1179,53 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   await warmCredentialCache();
   const credentials = requireCredentials(cachedCredentials, RelaySessionError);
   return relayShareJsonWithCredentials(credentials, path, init);
+}
+
+// Every authenticated `/sync/shares` listing this app reads is applied to the
+// received-share records of every registered workspace it speaks for: an
+// ended record whose share is active again resumes, and the owner's confirmed
+// removals are recorded. See recipientShareReconciliation.ts.
+function reconcileReceivedShares(listing: unknown): void {
+  const parsed = readReceivedShareListing(listing);
+  const credentials = cachedCredentials;
+  if (!parsed || !credentials?.relayUrl) return;
+  for (const entry of listWorkspaces()) {
+    let changed = false;
+    try {
+      changed = reconcileWorkspaceRecipientShares(entry.workspaceId, parsed, credentials);
+    } catch (error) {
+      console.warn(`[desktop] received share reconciliation for ${entry.workspaceId}:`, error);
+    }
+    if (changed) notifyRenderer({ workspaceId: entry.workspaceId });
+  }
+}
+
+// A restored share must resume even if this device was offline during Undo.
+let removalRecheck: { generation: number; startedAt: number; pending: Promise<void> } | null = null;
+async function recheckRemovedShares(workspaceId: string): Promise<void> {
+  const entry = findWorkspace(workspaceId);
+  if (!entry || !recipientShareNeedsRecheck(entry)) return;
+  await warmCredentialCache();
+  const credentials = cachedCredentials;
+  if (!credentials?.relayUrl) return;
+  const generation = credentialCacheGeneration;
+  if (removalRecheck?.generation === generation && Date.now() - removalRecheck.startedAt < 30_000) {
+    return removalRecheck.pending;
+  }
+  const pending = (async () => {
+    try {
+      const listing = await awaitCredentialGeneration({
+        capturedGeneration: generation,
+        currentGeneration: () => credentialCacheGeneration,
+        run: () => relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares"),
+      });
+      reconcileReceivedShares(listing);
+    } catch (error) {
+      console.warn(`[desktop] share removal recheck for ${workspaceId}:`, error);
+    }
+  })();
+  removalRecheck = { generation, startedAt: Date.now(), pending };
+  await pending;
 }
 
 // Each open workspace's copy of the grants its owner gave, for the automation
@@ -1646,6 +1714,7 @@ const {
   notifyRenderer,
   projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
   linkedChatStoreFor,
+  recheckRemovedShares,
 });
 
 // The copyable MCP launch config for a workspace. The user's AI tool spawns the
@@ -2557,7 +2626,7 @@ async function syncWorkspaceForDispatch(
               // Guarded above: a shared view already returned false.
               shareView: false,
             },
-            { onCaptureOutcome: () => undefined },
+            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined },
             requireEngineSessions(),
           );
           if (!capture) return false;
@@ -3215,14 +3284,6 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
     await runNowIntents.remove(intent.notice);
     return "This workspace isn't on this computer. Run it from the computer that has it.";
   }
-  const dismissal = await noticeStore().dismissFirst(intent.notice, intent.account);
-  // The dismissal may have landed with its answer lost: the intent stays,
-  // and the next start or window focus asks again.
-  if (dismissal === "unanswered") return "dohc could not reach your server. It runs this once it does.";
-  if (dismissal === "not-first") {
-    await runNowIntents.remove(intent.notice);
-    return "This already ran from another computer.";
-  }
   await desktopEngine.startup;
   const release = await acquireDispatchRunActivity(workspace);
   try {
@@ -3232,6 +3293,21 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
     }
     automationHosts.open(workspace.workspaceId);
     await automations.open();
+    // Checked before the dismissal: a computer that cannot run it leaves
+    // the notice for one that can.
+    const refusal = await automations.runNowRefusal(intent.automationId);
+    if (refusal !== null) {
+      await runNowIntents.remove(intent.notice);
+      return refusal;
+    }
+    const dismissal = await noticeStore().dismissFirst(intent.notice, intent.account);
+    // The dismissal may have landed with its answer lost: the intent stays,
+    // and the next start or window focus asks again.
+    if (dismissal === "unanswered") return "dohc could not reach your server. It runs this once it does.";
+    if (dismissal === "not-first") {
+      await runNowIntents.remove(intent.notice);
+      return "This already ran from another computer.";
+    }
     if (!(await automations.runNow(intent.automationId, intent.notice.noticeId))) {
       return "dohc could not start the automation. Its engine did not answer.";
     }
@@ -3242,6 +3318,78 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
   } finally {
     await release();
   }
+}
+
+// Try again from a failed run's notice, on the computer that ran it. A
+// workspace no window has open opens the way a due schedule's does, and
+// stays open until the run settles.
+async function retryAutomationFromNotice(
+  notice: NoticeRow,
+  input: { automationId: string; claimId: string; startOver: boolean },
+): Promise<CollectionAutomationRetry> {
+  const workspace = notice.workspaceId !== null
+    ? findWorkspace(notice.workspaceId)
+    : listWorkspaces().find((entry) => entry.shareView?.shareId === notice.recipientShareId) ?? null;
+  if (!workspace) return { status: "refused", reason: "This workspace isn't on this computer anymore." };
+  await desktopEngine.startup;
+  const release = await acquireDispatchRunActivity(workspace);
+  const automations = withWorkspaceAttachment(workspace, (held) => held.state.collectionAutomations);
+  let result: CollectionAutomationRetry | null = null;
+  try {
+    if (!automations) return { status: "refused", reason: "dohc could not open this workspace to run the automation." };
+    await automations.open();
+    result = await automations.retry(input);
+    return result;
+  } finally {
+    if (automations && result?.status === "queued") {
+      void automations.idle().finally(release).catch((error: unknown) =>
+        console.warn(`[desktop] Try again in ${workspace.workspaceId}:`, error));
+    } else {
+      await release();
+    }
+  }
+}
+
+// Someone switched off an automation. The person who changed it last hears
+// who did, as History names them, unless they did it themselves. Only the
+// owner's computer keeps that History, and only a synced workspace has
+// anyone else to tell.
+async function sendSwitchedOffNotice(workspaceId: string, switched: AutomationSwitchedOff): Promise<void> {
+  const history = ownerHistory(workspaceId);
+  if (history === null) return;
+  const path = `${switched.collectionPath}/automations.yaml`;
+  const { capture, ownerUserId, grants } = history;
+  const found = await whoSwitchedOff(capture, { path, id: switched.id, ownerUserId });
+  if (found === null) return;
+  const switcherName = switcherNameFor({
+    switchedOffBy: found.switchedOffBy,
+    recipient: found.lastChangedBy,
+    ownerUserId,
+    ownerName: cachedPreferredName ?? null,
+    emailOf: (userId) => grants.find((grant) => grant.recipientUserId === userId && grant.recipientEmail !== null)?.recipientEmail ?? null,
+  });
+  const notice = switchedOffNotice({ workspaceId, switched, path, ...found, switcherName });
+  if (notice !== null) await noticeStore().postNotice(notice);
+}
+
+// Who changed an automation last, as the owner's History names them. Null
+// on any other computer, which does not keep who changed what.
+async function automationLastChangedBy(workspaceId: string, automationId: string): Promise<string | null> {
+  const history = ownerHistory(workspaceId);
+  const parsed = parseCollectionAutomationId(automationId);
+  if (history === null || parsed === null) return null;
+  return await whoChangedLast(history.capture, {
+    path: `${parsed.collectionPath}/automations.yaml`, id: parsed.id, ownerUserId: history.ownerUserId,
+  });
+}
+
+// The History of a synced workspace this computer owns, where it records
+// who changed each file; null for any other, which has nobody else to tell.
+function ownerHistory(workspaceId: string) {
+  const entry = findWorkspace(workspaceId);
+  const capture = activity.engineCaptureFor(workspaceId);
+  if (!entry?.remote || entry.shareView !== undefined || !capture) return null;
+  return { capture, ownerUserId: entry.remote.ownerUserId, grants: entry.shareRoster?.grants ?? [] };
 }
 
 // Every Run now a crash or a lost answer left unfinished.
@@ -3322,7 +3470,7 @@ const automationHosts = createAutomationHosts({
       window.webContents.send(CHANNELS.scheduleHostChanged, workspaceId);
     }
   },
-  startedHere: (workspaceId, startAfterMs) => automationScheduler.startedHere(workspaceId, startAfterMs),
+  startedHere: (workspaceId, startAfterMs, floorMs) => automationScheduler.startedHere(workspaceId, startAfterMs, floorMs),
   hostChanged: (workspaceId) => collectionAutomationsOf(workspaceId)?.hostChanged(),
   // The release waits until the engine here claims no more Group messages,
   // and carries what it decided so the next host claims each one once.
@@ -3533,14 +3681,41 @@ function createCollectionAutomationsFor(
         return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
       }),
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
-    writeText: (path, text, expectedContentHash) =>
-      writeWorkspaceText(rootPath, path, text, expectedContentHash),
+    writeText: async (path, text, expectedContentHash, automationId) => {
+      const capture = activity.engineCaptureFor(workspaceId);
+      // A shared view keeps no History, so it writes the way it always does.
+      if (!capture || findWorkspace(workspaceId)?.shareView !== undefined) {
+        return await writeWorkspaceText(rootPath, path, text, expectedContentHash);
+      }
+      // In the editor's own order for the file, so neither save overwrites the other.
+      return await withOrderedWorkspaceTextPath(rootPath, path, async () => {
+        try {
+          await capture.writeAuthoredTextFile(join(rootPath, path), text,
+            { kind: "automation", automationId, onBehalfOf: "local", depth: 1 }, { expectedContentHash });
+          return { status: "written" as const };
+        } catch (error) {
+          if (error instanceof AuthoredTextChangedError) return { status: "conflict" as const };
+          throw error;
+        }
+      });
+    },
     pathExists: (path) => lstat(join(rootPath, path)).then(() => true, () => false),
     roster: () => shareRosters.forRun(workspaceId),
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
     store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir),
-    onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
+    onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
+    reportFailure: (report) => sendFailureNotices({
+      notices: noticeStore(),
+      computer: { installId: localReactorFallbackId(), label: computerLabel(hostname()) },
+      throughShare: findWorkspace(workspaceId)?.shareView !== undefined,
+      lastChangedBy: (automationId) => automationLastChangedBy(workspaceId, automationId),
+      onError: (context, error) => console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
+    }, workspaceId, report),
+    withdrawFailure: (failure) =>
+      noticeStore().withdraw(automationFailedNoticeId({ workspaceId, installId: localReactorFallbackId(), failure })),
+    onSwitchedOff: (switched) => void sendSwitchedOffNotice(workspaceId, switched).catch((error: unknown) =>
+      console.warn(`[desktop] Collection automations in ${workspaceId}: tell who changed "${switched.name}" last that it was switched off:`, error)),
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
     chat: {
@@ -3646,6 +3821,8 @@ async function stopAllSitePreviews(): Promise<void> {
 }
 
 let datasetForCli: ((input: DatasetRequest) => Promise<DatasetResult>) | undefined;
+// A window's press path; the CLI's presses take it too.
+let pressNamedForCli: ReturnType<typeof registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>>["pressNamed"] | undefined;
 const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
 // Each workspace attachment's local dataset host, opened on first use and
 // closed when the attachment's state is disposed, after its automation
@@ -3725,6 +3902,52 @@ const { startDesktopCliServer } = createDesktopCliServer({
     if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
     return ownerAppResponsesForCli(input);
   },
+  // The executor calls the Automations panel's IPC makes. A CLI request
+  // opened the workspace, and each call waits for its automations to load.
+  automations: (workspace) => {
+    const opened = async () => {
+      const automations = collectionAutomationsOf(workspace.workspaceId);
+      if (!automations) throw new Error("This workspace was closed.");
+      await automations.open();
+      return automations;
+    };
+    return {
+      runs: async (automationId) => (await opened()).runs(automationId),
+      run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
+      retry: (input) => retryAutomationRun({
+        notices: noticeStore(),
+        installId: localReactorFallbackId(),
+        holds: async (run) => (await (await opened()).run(run.automationId, run.claimId)) !== null,
+        retry: async (run) => (await opened()).retry(run),
+      }, { workspaceId: workspace.workspaceId, ...input }),
+    };
+  },
+  // A press goes through the press path a window's press takes, under this
+  // workspace's own operation. The dataset is described the way the CLI's
+  // dataset verbs describe it, and the executor opens before it is asked.
+  buttons: (workspace) => ({
+    press: async (input, by) => {
+      if (!pressNamedForCli || !datasetForCli) throw new Error("Buttons are not ready. Try again.");
+      const describe = datasetForCli;
+      let waiting: PressWaitReason | null = null;
+      const result = await pressNamedForCli({ ...input, workspaceId: workspace.workspaceId }, {
+        by,
+        withOperation: (work) => withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+          // A shared view runs no automations here; its presses go to the relay.
+          if (!shareViewIsPresent(operation.workspace.shareView)) await operation.state.collectionAutomations.open();
+          return await work(operation);
+        }),
+        describeDataset: async (datasetId) => {
+          const described = await describe({ action: "describe", workspaceId: workspace.workspaceId, datasetId });
+          if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
+          return described.dataset;
+        },
+        // No window hears how the run settles; the caller follows it in run history.
+        watch: (_claimId, reason) => { waiting = reason; },
+      });
+      return { result, waiting };
+    },
+  }),
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
@@ -3899,7 +4122,16 @@ const desktopEngine = createDesktopEngine({
   recordEngineProblem: (error, stage) => crashReports.record({ kind: "engine", error, stage }),
   workspaceAuthorities, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
-  notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
+  launchMarks, desktopMarks, logLaunchMarksOnce,
+  noteNoAtomicPlacement: (workspaceId) => {
+    try {
+      withWorkspaceActivityState(workspaceId, (lease) =>
+        workspaceActivity.recordAtomicPlacementUnavailable(lease.state.activity),
+      );
+    } catch {
+      // The workspace closed since the engine wrote; nothing to show.
+    }
+  },
 });
 const {
   requireEngineSessions, closeRelayTransportWorkspace, closeAllRelayTransportWorkspaces,
@@ -3957,6 +4189,7 @@ function createShareMountCommandsFor(
         () => notifyRenderer(scope),
       ),
     logError: (message, error) => console.error(`[desktop] ${message}`, error),
+    recheckRemovedShares,
   });
 }
 
@@ -4847,6 +5080,7 @@ function registerIpcHandlers(): void {
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
     sharesChanged: shareRosters.sharesChanged,
+    reconcileReceivedShares,
   });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
@@ -5129,23 +5363,19 @@ function registerIpcHandlers(): void {
         assertCurrent,
       }),
     sharesChanged: shareRosters.sharesChanged,
+    reconcileReceivedShares,
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
-    datasetAutomationFailures: async (workspaceId) =>
-      ((await collectionAutomationsOf(workspaceId)?.datasetFailures()) ?? []).map(({ neverStarted, ...failure }) => ({ ...failure, chainStopped: neverStarted })),
     detectAgentTools,
     registerHandler: handleIpc,
-    assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine, withEngineAdapter,
-    acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged, requireEngineCapture,
-    automationNameOf: (workspaceId, automationId) => collectionAutomationsOf(workspaceId)?.nameOf(automationId) ?? null,
+    assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
     linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
     assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     agentIntegration, mcpShareAccessOf, mcpConfigFor,
     senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
     openWorkspaceActivity,
   });
-  agentRunsIpc.registerAutomationFailures();
   registerCollectionAutomationsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, sharedViewOf,
@@ -5157,7 +5387,7 @@ function registerIpcHandlers(): void {
     watchPress: (workspaceId, claimId, sender) => pressWindows.watch(workspaceId, claimId, sender, null),
   });
 
-  registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+  pressNamedForCli = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation,
     readText: readWorkspaceTextIfPresent,
@@ -5213,7 +5443,7 @@ function registerIpcHandlers(): void {
         .press(shareId, input);
     },
     pressWindows,
-  });
+  }).pressNamed;
 
   registerStopAndRestoreIpc<
     WebContents,
@@ -5263,6 +5493,7 @@ function registerIpcHandlers(): void {
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
     recordShareViewStoreRefusal: activity.recordShareViewStoreRefusal,
+    recheckRemovedShares,
   });
 
   // ---- Share mounts ----
@@ -5486,6 +5717,7 @@ function registerIpcHandlers(): void {
     listNotices: () => noticeStore().list(),
     markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
     runSkippedScheduleNow: async (input) => ({ note: await runSkippedScheduleNow(input.notice, input.account) }),
+    retryAutomationNotice: (input) => retryFromFailureNotice({ notices: noticeStore(), retry: retryAutomationFromNotice }, input),
   });
 
   workspaceEngineIpc.registerYDoc();

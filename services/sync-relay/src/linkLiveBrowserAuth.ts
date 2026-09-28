@@ -10,13 +10,13 @@ export function createLinkLiveBrowserResolver(options: { storage: SyncRelayStora
   const supplied = options.linkKey;
   const linkKey = typeof supplied === "string" ? supplied : Buffer.from(new Uint8Array(supplied.buffer, supplied.byteOffset, supplied.byteLength));
   return {
-    async resolve(request: Request, discriminator: string): Promise<LinkLiveBrowserContext | null> {
+    async resolve(request: Request, discriminator: string, access: "read" | "edit" = "edit"): Promise<LinkLiveBrowserContext | null> {
       if (request.signal.aborted || !/^[A-Za-z0-9_-]{12}$/.test(discriminator)) return null;
       const bearer = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") ?? "")?.[1];
       const profile = request.headers.get("x-dohc-link-profile-secret");
       if (!bearer || !profile || !LINK_SECRET_PATTERN.test(profile)) return null;
       const current = validateLinkCapability({ storage, capabilityToken: bearer, linkKey, nowMs: Date.now() });
-      if (!current || current.access !== "edit") return null;
+      if (!current || (access === "edit" && current.access !== "edit")) return null;
       const share = storage.getShare(current.shareId);
       if (!share) return null;
       return { kind: "link", workspaceId: share.workspaceId, shareId: current.shareId, grantId: current.grantId,

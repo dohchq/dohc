@@ -12,6 +12,7 @@ import { dirname } from "node:path";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import type { RosterListing, ShareRoster } from "../automations/shareRoster";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import type { ConfirmedShareRemoval } from "./recipientShareReconciliation";
 import type { ShareViewSelector } from "./shareViewInfo";
 
 // Pure registry persistence: a JSON file of known local workspaces. The
@@ -258,6 +259,10 @@ export interface JoinedSharedChannel {
   relayUrl: string;
   recipientUserId: string;
   ended?: boolean;
+  // The person left this channel themselves. Its grant may still be active
+  // on the relay, so an active listing must not resume it; Join is the way
+  // back. Absent on a row the relay ended.
+  left?: true;
 }
 
 // A share MOUNTED into a host workspace: the received share materializes
@@ -303,45 +308,17 @@ export interface RegistryEntry extends CreatedWorkspace {
   sharedChannels?: JoinedSharedChannel[];
   // Share mounts materialized into this workspace's shared-with-me/.
   shareMounts?: ShareMountRecord[];
-  // How far the owner has seen each automation's failures, by engine
-  // automation id ("collection:<collection path>#<id>"). The engine's failed claim rows
-  // are the durable evidence and are never deleted; a dismiss only records
-  // the generation (the automation's failed-claim count) the owner saw.
-  // Same rule as ShareSkippedOps.acknowledgedGeneration: a failure recorded
-  // after the render has a higher generation, so a stale click cannot hide
-  // it, and an acknowledgment never moves backwards.
-  automationFailureAcks?: Record<string, number>;
+  // Shares held by this entry whose owner removed this account, as the
+  // relay's authenticated `removed` listing confirmed. Kept while the record
+  // is still ended and the share is not active again; see
+  // recipientShareReconciliation.ts for how a listing updates it.
+  confirmedRemovedShares?: ConfirmedShareRemoval[];
   // The grants the owner gave on this workspace, as the relay last listed
   // them. Absent until the first listing. See automations/shareRoster.ts.
   shareRoster?: ShareRoster;
   // The computer that runs this synced workspace's schedules, as the relay
   // last said; null when it recorded none. See automations/automationHost.ts.
   automationHost?: RelayAutomationHost | null;
-}
-
-/**
- * Where an automation's acknowledgment is recorded: its engine id, or for a
- * dataset automation its id and the dataset instance its count belongs to,
- * so a dataset made again starts with nothing acknowledged.
- */
-export function automationFailureAckKey(failure: { automationId: string; datasetInstance: string | null }): string {
-  return failure.datasetInstance === null ? failure.automationId : `${failure.automationId}@${failure.datasetInstance}`;
-}
-
-/**
- * The failure rows the owner has not acknowledged yet: generation above the
- * recorded acknowledgment. Generic over the row so the pure store does not
- * import the wire type.
- */
-export function unacknowledgedAutomationFailures<
-  F extends { automationId: string; datasetInstance: string | null; generation: number },
->(
-  failures: readonly F[],
-  acks: Record<string, number> | undefined,
-): F[] {
-  return failures.filter(
-    (failure) => failure.generation > (acks?.[automationFailureAckKey(failure)] ?? 0),
-  );
 }
 
 function fsyncAndClose(fd: number): void {
@@ -595,31 +572,6 @@ export function createRegistryStore(registryFile: string) {
       });
     },
 
-    /**
-     * Record that the user has seen an automation's failures up to
-     * `generation`. Deletes nothing — the engine's failed claim rows stay —
-     * and never moves backwards, so a stale click cannot un-see a newer
-     * failure. The caller clamps `generation` to the engine's current one.
-     */
-    acknowledgeAutomationFailure(
-      workspaceId: string,
-      automationId: string,
-      generation: number,
-    ): void {
-      updateWorkspaceEntry(workspaceId, (entry) => {
-        const current = entry.automationFailureAcks?.[automationId] ?? 0;
-        const next = Math.max(current, generation);
-        if (next === current) return undefined;
-        return {
-          ...entry,
-          automationFailureAcks: {
-            ...entry.automationFailureAcks,
-            [automationId]: next,
-          },
-        };
-      });
-    },
-
     /** Keep the relay's latest answer for which computer runs the schedules. */
     setAutomationHost(workspaceId: string, host: RelayAutomationHost | null): void {
       updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, automationHost: host }));
@@ -659,6 +611,25 @@ export function createRegistryStore(registryFile: string) {
      * those ops. So the read-and-merge lives here, where a caller cannot pass
      * a stale copy at all.
      */
+    /**
+     * Apply a relay listing to the workspace's received-share records. The
+     * same read-and-merge as markShareViewEnded: the reconcile runs on the
+     * record as it stands, so a pull that wrote between the caller's read and
+     * this write is not undone. Returns whether anything changed.
+     */
+    reconcileRecipientShares(
+      workspaceId: string,
+      reconcile: (entry: Readonly<RegistryEntry>) => RegistryEntry | null,
+    ): boolean {
+      let changed = false;
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        const next = reconcile(entry);
+        changed = next !== null;
+        return next ?? undefined;
+      });
+      return changed;
+    },
+
     markShareViewEnded(workspaceId: string): void {
       updateWorkspaceEntry(
         workspaceId,

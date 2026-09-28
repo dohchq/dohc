@@ -25,7 +25,7 @@ const rules = { datasetId: definition.datasetId, revision: 2, revisionSha256: "r
 const revision = { ...rules, definitionSha256: "", schemaSha256: "", operationsSha256: "", definition } satisfies DatasetRevision;
 const run = (operationId: string): StoredRun => ({
   version: 2, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, updatedAtMs: 1,
-  plan: null, created: [], replans: [], undoRequests: [], readableFields: null, superseded: false, undo: null, settled: true, compacted: false, outcome: { state: "done" },
+  plan: null, created: [], replans: [], undoRequests: [], readableFields: null, datasetId: null, superseded: false, undo: null, settled: true, compacted: false, outcome: { state: "done" },
   applied: [{ ordinal: 0, writes: [
     { kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId: "a", version: 2,
       fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }] },
@@ -40,8 +40,8 @@ const undo = (host: DatasetUndoHost, runs: StoredRun[]) => undoDatasetAutomation
 
 describe("undo of a dataset run", () => {
   it("sees when the rules an edit ran under no longer resolve", () => {
-    expect(datasetUndoRulesChanged({ resolves: () => false }, [run(EDIT)])).toBe(true);
-    expect(datasetUndoRulesChanged({ resolves: () => true }, [run(EDIT)])).toBe(false);
+    expect(datasetUndoRulesChanged({ resolves: () => false, revision: () => revision }, [run(EDIT)])).toBe(true);
+    expect(datasetUndoRulesChanged({ resolves: () => true, revision: () => revision }, [run(EDIT)])).toBe(false);
   });
 
   it("sends a reversible edit back with the values it replaced under the same key each time, and leaves an edit the rules do not let it undo", async () => {
@@ -50,7 +50,7 @@ describe("undo of a dataset run", () => {
       invokeAsOwner: async (input: DatasetInvocation) => { sent.push(input); return { result: { id: "a", version: 3, priorValues: { [STATUS]: "Closed" } }, revision: 9, replayed: false }; },
       revision: () => revision, resolves: () => true,
     };
-    const undone = { reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 0, actions: 0 };
+    const undone = { reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0 };
     expect(await undo(host, [run(EDIT)])).toEqual(undone);
     expect(sent).toEqual([expect.objectContaining({ operationId: EDIT, input: { id: "a", expectedVersion: 2, values: { [STATUS]: "Open" } }, idempotencyKey: expect.stringMatching(/^u\.[0-9a-f]{64}$/) })]);
     // An Undo that stopped part way sends the same content under the same key, so the dataset replays its receipt.
@@ -88,7 +88,7 @@ describe("undo of a dataset run", () => {
   const edit = (operationId: string, recordId: string, fieldId: string, before: string, after: string, version: number): RunWrite =>
     ({ kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId, version, fields: [{ fieldId, field: "Field", before, after }] });
   const runOf = (keySeed: string, startedAtMs: number, writes: RunWrite[]): StoredRun => ({ ...run(EDIT), keySeed, startedAtMs, applied: [{ ordinal: 0, writes }] });
-  const none = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0 };
+  const none = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0 };
 
   it("keeps a field someone changed after the runs' last write to it, even where it matches an earlier write", async () => {
     // The runs wrote Open → Paid → Closed. Someone then set it back to Paid.
@@ -145,5 +145,67 @@ describe("undo of a dataset run", () => {
     expect(await undo(host, runs)).toEqual({ ...none, reverted: 1 });
     expect(records.a.values[STATUS]).toBe("Closed");
     expect(writes).toEqual([{ [STATUS]: "Open" }]);
+  });
+});
+
+describe("undo of a dataset run's actions", () => {
+  const HOLD = id(20), RELEASE = id(21), SETTLE = id(22);
+  const withActions: DatasetDefinition = { ...definition, operations: [...definition.operations,
+    { operationId: HOLD, name: "invoices.hold", label: "Hold", tableId: TABLE, kind: "action", access: "owner", readOnly: false, fieldIds: [STATUS], reversedBy: "invoices.release" },
+    { operationId: RELEASE, name: "invoices.release", label: "Release", tableId: TABLE, kind: "action", access: "owner", readOnly: false, fieldIds: [STATUS] },
+    { operationId: SETTLE, name: "invoices.settle", label: "Settle", tableId: TABLE, kind: "action", access: "owner", readOnly: false, fieldIds: [STATUS] },
+  ] };
+  const action = (operationId: string, name: string, forward: number, undo?: JsonValue, under = rules): RunWrite =>
+    ({ kind: "dataset-action", rules: under, operationId, tableId: TABLE, name, revision: forward, ...(undo === undefined ? {} : { undo, reverseOperationId: RELEASE }) });
+  const runOf = (startedAtMs: number, writes: RunWrite[]): StoredRun => ({ ...run(EDIT), startedAtMs, applied: [{ ordinal: 0, writes }] });
+
+  it("reverses the newest commit first even when a later run's clock read earlier, and keeps each reverse's key", async () => {
+    const sent: DatasetInvocation[] = [];
+    const host: DatasetUndoHost = {
+      invokeAsOwner: async (input) => { sent.push(input); return { result: { ok: true }, revision: 30, replayed: false }; },
+      revision: () => ({ ...revision, definition: withActions }),
+      resolves: () => true,
+    };
+    // The start-over run began at an earlier clock reading, but committed revision 11 after the first run's 10.
+    const runs = [runOf(5, [action(HOLD, "Hold", 10, { id: "a", status: "Open" })]), runOf(1, [action(HOLD, "Hold", 11, { id: "b", status: "Open" }), action(SETTLE, "Settle", 12)])];
+    expect(await undo(host, runs)).toMatchObject({ actionsReversed: 2, actions: 1 });
+    expect(sent.map((input) => input.input)).toEqual([{ id: "b", status: "Open" }, { id: "a", status: "Open" }]);
+    expect(sent.every((input) => input.operationId === RELEASE)).toBe(true);
+    const keys = sent.map((input) => input.idempotencyKey);
+    sent.length = 0;
+    await undo(host, runs);
+    expect(sent.map((input) => input.idempotencyKey)).toEqual(keys);
+  });
+
+  it("stops at the first reverse the dataset refuses, and refuses to start once any action's rules no longer resolve", async () => {
+    const sent: DatasetInvocation[] = [];
+    const host: DatasetUndoHost = {
+      invokeAsOwner: async (input) => { sent.push(input); throw new AppBackendRuntimeError({ code: "changed", message: "This invoice is no longer on hold." }); },
+      revision: () => ({ ...revision, definition: withActions }),
+      resolves: () => true,
+    };
+    const runs = [runOf(1, [action(HOLD, "Hold", 10, { id: "a" }), action(HOLD, "Hold", 11, { id: "b" })])];
+    await expect(undo(host, runs)).rejects.toThrow("Hold was not undone. Release refused: This invoice is no longer on hold.");
+    expect(sent).toHaveLength(1);
+    // An action with no reverse under rules that changed still stops Undo before it starts.
+    const mixed = [runOf(1, [action(SETTLE, "Settle", 10)]), runOf(2, [action(HOLD, "Hold", 11, { id: "a" }, { ...rules, revision: 3 })])];
+    expect(datasetUndoRulesChanged({ resolves: (reference) => reference.revision === 3, revision: () => ({ ...revision, definition: withActions }) }, mixed)).toBe(true);
+  });
+
+  it("refuses to start when the rules now name another reverse than the one an action ran with", async () => {
+    const OTHER = id(23);
+    const repointed: DatasetDefinition = { ...withActions, operations: withActions.operations.map((operation) =>
+      operation.operationId === RELEASE ? { ...operation, operationId: OTHER } : operation) };
+    const sent: DatasetInvocation[] = [];
+    const host: DatasetUndoHost = {
+      invokeAsOwner: async (input) => { sent.push(input); return { result: { ok: true }, revision: 30, replayed: false }; },
+      revision: () => ({ ...revision, definition: repointed }),
+      resolves: () => true,
+    };
+    const runs = [runOf(1, [action(HOLD, "Hold", 10, { id: "a" })])];
+    expect(datasetUndoRulesChanged(host, runs)).toBe(true);
+    await expect(undo(host, runs)).rejects.toThrow("Collection rules changed after this run, so dohc cannot undo it.");
+    expect(sent).toEqual([]);
+    expect(datasetUndoRulesChanged({ ...host, revision: () => ({ ...revision, definition: withActions }) }, runs)).toBe(false);
   });
 });

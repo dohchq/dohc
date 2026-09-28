@@ -11,7 +11,7 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { bridgeCaptureEventsToRenderer } from "./captureActivityBridge";
+import { bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement } from "./captureActivityBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { RegistryEntry } from "./registryStore";
@@ -47,6 +47,7 @@ type EngineAuthorityState = {
 /** The Collection automation executor's part in an engine restart. */
 interface CollectionAutomationsLifecycle {
   notifyClaimed(): void;
+  failuresChanged(): void;
   pauseForEngineRestart(): void;
   resumeAfterEngineRestart(): void;
 }
@@ -72,9 +73,11 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
       work: (lease: WorkspaceAuthorityLease<RegistryEntry, State>) => Result | Promise<Result>,
     ): Promise<Result>;
   };
-  collectionAutomations: { current(workspaceId: string): Pick<CollectionAutomationsLifecycle, "notifyClaimed"> | undefined };
+  collectionAutomations: { current(workspaceId: string): Pick<CollectionAutomationsLifecycle, "notifyClaimed" | "failuresChanged"> | undefined };
   notifyRenderer(scope?: WorkspaceActivityScope): void;
-  notifyAutomationFailuresChanged(workspaceId: string): void;
+  // The engine announced that a workspace's drive has no rename that refuses
+  // to replace a file.
+  noteNoAtomicPlacement(workspaceId: string): void;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
@@ -87,7 +90,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const {
     app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
     isQuitting, recordEngineProblem, workspaceAuthorities, notifyRenderer,
-    notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
+    launchMarks, desktopMarks, logLaunchMarksOnce,
   } = dependencies;
 
   let rustEngineDaemon: EngineDaemonLifecycle | null = null;
@@ -454,11 +457,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // signal that a moment landed, so bridge them onto the renderer's
       // workspace-activity ping or the history timeline goes permanently stale.
       bridgeCaptureEventsToRenderer(rustEngineDaemon, notifyRenderer);
+      // The first placement that falls back on a drive without atomic
+      // renames announces it at once; the capture health poll is a backstop.
+      bridgeNoAtomicPlacement(rustEngineDaemon, dependencies.noteNoAtomicPlacement);
       // The daemon also claims each local record change for its subscribed
       // automations (ADR 0008); its automation.claimed events wake the owning
       // workspace's executors to drain the durable claim table, and a claim
       // inserted already failed (the depth cap's chain-stopped stop report)
-      // pokes the owner's failure notice instead.
+      // tells the executor, which sends its failure notice.
       bridgeAutomationClaimsToExecutors(
         rustEngineDaemon,
         (workspaceId) => ({
@@ -466,7 +472,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             dependencies.collectionAutomations.current(workspaceId)?.notifyClaimed();
           },
         }),
-        notifyAutomationFailuresChanged,
+        (workspaceId) => dependencies.collectionAutomations.current(workspaceId)?.failuresChanged(),
       );
       const relaySource = new RelayConfiguredDaemonClientSource(
         rustEngineDaemon,

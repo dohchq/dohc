@@ -8,7 +8,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer, materialize_one,
-    materialize_secret_delete_one, materialize_secret_one,
+    materialize_secret_delete_one, materialize_secret_one, recover_displacements,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
@@ -519,66 +519,233 @@ pub(super) fn replay_pending_materializations(
     selected: Option<&HashSet<String>>,
     superseded_after_projection_is_drained: bool,
 ) -> Result<MaterializationReplaySummary, RuntimeError> {
+    // A crash can leave a replace half done, including for a job that will not
+    // run again. Resolve those first, so no displaced file is left unsettled.
+    recover_displacements(
+        store,
+        root_dir,
+        Some(scope.workspace_id),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
+    )?;
     let jobs = store.list_pending_materialization_jobs()?;
-    let mut summary = MaterializationReplaySummary {
-        completed: 0,
-        failed: 0,
-        selected_seen: 0,
-    };
-    let mut secret_key: Option<SecretDataKey> = None;
-    for job in jobs {
-        if selected.is_some_and(|selected| !selected.contains(&job.job_id)) {
-            continue;
-        }
-        // Empty is the migration sentinel for a pre-coordinate row. Those
-        // intents were globally replayable before workspace scoping existed,
-        // so preserve that behavior until one workspace drains them.
-        if !job.workspace_id.is_empty() && job.workspace_id != scope.workspace_id {
-            continue;
-        }
-        summary.selected_seen += usize::from(selected.is_some());
-        if let Some(progress) = scope.progress {
-            progress.fetch_add(1, Ordering::Relaxed);
-        }
-        let switch_secret = job.job_id.starts_with("version-switch-secret-mat_");
-        let ordinary_secret = job.job_id.starts_with("secret-mat_");
-        if switch_secret || ordinary_secret {
-            let coordinates = if switch_secret {
-                match switch_projection_matches_active(store, &job, true)? {
-                    Some(coordinates) => coordinates,
-                    None => {
+    (|| -> Result<MaterializationReplaySummary, RuntimeError> {
+        let mut summary = MaterializationReplaySummary {
+            completed: 0,
+            failed: 0,
+            selected_seen: 0,
+        };
+        let mut secret_key: Option<SecretDataKey> = None;
+        for job in jobs {
+            if selected.is_some_and(|selected| !selected.contains(&job.job_id)) {
+                continue;
+            }
+            // Empty is the migration sentinel for a pre-coordinate row. Those
+            // intents were globally replayable before workspace scoping existed,
+            // so preserve that behavior until one workspace drains them.
+            if !job.workspace_id.is_empty() && job.workspace_id != scope.workspace_id {
+                continue;
+            }
+            summary.selected_seen += usize::from(selected.is_some());
+            if let Some(progress) = scope.progress {
+                progress.fetch_add(1, Ordering::Relaxed);
+            }
+            let switch_secret = job.job_id.starts_with("version-switch-secret-mat_");
+            let ordinary_secret = job.job_id.starts_with("secret-mat_");
+            if switch_secret || ordinary_secret {
+                let coordinates = if switch_secret {
+                    match switch_projection_matches_active(store, &job, true)? {
+                        Some(coordinates) => coordinates,
+                        None => {
+                            store.mark_materialization_complete(&job.job_id, now_ms)?;
+                            if selected.is_some() {
+                                summary.failed += 1;
+                            }
+                            continue;
+                        }
+                    }
+                } else {
+                    let Some(coordinates) = secret_job_coordinates(store, &job)? else {
                         store.mark_materialization_complete(&job.job_id, now_ms)?;
+                        continue;
+                    };
+                    let active_version_id = VersionedTextStore::new(store)
+                        .get_active_version(&coordinates.workspace_id)?
+                        .version_id;
+                    if coordinates.version_id != active_version_id {
+                        continue;
+                    }
+                    let tip_present = secret_tip_exists(store, &coordinates)?;
+                    match (job.operation, tip_present) {
+                        (MaterializationOperation::Write, false)
+                        | (MaterializationOperation::Delete, true) => {
+                            store.mark_materialization_complete(&job.job_id, now_ms)?;
+                            continue;
+                        }
+                        (MaterializationOperation::Delete, false)
+                        | (MaterializationOperation::Write, true) => {}
+                    }
+                    coordinates
+                };
+                if job.operation == MaterializationOperation::Delete {
+                    match materialize_secret_delete_one(
+                        store,
+                        root_dir,
+                        &job,
+                        &MaterializeOptions {
+                            policy: DurabilityPolicy::per_os(),
+                            replacer: &StdReplacer,
+                            backoff: &StdBackoff,
+                            now_ms,
+                            faults,
+                        },
+                    ) {
+                        Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+                            summary.completed += 1;
+                        }
+                        Ok(
+                            JobOutcome::Conflict
+                            | JobOutcome::Superseded
+                            | JobOutcome::Blocked
+                            | JobOutcome::Crashed(_),
+                        )
+                        | Err(_) => summary.failed += 1,
+                    }
+                    continue;
+                }
+                if secret_key.is_none() {
+                    let Ok(Some(key)) = load_key_file(root_dir) else {
+                        summary.failed += 1;
+                        continue;
+                    };
+                    secret_key = Some(key);
+                }
+                let plaintext = match secret_plaintext_for_job(
+                    store,
+                    secret_key.as_ref().expect("secret key loaded"),
+                    &coordinates,
+                ) {
+                    Ok(Some(plaintext)) => plaintext,
+                    Ok(None) => {
+                        store.mark_materialization_complete(&job.job_id, now_ms)?;
+                        continue;
+                    }
+                    Err(_) => {
+                        summary.failed += 1;
+                        continue;
+                    }
+                };
+                let plaintext_sha = hex_sha256(plaintext.as_bytes());
+                if let Some(self_writes) = scope.self_writes {
+                    self_writes.record(scope.workspace_id, &job.target_path, &plaintext_sha);
+                }
+                let outcome = materialize_secret_one(
+                    store,
+                    root_dir,
+                    &job,
+                    plaintext.as_bytes(),
+                    &MaterializeOptions {
+                        policy: DurabilityPolicy::per_os(),
+                        replacer: &StdReplacer,
+                        backoff: &StdBackoff,
+                        now_ms,
+                        faults,
+                    },
+                );
+                match outcome {
+                    Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+                        summary.completed += 1;
+                    }
+                    Ok(
+                        JobOutcome::Conflict
+                        | JobOutcome::Superseded
+                        | JobOutcome::Blocked
+                        | JobOutcome::Crashed(_),
+                    )
+                    | Err(_) => {
+                        if let Some(self_writes) = scope.self_writes {
+                            self_writes.retract(
+                                scope.workspace_id,
+                                &job.target_path,
+                                &plaintext_sha,
+                            );
+                        }
+                        summary.failed += 1;
+                    }
+                }
+                continue;
+            }
+            if job.job_id.starts_with("version-switch-mat_")
+                && switch_projection_matches_active(store, &job, false)?.is_none()
+            {
+                store.mark_materialization_complete(&job.job_id, now_ms)?;
+                if selected.is_some() {
+                    summary.failed += 1;
+                }
+                continue;
+            }
+            if matches!(
+                rollback_job_matches_active(store, scope.workspace_id, &job)?,
+                Some(false)
+            ) {
+                continue;
+            }
+            if let Some(moment_id) = job.job_id.strip_prefix("binary-rename-1-delete-mat_") {
+                let write_job_id = binary_rename_write_job_id(moment_id);
+                match store
+                    .load_materialization_job(&write_job_id)?
+                    .map(|write_job| write_job.status)
+                {
+                    // Follow-up: cancelled means the destination path was
+                    // explicitly deleted after the rename committed — that
+                    // delete already resolved the destination, so this paired
+                    // delete (removing the rename's old path) must still run.
+                    // Treating it like Conflict would strand the old path on
+                    // disk forever, under a job nothing ever revisits.
+                    Some(JobStatus::Complete) | Some(JobStatus::Cancelled) => {}
+                    Some(JobStatus::Conflict) => {
+                        store.mark_materialization_conflict(&job.job_id, now_ms)?;
+                        summary.failed += 1;
+                        continue;
+                    }
+                    Some(JobStatus::Pending) | None => {
                         if selected.is_some() {
                             summary.failed += 1;
                         }
                         continue;
                     }
                 }
+            }
+            let outcome = if let Some(self_writes) = scope.self_writes {
+                let (materialized, reported) = materialize_pending_job(
+                    store,
+                    root_dir,
+                    scope.workspace_id,
+                    &job,
+                    self_writes,
+                    now_ms,
+                    faults,
+                );
+                if materialized {
+                    Ok(JobOutcome::Completed)
+                } else {
+                    Ok(match reported {
+                        PostCommitMaterializeOutcome::Conflict => JobOutcome::Conflict,
+                        PostCommitMaterializeOutcome::Superseded => JobOutcome::Superseded,
+                        PostCommitMaterializeOutcome::Applied
+                        | PostCommitMaterializeOutcome::Skipped
+                        | PostCommitMaterializeOutcome::Error => {
+                            JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit)
+                        }
+                    })
+                }
             } else {
-                let Some(coordinates) = secret_job_coordinates(store, &job)? else {
-                    store.mark_materialization_complete(&job.job_id, now_ms)?;
-                    continue;
-                };
-                let active_version_id = VersionedTextStore::new(store)
-                    .get_active_version(&coordinates.workspace_id)?
-                    .version_id;
-                if coordinates.version_id != active_version_id {
-                    continue;
-                }
-                let tip_present = secret_tip_exists(store, &coordinates)?;
-                match (job.operation, tip_present) {
-                    (MaterializationOperation::Write, false)
-                    | (MaterializationOperation::Delete, true) => {
-                        store.mark_materialization_complete(&job.job_id, now_ms)?;
-                        continue;
-                    }
-                    (MaterializationOperation::Delete, false)
-                    | (MaterializationOperation::Write, true) => {}
-                }
-                coordinates
-            };
-            if job.operation == MaterializationOperation::Delete {
-                match materialize_secret_delete_one(
+                materialize_one(
                     store,
                     root_dir,
                     &job,
@@ -589,199 +756,52 @@ pub(super) fn replay_pending_materializations(
                         now_ms,
                         faults,
                     },
-                ) {
-                    Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
-                        summary.completed += 1;
-                    }
-                    Ok(
-                        JobOutcome::Conflict
-                        | JobOutcome::Superseded
-                        | JobOutcome::Blocked
-                        | JobOutcome::Crashed(_),
-                    )
-                    | Err(_) => summary.failed += 1,
-                }
-                continue;
-            }
-            if secret_key.is_none() {
-                let Ok(Some(key)) = load_key_file(root_dir) else {
-                    summary.failed += 1;
-                    continue;
-                };
-                secret_key = Some(key);
-            }
-            let plaintext = match secret_plaintext_for_job(
-                store,
-                secret_key.as_ref().expect("secret key loaded"),
-                &coordinates,
-            ) {
-                Ok(Some(plaintext)) => plaintext,
-                Ok(None) => {
-                    store.mark_materialization_complete(&job.job_id, now_ms)?;
-                    continue;
-                }
-                Err(_) => {
-                    summary.failed += 1;
-                    continue;
-                }
+                )
+                .map_err(RuntimeError::from)
             };
-            let plaintext_sha = hex_sha256(plaintext.as_bytes());
-            if let Some(self_writes) = scope.self_writes {
-                self_writes.record(scope.workspace_id, &job.target_path, &plaintext_sha);
-            }
-            let outcome = materialize_secret_one(
-                store,
-                root_dir,
-                &job,
-                plaintext.as_bytes(),
-                &MaterializeOptions {
-                    policy: DurabilityPolicy::per_os(),
-                    replacer: &StdReplacer,
-                    backoff: &StdBackoff,
-                    now_ms,
-                    faults,
-                },
-            );
             match outcome {
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                     summary.completed += 1;
                 }
-                Ok(
-                    JobOutcome::Conflict
-                    | JobOutcome::Superseded
-                    | JobOutcome::Blocked
-                    | JobOutcome::Crashed(_),
-                )
-                | Err(_) => {
-                    if let Some(self_writes) = scope.self_writes {
-                        self_writes.retract(scope.workspace_id, &job.target_path, &plaintext_sha);
-                    }
+                Ok(JobOutcome::Blocked) => summary.failed += 1,
+                Ok(JobOutcome::Superseded) if superseded_after_projection_is_drained => {
+                    summary.completed += 1;
+                }
+                Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
                     summary.failed += 1;
-                }
-            }
-            continue;
-        }
-        if job.job_id.starts_with("version-switch-mat_")
-            && switch_projection_matches_active(store, &job, false)?.is_none()
-        {
-            store.mark_materialization_complete(&job.job_id, now_ms)?;
-            if selected.is_some() {
-                summary.failed += 1;
-            }
-            continue;
-        }
-        if matches!(
-            rollback_job_matches_active(store, scope.workspace_id, &job)?,
-            Some(false)
-        ) {
-            continue;
-        }
-        if let Some(moment_id) = job.job_id.strip_prefix("binary-rename-1-delete-mat_") {
-            let write_job_id = binary_rename_write_job_id(moment_id);
-            match store
-                .load_materialization_job(&write_job_id)?
-                .map(|write_job| write_job.status)
-            {
-                // Follow-up: cancelled means the destination path was
-                // explicitly deleted after the rename committed — that
-                // delete already resolved the destination, so this paired
-                // delete (removing the rename's old path) must still run.
-                // Treating it like Conflict would strand the old path on
-                // disk forever, under a job nothing ever revisits.
-                Some(JobStatus::Complete) | Some(JobStatus::Cancelled) => {}
-                Some(JobStatus::Conflict) => {
-                    store.mark_materialization_conflict(&job.job_id, now_ms)?;
-                    summary.failed += 1;
-                    continue;
-                }
-                Some(JobStatus::Pending) | None => {
-                    if selected.is_some() {
-                        summary.failed += 1;
-                    }
-                    continue;
-                }
-            }
-        }
-        let outcome = if let Some(self_writes) = scope.self_writes {
-            let (materialized, reported) = materialize_pending_job(
-                store,
-                root_dir,
-                scope.workspace_id,
-                &job,
-                self_writes,
-                now_ms,
-                faults,
-            );
-            if materialized {
-                Ok(JobOutcome::Completed)
-            } else {
-                Ok(match reported {
-                    PostCommitMaterializeOutcome::Conflict => JobOutcome::Conflict,
-                    PostCommitMaterializeOutcome::Superseded => JobOutcome::Superseded,
-                    PostCommitMaterializeOutcome::Applied
-                    | PostCommitMaterializeOutcome::Skipped
-                    | PostCommitMaterializeOutcome::Error => {
-                        JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit)
-                    }
-                })
-            }
-        } else {
-            materialize_one(
-                store,
-                root_dir,
-                &job,
-                &MaterializeOptions {
-                    policy: DurabilityPolicy::per_os(),
-                    replacer: &StdReplacer,
-                    backoff: &StdBackoff,
-                    now_ms,
-                    faults,
-                },
-            )
-            .map_err(RuntimeError::from)
-        };
-        match outcome {
-            Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
-                summary.completed += 1;
-            }
-            Ok(JobOutcome::Blocked) => summary.failed += 1,
-            Ok(JobOutcome::Superseded) if superseded_after_projection_is_drained => {
-                summary.completed += 1;
-            }
-            Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
-                summary.failed += 1;
-                if let Some(moment_id) = job.job_id.strip_prefix("ydoc-mat_") {
-                    let coords: Option<(String, String, String)> =
-                        store.read_with(|connection| {
-                            connection
-                                .query_row(
-                                    "SELECT workspace_id, version_id, object_id \
-                                 FROM moments WHERE moment_id = ?1",
-                                    [moment_id],
-                                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                                )
-                                .optional()
-                                .map_err(StorageError::corrupt_public)
-                        })?;
-                    if let Some((workspace_id, version_id, object_id)) = coords {
-                        store.write_with(&NoFaults, |transaction| {
-                            transaction
-                                .execute(
-                                    "UPDATE ydoc_docs SET last_settled_sha = NULL, \
-                                     settled_update_seq = NULL, updated_at_ms = ?4 \
-                                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                                    params![workspace_id, version_id, object_id, now_ms],
-                                )
-                                .map_err(StorageError::persist_public)?;
-                            Ok::<_, StorageError>(())
-                        })?;
+                    if let Some(moment_id) = job.job_id.strip_prefix("ydoc-mat_") {
+                        let coords: Option<(String, String, String)> =
+                            store.read_with(|connection| {
+                                connection
+                                    .query_row(
+                                        "SELECT workspace_id, version_id, object_id \
+                                     FROM moments WHERE moment_id = ?1",
+                                        [moment_id],
+                                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                                    )
+                                    .optional()
+                                    .map_err(StorageError::corrupt_public)
+                            })?;
+                        if let Some((workspace_id, version_id, object_id)) = coords {
+                            store.write_with(&NoFaults, |transaction| {
+                                transaction
+                                    .execute(
+                                        "UPDATE ydoc_docs SET last_settled_sha = NULL, \
+                                         settled_update_seq = NULL, updated_at_ms = ?4 \
+                                         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                                        params![workspace_id, version_id, object_id, now_ms],
+                                    )
+                                    .map_err(StorageError::persist_public)?;
+                                Ok::<_, StorageError>(())
+                            })?;
+                        }
                     }
                 }
+                Ok(JobOutcome::Crashed(_)) | Err(_) => summary.failed += 1,
             }
-            Ok(JobOutcome::Crashed(_)) | Err(_) => summary.failed += 1,
         }
-    }
-    Ok(summary)
+        Ok(summary)
+    })()
 }
 
 pub(super) fn materialize_pending_job(

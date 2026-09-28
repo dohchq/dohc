@@ -59,6 +59,86 @@ describe("RecordButtonsRow", () => {
     expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
   });
 
+  it("asks before it runs an action dohc cannot undo, and runs it only on Run", async () => {
+    const bridge = stub({
+      record: invoice, collectionPath: "Invoices",
+      buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid", irreversible: [{ name: "invoices.settle", label: "Settle" }, { name: "receipts.send", label: "Send receipt" }] } }],
+    });
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} />);
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    const question = screen.getByRole("dialog", { name: "Run Mark paid for Invoice 12" });
+    expect(question.textContent).toContain("Settle and Send receipt can't be undone.");
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    // Focus goes to Run; Escape returns it to the button and runs nothing.
+    expect(document.activeElement?.textContent).toBe("Run");
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(button);
+    fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
+    // A held Enter that opened the question does not answer it.
+    fireEvent.click(button);
+    expect(screen.getByRole("dialog").getAttribute("aria-describedby")).toBe(screen.getByText("Settle and Send receipt can't be undone.").id);
+    const run = screen.getByRole("button", { name: "Run" });
+    // Tab and Shift+Tab stay in the question.
+    fireEvent.keyDown(run, { key: "Tab" });
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(run);
+    const held = new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true, cancelable: true });
+    run.dispatchEvent(held);
+    expect(held.defaultPrevented).toBe(true);
+    expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
+    fireEvent.click(run);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(button);
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1));
+  });
+
+  it("closes the question on scroll even when its words were already showing", async () => {
+    const bridge = stub({
+      record: invoice, collectionPath: "Invoices",
+      buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid", irreversible: [{ name: "invoices.settle", label: "Settle" }] } }],
+    });
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} />);
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    // A press someone else is running leaves words on the button, which show while the pointer is over it.
+    bridge.pressAutomationButton.mockResolvedValueOnce({ busy: true as const, reason: "Running for this record." } as never);
+    fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(button.getAttribute("aria-describedby")).not.toBeNull());
+    fireEvent.mouseEnter(button.parentElement!);
+    fireEvent.click(button);
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    act(() => { window.dispatchEvent(new Event("scroll")); });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("closes the question and gives focus back when the button would run other actions", async () => {
+    const bridge = stub({
+      record: invoice, collectionPath: "Invoices",
+      buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid", irreversible: [{ name: "invoices.settle", label: "Settle" }] } }],
+    });
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} />);
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    expect(document.activeElement?.textContent).toBe("Run");
+    bridge.listRecordButtons.mockResolvedValue({
+      record: invoice, collectionPath: "Invoices",
+      buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid", irreversible: [{ name: "invoices.settle", label: "Settle" }, { name: "invoices.refund", label: "Refund" }] } }],
+    });
+    act(() => bridge.emitActivity({ workspaceId: "ws-1", paths: ["Invoices/automations.yaml"] } as WorkspaceActivityEvent));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(button);
+    expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
+  });
+
   it("shows nothing for a file that is not a record, or a Collection without buttons", async () => {
     const bridge = stub({ record: null });
     const { container } = render(<RecordButtonsRow workspaceId="ws-1" path="Notes/todo.md" onError={() => undefined} onNotice={() => undefined} />);

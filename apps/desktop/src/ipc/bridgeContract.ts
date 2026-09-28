@@ -1,3 +1,4 @@
+import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
@@ -125,6 +126,7 @@ import {
 // The renderer never sees raw Electron APIs.
 
 const OPAQUE_ID = z.string().min(1).max(200);
+const CHAT_CHANNEL_SLUG = z.string().min(1).refine(value => nameByteLength(value) <= 200);
 
 // Length caps: IPC payloads are untrusted; bound every renderer-supplied
 // string so a hostile/buggy caller cannot cause memory/latency pressure.
@@ -360,6 +362,11 @@ export const WorkspaceIdPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
+
+export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
+  recoveryCopies: z.boolean().optional(),
+});
+export type RevealWorkspaceFolderPayload = z.infer<typeof RevealWorkspaceFolderPayload>;
 
 // Who asked for a sync pass now. A person's retry counts toward the attempts
 // a failure's notice weighs; a retry on reconnecting or waking does not.
@@ -1014,7 +1021,7 @@ const WorkspaceGraphChatThreadNode = WorkspaceGraphNodeBase.extend({
   channelId: OPAQUE_ID.optional(),
   channelWireId: z.string().min(1).max(256).optional(),
   channelName: z.string().min(1).max(100).optional(),
-  channelSlug: z.string().min(1).max(100).optional(),
+  channelSlug: CHAT_CHANNEL_SLUG.optional(),
   channelKind: z.enum(["channel", "dm", "agent"]).optional(),
   filePath: z.never().optional(),
   headingAnchor: z.never().optional(),
@@ -1241,6 +1248,13 @@ const SYNC_STATUS_BASE_FIELDS = {
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
   historyShareView: z.boolean(),
+  // True when the workspace's drive cannot refuse to replace a file (FAT,
+  // exFAT, some network shares), so a save can lose another program's change
+  // made at the same moment. Optional, unlike its neighbours: an omitted
+  // warning reads as "no warning", which is the safe reading.
+  atomicPlacementUnavailable: z.boolean().optional(),
+  recoveryUnavailable: z.boolean().optional(),
+  keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
@@ -1604,7 +1618,7 @@ export const ChatFileMentionRecord = z.object({
   channelId: OPAQUE_ID.optional(),
   channelWireId: z.string().min(1).max(256).optional(),
   channelName: z.string().min(1).max(100).optional(),
-  channelSlug: z.string().min(1).max(100).optional(),
+  channelSlug: CHAT_CHANNEL_SLUG.optional(),
   channelKind: z.enum(["channel", "dm", "agent"]).optional(),
 });
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
@@ -1912,7 +1926,7 @@ const CHAT_CHANNEL_NAME_MAX = 80;
 export const ChatChannelRecord = z.object({
   id: OPAQUE_ID,
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
   // What the group holds and why it exists. Older fixtures omit them.
   type: z.enum(["posts", "chat", "both"]).optional(),
@@ -2017,7 +2031,7 @@ const ChatFeedChannelRecord = z.object({
   id: OPAQUE_ID,
   wireId: z.string().min(1).max(256).optional(),
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
 });
 
@@ -3280,7 +3294,19 @@ export type GetRelayReceivedSharePayload = z.infer<
 >;
 
 export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
-  z.object({ found: z.literal(false) }).strict(),
+  z
+    .object({
+      found: z.literal(false),
+      // Present when the authenticated exact lookup confirms owner removal.
+      removed: z
+        .object({
+          message: z.string().min(1).max(500),
+          removedAtMs: z.number().int().nonnegative().optional(),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
   z
     .object({
       found: z.literal(true),
@@ -3292,11 +3318,22 @@ export type GetRelayReceivedShareResult = z.infer<
   typeof GetRelayReceivedShareResult
 >;
 
+// A grant the owner removed from this account. The relay keeps the row apart
+// from `received`, which stays active-only, and words the reason itself.
+export const RelayShareRemovedRow = z.object({
+  shareId: OPAQUE_ID,
+  grantId: OPAQUE_ID,
+  message: z.string().min(1).max(500),
+  removedAtMs: z.number().int().nonnegative(),
+});
+export type RelayShareRemovedRow = z.infer<typeof RelayShareRemovedRow>;
+
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
   // Path/version shares addressed to this account (chat grants are
   // listed through listChatChannelShares).
   received: z.array(RelayShareReceivedRow).max(1000).default([]),
+  removed: z.array(RelayShareRemovedRow).max(1000).default([]),
 });
 export type ListRelaySharesResult = z.infer<typeof ListRelaySharesResult>;
 
@@ -3326,6 +3363,43 @@ export const RevokeRelaySharePayload = z.object({
   shareId: OPAQUE_ID,
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
+
+// The relay's receipt for a removal it can put back. It restores the grants
+// the removal ended, as they were; it never makes a new grant or link. The
+// relay forgets the receipt at `expiresAtMs`, 10 minutes after the removal.
+export const RelayShareUndoReceipt = z
+  .object({
+    undoId: z.string().min(1).max(256),
+    expiresAtMs: z.number().int().nonnegative(),
+  })
+  .strict();
+export type RelayShareUndoReceipt = z.infer<typeof RelayShareUndoReceipt>;
+
+export const RevokeRelayShareResult = z
+  .object({ undo: RelayShareUndoReceipt.optional() })
+  .strict();
+export type RevokeRelayShareResult = z.infer<typeof RevokeRelayShareResult>;
+
+export const RelayShareRevokeResponse = z.object({
+  ok: z.literal(true),
+  undo: RelayShareUndoReceipt.optional(),
+});
+
+export const UndoRelaySharePayload = z
+  .object({
+    shareId: OPAQUE_ID,
+    undoId: RelayShareUndoReceipt.shape.undoId,
+  })
+  .strict();
+export type UndoRelaySharePayload = z.infer<typeof UndoRelaySharePayload>;
+
+export const UndoRelayShareResult = z.object({ shareId: OPAQUE_ID }).strict();
+export type UndoRelayShareResult = z.infer<typeof UndoRelayShareResult>;
+
+export const RelayShareUndoResponse = z.object({
+  ok: z.literal(true),
+  shareId: OPAQUE_ID,
+});
 
 const RELAY_SHARE_LINK_ACCESS = z.enum(["view", "comment", "edit"]);
 
@@ -3517,6 +3591,7 @@ export const RelayShareLinkRetuneNarrowResponse = z.object({
 
 export const RelayShareLinkEndResponse = z.object({
   ok: z.literal(true),
+  undo: RelayShareUndoReceipt,
 });
 
 const RelayShareLinkDependentsChangedOutcome = z
@@ -3554,7 +3629,7 @@ export type RetuneRelayShareLinkResult = z.infer<
 >;
 
 export const RevokeRelayShareLinkResult = z.discriminatedUnion("outcome", [
-  z.object({ outcome: z.literal("ended") }).strict(),
+  z.object({ outcome: z.literal("ended"), undo: RelayShareUndoReceipt }).strict(),
   RelayShareLinkDependentsChangedOutcome,
 ]);
 export type RevokeRelayShareLinkResult = z.infer<
@@ -3903,6 +3978,7 @@ export const RevokeRelayShareGrantResult = z
     ...RelayShareNamedGrantTransitionBase,
     status: z.literal("revoked"),
     revokedAtMs: z.number().int().nonnegative(),
+    undo: RelayShareUndoReceipt,
   })
   .strict();
 export type RevokeRelayShareGrantResult = z.infer<
@@ -4339,6 +4415,9 @@ export const ListChatChannelSharesResult = z.object({
       state: z.literal("answered"),
       granted: z.array(ChatChannelShareGrantRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
       received: z.array(ChatChannelShareReceivedRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
+      // Share ids whose owner removed this account, as the relay confirms.
+      // Only this lane may say "the owner removed your access".
+      removed: z.array(OPAQUE_ID).max(1000).default([]),
     }),
     z.object({ state: z.literal("unreachable") }),
     // Over the per-lane cap. Not "unreachable": that word means dohc could not
@@ -4436,55 +4515,6 @@ export const DismissShareSkipsPayload = z.object({
   generation: z.number().int().nonnegative(),
 });
 export type DismissShareSkipsPayload = z.infer<typeof DismissShareSkipsPayload>;
-
-// ---- Automation failures (ADR 0008) ----
-// The engine's failed automation claims are the durable record; main serves
-// them minus what the owner acknowledged. One notice per automation: the
-// newest error and a generation (the automation's failed-claim count).
-export const ListAutomationFailuresPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-});
-export type ListAutomationFailuresPayload = z.infer<
-  typeof ListAutomationFailuresPayload
->;
-
-export const AutomationFailureNotice = z.object({
-  automationId: z.string().min(1),
-  // The newest failed claim: the one a Try again re-runs.
-  claimId: z.string().min(1),
-  // A chain stop never ran, and no Try again can run it.
-  chainStopped: z.boolean(),
-  // The automation's name in its automations.yaml, when dohc can read it.
-  name: z.string().nullable(),
-  error: z.string(),
-  updatedAtMs: z.number().int(),
-  generation: z.number().int().nonnegative(),
-  // A dataset automation's failures count per instance of its dataset, which
-  // a delete and remake or a restore replaces; null for a document Collection.
-  datasetInstance: z.string().min(1).max(2048).nullable(),
-});
-export type AutomationFailureNotice = z.infer<typeof AutomationFailureNotice>;
-
-export const ListAutomationFailuresResult = z.object({
-  failures: z.array(AutomationFailureNotice),
-});
-export type ListAutomationFailuresResult = z.infer<
-  typeof ListAutomationFailuresResult
->;
-
-// Acknowledging an automation's failures up to the generation on screen.
-// Deletes nothing: the engine's claim rows stay, and a failure recorded
-// after the render has a higher generation, so it speaks up again.
-export const DismissAutomationFailurePayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  automationId: z.string().min(1),
-  generation: z.number().int().nonnegative(),
-  // The notice's dataset instance. A dismissal of an earlier instance changes nothing.
-  datasetInstance: z.string().min(1).max(2048).nullable(),
-});
-export type DismissAutomationFailurePayload = z.infer<
-  typeof DismissAutomationFailurePayload
->;
 
 // ---- Collection automations (the ⚡ panel) ----
 // Main parses and writes automations.yaml, so the renderer never loads the
@@ -4722,7 +4752,8 @@ const PressedButton = {
 };
 export const PressAutomationButtonPayload = z.union([
   z.strictObject({ ...PressedButton, collectionPath: PATH_STRING }),
-  z.strictObject({ ...PressedButton, datasetId: z.uuid(), table: z.string().min(1).max(256) }),
+  // `confirmed` holds the operation names of the actions the person was told can't be undone and chose to run.
+  z.strictObject({ ...PressedButton, datasetId: z.uuid(), table: z.string().min(1).max(256), confirmed: z.array(z.string().max(256)).max(64).optional() }),
 ]);
 export type PressAutomationButtonPayload = z.infer<typeof PressAutomationButtonPayload>;
 export type PressAutomationButtonResult =
@@ -5394,6 +5425,9 @@ export const NoticeRow = z.object({
   target: NoticeTargetShape.nullable(),
   createdAtMs: z.number().int().nonnegative(),
   readAtMs: z.number().int().nonnegative().nullable(),
+  // This person posted it from this computer. Try again on a failed run
+  // works only here, where the run's claim is.
+  postedHere: z.boolean(),
 });
 export type NoticeRow = z.infer<typeof NoticeRow>;
 export const NoticeRef = z.object({
@@ -5426,11 +5460,25 @@ export const RunSkippedScheduleNowPayload = z.object({
 });
 // `note` is null once the run started on this computer, or says why not.
 export const RunSkippedScheduleNowResult = z.object({ note: z.string().max(500).nullable() });
+// Try again on a failed run's notice, from the list for `account`.
+// `startOver` confirms running a changed automation from the beginning.
+export const RetryAutomationNoticePayload = z.object({
+  account: NoticeAccountKey,
+  notice: NoticeRef,
+  startOver: z.boolean(),
+});
+export const RetryAutomationNoticeResult = z.union([
+  z.object({ status: z.literal("queued"), press: z.boolean() }),
+  z.object({ status: z.enum(["definition-changed", "progress-gone"]), repeatsMessages: z.boolean() }),
+  z.object({ status: z.literal("refused"), reason: z.string().min(1).max(2_000) }),
+]);
 
 // Which of the owner's computers runs a workspace's schedules.
 const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
 const ScheduleHostComputer = z.object({
   installId: z.string().min(1).max(256),
+  // "server" for the dohc server, listed first while it runs automations.
+  kind: z.enum(["computer", "server"]),
   label: z.string().min(1).max(64),
   lastSeenMs: z.number().int().nonnegative(),
   thisComputer: z.boolean(),
@@ -5519,6 +5567,10 @@ export const noticeOperations = {
   runSkippedScheduleNow: {
     channel: "desktop:run-skipped-schedule-now",
     payload: RunSkippedScheduleNowPayload, result: RunSkippedScheduleNowResult, guard: "trusted-sender",
+  },
+  retryAutomationNotice: {
+    channel: "desktop:retry-automation-notice",
+    payload: RetryAutomationNoticePayload, result: RetryAutomationNoticeResult, guard: "trusted-sender",
   },
 } satisfies OperationTable;
 
@@ -5802,7 +5854,7 @@ export interface DohcDesktopBridge
     payload: AttachWorkspaceFolderPayload,
   ): Promise<WorkspaceSummary>;
   forgetWorkspace(payload: WorkspaceIdPayload): Promise<void>;
-  revealWorkspaceFolder(payload: WorkspaceIdPayload): Promise<void>;
+  revealWorkspaceFolder(payload: RevealWorkspaceFolderPayload): Promise<void>;
   // Opens (or focuses) a window for the workspace and leaves this window as
   // it is. The manager window closes itself after.
   openWorkspaceWindow(payload: WorkspaceIdPayload): Promise<void>;
@@ -5925,7 +5977,9 @@ export interface DohcDesktopBridge
   getRelayReceivedShare(
     payload: GetRelayReceivedSharePayload,
   ): Promise<GetRelayReceivedShareResult>;
-  revokeRelayShare(payload: RevokeRelaySharePayload): Promise<void>;
+  revokeRelayShare(payload: RevokeRelaySharePayload): Promise<RevokeRelayShareResult>;
+  // Puts back what a removal ended, using its receipt. Owner only.
+  undoRelayShare(payload: UndoRelaySharePayload): Promise<UndoRelayShareResult>;
   createRelayShareLink(
     payload: CreateRelayShareLinkPayload,
   ): Promise<CreateRelayShareLinkResult>;
@@ -5990,15 +6044,6 @@ export interface DohcDesktopBridge
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
   refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
   dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
-  // Automation failures (ADR 0008): the unacknowledged failure rows for the
-  // workspace's automations, and the acknowledgment that hides them without
-  // deleting the engine's claim rows.
-  listAutomationFailures(
-    payload: ListAutomationFailuresPayload,
-  ): Promise<ListAutomationFailuresResult>;
-  dismissAutomationFailure(
-    payload: DismissAutomationFailurePayload,
-  ): Promise<void>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
@@ -6135,6 +6180,7 @@ export interface DohcDesktopBridge
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
+  retryFileRecovery(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.
   retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
@@ -6191,11 +6237,10 @@ export interface DohcDesktopBridge
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
-  // Live push: an automation claim failed (settled here, or recorded by the
-  // engine at the depth cap). A poke, not the record — the subscriber
-  // re-lists through listAutomationFailures, guarded by its own workspace.
-  // Returns an unsubscribe function.
-  onAutomationFailuresChanged(
+  // Live push: an automation claim failed or a retry queued one, so run
+  // history changed. A poke, not the record; the subscriber reads the runs
+  // again, guarded by its own workspace. Returns an unsubscribe function.
+  onAutomationRunsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
   // Live push: the crash report changed. A poke, not the report; the

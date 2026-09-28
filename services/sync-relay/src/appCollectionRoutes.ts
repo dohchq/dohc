@@ -34,6 +34,7 @@ export function createLinkAppCollectionRoutes(options:{
     const base={publicationId:route.publicationId,capabilityHash:capability.session.capabilityHash,profileTokenHash:hashLinkProfileSecret(secret,options.linkKey),limits,publicEditRelease:options.publicEditRelease};
     const signal=AbortSignal.any([request.signal,options.storage.unavailable]);signal.throwIfAborted();
     const admitted=options.storage.authorizeLinkAppCollection({...base,nowMs:options.nowMs()});
+
     const releaseBytes=options.streams.admitLinkBlobBytes(admitted.grantId,RESPONSE_BYTES+(request.method==="POST"?APP_COLLECTION_REQUEST_BYTES:0));
     if(!releaseBytes)throw relayError("link_read_rate_limited");
     const settleEgress=options.egress.reserve(admitted.grantId,RESPONSE_BYTES,options.nowMs());

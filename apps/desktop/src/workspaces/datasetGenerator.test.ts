@@ -59,6 +59,9 @@ describe("initial dataset source", { timeout: 60_000 }, () => {
     expect(JSON.parse(after.files["data/registrations/dataset.json"]!).tables[0].fields.at(-1)).toEqual(button);
     expect(hasGeneratedDatasetOperations(before.files[plain.operationsPath]!, after.definition)).toBe(true);
     expect(hasGeneratedDatasetOperations(before.files[plain.operationsPath]! + "\n// edited", after.definition)).toBe(false);
+    // Rules that name an action are someone's own, whatever the source's text.
+    const withAction = { ...after.definition, operations: [...after.definition.operations, { ...after.definition.operations[0]!, operationId: id(31), name: "settle", kind: "action" as const, readOnly: false }] };
+    expect(hasGeneratedDatasetOperations(before.files[plain.operationsPath]!, withAction)).toBe(false);
   });
 
   it("refuses a create operation that cannot fill a private required field", () => {

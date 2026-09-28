@@ -38,7 +38,7 @@ describe("a save while the settings file changes", () => {
     race.beforeReplace = () => writeFile(path, JSON.stringify({
       appearance: { themeMode: "dark" },
       profile: { preferredName: "Ada" },
-      accentColor: "teal",
+      wallpaper: "teal",
     }));
     const saved = await writeUserSettingsFile(root, {
       ...seen,
@@ -48,16 +48,16 @@ describe("a save while the settings file changes", () => {
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
       appearance: { themeMode: "dark", zoomLevel: 2 },
       profile: { preferredName: "Ada" },
-      accentColor: "teal",
+      wallpaper: "teal",
     });
     expect(saved).toEqual({
       settings: {
         ...DEFAULT_USER_SETTINGS,
         profile: { preferredName: "Ada" },
-        appearance: { themeMode: "dark", zoomLevel: 2 },
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark", zoomLevel: 2 },
       },
       source: "stored",
-      ignored: [{ key: "accentColor", reason: "unknown" }],
+      ignored: [{ key: "wallpaper", reason: "unknown" }],
     });
     // What the save answered is what is on disk, so the watcher finds nothing
     // left to apply.

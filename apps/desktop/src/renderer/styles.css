@@ -19,6 +19,11 @@
   --font-sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 
+  /* The editor's type. The settings file sets both (theme.ts); these are its
+   * defaults, and the editor's other sizes keep their ratio to the body. */
+  --dohc-editor-font: var(--font-sans);
+  --dohc-editor-font-size: 15px;
+
   --dohc-bg: #faf9f5;
   --dohc-panel: #f3f1ea;
   --dohc-panel-2: #ebe8e0;
@@ -341,7 +346,8 @@ body {
   padding: 6px 56px 120px;
   color: var(--dohc-ink);
   cursor: text;
-  font-size: 15px;
+  font-family: var(--dohc-editor-font);
+  font-size: var(--dohc-editor-font-size);
   line-height: 1.65;
   letter-spacing: -0.006em;
   outline: none;
@@ -421,7 +427,7 @@ body {
  * column (the shorthand would otherwise beat the `> *` centering rule). */
 .dohc-notion-editor h1 {
   margin: 32px auto 12px;
-  font-size: 31px;
+  font-size: calc(var(--dohc-editor-font-size) * 31 / 15);
   font-weight: 700;
   letter-spacing: -0.021em;
   line-height: 1.15;
@@ -429,7 +435,7 @@ body {
 
 .dohc-notion-editor h2 {
   margin: 30px auto 10px;
-  font-size: 22px;
+  font-size: calc(var(--dohc-editor-font-size) * 22 / 15);
   font-weight: 650;
   letter-spacing: -0.014em;
   line-height: 1.25;
@@ -437,7 +443,7 @@ body {
 
 .dohc-notion-editor h3 {
   margin: 24px auto 8px;
-  font-size: 17px;
+  font-size: calc(var(--dohc-editor-font-size) * 17 / 15);
   font-weight: 650;
   letter-spacing: -0.008em;
 }
@@ -582,7 +588,7 @@ body {
   color: var(--dohc-ink);
   padding: 2px 0 2px 18px;
   font-family: var(--font-serif);
-  font-size: 16px;
+  font-size: calc(var(--dohc-editor-font-size) * 16 / 15);
   font-style: italic;
 }
 
@@ -613,7 +619,7 @@ body {
   background: var(--dohc-panel-2);
   padding: 1px 5px;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: calc(var(--dohc-editor-font-size) * 12.5 / 15);
 }
 
 .dohc-notion-editor pre {
@@ -631,7 +637,7 @@ body {
   border: 0;
   background: transparent;
   padding: 0;
-  font-size: 13px;
+  font-size: calc(var(--dohc-editor-font-size) * 13 / 15);
   line-height: 1.6;
 }
 
@@ -689,7 +695,7 @@ body {
   padding: 8px 10px;
   vertical-align: top;
   text-align: left;
-  font-size: 14px;
+  font-size: calc(var(--dohc-editor-font-size) * 14 / 15);
   overflow-wrap: anywhere;
 }
 

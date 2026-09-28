@@ -1,5 +1,6 @@
 import {
   COLLECTION_SCHEMA_FILENAME,
+  collectionVersionError,
   type CollectionSchema,
 } from "@dohc/workspace-contracts/collection";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
@@ -42,7 +43,7 @@ export async function rewriteCollectionSchema(options: {
     if (parsed.status !== "valid") {
       return {
         status: "error",
-        detail: `The ${COLLECTION_SCHEMA_FILENAME} file has entries dohc cannot read. Fix the file, then try again.`,
+        detail: collectionVersionError(parsed.reasons, relativePath) ?? `The ${COLLECTION_SCHEMA_FILENAME} file has entries dohc cannot read. Fix the file, then try again.`,
       };
     }
     const text = serializeCollectionSchema(mutate(parsed.schema));

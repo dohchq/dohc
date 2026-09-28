@@ -157,7 +157,9 @@ const WriteSchema = z.union([
     recordId: DatasetRecordIdSchema,
     version: z.number().int().positive(),
   }),
-  // An action that ran, by its label then, and the dataset revision its commit made.
+  // An action that ran, by its label then, and the dataset revision its
+  // commit made. `undo` is what its reverse action takes, for an action the
+  // rules say can be reversed, and `reverseOperationId` is that reverse.
   z.object({
     kind: z.literal("dataset-action"),
     rules: DatasetRulesSchema,
@@ -165,6 +167,9 @@ const WriteSchema = z.union([
     tableId: z.string(),
     name: z.string(),
     revision: z.number().int().nonnegative(),
+    undo: JsonValueSchema.optional(),
+    // The reverse action the rules named when this one ran; Undo runs that one or none.
+    reverseOperationId: z.string().optional(),
   }),
   z.object({ kind: z.literal("dataset-kept"), recordId: DatasetRecordIdSchema, fieldId: z.string(), field: z.string(), planned: JsonValueSchema, current: JsonValueSchema }),
   z.object({ kind: z.literal("dataset-skipped"), recordId: DatasetRecordIdSchema, reason: z.string() }),
@@ -208,6 +213,7 @@ const StoredRunSchema = z.object({
   replans: z.array(ReplanSchema),
   undoRequests: z.array(UndoRequestSchema),
   readableFields: z.array(z.string()).nullable(),
+  datasetId: z.string().min(1).nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
   settled: z.boolean(),
@@ -266,6 +272,12 @@ export interface StoredRun {
    * Collection. A run resumes only while every one of them is still readable.
    */
   readableFields: string[] | null;
+  /**
+   * The dataset a dataset Collection's plan read and writes, or null for a
+   * document Collection. A plan resumes only while its Collection keeps
+   * that dataset.
+   */
+  datasetId: string | null;
   /** A person chose to run the claim again from the start under a newer definition. */
   superseded: boolean;
   /**
@@ -321,6 +333,26 @@ const TimeoutsSchema = z.object({
   version: z.literal(1),
   timeouts: z.array(z.object({ automationId: z.string().min(1), count: z.number().int().nonnegative() })),
 });
+
+const ReportedFailuresSchema = z.object({
+  version: z.literal(1),
+  failures: z.array(z.object({
+    automationId: z.string().min(1),
+    datasetInstance: z.string().min(1).nullable(),
+    // The failed run the notice names.
+    claimId: z.string().min(1),
+    generation: z.number().int().nonnegative(),
+    open: z.boolean(),
+  })),
+});
+
+const EnabledAutomationsSchema = z.object({
+  version: z.literal(1),
+  collections: z.array(z.object({ path: z.string().min(1), enabled: z.array(z.string().min(1)) })),
+});
+
+/** The newest failure of one automation this computer sent a notice for. */
+export type ReportedFailure = z.infer<typeof ReportedFailuresSchema>["failures"][number];
 
 /** An engine subscription this computer holds: records under a path, or one Group's messages. */
 export type StoredSubscription =
@@ -460,6 +492,19 @@ export interface AutomationRunStore {
   /** Consecutive timed-out runs per automation, for the circuit breaker. */
   readTimeouts(): Promise<Map<string, number>>;
   saveTimeouts(timeouts: ReadonlyMap<string, number>): Promise<void>;
+  /**
+   * The newest failure this computer sent a notice for, per automation, so
+   * a failure is sent once. `open` is false once its notice was taken back.
+   */
+  readReportedFailures(): Promise<ReportedFailure[]>;
+  saveReportedFailures(reported: readonly ReportedFailure[]): Promise<void>;
+  /**
+   * The ids of the switched-on automations in each Collection, as this
+   * computer last read them, or null before the first save. A switch off
+   * made while dohc was closed shows against these.
+   */
+  readEnabledAutomations(): Promise<Map<string, string[]> | null>;
+  saveEnabledAutomations(enabled: ReadonlyMap<string, readonly string[]>): Promise<void>;
 }
 
 type ProgressLine =
@@ -710,6 +755,28 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       return serial(async () => {
         const entries = [...timeouts].map(([automationId, count]) => ({ automationId, count }));
         await writeDurably(join(await base(), "timeouts.json"), `${JSON.stringify({ version: 1, timeouts: entries })}\n`);
+      });
+    },
+    async readReportedFailures() {
+      const parsed = ReportedFailuresSchema.safeParse(await readJson(join(await base(), "failures.json")));
+      return parsed.success ? parsed.data.failures : [];
+    },
+    saveReportedFailures(failures) {
+      return serial(async () => {
+        await writeDurably(join(await base(), "failures.json"), `${JSON.stringify({ version: 1, failures })}\n`);
+      });
+    },
+    async readEnabledAutomations() {
+      const read = await readJson(join(await base(), "enabled.json"));
+      if (read === undefined) return null;
+      const parsed = EnabledAutomationsSchema.safeParse(read);
+      // A damaged file counts as none: nothing is reported until the next save.
+      return parsed.success ? new Map(parsed.data.collections.map((entry) => [entry.path, entry.enabled])) : null;
+    },
+    saveEnabledAutomations(enabled) {
+      return serial(async () => {
+        const collections = [...enabled].map(([path, ids]) => ({ path, enabled: [...ids] }));
+        await writeDurably(join(await base(), "enabled.json"), `${JSON.stringify({ version: 1, collections })}\n`);
       });
     },
   };

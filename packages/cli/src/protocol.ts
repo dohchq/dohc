@@ -296,6 +296,39 @@ const collectionCreateRecordArgsSchema = z
   })
   .strict();
 
+// An automation, named by its Collection's folder and its id in that
+// Collection's automations.yaml, and one of its runs by the run's id.
+const automationArgs = {
+  ...argsBase,
+  collectionPath: collectionPathArg,
+  automation: z.string().min(1).max(200),
+};
+const automationRunIdArg = z.string().min(1).max(256);
+const automationRunsArgsSchema = z.object(automationArgs).strict();
+const automationRunArgsSchema = z
+  .object({ ...automationArgs, run: automationRunIdArg })
+  .strict();
+// `startOver` confirms running an automation that changed since the run
+// failed, or a run whose progress is gone, from its first step.
+const automationRetryArgsSchema = z
+  .object({ ...automationArgs, run: automationRunIdArg, startOver: z.boolean() })
+  .strict();
+// A press of a Button field on one record. `record` is a document record's
+// id, or a dataset record's primary key as JSON. `confirm` names the actions
+// dohc cannot undo that the caller chose to run. A `requestId` sent again
+// answers the same press instead of pressing twice.
+const automationPressArgsSchema = z
+  .object({
+    ...argsBase,
+    collectionPath: collectionPathArg,
+    field: z.string().min(1).max(256),
+    record: z.string().min(1).max(1024),
+    table: z.string().min(1).max(256).optional(),
+    confirm: z.array(z.string().min(1).max(256)).max(64),
+    requestId: requestIdSchema.optional(),
+  })
+  .strict();
+
 export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("dataset"), args: z.object({ ...argsBase, request: DatasetRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
@@ -342,6 +375,10 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("automationRuns"), args: automationRunsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("automationRun"), args: automationRunArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("automationRetry"), args: automationRetryArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("automationPress"), args: automationPressArgsSchema }).strict(),
 ]);
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
@@ -830,6 +867,169 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// What an automation run did, as this computer's run history keeps it:
+// a field it wrote, a record it added, a field someone else had changed
+// since the run planned it (kept as they left it), a record it could no
+// longer find, the same four for dataset records, and a message or notice
+// it sent. Values are plain JSON.
+const automationDatasetRulesSchema = z
+  .object({ datasetId: z.string(), revision: z.number().int().positive(), revisionSha256: z.string() })
+  .strict();
+const automationDatasetRecordIdSchema = z.union([z.string(), z.number()]);
+const automationRunChangeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("field"), recordId: z.string(), path: z.string(), field: z.string(), before: z.json(), after: z.json() }).strict(),
+  z.object({ kind: z.literal("created"), recordId: z.string(), path: z.string() }).strict(),
+  z.object({ kind: z.literal("kept"), recordId: z.string(), path: z.string(), field: z.string(), planned: z.json(), current: z.json() }).strict(),
+  z.object({ kind: z.literal("skipped"), recordId: z.string(), path: z.string(), reason: z.string() }).strict(),
+  z.object({
+    kind: z.literal("dataset-edit"),
+    rules: automationDatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    recordId: automationDatasetRecordIdSchema,
+    version: z.number().int().positive(),
+    fields: z.array(z.object({ fieldId: z.string(), field: z.string(), before: z.json(), after: z.json() }).strict()),
+  }).strict(),
+  z.object({
+    kind: z.literal("dataset-created"),
+    rules: automationDatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    recordId: automationDatasetRecordIdSchema,
+    version: z.number().int().positive(),
+  }).strict(),
+  // An action that ran, by its label then, and the dataset revision its commit made. When the
+  // rules named a reverse action, `reverseOperationId` is it and `undo` is its input; Undo runs that or nothing.
+  z.object({
+    kind: z.literal("dataset-action"),
+    rules: automationDatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    name: z.string(),
+    revision: z.number().int().nonnegative(),
+    undo: z.json().optional(),
+    reverseOperationId: z.string().optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("dataset-kept"),
+    recordId: automationDatasetRecordIdSchema,
+    fieldId: z.string(),
+    field: z.string(),
+    planned: z.json(),
+    current: z.json(),
+  }).strict(),
+  z.object({ kind: z.literal("dataset-skipped"), recordId: automationDatasetRecordIdSchema, reason: z.string() }).strict(),
+  z.object({ kind: z.literal("message"), messageId: z.string(), name: z.string() }).strict(),
+  z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string() }).strict(),
+]);
+// The change a run is for. `kind` is null for a dataset run that failed
+// before it could carry its change; `by` is null when the change did not say.
+const automationTriggerSchema = z
+  .object({
+    kind: z.enum(["added", "changed", "removed", "message", "button", "schedule"]).nullable(),
+    recordId: z.string().nullable(),
+    by: z.enum(["human", "agent", "automation"]).nullable(),
+    depth: z.number().int().nonnegative(),
+  })
+  .strict();
+const automationRunFields = {
+  run: automationRunIdArg,
+  state: z.enum(["pending", "running", "done", "failed"]),
+  error: z.string().nullable(),
+  createdAtMs: z.number().int().nonnegative(),
+  updatedAtMs: z.number().int().nonnegative(),
+  trigger: automationTriggerSchema,
+  // The run began under another version of the automation.
+  definitionChanged: z.boolean(),
+  // The chain depth cap stopped it before it ran.
+  chainStopped: z.boolean(),
+  undone: z.boolean(),
+};
+const automationRunsResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      runs: z.array(z.object({ ...automationRunFields, changes: z.number().int().nonnegative() }).strict()),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+const automationRunResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      run: z
+        .object({
+          ...automationRunFields,
+          // Steps count from 1 in the order the file lists them, including
+          // the steps inside If and Otherwise. A step that changed nothing
+          // is not listed.
+          steps: z.array(
+            z.object({ step: z.number().int().positive(), changes: z.array(automationRunChangeSchema) }).strict(),
+          ),
+          // The step whose change did not land when the run failed. Null
+          // when it did not fail, or failed before any step, such as on a
+          // formula.
+          failedStep: z.number().int().positive().nullable(),
+          // Try again runs it from the first step and needs startOver,
+          // because the automation changed or the run's progress is gone.
+          // Otherwise Try again resumes at failedStep.
+          startsOver: z.boolean(),
+        })
+        .strict(),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+const automationRetryResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("queued") }).strict(),
+  // Running it again starts from the first step and can repeat changes the
+  // run already made, so it needs startOver. `repeatsMessages` says posts,
+  // direct messages, and notices it sent may be sent again.
+  z
+    .object({
+      ok: z.literal(false),
+      status: z.enum(["definition-changed", "progress-gone"]),
+      repeatsMessages: z.boolean(),
+      reason: z.string().min(1),
+    })
+    .strict(),
+  // A run on another computer carries its failure notice, which names that computer.
+  z
+    .object({
+      ok: z.literal(false),
+      reason: z.string().min(1),
+      notice: z.object({ title: z.string(), body: z.string() }).strict().optional(),
+    })
+    .strict(),
+]);
+
+const automationPressResultSchema = z.union([
+  // The run the press started. `outcome` is set when a press sent again
+  // finds its run already ended; `waiting` says why the run waits, if it does.
+  z
+    .object({
+      ok: z.literal(true),
+      run: automationRunIdArg,
+      outcome: z.enum(["done", "skipped", "failed", "ended"]).nullable(),
+      error: z.string().nullable(),
+      waiting: z.string().nullable(),
+    })
+    .strict(),
+  // A shared view's press went to the owner's computer, which runs it. Its
+  // changes arrive as synced edits, and a failure as a notice.
+  z.object({ ok: z.literal(true), relayed: z.literal(true) }).strict(),
+  // The press would run actions dohc cannot undo. Name each in confirm to run them.
+  z
+    .object({
+      ok: z.literal(false),
+      reason: z.string().min(1),
+      confirm: z.array(z.object({ name: z.string().min(1), label: z.string().min(1) }).strict()).min(1),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+
 export const cliResultSchemas = {
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
@@ -856,6 +1056,10 @@ export const cliResultSchemas = {
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,
+  automationRuns: automationRunsResultSchema,
+  automationRun: automationRunResultSchema,
+  automationRetry: automationRetryResultSchema,
+  automationPress: automationPressResultSchema,
 } as const;
 
 export type CliResultByVerb = {

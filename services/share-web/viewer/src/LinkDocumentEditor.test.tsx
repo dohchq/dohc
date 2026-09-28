@@ -7,6 +7,7 @@ import type {NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-brows
 import {LinkDocumentEditor} from "./LinkDocumentEditor";
 import {openLinkDocument} from "./linkLive";
 import {settle} from "./testing";
+import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
 
 vi.mock("./linkLive", () => ({openLinkDocument: vi.fn()}));
 let container: HTMLDivElement, root: Root;
@@ -37,6 +38,12 @@ async function click(text: string) {
   const button = [...container.querySelectorAll("button")].find(value => value.textContent === text); expect(button).toBeDefined();
   await act(async () => button!.click());
 }
+it("shows the grant-scoped refusal with its next step", async () => {
+  vi.mocked(openLinkDocument).mockRejectedValue(new Error(LINK_REFUSALS.link_comment_access.error));
+  await render(true);
+  await settle(() => container.textContent?.includes(LINK_REFUSALS.link_comment_access.error) === true);
+  expect(container.textContent).toContain("Retry");
+});
 it("retains a quarantined draft after access loss, including updates rejected before they entered the queue", async () => {
   const f = fixture(), onClose = vi.fn(); vi.mocked(openLinkDocument).mockResolvedValue(f.session);
   await render(true, onClose); await settle(() => container.querySelector('[role="textbox"]') !== null);

@@ -17,7 +17,6 @@ import {
   acknowledgeShareSkips,
   createRegistryStore,
   mergeShareSkippedOps,
-  unacknowledgedAutomationFailures,
   type RemoteIdentity,
 } from "./registryStore";
 // The predicate the RENDERER acts on, asserted here against the records this
@@ -83,58 +82,28 @@ function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
   }
 }
 
-// Automation failure acknowledgments (ADR 0008, Phase 4): the engine's
-// failed claim rows are the durable record; the registry stores only how
-// far the owner has seen, per automation. Same rules as the share skip
-// record above: an acknowledgment hides, never deletes, and never moves
-// backwards.
-describe("automation failure acknowledgments", () => {
-  const failure = (generation: number, automationId = "hello/triage") => ({
-    automationId,
-    datasetInstance: null,
-    error: "handler exploded",
-    updatedAtMs: 1_000,
-    generation,
-  });
-
-  it("serves a failure until its generation is acknowledged, then again past it", () => {
-    store.register(personal);
-    const seen = failure(3);
-    expect(unacknowledgedAutomationFailures([seen], undefined)).toEqual([seen]);
-
-    store.acknowledgeAutomationFailure("ws-1", "hello/triage", 3);
-    const acks = store.find("ws-1")?.automationFailureAcks;
-    expect(acks).toEqual({ "hello/triage": 3 });
-    expect(
-      unacknowledgedAutomationFailures([seen], acks),
-      "an acknowledged generation keeps warning forever",
-    ).toEqual([]);
-
-    // A newer failure has a higher generation: unacknowledged again.
-    expect(
-      unacknowledgedAutomationFailures([failure(4)], acks),
-      "one acknowledgment silencing every future failure",
-    ).toEqual([failure(4)]);
-    // Another automation's failures are untouched by this acknowledgment.
-    expect(
-      unacknowledgedAutomationFailures([failure(1, "hello/other")], acks),
-    ).toEqual([failure(1, "hello/other")]);
-  });
-
-  it("never lowers an acknowledgment and survives a reopen", () => {
-    store.register(personal);
-    store.acknowledgeAutomationFailure("ws-1", "hello/triage", 5);
-    store.acknowledgeAutomationFailure("ws-1", "hello/triage", 2);
-    expect(
-      store.find("ws-1")?.automationFailureAcks,
-      "a stale click un-seeing a newer acknowledgment",
-    ).toEqual({ "hello/triage": 5 });
-
-    const reopened = createRegistryStore(registryPath);
-    expect(
-      reopened.find("ws-1")?.automationFailureAcks,
-      "an acknowledgment that dies with the process re-raises every dismissed notice",
-    ).toEqual({ "hello/triage": 5 });
+// A relay listing applied to the received-share records: the reconcile runs
+// on the record as the file holds it, the result is persisted, and the caller
+// learns whether anything changed.
+describe("received share reconciliation", () => {
+  it("persists the reconciled entry and reports whether it changed", () => {
+    store.register({
+      ...personal,
+      sharedChannels: [{
+        shareId: "gone", channelWireId: "wire", access: "read-only", granterEmail: null,
+        relayUrl: "https://relay.test", recipientUserId: "me", ended: true,
+      }],
+    });
+    expect(store.reconcileRecipientShares("ws-1", () => null)).toBe(false);
+    expect(store.reconcileRecipientShares("ws-1", (entry) => ({
+      ...entry,
+      sharedChannels: entry.sharedChannels!.map(({ ended: _ended, ...row }) => row),
+      confirmedRemovedShares: [{ shareId: "other", removedAtMs: 5 }],
+    }))).toBe(true);
+    const reread = createRegistryStore(registryPath).find("ws-1");
+    expect(reread?.sharedChannels?.[0]?.ended).toBeUndefined();
+    expect(reread?.confirmedRemovedShares).toEqual([{ shareId: "other", removedAtMs: 5 }]);
+    expect(() => store.reconcileRecipientShares("missing", () => null)).toThrow("Unknown workspace");
   });
 });
 
