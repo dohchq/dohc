@@ -531,7 +531,7 @@ function noTriggerRecord(trigger: AutomationTrigger): string | null {
  */
 export function shapeProblem(
   automation: Automation,
-  findValues: (condition: string) => readonly FindValue[] | { problem: string },
+  findValues: (condition: string, ordinal: number) => readonly FindValue[] | { problem: string },
 ): string | null {
   const recordless = noTriggerRecord(automation.when);
   const steps = orderSteps(automation.do);
@@ -540,7 +540,7 @@ export function shapeProblem(
   let formulas = (automation.if === null ? 0 : 1) +
     (automation.when.kind === "field-changed" && automation.when.to?.kind === "formula" ? 1 : 0) +
     (automation.when.kind === "starts-matching" ? 2 : 0);
-  for (const { step } of everyStep(steps)) {
+  for (const { step, ordinal } of everyStep(steps)) {
     switch (step.kind) {
       case "wake-agent":
       case "post":
@@ -561,7 +561,7 @@ export function shapeProblem(
       case "find": {
         finds += 1;
         formulas += 1;
-        const values = findValues(step.condition);
+        const values = findValues(step.condition, ordinal);
         if ("problem" in values) return values.problem;
         if (recordless !== null && values.some((value) => value.kind === "trigger-field" ||
           (value.kind === "formula" && readsTriggerRecord(value.expression)))) {

@@ -52,6 +52,8 @@ export function datasetRecordKey(datasetId: string, tableId: string, recordId: D
 export interface DatasetRules {
   definition: DatasetDefinition;
   generated: boolean;
+  /** Resolves only this destination's steps, retaining their original ordinals. */
+  sourceCollection?: string;
 }
 
 /** Each step's operation and table, and the read that finds the trigger record. */
@@ -164,14 +166,17 @@ export function datasetCodeOperation(
  */
 function resolve(
   automation: Automation,
-  { definition, generated }: DatasetRules,
+  { definition, generated, sourceCollection }: DatasetRules,
   pin: false | ((step: RecordStep) => boolean),
 ): { steps: DatasetSteps; pinned: Map<number, string> } | { problem: string } {
   const trigger = automation.when;
   // A schedule or a Group message has no trigger record, so its steps take
   // their tables from their operations.
   let table: DatasetTable | null = null;
-  if ("table" in trigger) {
+  const destination = posix.dirname(definition.schemaPath);
+  const ownsTrigger = sourceCollection === undefined || sourceCollection === destination;
+  const destinations = recordStepDestinations(automation, sourceCollection ?? destination);
+  if (ownsTrigger && "table" in trigger) {
     const named = datasetTableNamed(definition, trigger.table);
     if (named === undefined) {
       return { problem: trigger.table === null
@@ -257,12 +262,14 @@ function resolve(
     return null;
   };
   for (const { ordinal, step } of ordered) {
+    if (sourceCollection !== undefined && destinations.get(ordinal) !== destination) continue;
     if (step.kind === "invoke") {
       const problem = resolveAction(ordinal, step);
       if (problem !== null && !pin) return { problem };
       continue;
     }
     if (step.kind !== "set" && step.kind !== "add-record" && step.kind !== "find") continue;
+    if (!generated && sourceCollection !== undefined) return { problem: GENERATED_ONLY(definition.name) };
     const problem = resolveStep(ordinal, step);
     // Pinning goes on past a step no operation fits, so the others still get theirs.
     if (problem !== null && !pin) return { problem };
@@ -330,7 +337,7 @@ export function datasetAutomationProblem(automation: Automation, dataset: Datase
  * first; rules that changed since can still refuse it here.
  */
 export function datasetStepsOf(automation: Automation, rules: DatasetRules): DatasetSteps {
-  if (!rules.generated) {
+  if (!rules.generated && rules.sourceCollection === undefined) {
     const problem = authoredProblem(automation, rules.definition.name);
     if (problem !== null) throw new Error(problem);
   }
@@ -339,13 +346,31 @@ export function datasetStepsOf(automation: Automation, rules: DatasetRules): Dat
   return resolved.steps;
 }
 
+/** Static destinations, including the destination inherited by a Set binding. */
+export function recordStepDestinations(automation: Automation, source: string): Map<number, string> {
+  const bindings = new Map<string, string>();
+  const destinations = new Map<number, string>();
+  for (const { ordinal, step } of stepsInOrder(automation)) {
+    if (step.kind === "add-record" || step.kind === "find") {
+      const path = step.collection ?? source;
+      destinations.set(ordinal, path);
+      if (step.as !== null) bindings.set(step.as, path);
+    } else if (step.kind === "set") {
+      destinations.set(ordinal, step.records === null ? source : bindings.get(step.records) ?? source);
+    } else if (step.kind === "invoke" || step.kind === "run" || step.kind === "run-file") {
+      destinations.set(ordinal, source);
+    }
+  }
+  return destinations;
+}
+
 // Each operation a run can call, once each: the trigger record's read, each
 // step's operation, and each read that checks a record again. A code step's
 // changes are known only once it runs, so it can call every edit, create,
 // and read on the table it changes records in. On a dataset whose
 // operations someone wrote, it changes no record, so it calls none.
-function invokedOperations(automation: Automation, { definition, generated }: DatasetRules, { trigger, steps, rereads }: DatasetSteps): DatasetOperation[] {
-  const codeTable = generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+function invokedOperations(automation: Automation, { definition, generated, sourceCollection }: DatasetRules, { trigger, steps, rereads }: DatasetSteps): DatasetOperation[] {
+  const codeTable = (sourceCollection === undefined || sourceCollection === posix.dirname(definition.schemaPath)) && generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
     ? datasetCodeTable(automation, definition)
     : undefined;
   const code = codeTable === undefined
@@ -441,7 +466,7 @@ export function datasetReachSteps(
   const { trigger, steps } = resolved.steps;
   const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, access: operation.access });
   // A code step on a generated dataset reads and changes its table's records, so their fields count too.
-  const code = rules.generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+  const code = (rules.sourceCollection === undefined || rules.sourceCollection === posix.dirname(definition.schemaPath)) && rules.generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
     ? datasetCodeTable(automation, definition)
     : undefined;
   const tables = new Map([...(trigger === null ? [] : [trigger.table]), ...[...steps.values()].map((step) => step.table), ...(code === undefined ? [] : [code])]
@@ -543,7 +568,7 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
  * no id yet, so its identity has an empty one, and `part`, the effect's place
  * among its step's effects, tells a code step's added records apart.
  */
-export function datasetEffectKey(claimId: string, keySeed: string, ordinal: number, part: number, recordId: DatasetRecordId | null, replan: number): string {
-  const identity = `${claimId}/${keySeed}/${ordinal}/${part}/${recordId ?? ""}/${replan}`;
+export function datasetEffectKey(claimId: string, keySeed: string, ordinal: number, part: number, recordId: DatasetRecordId | null, replan: number, destination?: { datasetId: string; tableId: string }): string {
+  const identity = JSON.stringify([claimId, keySeed, ordinal, part, destination?.datasetId ?? null, destination?.tableId ?? null, recordId, replan]);
   return `a.${createHash("sha256").update(identity).digest("hex")}`;
 }

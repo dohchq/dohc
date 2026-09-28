@@ -47,11 +47,9 @@ import {
   fieldWritesOf,
   fieldsNamedBy,
   parseCollectionAutomationId,
-  reachStepsOf,
   scheduleHash,
   stepsInOrder,
   subscriptionFor,
-  unsupportedReason,
 } from "./automationPlan";
 import {
   checkAutomationReach,
@@ -76,14 +74,18 @@ import {
   type CollectionAutomationReads,
   type CollectionAutomationRunDependencies,
   type CollectionAutomationRunOutcome,
+  rebaseRun,
+  LOST_COLLECTION_ERROR,
 } from "./collectionAutomationRun";
-import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
+import { automationInventory, type AutomationInventory } from "./automationInventory";
+import { AutomationRunWait } from "./automationRunWait";
+import { automationUndoReach, undoAutomationRuns } from "./automationUndo";
 import {
-  datasetAutomationProblem,
+  type CollectionAutomationUndone,
+} from "./collectionAutomationUndo";
+import {
   datasetIrreversibleActions,
   datasetFieldWritesOf,
-  datasetOperationsOf,
-  datasetReachSteps,
   datasetTableNamed,
   datasetUndoDeletes,
   pinDatasetOperations,
@@ -96,7 +98,6 @@ import {
   datasetUndoRulesChanged,
   DATASET_UNDO_RULES_CHANGED,
   planDatasetUndo,
-  undoDatasetAutomationRuns,
   type DatasetUndoConfirmed,
   type DatasetUndoHost,
   type DatasetUndoPreview,
@@ -369,7 +370,7 @@ type IndexedFile = { file: AutomationsFileParseResult; contentHash: string | nul
  * A dataset Collection's approved rules, whether dohc generated its
  * operations, and its data grants, as the reach check reads them.
  */
-type IndexedDataset = { definition: DatasetDefinition; generated: boolean; grants: ReachDatasetGrants };
+type IndexedDataset = { approved: import("@dohc/security-contract/dataset").DatasetRevision | null; definition: DatasetDefinition; generated: boolean | null; grants: ReachDatasetGrants };
 
 /** One step's reach as the ⚡ panel shows it. */
 export type CollectionAutomationStepReach =
@@ -898,6 +899,10 @@ export class CollectionAutomations {
   private readonly schemaFields = new Map<string, ReadonlySet<string> | string>();
   /** Dataset Collections, with their approved rules. Only when dohc can run dataset automations. */
   private readonly datasets = new Map<string, IndexedDataset>();
+  private targetRevision = 0;
+  private readonly inventories = new WeakMap<Automation, {
+    revision: number; chat: ChatDirectory | null; source: string; result: AutomationInventory | Error;
+  }>();
   /** The engine subscriptions this computer holds, by engine automation id. */
   private subscribed = new Map<string, StoredSubscription>();
   /** Each step's last reach verdict. */
@@ -1069,16 +1074,17 @@ export class CollectionAutomations {
       if (folder !== ".") folders.add(folder);
     }
     if (folders.size === 0 || this.opened === null) return;
+    this.targetRevision += 1;
     void this.enqueue(async () => {
       let datasets: Promise<Map<string, IndexedDataset> | null> | undefined;
       let listed: Promise<Map<string, string>> | undefined;
       for (const folder of folders) {
         this.schemaFields.delete(folder);
-        this.datasets.delete(folder);
         const collectionId = await this.options.pathExists(`${folder}/collection.yaml`)
           ? (await (listed ??= this.listedCollections())).get(folder)
           : undefined;
         if (collectionId !== undefined) {
+          this.datasets.delete(folder);
           this.collections.set(folder, collectionId);
           await this.readFile(folder);
           continue;
@@ -1087,8 +1093,11 @@ export class CollectionAutomations {
         // A new automations.yaml beside a dataset is a reason to open its host.
         const open = await this.options.pathExists(`${folder}/${DATASET_FILE_NAME}`) &&
           await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`);
-        const dataset = (await (datasets ??= this.datasetFolders(open)))?.get(folder);
+        const knownDatasets = await (datasets ??= this.datasetFolders(open));
+        if (knownDatasets === null) continue;
+        const dataset = knownDatasets.get(folder);
         if (dataset === undefined) {
+          this.datasets.delete(folder);
           this.files.delete(folder);
         } else {
           this.datasets.set(folder, dataset);
@@ -1096,6 +1105,7 @@ export class CollectionAutomations {
         }
       }
       await this.readNamedSchemas();
+      this.targetRevision += 1;
       await this.noteSwitches();
       this.noteEnabledSchedules(false);
       await this.reconcile(false);
@@ -1134,6 +1144,7 @@ export class CollectionAutomations {
   }
 
   private async indexDatasets(open: boolean): Promise<void> {
+    this.targetRevision += 1;
     const folders = await this.datasetFolders(open);
     if (folders === null) return;
     for (const path of this.datasets.keys()) {
@@ -1146,6 +1157,7 @@ export class CollectionAutomations {
       this.datasets.set(path, dataset);
       await this.readFile(path);
     }
+    this.targetRevision += 1;
     await this.noteSwitches();
     // A schedule found now counts from now, as one switched on does.
     this.noteEnabledSchedules(false);
@@ -1200,7 +1212,7 @@ export class CollectionAutomations {
   rosterChanged(): void {
     if (this.state !== "open") return;
     void this.options.cachedRoster()
-      .then((roster) => roster.kind === "unknown" ? undefined : this.recordVerdicts(roster, this.everyAutomation()))
+      .then((roster) => roster.kind === "unknown" ? undefined : this.recordVerdicts(roster))
       .catch((error: unknown) => this.options.onError("check who can edit automations", error))
       .finally(() => this.clearWaits("roster", "held"));
   }
@@ -1606,9 +1618,9 @@ export class CollectionAutomations {
     await this.ready();
     await this.openDataset(collectionPath);
     const dataset = this.datasets.get(collectionPath);
-    if (dataset === undefined) return [...automations];
+    if (dataset === undefined || dataset.generated === null) return [...automations];
     const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
-    return automations.map((automation) => pinDatasetOperations(automation, dataset, (step) => held.has(JSON.stringify(step))));
+    return automations.map((automation) => pinDatasetOperations(automation, { ...dataset, generated: dataset.generated === true }, (step) => held.has(JSON.stringify(step))));
   }
 
   /**
@@ -1627,7 +1639,7 @@ export class CollectionAutomations {
     const held = new Set(indexed?.file.status === "read"
       ? indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? stepsInOrder(entry.automation).map(({ step }) => JSON.stringify(step)) : []))
       : []);
-    const pinned = dataset === undefined ? automation : pinDatasetOperations(automation, dataset, (step) => held.has(JSON.stringify(step)));
+    const pinned = dataset === undefined ? automation : pinDatasetOperations(automation, { ...dataset, generated: dataset.generated === true }, (step) => held.has(JSON.stringify(step)));
     return (await this.reasonsIn(collectionPath, false)).reasonOf(pinned);
   }
 
@@ -1965,9 +1977,9 @@ export class CollectionAutomations {
     await this.opened;
     const home = await this.datasetFolder(datasetId);
     const dataset = home === null ? undefined : this.datasets.get(home);
-    if (dataset === undefined) return [];
+    if (dataset === undefined || dataset.generated === null) return [];
     return await this.marksOf(this.writableCollections(), ({ collectionPath, automation }) => collectionPath !== home ? [] :
-      datasetFieldWritesOf(automation, dataset).flatMap((write) => (write.table === table ? [write.field] : [])));
+      datasetFieldWritesOf(automation, { ...dataset, generated: dataset.generated === true }).flatMap((write) => (write.table === table ? [write.field] : [])));
   }
 
   /** Each field `fieldsOf` names for a switched-on automation that can run, with those automations' names in file order. */
@@ -2335,16 +2347,18 @@ export class CollectionAutomations {
   async datasetButtons(
     datasetId: string,
     buttons: ReadonlyArray<{ field: string; table: string }>,
-    description: DatasetDescription,
+    describe: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<AutomationButtonState[]> {
     await this.ready();
     const collectionPath = await this.datasetFolder(datasetId);
     const roster = await this.options.cachedRoster();
+    const descriptions = this.buttonDescriptions(describe);
+    const description = await descriptions(datasetId);
     const states: AutomationButtonState[] = [];
     for (const button of buttons) {
       states.push(collectionPath === null
         ? { kind: "disabled", reason: DATASET_NOT_APPROVED }
-        : (await this.datasetButton(collectionPath, button, description, roster)).state);
+        : (await this.datasetButton(collectionPath, button, description, roster, descriptions)).state);
     }
     return states;
   }
@@ -2362,7 +2376,7 @@ export class CollectionAutomations {
     input: { datasetId: string; table: string; field: string; recordId: string; pressId: string; pressedBy: string; by: AutomationPressActor;
       /** The names of the actions the person was told can't be undone and chose to run. */
       confirmed: readonly string[] },
-    description: DatasetDescription,
+    describe: (datasetId: string) => Promise<DatasetDescription>,
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
   ): Promise<CollectionAutomationPress> {
     await this.ready();
@@ -2379,7 +2393,9 @@ export class CollectionAutomations {
       if (known.press.request !== request || datasetPresser(claim) !== input.pressedBy) throw new Error("This press id already names another press.");
       return await this.answerPress(claim, watch);
     }
-    const button = await this.datasetButton(collectionPath, input, description, await this.options.cachedRoster());
+    const descriptions = this.buttonDescriptions(describe);
+    const description = await descriptions(input.datasetId);
+    const button = await this.datasetButton(collectionPath, input, description, await this.options.cachedRoster(), descriptions);
     if (!("checked" in button)) throw new Error(button.state.reason);
     // The automation changed since the button asked: it would run an action nobody agreed to.
     if ((button.state.irreversible ?? []).some((action) => !input.confirmed.includes(action.name))) throw new Error(changedSincePressed(input.field));
@@ -2412,11 +2428,21 @@ export class CollectionAutomations {
    * included, and a person who cannot learns nothing about the automation.
    * The rest is as for a document Collection's button.
    */
+  private buttonDescriptions(describe: (datasetId: string) => Promise<DatasetDescription>) {
+    const descriptions = new Map<string, Promise<DatasetDescription>>();
+    return (datasetId: string) => {
+      let pending = descriptions.get(datasetId);
+      if (pending === undefined) { pending = describe(datasetId); descriptions.set(datasetId, pending); }
+      return pending;
+    };
+  }
+
   private async datasetButton(
     collectionPath: string,
     button: { field: string; table: string | null },
     description: DatasetDescription,
     roster: ReachRoster,
+    describe: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<
     | { state: Exclude<AutomationButtonState, { kind: "ready" }> }
     | { state: Extract<AutomationButtonState, { kind: "ready" }>; checked: { automation: Automation; datasetId: string; tableId: string; fieldId: string } }
@@ -2446,8 +2472,25 @@ export class CollectionAutomations {
       (named) => named === table.name || (named === null && definition.tables.length === 1), definition.name);
     if (resolved.kind === "state") return { state: resolved.state };
     const { automation } = resolved;
-    if (!datasetButtonAccess(description, table.name, datasetOperationsOf(automation, dataset))) return disabled(noAccessReason(table.name));
-    const state = await this.runnableButtonState(collectionPath, automation, roster);
+    let inventory: AutomationInventory;
+    try { inventory = this.inventory(collectionPath, automation); }
+    catch (error) { return disabled(errorText(error)); }
+    const operations = new Map<string, Set<string>>();
+    for (const step of inventory.reach) {
+      if (step.kind !== "dataset-operation") continue;
+      const names = operations.get(step.datasetId) ?? new Set<string>();
+      names.add(step.operation.name);
+      operations.set(step.datasetId, names);
+    }
+    for (const [datasetId, names] of operations) {
+      let access: DatasetDescription;
+      try { access = await describe(datasetId); }
+      catch { return disabled(noAccessReason(table.name)); }
+      if (access.datasetId !== datasetId || [...names].some((name) => !access.operations.some((operation) => operation.name === name))) {
+        return disabled(noAccessReason(table.name));
+      }
+    }
+    const state = await this.runnableButtonState(collectionPath, automation, roster, inventory.reach);
     if (state.kind !== "ready") return { state };
     // A press that runs an action asks first, since dohc cannot undo what the action did.
     const irreversible = datasetIrreversibleActions(automation, definition);
@@ -2601,16 +2644,19 @@ export class CollectionAutomations {
    * editor to allow it. A dataset field formulas cannot see is hidden from
    * them, and stops nothing.
    */
-  private async runnableButtonState(collectionPath: string, automation: Automation, roster: ReachRoster): Promise<AutomationButtonState> {
-    const unsupported = this.cannotRun(collectionPath, automation);
+  private async runnableButtonState(collectionPath: string, automation: Automation, roster: ReachRoster, inventory?: readonly ReachStep[]): Promise<AutomationButtonState> {
+    const unsupported = inventory === undefined ? this.cannotRun(collectionPath, automation) : null;
     if (unsupported !== null) return { kind: "disabled", reason: unsupported };
     const automationId = this.automationIdIn(collectionPath, automation.id);
     if (roster.kind === "unknown") return { kind: "ready", automationId };
-    const steps = this.reachSteps(collectionPath, automation);
+    let steps: readonly ReachStep[];
+    try {
+      steps = inventory ?? this.reachSteps(collectionPath, automation);
+    } catch (error) { return { kind: "disabled", reason: errorText(error) }; }
     for (const [index, reach] of checkAutomationReach(roster, { id: automation.id, collection: collectionNamed(collectionPath), codeFiles: codeFilesOf(automation, collectionPath), steps }).entries()) {
       if (!reach.allowed && steps[index]!.kind !== "dataset-field") return { kind: "disabled", reason: reach.reason };
     }
-    if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }])) {
+    if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }], steps)) {
       return { kind: "disabled", reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.` };
     }
     return { kind: "ready", automationId };
@@ -2633,7 +2679,6 @@ export class CollectionAutomations {
   ): Promise<CollectionAutomationUndo> {
     await this.ready();
     const parsed = this.locate(input.automationId);
-    const dataset = parsed !== null && this.datasets.has(parsed.collectionPath);
     // Held from before the first read to the end, like Try again's.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
     this.changing.add(input.claimId);
@@ -2657,11 +2702,30 @@ export class CollectionAutomations {
       if (runs.length > 0 && runs.every((run) => run.undo === "done")) {
         return { status: "refused", reason: "You already undid this run." };
       }
-      // A run's changes go back the way it made them. One made while the
-      // Collection kept its records the other way has nothing here to undo.
-      if (runs.some((run) => (run.rules !== null) !== dataset)) {
-        return { status: "refused", reason: KEPT_ANOTHER_WAY_UNDO };
+      const hasDatasets = runs.some((run) => run.steps.some((step) => step.effects.some((effect) => "rules" in effect)) ||
+        run.applied.some((entry) => entry.writes.some((write) => "rules" in write)));
+      if (parsed === null) return { status: "refused", reason: LOST_COLLECTION_ERROR };
+      if (hasDatasets && await this.withLiveHost(() => true, true) !== true) {
+        throw new Error("The dataset host is unavailable. Reopen the workspace, then try again.");
       }
+      const needsReverseReach = datasetUndoDeletesRecorded(runs) || runs.some((run) => run.applied.some((entry) =>
+        entry.writes.some((write) => write.kind === "dataset-action" && write.reverseOperationId !== undefined)));
+      const source = needsReverseReach ? { roster: await this.options.roster(), collection: collectionNamed(parsed.collectionPath) } : null;
+      for (const run of runs) {
+        if (rebaseRun(run, (id) => this.collectionPathOf(id)).lost) return { status: "refused", reason: LOST_COLLECTION_ERROR };
+      }
+      let reverseReach: ReachStep[];
+      try {
+        const reach = (host: DatasetUndoHost | null) => automationUndoReach(runs, this.targetResolver(), (id) => this.collectionPathOf(id), source, host);
+        const checked = hasDatasets ? await this.withLiveHost(reach, true) : await reach(null);
+        if (checked === null) throw new Error("The dataset host is unavailable. Reopen the workspace, then try again.");
+        reverseReach = checked;
+      }
+      catch (error) { return { status: "refused", reason: errorText(error) }; }
+      const denied = source && checkAutomationReach(source.roster, {
+        id: parsed.id, collection: collectionNamed(parsed.collectionPath), codeFiles: [], steps: reverseReach,
+      }).find((verdict) => !verdict.allowed);
+      if (denied && !denied.allowed) return { status: "refused", reason: denied.reason };
       // Every run of the claim changed records, one a person started over
       // under a newer definition too. One whose Undo stopped part way is
       // undone again: what is already back stays as it is.
@@ -2672,7 +2736,7 @@ export class CollectionAutomations {
       // sent. It reads every run of the claim, those saved undone too, so a
       // retry after only some were saved done sends the same requests as
       // before and replays their receipts instead of writing again.
-      const checked = parsed !== null && dataset ? await this.datasetUndoCheck(input, collectionNamed(parsed.collectionPath), stored.runs, runs, pending) : null;
+      const checked = hasDatasets ? await this.datasetUndoCheck(input, collectionNamed(parsed.collectionPath), stored.runs, runs, pending) : null;
       if (checked !== null && "status" in checked) return checked;
       // Saved before anything is reversed, so no run resumes over what this
       // puts back, even if it stops part way.
@@ -2689,25 +2753,18 @@ export class CollectionAutomations {
         holder.undoCovers.push(...covers);
         holder.undoCalls.push(...checked.calls);
       }
-      const undone = checked !== null
-        // Who can edit, as last read, before each delete, as a run reads it before each record effect.
-        ? await this.withLiveHost((host) => undoDatasetAutomationRuns(host, checked.collection, async () => {
-          const roster = await this.options.cachedRoster();
-          if (roster.kind === "unknown") throw new Error(rosterProblem(roster, checked.collection));
-          return roster;
-        }, input.claimId, runs, async (request) => {
-          await this.options.store.recordUndoRequest(newest(), request);
-          newest().undoRequests.push(request);
-        }, this.runAbort.signal), true)
-        : await undoCollectionAutomationRuns({
-          withReads: (work) => this.withLiveEngine(work),
-          withRecordWrites: this.options.withRecordWrites,
-          trash,
-          collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
-        // Every run of the claim, those saved undone too: each field goes
-        // back to one value, which a retry after only some were saved done
-        // must find again.
-        }, runs, this.runAbort.signal);
+      const reverse = (host: DatasetUndoHost | null) => undoAutomationRuns({
+        withReads: (work) => this.withLiveEngine(work), withRecordWrites: this.options.withRecordWrites,
+        trash, collectionPathOf: (id) => this.collectionPathOf(id),
+      }, host, collectionNamed(parsed.collectionPath), async () => {
+        const roster = await this.options.cachedRoster();
+        if (roster.kind === "unknown") throw new Error(rosterProblem(roster, collectionNamed(parsed.collectionPath)));
+        return roster;
+      }, input.claimId, runs, async (request) => {
+        await this.options.store.recordUndoRequest(newest(), request);
+        newest().undoRequests.push(request);
+      }, this.runAbort.signal);
+      const undone = hasDatasets ? await this.withLiveHost(reverse, true) : await reverse(null);
       if (undone === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
       for (const run of pending) await this.options.store.updateState(run, { undo: "done" });
       return { status: "undone", ...undone };
@@ -2948,20 +3005,23 @@ export class CollectionAutomations {
   }
 
   private async loadIndex(): Promise<void> {
+    this.targetRevision += 1;
     this.collections = await this.listedCollections();
     this.files.clear();
     this.schemaFields.clear();
-    this.datasets.clear();
     for (const path of this.collections.keys()) await this.readFile(path);
     // A dataset's schedules run with the host closed, so the index opens it
     // whenever this workspace has a dataset store. It does so before the
     // schedules are noted, so one seen now is not taken as switched on now.
-    for (const [path, definition] of (await this.datasetFolders(true)) ?? []) {
+    const datasets = await this.datasetFolders(true);
+    if (datasets !== null) this.datasets.clear();
+    for (const [path, definition] of datasets ?? this.datasets) {
       if (this.collections.has(path)) continue;
       this.datasets.set(path, definition);
       await this.readFile(path);
     }
     await this.readNamedSchemas();
+    this.targetRevision += 1;
   }
 
   /** Reads the field names of every Collection an automation names that the index lacks. */
@@ -3090,12 +3150,10 @@ export class CollectionAutomations {
         unplaced.add(definition.datasetId);
         continue;
       }
-      // Subscription discovery keeps only identity. Target resolution loads
-      // approved rules and current grants on demand, even without automations.
-      folders.set(folder, { definition, generated: false, grants: { workspaceId: "", grants: [] } });
-      if (!(await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`))) continue;
+      // Index approved destinations even when they have no automations file.
+      folders.set(folder, { definition, approved: null, generated: null, grants: { workspaceId: "", grants: [] } });
       try {
-        const metadata = await this.withLiveHost((host) => ({ generated: host.generated(definition.datasetId), grants: host.dataGrants(definition.datasetId) }));
+        const metadata = await this.withLiveHost((host) => ({ approved: host.revision(definition.datasetId), generated: host.generated(definition.datasetId), grants: host.dataGrants(definition.datasetId) }));
         if (metadata === null) throw new Error(`The dataset host for ${folder} is unavailable.`);
         folders.set(folder, { definition, ...metadata });
       } catch (error) {
@@ -3121,20 +3179,49 @@ export class CollectionAutomations {
   }
 
   /** Why dohc cannot run an automation in this indexed Collection yet, or null. */
-  private unsupportedIn(collectionPath: string, automation: Automation): string | null {
-    const dataset = this.datasets.get(collectionPath);
-    if (dataset === undefined) return unsupportedReason(automation);
-    const subscription = datasetSubscriptionFor(automation, dataset.definition);
-    return subscription !== null && "problem" in subscription ? subscription.problem : datasetAutomationProblem(automation, dataset);
+  private inventory(collectionPath: string, automation: Automation): AutomationInventory {
+    const cached = this.inventories.get(automation);
+    if (cached?.revision === this.targetRevision && cached.chat === this.chat && cached.source === collectionPath) {
+      if (cached.result instanceof Error) throw cached.result;
+      return cached.result;
+    }
+    let result: AutomationInventory | Error;
+    try { result = this.buildInventory(collectionPath, automation); }
+    catch (error) { result = error instanceof Error ? error : new Error(String(error)); }
+    this.inventories.set(automation, { revision: this.targetRevision, chat: this.chat, source: collectionPath, result });
+    if (result instanceof Error) throw result;
+    return result;
   }
 
-  /** The Collections each step reaches, for the reach check. */
-  private reachSteps(collectionPath: string, automation: Automation) {
-    const collection = collectionNamed(collectionPath);
+  private buildInventory(collectionPath: string, automation: Automation): AutomationInventory {
+    return automationInventory(automation, collectionPath, (path) => {
+      const dataset = this.datasets.get(path);
+      if (dataset !== undefined) {
+        if (dataset.generated === null || dataset.approved === null) throw new AutomationRunWait(`The dataset host for ${path} is unavailable.`);
+        return { kind: "dataset", collection: collectionNamed(path), approved: dataset.approved,
+          generated: dataset.generated, grants: dataset.grants };
+      }
+      if (!this.collections.has(path)) throw new Error(`dohc cannot find an approved Collection at ${path}. Check its files and rules.`);
+      const fields = this.schemaFields.get(path) ?? null;
+      if (typeof fields === "string") throw new Error(fields);
+      return { kind: "document", collection: collectionNamed(path), fields };
+    }, this.chat);
+  }
+
+  private unsupportedIn(collectionPath: string, automation: Automation): string | null {
     const dataset = this.datasets.get(collectionPath);
-    return dataset !== undefined
-      ? (datasetReachSteps(automation, collection, dataset, dataset.grants, this.chat) ?? [])
-      : reachStepsOf(automation, collection, collectionNamed, this.chat);
+    if (dataset !== undefined) {
+      const subscription = datasetSubscriptionFor(automation, dataset.definition);
+      if (subscription !== null && "problem" in subscription) return subscription.problem;
+    }
+    try { this.inventory(collectionPath, automation); return null; }
+    catch (error) { return errorText(error); }
+  }
+
+  /** Uses the indexed destination metadata, as every reach consumer does. */
+  private reachSteps(collectionPath: string, automation: Automation): ReachStep[] {
+    try { return this.inventory(collectionPath, automation).reach; }
+    catch (error) { return [{ kind: "unavailable", reason: errorText(error), identity: "unavailable" }]; }
   }
 
   private definitionFor(automationId: string): Automation | null {
@@ -3181,6 +3268,7 @@ export class CollectionAutomations {
     const hash = definitionHash(automation);
     const steps = this.reachSteps(collectionPath, automation);
     for (const [index, reach] of steps.entries()) {
+      if (reach.kind === "unavailable") return false;
       const step = reachStepId(reach, index);
       // A stopped step fails the run, and a held one waits for a current editor.
       const verdict = this.verdicts.get(reachVerdictKey(automationId, hash, step))?.verdict;
@@ -3342,16 +3430,26 @@ export class CollectionAutomations {
    * of these automations is held. A step that starts to wait raises its
    * notice once.
    */
-  private async recordVerdicts(roster: Exclude<ReachRoster, { kind: "unknown" }>, automations: readonly OwnedAutomation[]): Promise<boolean> {
+  private async recordVerdicts(roster: Exclude<ReachRoster, { kind: "unknown" }>, automations?: readonly OwnedAutomation[], resolved?: readonly ReachStep[]): Promise<boolean> {
     await this.loadChat(roster);
+    automations ??= this.everyAutomation();
+    const owned = automations;
+    const inventories = new Map<string, readonly ReachStep[]>();
+    for (const { automationId, collectionPath, automation } of owned) {
+      try { inventories.set(automationId, resolved ?? this.inventory(collectionPath, automation).reach); }
+      catch (error) {
+        if (!(error instanceof AutomationRunWait)) inventories.set(automationId, [{ kind: "unavailable", reason: errorText(error), identity: "unavailable" }]);
+      }
+    }
     return await this.updateVerdicts(() => {
       // Without the saved verdicts every step waits.
-      if (this.verdictsUnreadable) return automations.length > 0;
+      if (this.verdictsUnreadable) return owned.length > 0;
       let held = false;
-      for (const { automationId, collectionPath, automation } of automations) {
+      for (const { automationId, collectionPath, automation } of owned) {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
-        const steps = this.reachSteps(collectionPath, automation);
+        const steps = inventories.get(automationId);
+        if (steps === undefined) continue;
         checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps }).forEach((reach, index) => {
           const step = reachStepId(steps[index]!, index);
           const key = reachVerdictKey(automationId, hash, step);
@@ -3683,7 +3781,7 @@ export class CollectionAutomations {
   }
 
   /** Whether a claim's run saved steps it has not finished: it resumes wherever its Collection is now. */
-  private async hasSavedPlan(claim: AutomationClaim): Promise<boolean> {
+  private async hasSavedPlan(claim: Pick<AutomationClaim, "automationId" | "claimId">): Promise<boolean> {
     const { runs } = await this.options.store.runsOf(claim.automationId, claim.claimId);
     return runs.some((run) => run.outcome?.state !== "done" && !run.superseded);
   }
@@ -3747,9 +3845,23 @@ export class CollectionAutomations {
     // A claim this version cannot run, or that names a field its Collection
     // lacks, fails with the reason the panel shows, so it reaches the failure
     // notice and Try again runs it once that is fixed.
-    const unsupported = this.cannotRun(id.collectionPath, automation);
-    if (unsupported !== null) {
-      return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.afterSettle() };
+    if (this.datasets.get(id.collectionPath)?.generated === null) {
+      this.datasetWaits.set(claim.claimId, id.collectionPath);
+      return { kind: "release", waitsFor: "dataset" };
+    }
+    const resuming = await this.hasSavedPlan(claim);
+    if (!resuming) {
+      try { this.inventory(id.collectionPath, automation); }
+      catch (error) {
+        if (error instanceof AutomationRunWait) {
+          this.datasetWaits.set(claim.claimId, collectionId ?? id.collectionPath);
+          return { kind: "release", waitsFor: "dataset" };
+        }
+      }
+      const unsupported = this.cannotRun(id.collectionPath, automation);
+      if (unsupported !== null) {
+        return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.afterSettle() };
+      }
     }
     // Every step needs the roster, even one inside the Collection: someone
     // with Edit on the file alone is an editor who cannot edit its records.
@@ -3768,11 +3880,8 @@ export class CollectionAutomations {
       }
       return { kind: "release", waitsFor: "roster" };
     }
-    const stepHeld = await this.recordVerdicts(roster, [{ automationId: claim.automationId, collectionPath: id.collectionPath, automation }]);
-    // A step that reach allows only because an editor left waits for a
-    // current editor to confirm it.
+    // The coordinator follows saved destinations before it records reach.
     if (stop.aborted) return release;
-    if (stepHeld) return { kind: "release", waitsFor: "held" };
     // A relayed press runs only on the computer that still runs the
     // workspace's automations, and holds off a handover while its run
     // writes, new or resumed after a restart. After a handover it runs
@@ -3793,8 +3902,8 @@ export class CollectionAutomations {
     const collection = collectionNamed(id.collectionPath);
     const runner = runnerOf(held, definition?.datasetId);
     const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => runner.kind === "document"
-      ? runCollectionAutomation(this.runDependencies(), { claim: runner.claim, automation, collection, roster, signal, stopped: stop })
-      : runDatasetAutomation({ ...this.runDependencies(), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
+      ? runCollectionAutomation(this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }), { claim: runner.claim, automation, collection, roster, signal, stopped: stop })
+      : runDatasetAutomation({ ...this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
         { held: runner.held, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
     // A pause or close stopped the run; its progress is saved, and the next
@@ -4023,10 +4132,11 @@ export class CollectionAutomations {
 
   /** Finds where automations post again, when any automation does. */
   private async loadChat(roster: Exclude<ReachRoster, { kind: "unknown" }>): Promise<void> {
-    if (!this.everyAutomation().some(({ automation }) => sendsMessages(automation) || automation.when.kind === "group-message")) return;
-    try {
-      const sending = this.everyAutomation().map(({ automation }) => automation)
+    const sending = [...this.files.values()].flatMap((indexed) => indexed.file.status === "read"
+      ? indexed.file.entries.flatMap((entry) => entry.status === "valid" ? [entry.automation] : []) : [])
       .filter((automation) => sendsMessages(automation) || automation.when.kind === "group-message");
+    if (sending.length === 0) return;
+    try {
       this.chat = (await this.options.chat.directory(roster, chatNeedsOf(sending))) ?? this.chat;
     } catch (error) {
       this.options.onError("read where automations post", error);
@@ -4036,15 +4146,21 @@ export class CollectionAutomations {
   private targetResolver() {
     return createAutomationTargets({
       readText: this.options.readText,
+      revisionOf: () => this.targetRevision,
       readSchemaFields: (path) => this.readSchemaFields(path),
       isCollection: (path) => this.collections.has(path),
       withHost: (work) => this.withLiveHost(work),
     });
   }
 
-  private runDependencies(): CollectionAutomationRunDependencies {
+  private runDependencies(owned?: OwnedAutomation): CollectionAutomationRunDependencies {
     return {
       targets: this.targetResolver(),
+      withHost: (work) => this.withLiveHost(work),
+      cachedRoster: () => this.options.cachedRoster(),
+      checkReach: async (steps, roster) => {
+        return owned === undefined ? false : this.recordVerdicts(roster, [owned], steps);
+      },
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withRecordWrites,
       collectionIdOf: (path) => this.collections.get(path) ?? null,

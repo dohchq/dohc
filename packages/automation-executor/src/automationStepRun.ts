@@ -1,3 +1,5 @@
+import { prepareRecordBackend, type RecordRunDependencies, type RecordRunInput, type RunSource } from "./automationRecordBackend";
+import { AutomationRunWait } from "./automationRunWait";
 import type { AutomationTimeSpent, JsonValue } from "@dohc/app-backend-runtime/automation";
 import {
   answersOf,
@@ -29,6 +31,7 @@ import { chatNeedsOf, AutomationChatSessionWait, type ChatDirectory } from "./au
 import type { ReachCollection, ReachRoster } from "./automationReach";
 import { RUN_PLAN_BUDGET_BYTES, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
 import {
+  startRun,
   checkPlannedMessages,
   DEADLINE_ERROR,
   UNREADABLE_RUN_ERROR,
@@ -58,6 +61,7 @@ export class StepRecordChanged extends Error {}
 
 /** The reads one step makes through its Collection's own reads. */
 export interface StepReads {
+  destinations?(ordinal: number): NonNullable<StoredStep["destinations"]>;
   /** The trigger record as it is now; null when the run has none or it is gone. */
   trigger(): Promise<RunRecord | null>;
   /** The records a Find or an Add record step at `ordinal` gave, as they are now. A record that is gone is left out. */
@@ -76,10 +80,9 @@ export interface StepReads {
 export interface StepBackend {
   /**
    * Runs one step's reads. Null when the Collection's store is not open;
-   * "changed" when a record changed between two of the step's reads of it,
-   * or "moved" when the run must check its Collection's new location.
+   * "changed" when a record changed between two of the step's reads of it.
    */
-  step<T>(work: (reads: StepReads) => Promise<T>): Promise<T | null | "changed" | "moved">;
+  step<T>(work: (reads: StepReads) => Promise<T>): Promise<T | null | "changed">;
   /** Each document Collection a step writes, by its Collection id; none for a dataset. */
   collectionsOf(step: StoredStep): StoredRun["collections"];
   /** The record the Add record step at `ordinal` added, from what the run recorded. */
@@ -261,7 +264,7 @@ async function walkSteps(
           if ("error" in answers) return { outcome: failed(answers.error, answers.timedOut) };
           const found = await reads.find(ordinal, filterValues(values, record, answers));
           if ("problem" in found) return { outcome: failed(found.problem) };
-          return { step: { ordinal, effects: [], output: { kind: "find", records: found.map(refOf) } } };
+          return { step: { ordinal, ...(reads.destinations ? { destinations: reads.destinations(ordinal) } : {}), effects: [], output: { kind: "find", records: found.map(refOf) } } };
         }
         const request = stepRequest(ctx, entry, inputs, source);
         const results = await evaluateRequest(dependencies.evaluator, ctx.claim.automationId, request, spent);
@@ -289,10 +292,9 @@ async function walkSteps(
         if ("problem" in planned) return { outcome: failed(planned.problem) };
         const effects = reads.effects(ordinal, planned.step.effects);
         if ("problem" in effects) return { outcome: failed(effects.problem) };
-        return { step: { ordinal, effects, ...(planned.step.output ? { output: planned.step.output } : {}) } };
+        return { step: { ordinal, ...(reads.destinations ? { destinations: reads.destinations(ordinal) } : {}), effects, ...(planned.step.output ? { output: planned.step.output } : {}) } };
       });
       if (result === null) return { outcome: { kind: "wait", reason: "engine" } };
-      if (result === "moved") return { outcome: { kind: "wait", reason: "moved" } };
       if (result !== "changed") return result;
       if (input.signal.aborted) return { outcome: failed(DEADLINE_ERROR, true) };
       if (rereads >= MAX_REREADS) return { outcome: failed(KEPT_CHANGING_ERROR) };
@@ -319,6 +321,7 @@ async function walkSteps(
         if ("outcome" in applied) return applied.outcome;
         writes = applied;
       } catch (error) {
+        if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
         if (input.stopped.aborted) return stopped;
         // A synced workspace with no session waits for one: a post written now would reach nobody.
         if (error instanceof AutomationChatSessionWait) return { kind: "wait", reason: "session" };
@@ -348,6 +351,7 @@ async function walkSteps(
         try {
           prepared = await prepare(entry);
         } catch (error) {
+          if (error instanceof AutomationRunWait) return end({ kind: "wait", reason: error.reason });
           return end(input.stopped.aborted ? stopped : input.signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error)));
         }
         if (input.stopped.aborted) return end(stopped);
@@ -407,4 +411,29 @@ async function walkSteps(
   // the next drain, which finds every effect recorded and completes it.
   if (ended === null) return input.stopped.aborted ? { kind: "wait", reason: "stopped" } : { kind: "done" };
   return ended;
+}
+
+/** Both source runners use this coordinator and its destination-routed backend. */
+export async function coordinateSourceRun(
+  dependencies: RecordRunDependencies, input: RecordRunInput, source: RunSource,
+): Promise<CollectionAutomationRunOutcome> {
+  try {
+    const prepared = await prepareRecordBackend(dependencies, input, source);
+    if ("outcome" in prepared) return prepared.outcome;
+    const { backend, ctx, state, resuming } = prepared;
+    const spent = { prepareMs: 0, runMs: 0 };
+    if (!resuming) {
+      let started: CollectionAutomationRunOutcome | null;
+      try { started = await startRun(dependencies.evaluator, backend, ctx, spent); }
+      catch (error) {
+        if (error instanceof AutomationRunWait) throw error;
+        return failed(errorText(error));
+      }
+      if (started !== null) return input.stopped.aborted ? stopped : started;
+    }
+    return await runSteps(dependencies, backend, { ...input, claimRun: input.claim.run }, ctx, state, resuming, spent);
+  } catch (error) {
+    if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
+    throw error;
+  }
 }

@@ -95,7 +95,8 @@ export interface ReachPerson {
  * and paths as the engine lists them. Steps inside an If count like any
  * other step.
  */
-export type ReachStep =
+export type ReachStep = (
+  | { kind: "unavailable"; reason: string }
   // Set fields, add records, or change found records in `collection`.
   | { kind: "change-records"; collection: ReachCollection }
   | { kind: "find-records"; collection: ReachCollection }
@@ -115,7 +116,8 @@ export type ReachStep =
   | { kind: "read-group"; group: { channelWireId: string | null; name: string } }
   | { kind: "notify"; person: ReachPerson }
   // A personal step, such as waking this person's agent.
-  | { kind: "personal"; person: ReachPerson };
+  | { kind: "personal"; person: ReachPerson }
+) & { /** Retains a static step's existing hold identity when storage-specific checks expand. */ identity?: string };
 
 /** A dataset operation a step invokes. */
 export interface ReachDatasetOperation {
@@ -331,6 +333,7 @@ function checkOwnerStep(
   editors: readonly Person[],
 ): StepReach {
   switch (step.kind) {
+    case "unavailable": return stop(step.reason);
     case "change-records": {
       const blocked = editors.find((person) => !reaches(person, step.collection.path, "edit"));
       return blocked ? stop(`${nameOf(blocked)} cannot edit ${step.collection.name}.`, nameOf(blocked)) : ALLOWED;
@@ -395,6 +398,7 @@ function checkOwnerStep(
  * so matching names in different Collections cannot share a verdict.
  */
 export function reachStepId(step: ReachStep, index: number): string {
+  if (step.identity !== undefined) return step.identity;
   switch (step.kind) {
     case "dataset-operation":
       return JSON.stringify(["operation", step.datasetId, step.operation.operationId]);

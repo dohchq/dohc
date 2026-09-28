@@ -168,6 +168,7 @@ function workspace(docs: readonly Doc[], fault: Fault | null = null, files = new
       collectionIdOf: (path) => (path === "Tasks" || path === "Log" ? path : null),
       collectionPathOf: (collectionId) => (collectionId === "Tasks" || collectionId === "Log" ? collectionId : null),
       targets: createAutomationTargets({
+        revisionOf: () => 0,
         isCollection: (path) => path === "Tasks" || path === "Log",
         readText: async (path) => { metadataReads.push(path); return null; },
         readSchemaFields: async (path) => { metadataReads.push(`${path}/collection.yaml`); return null; },
@@ -265,7 +266,7 @@ describe("a stepwise run", () => {
     expect(space.records.get("rec_t")!.values.Count).toBe(1);
   });
 
-  it("still refuses an approved dataset destination before reading records", async () => {
+  it("refuses a dataset destination with no approved operation before reading records", async () => {
     const space = workspace([task("rec_t", {})]);
     const store = createAutomationRunStore(await createTestScratch("dohc-document-target-"), testMetadataDir);
     const dependencies = space.dependencies(store);
@@ -282,7 +283,7 @@ describe("a stepwise run", () => {
       claim: { ...added(), automationId: "collection:Tasks#donate" }, automation: definition, collection: { path: "Tasks", name: "Tasks" },
       roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal,
     });
-    expect(outcome).toMatchObject({ kind: "failed", error: "Automations cannot use Log yet, because its records change only through its Collection actions." });
+    expect(outcome).toMatchObject({ kind: "failed", error: "Log has no approved way to add records with Amount." });
     expect(space.keys.size).toBe(0);
   });
 

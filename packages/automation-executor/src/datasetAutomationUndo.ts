@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
-import type { DatasetOperation } from "@dohc/security-contract/dataset";
+import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contract/dataset";
 import { datasetFieldKey, type ReachCollection, type ReachRoster } from "./automationReach";
 import type { DatasetUndoCall, DatasetUndoRequest, RunWrite, StoredRun } from "./automationRunStore";
 import { unrecordedEffect } from "./automationStepRun";
@@ -165,10 +165,21 @@ function additionsOf(runs: readonly StoredRun[]): Map<string, Addition> {
 }
 
 /** The deletes an Undo may use on an addition under `roster`: those its plan recorded that every editor can still use. */
-function usableDeletes(host: DatasetUndoHost, roster: ReachRoster, collection: ReachCollection, addition: Addition): DatasetOperation[] {
+function usableDeletes(host: Pick<DatasetUndoHost, "revision" | "dataGrants">, roster: ReachRoster, collection: ReachCollection, addition: Addition): DatasetOperation[] {
   const { datasetId } = addition.rules;
   return datasetUndoDeletes(roster, collection, host.revision(datasetId).definition, addition.tableId, host.dataGrants(datasetId))
     .filter((operation) => addition.deletes.includes(operation.operationId));
+}
+
+export function datasetUndoPreviewReads(
+  host: Pick<DatasetUndoHost, "revision" | "dataGrants">,
+  reach: { roster: ReachRoster; collection: ReachCollection }, runs: readonly StoredRun[],
+): Array<{ datasetId: string; operationId: string }> {
+  return [...additionsOf(runs).values()].flatMap((addition) => {
+    if (addition.changed || usableDeletes(host, reach.roster, reach.collection, addition).length === 0) return [];
+    const read = datasetUndoRead(host.revision(addition.rules.datasetId).definition, addition.tableId);
+    return read === undefined ? [] : [{ datasetId: addition.rules.datasetId, operationId: read.operationId }];
+  });
 }
 
 /** Whether any record the runs added has a delete its plan recorded, so Undo needs to know who can edit. */
@@ -230,7 +241,14 @@ export interface DatasetUndoConfirmed {
 }
 
 function choiceKey(addition: Addition, operations: readonly DatasetOperation[]): string {
-  return JSON.stringify([addition.tableId, ...operations.map((operation) => operation.operationId).sort()]);
+  return JSON.stringify([addition.rules.datasetId, addition.tableId, ...operations.map((operation) => operation.operationId).sort()]);
+}
+
+/** The exact read used by an added-record preview or a stale edit's recovery. */
+export function datasetUndoRead(definition: DatasetDefinition, tableId: string, fields?: readonly string[]): DatasetOperation | undefined {
+  const reads = definition.operations.filter((operation) => operation.kind === "read" && operation.tableId === tableId);
+  return fields === undefined ? reads[0] : reads.filter((operation) => fields.every((field) => operation.fieldIds.includes(field)))
+    .sort((left, right) => left.fieldIds.length - right.fieldIds.length)[0];
 }
 
 /**
@@ -241,7 +259,7 @@ function choiceKey(addition: Addition, operations: readonly DatasetOperation[]):
 async function versionNow(host: DatasetUndoHost, addition: Addition, signal: AbortSignal): Promise<number | null | undefined> {
   const { definition } = host.revision(addition.rules.datasetId);
   const table = definition.tables.find((candidate) => candidate.tableId === addition.tableId);
-  const read = definition.operations.find((operation) => operation.kind === "read" && operation.tableId === addition.tableId);
+  const read = datasetUndoRead(definition, addition.tableId);
   if (table === undefined || read === undefined) return undefined;
   const row = await readDatasetRecord(async (operationId, input) => {
     const answered = await send(() => host.invokeAsOwner({ ...addition.rules, operationId, input, idempotencyKey: "automation-undo-read", signal }));
@@ -314,7 +332,7 @@ export async function planDatasetUndo(
   }
   const deleted = new Set(deletes.map(({ addition }) => datasetRecordKey(addition.rules.datasetId, addition.tableId, addition.recordId)));
   let reverts = 0, irreversible = 0;
-  for (const record of changesOf(host, runs)) {
+  for (const record of datasetUndoChanges(host, runs)) {
     if (deleted.has(datasetRecordKey(record.last.rules.datasetId, record.last.tableId, record.last.recordId))) continue;
     const changed = record.fields.filter((field) => field.after.length > 0);
     const table = host.revision(record.last.rules.datasetId).definition.tables.some((candidate) => candidate.tableId === record.last.tableId);
@@ -410,7 +428,7 @@ function fieldChange(fieldId: string, writes: readonly FieldWrite[]): FieldChang
  * Per record, the runs' last edit of it, whether that edit surely landed, and
  * how each field they wrote goes back.
  */
-function changesOf(host: Pick<DatasetUndoHost, "revision">, runs: readonly StoredRun[]): Array<{ last: Edit; sure: boolean; fields: FieldChange[] }> {
+export function datasetUndoChanges(host: Pick<DatasetUndoHost, "revision">, runs: readonly StoredRun[]): Array<{ last: Edit; sure: boolean; fields: FieldChange[] }> {
   const records = new Map<string, { last: Edit; sure: boolean; fields: Map<string, FieldWrite[]> }>();
   for (const { edit, sure, hidden } of editsOf(runs)) {
     const operation = host.revision(edit.rules.datasetId).definition.operations
@@ -454,6 +472,8 @@ export async function undoDatasetAutomationRuns(
   runs: readonly StoredRun[],
   saveRequest: (request: DatasetUndoRequest) => Promise<void>,
   signal: AbortSignal,
+  only?: { kind: "record"; datasetId: string; tableId: string; recordId: string | number } | { kind: "action"; datasetId: string; revision: number; operationId: string },
+  prepared?: ReturnType<typeof datasetUndoChanges>,
 ): Promise<CollectionAutomationUndone> {
   const saved = runs.flatMap((run) => run.undoRequests);
   // Each call once, though two saved lists may hold it: the same content has the same key.
@@ -472,6 +492,7 @@ export async function undoDatasetAutomationRuns(
   const reverses = calls
     .flatMap((call) => {
       if (call.kind !== "reverse") return [];
+      if (only !== undefined && (only.kind !== "action" || only.datasetId !== call.rules.datasetId || only.revision !== call.revision || only.operationId !== call.action)) return [];
       const action = ranBy(call);
       return action === undefined ? [] : [{ call, action }];
     })
@@ -479,7 +500,8 @@ export async function undoDatasetAutomationRuns(
       ? right.call.revision - left.call.revision
       : left.call.rules.datasetId < right.call.rules.datasetId ? -1 : 1);
   const reversed = new Set(reverses.map(({ action }) => action));
-  undone.actions = actionsOf(runs).filter((action) => !reversed.has(action)).length;
+  undone.actions = actionsOf(runs).filter((action) => !reversed.has(action) && (only === undefined ||
+    (only.kind === "action" && only.datasetId === action.rules.datasetId && only.revision === action.revision && only.operationId === action.operationId))).length;
   for (const { call, action } of reverses) {
     signal.throwIfAborted();
     const reverse = reverseOf(host, action);
@@ -494,6 +516,7 @@ export async function undoDatasetAutomationRuns(
   // Records deleted or already gone, whose fields need nothing more.
   const removed = new Set<string>();
   for (const [key, addition] of additionsOf(runs)) {
+    if (only !== undefined && (only.kind !== "record" || datasetRecordKey(only.datasetId, only.tableId, only.recordId) !== key)) continue;
     const request = calls.find((candidate): candidate is Extract<DatasetUndoCall, { kind: "delete" }> =>
       candidate.kind === "delete" && datasetRecordKey(candidate.rules.datasetId, candidate.tableId, candidate.recordId) === key);
     signal.throwIfAborted();
@@ -531,7 +554,8 @@ export async function undoDatasetAutomationRuns(
       throw new Error(result.refused.message);
     }
   }
-  for (const record of changesOf(host, runs)) {
+  for (const record of prepared ?? datasetUndoChanges(host, runs)) {
+    if (only !== undefined && (only.kind !== "record" || only.datasetId !== record.last.rules.datasetId || only.tableId !== record.last.tableId || only.recordId !== record.last.recordId)) continue;
     if (removed.has(datasetRecordKey(record.last.rules.datasetId, record.last.tableId, record.last.recordId))) continue;
     const changed = record.fields.filter((field) => field.after.length > 0);
     const { definition } = host.revision(record.last.rules.datasetId);
@@ -592,9 +616,7 @@ export async function undoDatasetAutomationRuns(
         checked = true;
         // The record may have changed since the run: only fields still
         // holding what the runs may have left go back.
-        const read = definition.operations
-          .filter((candidate) => candidate.kind === "read" && candidate.tableId === table.tableId && fields.every((field) => candidate.fieldIds.includes(field.fieldId)))
-          .sort((left, right) => left.fieldIds.length - right.fieldIds.length)[0];
+        const read = datasetUndoRead(definition, table.tableId, fields.map((field) => field.fieldId));
         if (read === undefined) {
           // Fields an edit that may not have landed wrote cannot be checked, so they stay.
           if (!unreadAtStart) {

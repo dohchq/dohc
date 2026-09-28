@@ -69,7 +69,7 @@ interface RecordChanges {
  * without recording it. A record such an effect may have added is among
  * `added`, and is found only if it exists.
  */
-function changesOf(runs: readonly StoredRun[]): { added: Map<string, string>; records: Map<string, RecordChanges> } {
+export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<string, string>; records: Map<string, RecordChanges> } {
   const added = new Map<string, string>();
   const records = new Map<string, RecordChanges>();
   const wrote = (recordId: string, path: string, field: string, write: FieldWrite) => {
@@ -151,10 +151,12 @@ export async function undoCollectionAutomationRuns(
   dependencies: CollectionAutomationUndoDependencies,
   runs: readonly StoredRun[],
   signal: AbortSignal,
+  onlyRecordId?: string,
+  prepared?: ReturnType<typeof documentUndoChanges>,
 ): Promise<CollectionAutomationUndone> {
   // Each run's records are found where their Collections are now. A
   // Collection no longer here keeps its paths, where no record is found.
-  const { added, records } = changesOf(runs.map((run) => {
+  const { added, records } = prepared ?? documentUndoChanges(runs.map((run) => {
     const moved = structuredClone(run);
     rebaseRun(moved, (collectionId) => dependencies.collectionPathOf(collectionId));
     return moved;
@@ -163,6 +165,7 @@ export async function undoCollectionAutomationRuns(
     reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0,
   };
   for (const record of records.values()) {
+    if (onlyRecordId !== undefined && record.recordId !== onlyRecordId) continue;
     // A record the run added goes to the trash whole.
     if (added.has(record.recordId)) continue;
     const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ from }) => from.length > 0);
@@ -199,6 +202,7 @@ export async function undoCollectionAutomationRuns(
     }
   }
   for (const [recordId, path] of added) {
+    if (onlyRecordId !== undefined && recordId !== onlyRecordId) continue;
     const current = await locate(dependencies, path, recordId);
     if (current === null) continue;
     await dependencies.trash(current);

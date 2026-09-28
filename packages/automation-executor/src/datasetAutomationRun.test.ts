@@ -46,7 +46,10 @@ function runWithRoster(
 ) {
   return runDatasetAutomation({
     cachedRoster: async () => input.roster,
-    targets: { resolve: async () => ({ kind: "dataset", collection: input.collection, approved: revision, generated: true, grants: { workspaceId: "workspace", grants: [] } }) },
+    collectionPathOf: () => input.collection.path,
+    targets: { validate: async (target) => target, resolve: async () => (await dependencies.withHost((host) => ({ kind: "dataset" as const,
+      collection: input.collection, approved: host.revision(definition.datasetId), generated: host.generated(definition.datasetId),
+      grants: host.dataGrants(definition.datasetId) }))) ?? { kind: "problem", code: "host-unavailable", problem: "Unavailable" } },
     ...dependencies,
   }, input);
 }
@@ -85,14 +88,13 @@ if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw new
 const automation = parsed.entries[0].automation;
 const added: DatasetChangeClaimFact = { kind: "added", datasetId: definition.datasetId, tableId: TABLE, recordId: "a", version: 1, fields: [{ fieldId: STATUS, previous: null, next: "Open" }] };
 const claim: DatasetAutomationClaim = {
-  claimId: "claim-1", workspaceId: "workspace", datasetId: definition.datasetId, automationId: "collection:Budget#close", hostEpoch: "epoch", revision: 7,
+  claimId: "claim-1", workspaceId: "workspace", datasetId: definition.datasetId, automationId: `collection:${definition.datasetId}#close`, hostEpoch: "epoch", revision: 7,
   fact: added,
   actor: { kind: "owner" }, depth: 0, state: "running", attempts: 1, run: 1, error: null, createdAtMs: 1_000, updatedAtMs: 1_000,
 };
 const fromLedger = (claimed: DatasetAutomationClaim): DatasetRunClaim => ({ source: "dataset", claim: claimed });
 // A run with no chat step reads no chat and sends nothing.
 const sendsNothing = {
-  targets: { resolve: async () => ({ kind: "dataset" as const, collection: { path: "Budget", name: "Budget" }, approved: revision, generated: true, grants: { workspaceId: "workspace", grants: [] } }) },
   chat: {
     directory: async () => { throw new Error("This automation sends no messages."); },
     write: async () => { throw new Error("This automation sends no messages."); },
@@ -233,7 +235,7 @@ describe("a due time on a dataset", () => {
 `);
   const due = Date.UTC(2026, 8, 27);
   const dueTime: AutomationClaim = {
-    claimId: "atc_due", automationId: "collection:Budget#close", trigger: { key: `schedule:${due}` }, recordId: null, collectionPath: "Budget",
+    claimId: "atc_due", automationId: `collection:${definition.datasetId}#close`, trigger: { key: `schedule:${due}` }, recordId: null, collectionPath: "Budget",
     depth: 0, state: "running", attempts: 1, run: 1, createdAtMs: due + 5, updatedAtMs: due + 5,
     change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
   };
@@ -953,6 +955,24 @@ describe("chat steps in a dataset run", () => {
   const pressed: DatasetAutomationClaim = { ...claim, automationId: "collection:Budget#ask", actor: { kind: "owner", userId: "user-owner" },
     fact: { kind: "button", datasetId: definition.datasetId, tableId: TABLE, recordId: "a", fieldId: ASK, definitionHash: definitionDigest(ask) } };
 
+  it("names the button when its automation changed after a press", async () => {
+    const script = host({ resolves: () => true, edit: async () => { throw new Error("Must not write"); } });
+    const surface = { ...script.surface, revision: () => ({ ...revision, definition: withButton }) };
+    const stale = structuredClone(pressed);
+    if (stale.fact?.kind !== "button") throw new Error("fixture");
+    stale.fact.definitionHash = "old";
+    const spy = chatSpy();
+    expect(await runWithRoster({
+      withHost: async (work) => work(surface), evaluator,
+      store: createAutomationRunStore(await createTestScratch("dohc-dataset-button-"), testMetadataDir),
+      nowMs: () => 1, personName: (id) => id, ...spy.dependencies,
+    }, { held: fromLedger(stale), automation: ask, collection: BUDGET, roster: owner([]),
+      signal: new AbortController().signal, stopped: new AbortController().signal }))
+      .toEqual({ kind: "failed", error: "Ask changed after it was pressed. Press it again.", timedOut: false });
+    expect(script.sent).toEqual([]);
+    expect(spy.messages).toEqual([]);
+  });
+
   it("wakes your agent from a press in a Collection only you edit", async () => {
     const script = host({ resolves: () => true, edit: async () => { throw new Error("This automation edits nothing."); } });
     const surface: DatasetRunHost = { ...script.surface, revision: () => ({ ...revision, definition: withButton }) };
@@ -989,7 +1009,7 @@ describe("chat steps in a dataset run", () => {
     // The approved read goes, so the automation no longer resolves, and Bob can now edit Budget.
     rules = { ...withButton, operations: withButton.operations.filter((operation) => operation.kind !== "read") };
     const resumed = chatSpy();
-    expect(await attempt(resumed, [BOB], new AbortController().signal)).toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
+    expect(await attempt(resumed, [BOB], new AbortController().signal)).toEqual({ kind: "failed", error: "Budget has no approved read in Invoices.", timedOut: false });
     expect(resumed.messages).toEqual([]);
   });
 });
@@ -1079,7 +1099,7 @@ describe("a dataset action a run invokes", () => {
       return await evaluator.evaluate(automationId, scope, formulas);
     } };
     const host = actionHost(async () => { throw new Error("The action must not run."); });
-    expect(await runDatasetAutomation({
+    expect(await runWithRoster({
       withHost: async (work) => await work(host.surface), evaluator: sharing, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
       cachedRoster: async () => roster,
     }, {
@@ -1106,7 +1126,7 @@ describe("a dataset action a run invokes", () => {
     };
     const alone = { kind: "owner" as const, ownerUserId: "u-owner", grants: [] };
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
-    const attempt = async (roster: ReachRoster, host: ReturnType<typeof actionHost>) => await runDatasetAutomation({
+    const attempt = async (roster: ReachRoster, host: ReturnType<typeof actionHost>) => await runWithRoster({
       withHost: async (work) => await work(host.surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir),
       nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing, cachedRoster: async () => roster,
     }, {
@@ -1125,7 +1145,7 @@ describe("a dataset action a run invokes", () => {
   it("waits to run a planned action when it cannot check who can edit the Collection", async () => {
     const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);
     const host = actionHost(async () => { throw new Error("The action must not run."); });
-    expect(await runDatasetAutomation({
+    expect(await runWithRoster({
       withHost: async (work) => await work(host.surface), evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
       cachedRoster: async () => ({ kind: "unknown", problem: { kind: "unchecked", next: "dohc checks again when the server answers." } }),
     }, {
