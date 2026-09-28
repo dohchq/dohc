@@ -182,7 +182,7 @@ describe("MCP tool results", () => {
     const { client } = await connectedToolNames({ root: "/workspace", home: "/home", request: async () => partial });
     const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
     const result = await client.callTool({ name: "dohc_dataset", arguments: { request: {
-      action: "createForm", workspaceId: "workspace", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64),
+      action: "createForm", workspaceId: "workspace", datasetPath: "equipment/dataset.json", revision: 1, revisionSha256: "a".repeat(64),
       tableId: id(2), createOperationId: id(4), appRoot: "form", fieldIds: [id(3)],
     } } });
     expect(result.isError).toBe(true);
