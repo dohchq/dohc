@@ -798,21 +798,115 @@ describe("the owner's read of a grant's direct writes", () => {
     expect(second).toMatchObject({ writes: [{ submitId: "new" }], nextAfterOriginSeq: null });
   });
 
-  it("reads the ledger by grant and order, and drops the index an earlier build made", async () => {
+  it("keeps an earlier build's ledger rows as named writes, with their quota", async () => {
+    const r = await relay();
+    await upload(r, SCHEMA_TWO);
+    expect((await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)], { submitId: "edit" })).status).toBe(200);
+    const before = await json(await ownerRead(r, r.grantId));
+    const path = storagePath(r.storage);
+    closeTestStorage(r.storage);
+    // Put the ledger back the way the earlier build made it: a user id on
+    // every row, an index since replaced, and no migration mark.
+    const db = inspectDatabase(path);
+    const usage = () => db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?").get(WORKSPACE);
+    const quota = usage();
+    db.exec(`
+      DELETE FROM sync_relay_migrations WHERE migration_id = 'collection-write-authors-v1';
+      ALTER TABLE sync_relay_collection_writes RENAME TO current_ledger;
+      CREATE TABLE sync_relay_collection_writes (
+        grant_id TEXT NOT NULL,
+        submit_id TEXT NOT NULL CHECK (length(submit_id) BETWEEN 1 AND 128),
+        workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+        share_id TEXT NOT NULL,
+        grant_generation INTEGER NOT NULL CHECK (grant_generation BETWEEN 1 AND 9007199254740991),
+        user_id TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+        origin_id TEXT NOT NULL,
+        first_origin_seq INTEGER NOT NULL CHECK (first_origin_seq >= 0),
+        last_origin_seq INTEGER NOT NULL CHECK (last_origin_seq >= first_origin_seq),
+        paths_json TEXT NOT NULL CHECK (json_valid(paths_json)),
+        receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+        created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
+        storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
+        PRIMARY KEY (grant_id, submit_id)
+      ) STRICT;
+      INSERT INTO sync_relay_collection_writes
+        SELECT grant_id, submit_id, workspace_id, share_id, grant_generation, user_id, payload_sha256, origin_id,
+          first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms, storage_bytes
+        FROM current_ledger;
+      DROP TABLE current_ledger;
+      CREATE INDEX idx_sync_relay_collection_writes_grant
+        ON sync_relay_collection_writes(workspace_id, grant_id, created_at_ms);
+      CREATE TRIGGER sync_relay_collection_writes_usage_insert
+        AFTER INSERT ON sync_relay_collection_writes BEGIN
+        UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + NEW.storage_bytes
+        WHERE workspace_id = NEW.workspace_id; END;
+      CREATE TRIGGER sync_relay_collection_writes_usage_delete
+        AFTER DELETE ON sync_relay_collection_writes BEGIN
+        UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes - OLD.storage_bytes
+        WHERE workspace_id = OLD.workspace_id; END;
+    `);
+    expect(usage()).toEqual(quota);
+    db.close();
+
+    const reopened = reopenTestStorage(path);
+    const again: Relay = { ...r, h: testHandler(reopened, { nowMs: () => CLOCK }), storage: reopened };
+    const migrated = inspectDatabase(path);
+    expect(migrated.prepare(
+      "SELECT author_kind, user_id, principal_id FROM sync_relay_collection_writes",
+    ).all()).toEqual([{ author_kind: "named", user_id: RECIPIENT, principal_id: null }]);
+    expect(migrated.prepare(
+      "SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?",
+    ).get(WORKSPACE)).toEqual(quota);
+    expect(migrated.prepare(
+      "SELECT name FROM sqlite_master WHERE name LIKE '%collection_writes%' ORDER BY name",
+    ).all().map((row) => row.name)).toEqual([
+      "idx_sync_relay_collection_writes_grant_seq",
+      "sqlite_autoindex_sync_relay_collection_writes_1",
+      "sync_relay_collection_writes",
+      "sync_relay_collection_writes_usage_delete",
+      "sync_relay_collection_writes_usage_insert",
+    ]);
+    migrated.close();
+    expect(await json(await ownerRead(again, r.grantId))).toEqual(before);
+    // The same submit answers from its row, and another write still lands.
+    const retried = await write(again, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)], { submitId: "edit" });
+    expect(retried.status, await retried.clone().text()).toBe(200);
+    await upload(again, SCHEMA);
+    const next = await write(again, [edit(`${PACKING}/collection.yaml`, SCHEMA_TWO, SCHEMA)], { submitId: "next" });
+    expect(next.status, await next.clone().text()).toBe(200);
+    expect((await new Owner(again.h).directMoments()).length).toBe(2);
+  });
+
+  it("stores each write's author as a named user or a link principal, never both", async () => {
     const r = await relay();
     const path = storagePath(r.storage);
     closeTestStorage(r.storage);
     const db = inspectDatabase(path);
-    db.prepare(`CREATE INDEX idx_sync_relay_collection_writes_grant
-      ON sync_relay_collection_writes(workspace_id, grant_id, created_at_ms)`).run();
+    const insert = (submitId: string, authorKind: string, userId: string | null, principalId: string | null) =>
+      db.prepare(`INSERT INTO sync_relay_collection_writes (
+          grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, principal_id,
+          payload_sha256, origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms,
+          storage_bytes
+        ) VALUES ('grant', ?, ?, 'share', 1, ?, ?, ?, ?, 'relay:collection-file:grant', 0, 0, '[]', '{}', 0, 1)`)
+        .run(submitId, WORKSPACE, authorKind, userId, principalId, "a".repeat(64));
+    expect(() => insert("named", "named", "user", null)).not.toThrow();
+    expect(() => insert("link", "link", null, "principal")).not.toThrow();
+    for (const [kind, userId, principalId] of [
+      ["named", null, null],
+      ["named", "user", "principal"],
+      ["named", null, "principal"],
+      ["link", null, null],
+      ["link", "user", "principal"],
+      ["link", "user", null],
+      ["link", null, ""],
+      ["named", "", null],
+      ["public", null, "principal"],
+    ] as const) {
+      expect(() => insert(`${kind}-${userId}-${principalId}`, kind, userId, principalId), `${kind} ${userId} ${principalId}`)
+        .toThrow(/CHECK constraint/);
+    }
     db.close();
-    closeTestStorage(reopenTestStorage(path));
-    const reopened = inspectDatabase(path);
-    const indexes = reopened.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sync_relay_collection_writes' AND sql IS NOT NULL",
-    ).all().map((row) => row.name);
-    reopened.close();
-    expect(indexes).toEqual(["idx_sync_relay_collection_writes_grant_seq"]);
   });
 
   it("answers only the workspace's owner, for a grant on one of its shares", async () => {

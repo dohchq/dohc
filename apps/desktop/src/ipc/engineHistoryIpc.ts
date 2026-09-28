@@ -74,6 +74,7 @@ function engineMomentBaseForIpc(
       ? { agentAuthorName }
       : {}),
     ...(moment.author?.kind === "public" ? { publicAuthor: moment.author } : {}),
+    ...(moment.author?.kind === "link" ? { linkAuthor: moment.author } : {}),
     ...automationAuthorOf(moment.author, names),
     ...(moment.author?.kind === "named"
       ? { namedAuthor: { userId: moment.author.userId, label: names.named(moment.author) } }

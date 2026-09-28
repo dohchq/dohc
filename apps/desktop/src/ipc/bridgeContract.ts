@@ -1420,6 +1420,15 @@ export const EngineMomentRecord = z.object({
     userId: z.string().min(1).max(256),
     label: z.string().min(1).max(400),
   }).strict().optional(),
+  // Present when an Edit share link wrote the moment directly (ADR 0013).
+  // The grant names the link, and the principal the browser session that
+  // used it; neither names a person.
+  linkAuthor: z.object({
+    kind: z.literal("link"),
+    grantId: z.string().min(1).max(500),
+    grantGeneration: z.number().int().positive(),
+    principalId: z.string().min(1).max(500),
+  }).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
