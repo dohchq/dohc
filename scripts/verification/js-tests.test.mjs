@@ -123,7 +123,7 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
             await waitFor(process.env.FIXTURE_PACKAGE_FAIL==='1'?'package-failed':'package-started');
             if(existsSync('package-started'))writeFileSync('repository-saw-package','yes');
           }
-          if(process.env.FIXTURE_REPO_FAIL==='1')throw Error('fixture repository failed');
+          if(process.env.FIXTURE_REPO_FAIL==='1'){writeFileSync('repository-failed','yes');throw Error('fixture repository failed');}
           writeFileSync('repository-complete','yes');return {stdout:''};
         }
         if(args.includes('list'))return {stdout:JSON.stringify([
@@ -133,6 +133,8 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
           {name:'@dohc/no-tests',path:resolve('packages/no-tests')}
         ])};
         if(args[2]==='run')writeFileSync('package-started','yes');
+        // Hold the running packages until the repository fails, so the queued one must not start.
+        if(args[2]==='run' && process.env.FIXTURE_REPO_FAIL==='1' && process.env.FIXTURE_PACKAGE_FAIL!=='1')await waitFor('repository-failed');
         if(args[1]==='@dohc/new-package' && process.env.FIXTURE_PACKAGE_FAIL==='1'){writeFileSync('package-failed','yes');throw Error('fixture package failed');}
         if(args.includes('test:unit') && process.env.FIXTURE_CANCEL==='1') {
           process.emit('SIGINT');
@@ -169,6 +171,7 @@ for (const {name, cancel = false, selectedPackages, testFiles, missingFile = fal
       assert.equal(report.steps.at(-1).verdict, "FAIL");
     } else if (repoFail) {
       assert.match(report.error, packageFail ? /fixture package failed/ : /fixture repository failed/);
+      if (!packageFail) assert.equal(commands.filter(args=>args[2]==="run").length, 2, "the queued package must not start after the failure");
       assert.equal(commands.some(args=>args.includes("test:scripts")),false);
     } else if (!missing && !missingFile) {
       if (selectedPackages !== undefined) assert.deepEqual(report.selectedPackages,selectedPackages);
