@@ -557,10 +557,21 @@ export function parseCollectionSchema(yamlText: string): CollectionSchemaParseRe
     };
   }
 
+  if (raw.version !== undefined && raw.version !== 1) {
+    return {
+      status: "degraded",
+      schema: emptyCollectionSchema(),
+      reasons: [{
+        code: typeof raw.version === "number" && Number.isSafeInteger(raw.version) && raw.version > 1
+          ? "unsupported-version" : "invalid-version",
+        path: "/version",
+      }],
+    };
+  }
   const reasons: CollectionSchemaReason[] = [];
   reportUnknownProperties(
     raw,
-    new Set(["name", "description", "fields", "views"]),
+    new Set(["version", "name", "description", "fields", "views"]),
     "",
     reasons,
   );

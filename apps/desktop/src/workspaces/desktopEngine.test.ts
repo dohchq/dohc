@@ -577,6 +577,8 @@ describe("desktop engine composed sessions and events", () => {
       f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
       expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");
       expect(collection.failuresChanged).toHaveBeenCalledOnce();
+      f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
+      expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");
       f.rows.delete("workspace");
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
       expect(collection.notifyClaimed).toHaveBeenCalledOnce();

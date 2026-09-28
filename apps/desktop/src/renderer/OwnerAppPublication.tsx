@@ -59,13 +59,11 @@ export function OwnerAppPublication(props: PublicationProps) {
 
 function PublicationControl(props: PublicationProps) {
   const [open, setOpen] = useState(false);
-  const trigger = useRef<HTMLButtonElement>(null);
   const close = () => {
     setOpen(false);
-    trigger.current?.focus();
   };
   return <>
-    {props.triggerLabel ? <PrimaryButton ref={trigger} onClick={() => setOpen(true)}>{props.triggerLabel}</PrimaryButton> : <IconButton ref={trigger} data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
+    {props.triggerLabel ? <PrimaryButton onClick={() => setOpen(true)}>{props.triggerLabel}</PrimaryButton> : <IconButton data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
       <Upload size={13} aria-hidden />
     </IconButton>}
     {open ? <PublicationDialog {...props} onClose={close} onReopen={() => setOpen(true)} /> : null}

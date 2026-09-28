@@ -175,6 +175,7 @@ export const CHANNELS = {
   listRelayShares: "desktop:list-relay-shares",
   getRelayReceivedShare: "desktop:get-relay-received-share",
   revokeRelayShare: "desktop:revoke-relay-share",
+  undoRelayShare: "desktop:undo-relay-share",
   createRelayShareLink: "desktop:create-relay-share-link",
   addRelayShareLink: "desktop:add-relay-share-link",
   listRelayShareLinks: "desktop:list-relay-share-links",

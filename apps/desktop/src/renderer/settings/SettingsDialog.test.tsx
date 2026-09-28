@@ -76,7 +76,7 @@ async function resetWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
 
 const bridge = {
   onWorkspaceActivity: vi.fn(() => () => {}),
-  listRelayShares: vi.fn(async () => ({ owned: [], received: [] })),
+  listRelayShares: vi.fn(async () => ({ owned: [], received: [], removed: [] })),
   getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
   detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
   getMcpConfig: vi.fn(getDefaultMcpConfig),

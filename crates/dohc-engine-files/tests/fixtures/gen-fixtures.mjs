@@ -175,6 +175,9 @@ const globMatchPairs = [
 // unknown keys, path validation, value-type validation, and the
 // no-partial-application rule.
 const filesPolicyCases = [
+  ...["1", "1.0", "2", "2.0", "0", "-1", "1.5", "true", '"1"'].map(version => [
+    `files-version-${version}`, `version = ${version}\nrule = [{path = "private/**", tracked = false}]\n`,
+  ]),
   ["valid-multi-rule", '[[rule]]\npath = "drafts/**"\ntracked = false\nsearchable = false\n\n[[rule]]\npath = "docs/*.md"\nsearchable = true\n'],
   ["valid-inline-array", 'rule = [{ path = "a.md", tracked = true }]\n'],
   ["valid-empty-rule-array", "rule = []\n"],

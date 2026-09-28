@@ -85,6 +85,9 @@ export function registerSharedChannelsIpcHandlers<
   }): Promise<unknown>;
   // The owner shared one of this workspace's Groups or chats.
   sharesChanged(workspaceId: string): void;
+  // An authenticated account listing, applied to this machine's received
+  // shares so a share the owner restored resumes.
+  reconcileReceivedShares(listing: unknown): void;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -93,7 +96,7 @@ export function registerSharedChannelsIpcHandlers<
     relayShareJsonWithCredentials, listWorkspaces, setWorkspaceSharedChannels,
     relayClientForWorkspace, projectPendingChatBookmarksAfterPull, normalizeServerUrl,
     peekedReceivedGrantKinds, peekReceivedGrantKindForShare, acknowledgeWorkspaceShareSkips,
-    notifyRenderer, mountShareFolder, unmountShareFolder, sharesChanged,
+    notifyRenderer, mountShareFolder, unmountShareFolder, sharesChanged, reconcileReceivedShares,
   } = dependencies;
 
   // --- Shared channels (MU-C4) --------------------------------------------
@@ -403,8 +406,12 @@ export function registerSharedChannelsIpcHandlers<
             const listing = await relayShareJsonWithCredentials<{
               granted?: Array<Record<string, unknown>>;
               received?: Array<Record<string, unknown>>;
+              removed?: unknown;
             }>(credentials, "/sync/shares");
             assertCurrentShareSession();
+            // Before the joined answers below are read, so a row this listing
+            // resumes answers as live.
+            reconcileReceivedShares(listing);
             const receivedShareIds = Array.isArray(listing.received)
               ? listing.received.flatMap((row) => {
                   const selector = row.selector as
@@ -462,8 +469,13 @@ export function registerSharedChannelsIpcHandlers<
             ? relay.received.map((row) => row.channelWireId)
             : []),
         ];
+        // The registry as it stands, not the operation's snapshot: the listing
+        // above may have resumed a row.
+        const registered =
+          listWorkspaces().find((entry) => entry.workspaceId === workspace.workspaceId) ??
+          operation.workspace;
         return ListChatChannelSharesResult.parse({
-          joined: joinedChannelAnswers(operation.workspace, shownWireIds),
+          joined: joinedChannelAnswers(registered, shownWireIds),
           sessionKey:
             relay.state === "signed-out"
               ? null

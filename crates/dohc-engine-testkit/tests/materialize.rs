@@ -3739,6 +3739,8 @@ fn windows_staging_and_failed_return_preserve_attributes() {
         attrs
     );
     let mut permissions = std::fs::metadata(&destination).unwrap().permissions();
+    // Windows only clears FILE_ATTRIBUTE_READONLY; the Unix world-writable concern does not apply.
+    #[allow(clippy::permissions_set_readonly_false)]
     permissions.set_readonly(false);
     std::fs::set_permissions(&destination, permissions).unwrap();
 }

@@ -101,6 +101,15 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
 }
 
 describe("desktop CLI collection proxy", () => {
+  it("preserves the update diagnostic for collection queries and record reads", async () => {
+    await withWorkspace(async (base) => {
+      await mkdir(join(base.root, "tasks"));
+      const failure = { ok: false as const, reason: "tasks/collection.yaml uses a newer version. Update dohc to read this file." };
+      const ctx: ToolContext = { ...base, request: vi.fn(async () => failure) };
+      await expect(queryCollection(ctx, { collectionPath: "tasks" })).resolves.toEqual(failure);
+      await expect(readRecord(ctx, { collectionPath: "tasks", recordId: record.id })).resolves.toEqual(failure);
+    });
+  });
   it("maps all four collection tools to their CLI verbs with the MCP workspace and agent actor", async () => {
     await withWorkspace(async (base) => {
       await mkdir(join(base.root, "tasks"), { recursive: true });

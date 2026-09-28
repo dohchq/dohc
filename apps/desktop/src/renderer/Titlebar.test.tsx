@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Titlebar, workspaceName } from "./Titlebar";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -179,4 +179,16 @@ describe("Titlebar", () => {
     expect(screen.getByTestId("titlebar-primary-sidebar")).toBeTruthy();
     expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
   });
+});
+
+it("returns focus after choosing a workspace", async () => {
+  const second = { ...workspace, workspaceId: "ws-2", rootPath: "/second" };
+  render(<Titlebar workspace={workspace} workspaces={[workspace, second]} onSwitchWorkspace={() => {}} />);
+  const trigger = screen.getByTestId("workspace-switcher");
+  trigger.focus();
+  fireEvent.click(trigger);
+  const option = screen.getAllByTestId("workspace-switcher-option")[1]!;
+  option.focus();
+  fireEvent.click(option);
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
 });

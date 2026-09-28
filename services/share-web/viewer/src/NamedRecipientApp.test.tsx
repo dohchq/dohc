@@ -115,3 +115,11 @@ it("refuses an account mismatch in the selected-grant response", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input) === "/api/account/session" ? jsonResponse({user: {id: "alice", name: "Alice"}}) : jsonResponse(files("grant", "bob"))));
   await render(); expect(container.textContent).toContain("could not open this invitation"); expect(container.textContent).not.toContain("docs/a.md");
 });
+
+it("tells the named recipient the owner removed access", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input) === "/api/account/session"
+    ? jsonResponse({user: {id: "alice", name: "Alice"}})
+    : jsonResponse({ok: false, code: "share_access_removed", error: "The owner removed your access."}, 404)));
+  await render(); expect(container.textContent).toContain("The owner removed your access.");
+  expect(container.textContent).not.toContain("docs/a.md");
+});

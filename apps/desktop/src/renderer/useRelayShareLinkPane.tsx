@@ -18,6 +18,7 @@ import type {
 } from "../ipc/bridgeContract";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
+import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 
@@ -171,6 +172,13 @@ function pathsEqual(left: readonly string[], right: readonly string[]): boolean 
     normalizedLeft.length === normalizedRight.length &&
     normalizedLeft.every((path, index) => path === normalizedRight[index])
   );
+}
+
+// The selection as the dialog names it, for notices about its links.
+function targetLabel(target: RelayShareTarget): string {
+  return target.kind === "version"
+    ? `version “${target.versionName ?? target.versionId}”`
+    : (target.label ?? target.paths.join(", "));
 }
 
 function rowMatchesTarget(row: RelayShareLinkRow, target: RelayShareTarget): boolean {
@@ -398,6 +406,10 @@ export function useRelayShareLinkPane(props: {
   target: RelayShareTarget;
   visible: boolean;
   onClose: () => void;
+  // Ending a link or a person's access is undoable for a while. The shell
+  // shows that notice and holds the Undo, so it outlives this dialog; a
+  // refused removal goes to the same shell with Try again.
+  shareRemovals?: ShareRemovalNotices;
 }): {
   content: ReactNode;
   scope: string;
@@ -1172,7 +1184,10 @@ export function useRelayShareLinkPane(props: {
         return;
       }
       setOwnerConfirmation(null);
-      setOwnerMutationError({ shareId, actionKey });
+      // A refused removal is already in the shell's notices, with Try again.
+      if (!(props.shareRemovals && actionKey.startsWith("revoke:"))) {
+        setOwnerMutationError({ shareId, actionKey });
+      }
       if (refresh === "discussion") {
         pendingDiscussionReconciliationByShareId.current.add(shareId);
         updateOwnerDiscussion(shareId, (current) => ({
@@ -1245,17 +1260,56 @@ export function useRelayShareLinkPane(props: {
       );
       return;
     }
+    const scopeGeneration = linkScopeGeneration.current;
     void runOwnerMutation(
       action.shareId,
       `revoke:${action.grantId}`,
-      () =>
-        bridge().revokeRelayShareGrant({
-          workspaceId: props.workspaceId,
-          shareId: action.shareId,
-          grantId: action.grantId,
-        }),
+      () => endNamedAccess(action, scopeGeneration),
       "inventories",
     );
+  }
+
+  // Ends one person's access and reports it to the shell. Try again on a
+  // refusal runs this directly: the dialog may be gone by then, and the
+  // owner mutation gate only admits shares the open dialog still lists.
+  async function endNamedAccess(
+    action: Extract<OwnerConfirmation, { kind: "revoke" }>,
+    scopeGeneration: number,
+  ) {
+    const subject = `${action.name}'s access to ${targetLabel(props.target)}`;
+    try {
+      const result = await bridge().revokeRelayShareGrant({
+        workspaceId: props.workspaceId,
+        shareId: action.shareId,
+        grantId: action.grantId,
+      });
+      props.shareRemovals?.removed({
+        workspaceId: props.workspaceId,
+        shareId: action.shareId,
+        undo: result.undo,
+        message: `Ended ${subject}.`,
+        restoredMessage: `Restored ${subject}.`,
+        restored: () => {
+          if (isCurrentLinkScope(scopeGeneration)) void refreshLinks(scopeGeneration);
+        },
+      });
+      return result;
+    } catch (cause) {
+      props.shareRemovals?.failed({
+        workspaceId: props.workspaceId,
+        message: `dohc could not end ${subject}.`,
+        cause,
+        retry: () => {
+          void endNamedAccess(action, scopeGeneration).then(
+            () => {
+              if (isCurrentLinkScope(scopeGeneration)) void refreshLinks(scopeGeneration);
+            },
+            () => undefined,
+          );
+        },
+      });
+      throw cause;
+    }
   }
 
   async function refreshLinks(
@@ -1479,7 +1533,7 @@ export function useRelayShareLinkPane(props: {
     );
   }
 
-  async function mutateLink(action: LinkConfirmation, row: RelayShareLinkRow) {
+  async function mutateLink(action: LinkConfirmation, row: RelayShareLinkRow, fromNotice = false) {
     if (mutationBusy !== null || row.status !== "active") return;
     const scopeGeneration = linkScopeGeneration.current;
     const requestId = ++latestMutationRequest.current;
@@ -1508,6 +1562,28 @@ export function useRelayShareLinkPane(props: {
                 ...payload,
                 access: action.access,
               });
+      // The link ended whether or not this dialog is still current, so the
+      // notice and its Undo are reported before the checks below.
+      if (fromNotice && result.outcome === "dependents-changed") {
+        props.shareRemovals?.failed({
+          workspaceId: props.workspaceId,
+          message: "Access through this link changed. Open Share and check who has access before ending the link.",
+          cause: new Error("The link's recipients changed before removal."),
+        });
+      }
+      if (result.outcome === "ended") {
+        const subject = `the link to ${targetLabel(props.target)}`;
+        props.shareRemovals?.removed({
+          workspaceId: props.workspaceId,
+          shareId: row.shareId,
+          undo: result.undo,
+          message: `Ended ${subject}.`,
+          restoredMessage: `Restored ${subject}.`,
+          restored: () => {
+            if (isCurrentLinkScope(scopeGeneration)) void refreshLinks(scopeGeneration);
+          },
+        });
+      }
       if (
         !isCurrentLinkScope(scopeGeneration) ||
         latestMutationRequest.current !== requestId
@@ -1557,18 +1633,21 @@ export function useRelayShareLinkPane(props: {
       setConfirmation(null);
       void refreshLinks(scopeGeneration);
     } catch (cause) {
-      if (
-        !isCurrentLinkScope(scopeGeneration) ||
-        latestMutationRequest.current !== requestId
-      ) {
-        return;
+      if (action.kind === "end" && props.shareRemovals) {
+        props.shareRemovals.failed({
+          workspaceId: props.workspaceId,
+          message: `dohc could not end the link to ${targetLabel(props.target)}.`,
+          cause,
+          retry: () => void mutateLink(action, row, true),
+        });
       }
+      if (!isCurrentLinkScope(scopeGeneration) || latestMutationRequest.current !== requestId) return;
       if (retiresDisplayedCredential) {
         latestCopyRequest.current += 1;
         setMinted(null);
         setLinkCopied(false);
       }
-      setLifecycleError(ipcErrorMessage(cause));
+      if (action.kind !== "end" || !props.shareRemovals) setLifecycleError(ipcErrorMessage(cause));
       setConfirmation(null);
       void refreshLinks(scopeGeneration);
     } finally {

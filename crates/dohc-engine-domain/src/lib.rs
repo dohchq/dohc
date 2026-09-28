@@ -31,6 +31,7 @@ pub mod collections;
 pub mod conflicts;
 pub mod error;
 pub mod merge;
+pub mod names;
 pub mod normalize;
 pub mod records;
 pub mod secrets;

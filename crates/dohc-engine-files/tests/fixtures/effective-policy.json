@@ -344,6 +344,84 @@
   ],
   "filesPolicy": [
     {
+      "name": "files-version-1",
+      "toml": "version = 1\nrule = [{path = \"private/**\", tracked = false}]\n",
+      "ok": true,
+      "rules": [
+        {
+          "path": "private/**",
+          "tracked": false
+        }
+      ]
+    },
+    {
+      "name": "files-version-1.0",
+      "toml": "version = 1.0\nrule = [{path = \"private/**\", tracked = false}]\n",
+      "ok": true,
+      "rules": [
+        {
+          "path": "private/**",
+          "tracked": false
+        }
+      ]
+    },
+    {
+      "name": "files-version-2",
+      "toml": "version = 2\nrule = [{path = \"private/**\", tracked = false}]\n",
+      "ok": false,
+      "errors": [
+        "files.toml uses a newer version. Update dohc to read this file."
+      ]
+    },
+    {
+      "name": "files-version-2.0",
+      "toml": "version = 2.0\nrule = [{path = \"private/**\", tracked = false}]\n",
+      "ok": false,
+      "errors": [
+        "files.toml uses a newer version. Update dohc to read this file."
+      ]
+    },
+    {
+      "name": "files-version-0",
+      "toml": "version = 0\nrule = [{path = \"private/**\", tracked = false}]\n",
+      "ok": false,
+      "errors": [
+        "files.toml has an invalid version. Set version to 1."
+      ]
+    },
+    {
+      "name": "files-version--1",
+      "toml": "version = -1\nrule = [{path = \"private/**\", tracked = false}]\n",
+      "ok": false,
+      "errors": [
+        "files.toml has an invalid version. Set version to 1."
+      ]
+    },
+    {
+      "name": "files-version-1.5",
+      "toml": "version = 1.5\nrule = [{path = \"private/**\", tracked = false}]\n",
+      "ok": false,
+      "errors": [
+        "files.toml has an invalid version. Set version to 1."
+      ]
+    },
+    {
+      "name": "files-version-true",
+      "toml": "version = true\nrule = [{path = \"private/**\", tracked = false}]\n",
+      "ok": false,
+      "errors": [
+        "files.toml has an invalid version. Set version to 1."
+      ]
+    },
+    {
+      "name": "files-version-\"1\"",
+      "toml": "version = \"1\"\nrule = [{path = \"private/**\", tracked = false}]\n",
+      "ok": false,
+      "errors": [
+        "files.toml has an invalid version. Set version to 1."
+      ]
+    },
+    {
       "name": "valid-multi-rule",
       "toml": "[[rule]]\npath = \"drafts/**\"\ntracked = false\nsearchable = false\n\n[[rule]]\npath = \"docs/*.md\"\nsearchable = true\n",
       "ok": true,
@@ -410,8 +488,7 @@
       "toml": "version = true\n[[rule]]\npath = \"x.md\"\n",
       "ok": false,
       "errors": [
-        "unknown top-level key: version",
-        "policy must contain exactly one top-level key: rule"
+        "files.toml has an invalid version. Set version to 1."
       ]
     },
     {

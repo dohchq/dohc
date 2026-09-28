@@ -3070,7 +3070,7 @@ mod tests {
         let before = BASELINE_MIGRATIONS
             .iter()
             .position(|migration| migration.id == "v2-sync-identity-claim-state")
-            .expect("sync identity claim migration");
+            .expect("the identity claim migration ships");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('ws','origin','epoch','stream',1)", []).unwrap();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();

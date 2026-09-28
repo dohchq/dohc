@@ -82,6 +82,7 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useShellError } from "./shell/useShellError";
+import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
@@ -162,6 +163,7 @@ import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 // user clicked to open the panel — queries arrived with their first letters
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "./workbench/SearchView";
+import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { SidePanel } from "./workbench/SidePanel";
 import { MoreMenu } from "./ui/MoreMenu";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
@@ -648,6 +650,9 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const workspaceId = props.workspace.workspaceId;
+  const focusRoot = useRef<HTMLDivElement>(null);
+  useFocusReturn(true, focusRoot, () => document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'));
+  useFocusSurface(focusRoot, () => null);
   // Read by callbacks that outlive a render: the global key handler and a
   // slow update check must not act for a workspace this window has left.
   const workspaceIdRef = useRef(workspaceId);
@@ -823,6 +828,13 @@ export function DesktopWorkspaceShell(props: {
     runShellErrorAction,
   } = useShellError(workspaceId);
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
+  // Share removals from Chats, Settings and the share dialog: one notice
+  // with Undo, held here so it outlives the surface that removed the access.
+  const shareRemovals = useShareRemovalNotices({
+    workspaceId,
+    showSuccessNotice,
+    reportShellFailure,
+  });
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
   // polls and subscriptions off onError, so a fresh arrow per shell render
@@ -4388,6 +4400,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportFailureMessage,
+    shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
     collaboration: chatCollaboration,
@@ -4422,6 +4435,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportFailureMessage,
+    shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
     collaboration: null,
@@ -4655,6 +4669,9 @@ export function DesktopWorkspaceShell(props: {
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <div
       data-testid="workspace-shell"
+      ref={focusRoot}
+      tabIndex={-1}
+      data-focus-surface="workspace"
       // Flips to "true" only once openWorkspace has resolved — which in main
       // awaits the file watcher's initial scan (workspaceActivity.open races
       // handle.ready). The shell element itself mounts immediately, so a test
@@ -6059,6 +6076,7 @@ export function DesktopWorkspaceShell(props: {
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
             onWorkspaceFilesChanged={onSettingsFilesChanged}
+            shareRemovals={shareRemovals}
             onOpenCloud={() => {
               closeSettings();
               setCloudOpen(true);
@@ -6099,6 +6117,7 @@ export function DesktopWorkspaceShell(props: {
               workspaceId={workspaceId}
               target={shareTarget}
               onClose={() => setShareTarget(null)}
+              shareRemovals={shareRemovals}
             />
           </Suspense>
         </Overlay>

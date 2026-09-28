@@ -2197,6 +2197,17 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task)["Done on"]).toBe(localIsoTime(claim.createdAtMs).slice(0, 10));
   });
 
+  it("keeps an automation off when its Collection uses a newer version", async () => {
+    const w = await world({ automations: { Tasks: "  - id: done\n    name: Done\n    when: {field-changed: Status}\n    do: [{set: {Status: Done}}]\n" } });
+    await writeFile(join(w.root, "Tasks", "collection.yaml"), `version: 2\n${SCHEMA}`);
+    await w.executor.open();
+    const listed = await w.executor.automationsIn("Tasks");
+    expect(listed.status === "read" && listed.automations[0]).toMatchObject({
+      cannotRun: "Tasks/collection.yaml uses a newer version. Update dohc to read this file.",
+    });
+    expect(w.subscriptions.has("collection:Tasks#done")).toBe(false);
+  });
+
   it("checks fields against a schema with one bad key, and keeps an automation off while its schema is not YAML", async () => {
     const w = await world({ automations: { Tasks: "  - id: done\n    name: Done\n    when: {field-changed: Status}\n    do: [{set: {Done on: '=today()'}}]\n" } });
     // One key dohc does not know degrades the schema; its fields still count.
