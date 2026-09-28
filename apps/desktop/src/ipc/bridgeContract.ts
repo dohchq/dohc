@@ -4600,11 +4600,18 @@ export type CheckCollectionAutomationResult = {
   formulaProblems: Array<string | null>;
 };
 
-// Undo for a finished run, as the person who clicked it.
+// Undo for a finished run, as the person who clicked it. `deletes` is null
+// until the person confirms the preview of a run that added dataset records;
+// then it carries that preview's token and the delete they chose for each
+// choice it asked.
 export const UndoCollectionAutomationRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: COLLECTION_AUTOMATION_ID,
   claimId: z.string().min(1).max(256),
+  deletes: z.object({
+    token: z.string().min(1).max(128),
+    chosen: z.array(z.object({ key: z.string().min(1).max(16_384), operationId: z.string().min(1).max(256) })).max(64),
+  }).nullable(),
 });
 export type UndoCollectionAutomationRunPayload = z.infer<typeof UndoCollectionAutomationRunPayload>;
 export type UndoCollectionAutomationRunResult = CollectionAutomationUndo;

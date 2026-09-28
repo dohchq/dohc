@@ -49,6 +49,7 @@ import {
   datasetRecordKey,
   datasetRunClaim,
   datasetStepsOf,
+  datasetUndoDeletes,
   type DatasetRecordId,
   type DatasetRules,
   type DatasetSteps,
@@ -370,10 +371,11 @@ export async function runDatasetAutomation(
     // them build on what those steps read.
     const savedRulesHold = current === null || (current.rules !== null && host.resolves(current.rules) &&
       current.steps.every((step) => step.effects.every((effect) => !("rules" in effect) || host.resolves(effect.rules))));
-    return { approved, datasetRules, savedRulesHold, steps: datasetReachSteps(automation, collection, datasetRules, host.dataGrants(datasetId), chat) };
+    const grants = host.dataGrants(datasetId);
+    return { approved, datasetRules, grants, savedRulesHold, steps: datasetReachSteps(automation, collection, datasetRules, grants, chat) };
   });
   if (checked === null) return { kind: "wait", reason: "engine" };
-  const { approved, datasetRules, steps } = checked;
+  const { approved, datasetRules, grants, steps } = checked;
   if (!checked.savedRulesHold) return failed(RULES_CHANGED_ERROR);
   // An automation that no longer resolves under these rules runs nothing,
   // so reach cannot vouch for a saved step such as a wake.
@@ -451,7 +453,9 @@ export async function runDatasetAutomation(
     ...(datasetRules.generated ? {} : { recordKeys: ["id"] }),
     key: { claimId: claim.claimId, hash: run.keySeed },
   };
-  const backend = datasetBackend(dependencies, input, { approved, datasetRules, steps: datasetSteps, readable: seen, run });
+  // Each record a step adds carries the deletes an Undo may use on it: those every editor can use now.
+  const deletes = (tableId: string) => datasetUndoDeletes(roster, collection, approved.definition, tableId, grants).map((operation) => operation.operationId);
+  const backend = datasetBackend(dependencies, input, { approved, datasetRules, steps: datasetSteps, readable: seen, run, deletes });
   // One evaluator budget for the whole attempt: its conditions, then every
   // step, and every step read again because a record changed under it.
   const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
@@ -472,12 +476,16 @@ export async function runDatasetAutomation(
 function datasetBackend(
   dependencies: DatasetAutomationRunDependencies,
   input: DatasetAutomationRunInput,
-  setup: { approved: DatasetRevision; datasetRules: DatasetRules; steps: DatasetSteps; readable: ReadonlySet<string>; run: StoredRun },
+  setup: {
+    approved: DatasetRevision; datasetRules: DatasetRules; steps: DatasetSteps; readable: ReadonlySet<string>; run: StoredRun;
+    /** The approved deletes, among a table's, that every editor could use when the step was planned. */
+    deletes: (tableId: string) => string[];
+  },
 ): StepBackend {
   const { held, automation, collection, signal } = input;
   const { claim } = held;
   const datasetId = datasetIdOf(held);
-  const { approved, datasetRules, steps, readable, run } = setup;
+  const { approved, datasetRules, steps, readable, run, deletes } = setup;
   const { definition } = approved;
   const rules: Rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
   // Records and messages the run writes declare the next depth of the chain.
@@ -572,7 +580,7 @@ function datasetBackend(
             },
             codeRecords: (changes, { record }) => codeRecords(input, definition, datasetRules, changes, record, readable, snapshots, (operation, table, id) => read(operation, table, id), remember),
             effects(ordinal, planned) {
-              const effects = datasetStepEffects(automation, ordinal, planned, steps, definition, codeSteps.has(ordinal), rules, versions, collection.path);
+              const effects = datasetStepEffects(automation, ordinal, planned, steps, definition, codeSteps.has(ordinal), rules, versions, collection.path, deletes);
               if ("problem" in effects) return effects;
               const problem = codeStepProblem(automation, definition, [{ ordinal, effects }]);
               return problem === null ? effects : { problem };
@@ -770,6 +778,8 @@ function datasetStepEffects(
   rules: Rules,
   versions: ReadonlyMap<string, { id: DatasetRecordId; version: number }>,
   collectionPath: string,
+  /** The approved deletes an Undo may use on a record added to a table. */
+  deletes: (tableId: string) => string[],
 ): StoredStep["effects"] | { problem: string } {
   const own: StoredStep["effects"] = [];
   for (const effect of planned) {
@@ -802,6 +812,7 @@ function datasetStepEffects(
       return {
         kind: "dataset-create", rules, operationId: operation.operationId, tableId: table.tableId,
         values: effect.fields.map(({ field, value }) => ({ fieldId: fieldId(field), field, value })),
+        deletes: deletes(table.tableId),
       };
     }
     const known = versions.get(effect.target.path);
@@ -887,7 +898,7 @@ async function applyEffect(
     const id = created !== null && typeof created === "object" && !Array.isArray(created) ? created.id : undefined;
     const version = created !== null && typeof created === "object" && !Array.isArray(created) ? created.version : undefined;
     if ((typeof id !== "string" && typeof id !== "number") || typeof version !== "number") throw new Error("This Collection did not identify the record it added. Ask the owner to check its rules.");
-    return [{ kind: "dataset-created", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, recordId: id, version }];
+    return [{ kind: "dataset-created", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, recordId: id, version, deletes: effect.deletes }];
   }
 
   const { recordId } = effect.target;
@@ -907,7 +918,7 @@ async function applyEffect(
       if (typeof next !== "number") throw new Error("This Collection did not return the updated record's version. Ask the owner to check its rules.");
       const priorValues = prior !== null && typeof prior === "object" && !Array.isArray(prior) ? prior : {};
       return [...kept, {
-        kind: "dataset-edit", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, recordId, version: next,
+        kind: "dataset-edit", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, recordId, expectedVersion: version, version: next,
         fields: fields.map((field) => ({ ...field, before: priorValues[field.fieldId] ?? null })),
       }];
     }

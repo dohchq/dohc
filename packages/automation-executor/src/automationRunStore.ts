@@ -71,6 +71,9 @@ const EffectSchema = z.union([
     operationId: z.string(),
     tableId: z.string(),
     values: z.array(z.object({ fieldId: z.string(), field: z.string(), value: JsonValueSchema })),
+    // The approved deletes every editor could use when the run was planned,
+    // which an Undo may delete the added record with (datasetUndoDeletes).
+    deletes: z.array(z.string()),
   }),
   // An action to run with the input its formulas gave, saved before it is
   // sent so a resumed run sends the same input under the same key.
@@ -153,16 +156,20 @@ const WriteSchema = z.union([
   }),
   z.object({ kind: z.literal("skipped"), recordId: z.string(), path: z.string(), reason: z.string() }),
   // A dataset edit that landed: each field's value before (the operation's
-  // priorValues) and after, and the record's version after it.
+  // priorValues) and after, and the record's version it was sent at and the
+  // version it left. A gap between one write's version and the next shows
+  // that someone else wrote in between.
   z.object({
     kind: z.literal("dataset-edit"),
     rules: DatasetRulesSchema,
     operationId: z.string(),
     tableId: z.string(),
     recordId: DatasetRecordIdSchema,
+    expectedVersion: z.number().int().positive(),
     version: z.number().int().positive(),
     fields: z.array(DatasetFieldSchema),
   }),
+  // A record the run added, and the deletes its plan recorded for an Undo.
   z.object({
     kind: z.literal("dataset-created"),
     rules: DatasetRulesSchema,
@@ -170,6 +177,7 @@ const WriteSchema = z.union([
     tableId: z.string(),
     recordId: DatasetRecordIdSchema,
     version: z.number().int().positive(),
+    deletes: z.array(z.string()),
   }),
   // An action that ran, by its label then, and the dataset revision its
   // commit made. `undo` is what its reverse action takes, for an action the
@@ -214,13 +222,41 @@ const UndoRequestSchema = z.object({
   version: z.number().int().positive(),
   values: z.record(z.string(), JsonValueSchema),
 });
-// Version 6 plans and saves one step at a time, in the progress file beside
+// A dataset Undo's call, exactly as it is sent: the reverse of an action the
+// runs ran, by the commit it made, or the delete of a record they added.
+// Every one is saved, in the order sent, before the first is sent, so an
+// Undo that stops part way sends the same requests under the same keys and
+// never chooses again.
+const UndoCallSchema = z.union([
+  z.object({
+    kind: z.literal("reverse"),
+    rules: DatasetRulesSchema,
+    operationId: z.string(),
+    // The action it reverses, and the dataset revision that action's commit made.
+    action: z.string(),
+    revision: z.number().int().nonnegative(),
+    input: JsonValueSchema,
+    idempotencyKey: z.string(),
+  }),
+  z.object({
+    kind: z.literal("delete"),
+    rules: DatasetRulesSchema,
+    tableId: z.string(),
+    recordId: DatasetRecordIdSchema,
+    operationId: z.string(),
+    expectedVersion: z.number().int().positive(),
+    idempotencyKey: z.string(),
+  }),
+]);
+// Version 7 plans and saves one step at a time, in the progress file beside
 // the run's state, names each Collection the steps write by its Collection
-// id, records when the run ended, and qualifies formula-visible fields by
-// dataset and table. A run in any other format cannot be read, and the claim
-// fails instead of starting over or reading bare field ids as current reach.
+// id, records when the run ended, qualifies formula-visible fields by
+// dataset and table, and keeps the deletes an Undo may use on each record
+// it added and the calls a dataset Undo saved. A run in any other format
+// cannot be read, and the claim fails instead of starting over or reading
+// bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.literal(6),
+  version: z.literal(7),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -232,6 +268,8 @@ const StoredRunSchema = z.object({
   created: z.array(CreatedSchema),
   replans: z.array(ReplanSchema),
   undoRequests: z.array(UndoRequestSchema),
+  undoCalls: z.array(UndoCallSchema),
+  undoCovers: z.array(z.string()),
   readableFields: z.array(z.string()).nullable(),
   collections: z.array(CollectionRefSchema),
   rules: DatasetRulesSchema.nullable(),
@@ -245,7 +283,7 @@ const StoredRunSchema = z.object({
 });
 
 // A saved run's plan file: everything but its progress.
-const HeaderSchema = StoredRunSchema.omit({ steps: true, applied: true, created: true, replans: true, undoRequests: true });
+const HeaderSchema = StoredRunSchema.omit({ steps: true, applied: true, created: true, replans: true, undoRequests: true, undoCalls: true, undoCovers: true });
 // What run history's expiry reads of a run.
 const RunEndSchema = StoredRunSchema.pick({
   version: true, claimId: true, automationId: true, keySeed: true, rules: true, finishedAtMs: true, undo: true,
@@ -278,6 +316,7 @@ export type RunWrite = z.infer<typeof WriteSchema>;
 export type DatasetEffect = Extract<z.infer<typeof EffectSchema>, { kind: "dataset-edit" | "dataset-create" | "dataset-action" }>;
 export type DatasetReplan = z.infer<typeof ReplanSchema>;
 export type DatasetUndoRequest = z.infer<typeof UndoRequestSchema>;
+export type DatasetUndoCall = z.infer<typeof UndoCallSchema>;
 /** One planned step: its effects, on document records or on dataset records, and its result. */
 export interface StoredStep {
   ordinal: number;
@@ -293,7 +332,7 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 6;
+  version: 7;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -320,6 +359,14 @@ export interface StoredRun {
   replans: DatasetReplan[];
   /** Dataset Undo requests sent again after their record changed, saved before each is sent. */
   undoRequests: DatasetUndoRequest[];
+  /** A dataset Undo's reverses of actions and deletes of added records, all saved before the first is sent. */
+  undoCalls: DatasetUndoCall[];
+  /**
+   * The runs of the claim, by key seed, whose reverses and deletes an Undo
+   * planned and saved in `undoCalls`. A run no saved list covers, such as
+   * one Stop and restore left out, is planned when an Undo takes it.
+   */
+  undoCovers: string[];
   /**
    * Dataset, table, and field keys the plan's formulas could see, or null for
    * a document Collection. Each must remain readable when the run resumes.
@@ -545,6 +592,12 @@ export interface AutomationRunStore {
   save(run: StoredRun): Promise<void>;
   /** Records one planned step after the run's saved progress, before its first effect. */
   appendStep(run: StoredRun, step: StoredStep): Promise<void>;
+  /**
+   * Changes a run's settled or Undo state as it is saved now, rewriting only
+   * its header, so the settle and an Undo never overwrite each other's state
+   * with a copy read before it. Throws when the saved run cannot be read.
+   */
+  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo">>): Promise<void>;
   /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
   /**
@@ -556,6 +609,11 @@ export interface AutomationRunStore {
   recordReplan(run: StoredRun, replan: DatasetReplan): Promise<void>;
   /** Records a dataset Undo request before it is sent again at a record's new version. */
   recordUndoRequest(run: StoredRun, request: DatasetUndoRequest): Promise<void>;
+  /**
+   * Records every call a dataset Undo sends for the runs `covers` names, in
+   * order, in one line, before it sends the first.
+   */
+  recordUndoCalls(run: StoredRun, covers: readonly string[], calls: readonly DatasetUndoCall[]): Promise<void>;
   /**
    * Removes one batch of saved runs past run history's 30 days: every run
    * of a claim, once each ended 30 days before `now`, none has an
@@ -606,7 +664,8 @@ type ProgressLine =
   | ({ kind: "effect" } & StoredRun["applied"][number])
   | ({ kind: "created" } & StoredRun["created"][number])
   | ({ kind: "replan" } & DatasetReplan)
-  | ({ kind: "undo-request" } & DatasetUndoRequest);
+  | ({ kind: "undo-request" } & DatasetUndoRequest)
+  | { kind: "undo-calls"; covers: string[]; calls: DatasetUndoCall[] };
 
 const ProgressLineSchema = z.union([
   StepSchema.extend({ kind: z.literal("step") }),
@@ -614,6 +673,7 @@ const ProgressLineSchema = z.union([
   CreatedSchema.extend({ kind: z.literal("created") }),
   ReplanSchema.extend({ kind: z.literal("replan") }),
   UndoRequestSchema.extend({ kind: z.literal("undo-request") }),
+  z.object({ kind: z.literal("undo-calls"), covers: z.array(z.string()), calls: z.array(UndoCallSchema) }),
 ]);
 
 function progressText(run: StoredRun): string {
@@ -623,6 +683,7 @@ function progressText(run: StoredRun): string {
     ...run.replans.map((replan) => ({ kind: "replan" as const, ...replan })),
     ...run.applied.map((applied) => ({ kind: "effect" as const, ...applied })),
     ...run.undoRequests.map((request) => ({ kind: "undo-request" as const, ...request })),
+    ...(run.undoCovers.length > 0 ? [{ kind: "undo-calls" as const, covers: run.undoCovers, calls: run.undoCalls }] : []),
   ];
   return lines.map((line) => `${JSON.stringify(line)}\n`).join("");
 }
@@ -684,7 +745,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     const header = HeaderSchema.safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
     if (!header.success || header.data.automationId !== automationId) return null;
     if (runName(header.data.claimId, header.data.keySeed) !== name) return null;
-    const run: StoredRun = { ...header.data, steps: [], applied: [], created: [], replans: [], undoRequests: [] };
+    const run: StoredRun = { ...header.data, steps: [], applied: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [] };
     // Every saved run has its progress file, empty or not.
     const progress = await readBounded(join(folder, `${name}${PROGRESS_SUFFIX}`));
     if (progress === null || progress === undefined) return null;
@@ -713,6 +774,10 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       else if (entry.data.kind === "undo-request") {
         const { kind: _kind, ...request } = entry.data;
         run.undoRequests.push(request);
+      }
+      else if (entry.data.kind === "undo-calls") {
+        run.undoCovers.push(...entry.data.covers);
+        run.undoCalls.push(...entry.data.calls);
       }
       else {
         // The newest line for a planned record is the record it created.
@@ -841,7 +906,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     return true;
   });
   const header = (run: StoredRun) => {
-    const { steps: _steps, applied: _applied, created: _created, replans: _replans, undoRequests: _undoRequests, ...rest } = run;
+    const { steps: _steps, applied: _applied, created: _created, replans: _replans, undoRequests: _undoRequests, undoCalls: _undoCalls, undoCovers: _undoCovers, ...rest } = run;
     return rest;
   };
 
@@ -902,6 +967,19 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     appendStep(run, step) {
       return serial(() => appendLine(run, { kind: "step", ...step }));
     },
+    updateState(run, state) {
+      return serial(async () => {
+        const folder = await runsFolder(run.automationId);
+        const name = runName(run.claimId, run.keySeed);
+        const saved = await readRun(folder, name, run.automationId);
+        if (saved === null) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
+        const next = { ...saved, ...state };
+        // As a save does: an Undo that starts is listed before its run says so, and leaves the list after.
+        if (next.undo === "started") await noteUndo(next, name);
+        await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify(header(next))}\n`);
+        if (next.undo !== "started") await noteUndo(next, name);
+      });
+    },
     appendEffect(run, applied) {
       return serial(() => appendLine(run, { kind: "effect", ...applied }));
     },
@@ -913,6 +991,9 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     },
     recordUndoRequest(run, request) {
       return serial(() => appendLine(run, { kind: "undo-request", ...request }));
+    },
+    recordUndoCalls(run, covers, calls) {
+      return serial(() => appendLine(run, { kind: "undo-calls", covers: [...covers], calls: [...calls] }));
     },
     async expire(now, standing, from) {
       const runs = await serial(async () => {

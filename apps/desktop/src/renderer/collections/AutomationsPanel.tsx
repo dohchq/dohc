@@ -886,6 +886,7 @@ export function AutomationsPanel(props: {
             baseline={editing.baseline}
             cannotRun={editing.cannotRun}
             reach={editing.reach}
+            addsStay={table !== undefined && file?.status === "read" && file.addsStay.includes(table.name)}
             takenIds={new Set(editable?.automations.map((automation) => automation.id) ?? [])}
             saving={saving}
             readOnly={editable === null}

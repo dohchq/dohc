@@ -14,10 +14,10 @@ const setA = { kind: "set" as const, target: { recordId: "rec_a", collectionPath
 
 function run(claimId: string, state: "done" | "failed" | null, atMs: number, settled = state === "done"): StoredRun {
   return {
-    version: 6, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
+    version: 7, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: atMs, finishedAtMs: state === null ? null : atMs, steps: [{ ordinal: 0, effects: [setA, setA] }],
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    created: [], replans: [], undoRequests: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, settled,
+    created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, settled,
     outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1, step: 0 },
   };
 }
@@ -41,6 +41,18 @@ describe("the automation run store", () => {
     expect((await store.runsOf(AUTOMATION, "atc_one")).runs.find((found) => found.keySeed === saved.keySeed)?.undoRequests).toEqual([request]);
     await store.save({ ...saved, undo: "done", undoRequests: [request] });
     expect((await store.runsOf(AUTOMATION, "atc_one")).runs.find((found) => found.keySeed === saved.keySeed)?.undoRequests).toEqual([request]);
+    // So are an Undo's reverses and deletes, saved together in one line, in order.
+    const rules = { datasetId: "d", revision: 2, revisionSha256: "r" };
+    const deletes = [
+      { kind: "reverse" as const, rules, operationId: "release", action: "hold", revision: 9, input: { id: "a" }, idempotencyKey: "u.0" },
+      { kind: "delete" as const, rules, tableId: "t", recordId: 7, operationId: "delete", expectedVersion: 1, idempotencyKey: "u.1" },
+      { kind: "delete" as const, rules, tableId: "t", recordId: "8", operationId: "delete", expectedVersion: 3, idempotencyKey: "u.2" },
+    ];
+    await store.recordUndoCalls(saved, [saved.keySeed], deletes);
+    expect((await store.runsOf(AUTOMATION, "atc_one")).runs.find((found) => found.keySeed === saved.keySeed)).toMatchObject({ undoCalls: deletes, undoCovers: [saved.keySeed] });
+    await store.save({ ...saved, undo: "done", undoRequests: [request], undoCalls: deletes, undoCovers: [saved.keySeed] });
+    expect((await store.runsOf(AUTOMATION, "atc_one")).runs.find((found) => found.keySeed === saved.keySeed))
+      .toMatchObject({ undoRequests: [request], undoCalls: deletes, undoCovers: [saved.keySeed] });
     await store.saveSubscriptions([{ automationId: AUTOMATION, path: "Tasks", kinds: ["changed"], fields: ["Status"] }]);
     await expect(store.readSubscriptions()).resolves.toEqual([
       { automationId: AUTOMATION, path: "Tasks", kinds: ["changed"], fields: ["Status"] },
@@ -48,6 +60,28 @@ describe("the automation run store", () => {
     await store.saveTimeouts(new Map([[AUTOMATION, 2]]));
     await expect(store.readTimeouts()).resolves.toEqual(new Map([[AUTOMATION, 2]]));
     expect(await readdir(join(root, ".dohc", "automations"))).toEqual(expect.arrayContaining(["runs", "subscriptions.json", "timeouts.json"]));
+  });
+
+  it("changes a run's settled and Undo state as it is saved now, so neither overwrites the other from an older copy", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-automation-runs-"), testMetadataDir);
+    // The settle and an Undo each read the run before the other writes.
+    const read = run("atc_one", "done", 1, false);
+    await store.save(read);
+    const deletes = [{ kind: "delete" as const, rules: { datasetId: "d", revision: 2, revisionSha256: "r" }, tableId: "t", recordId: 7, operationId: "delete", expectedVersion: 1, idempotencyKey: "u.1" }];
+    await store.updateState(read, { undo: "started" });
+    // An Undo that started keeps its claim in run history, as a save that starts one does.
+    await expect(store.unfinishedUndos()).resolves.toEqual(new Set(["atc_one"]));
+    await store.recordUndoCalls(read, [read.keySeed], deletes);
+    await store.updateState(read, { settled: true });
+    expect((await store.runsOf(AUTOMATION, "atc_one")).runs).toEqual([expect.objectContaining({ settled: true, undo: "started", undoCalls: deletes })]);
+    await store.updateState(read, { undo: "done" });
+    expect((await store.runsOf(AUTOMATION, "atc_one")).runs).toEqual([expect.objectContaining({ settled: true, undo: "done", undoCalls: deletes })]);
+    await expect(store.updateState(run("atc_missing", "done", 1), { undo: "started" })).rejects.toThrow("could not read");
+    // Asked at once, each reads the run inside the store's queue, after the other wrote.
+    const other = run("atc_two", "done", 1, false);
+    await store.save(other);
+    await Promise.all([store.updateState(other, { undo: "started" }), store.updateState(other, { settled: true }), store.recordUndoCalls(other, [other.keySeed], deletes)]);
+    expect((await store.runsOf(AUTOMATION, "atc_two")).runs).toEqual([expect.objectContaining({ settled: true, undo: "started", undoCalls: deletes })]);
   });
 
   it("reads one fresh store from two places at once", async () => {
@@ -131,7 +165,7 @@ describe("the automation run store", () => {
     const files = await readdir(join(folder, automationFolder!));
     const planOf = (claimId: string) => join(folder, automationFolder!, files.find((file) => file.endsWith(".json") && file.startsWith(hashOf(claimId)))!);
     const text = await readFile(planOf("atc_older"), "utf8");
-    await writeFile(planOf("atc_older"), text.replace('"version":6', '"version":5'));
+    await writeFile(planOf("atc_older"), text.replace('"version":7', '"version":6'));
     await writeFile(planOf("atc_damaged"), "{ torn");
     const later = Date.now() + 31 * 24 * 60 * 60 * 1000;
     await expect(store.expire(Date.now(), async () => "gone", null)).resolves.toBeNull();
@@ -310,7 +344,7 @@ describe("the automation run store", () => {
     const text = await readFile(join(files, header), "utf8");
 
     // An earlier format kept its progress inside the run, or did not qualify formula-visible fields.
-    await writeFile(join(files, header), text.replace('"version":6', '"version":5'));
+    await writeFile(join(files, header), text.replace('"version":7', '"version":6'));
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
     await writeFile(join(files, header), text);
     await rm(join(files, progress));

@@ -437,7 +437,7 @@ describe("CollectionPage", () => {
       do: [{ kind: "set" as const, values: [{ field: "title", value: { kind: "literal" as const, value: "x" } }], records: null, operation: null }],
     };
     Object.assign(bridge, {
-      listCollectionAutomations: vi.fn(async () => ({ status: "read", contentHash: hashFor(0), automations: [{
+      listCollectionAutomations: vi.fn(async () => ({ status: "read", contentHash: hashFor(0), addsStay: [], automations: [{
         valid: true, automationId: "collection:tasks#stamp", automation: stamp, definitionHash: "0123456789abcdef",
         cannotRun: null, reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
       }] })),

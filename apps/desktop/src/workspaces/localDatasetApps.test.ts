@@ -244,7 +244,7 @@ describe("local app write attribution", () => {
     f.setRun({ depth: 4 });
     expect(await f.invoke("depth-4")).toMatchObject({ replayed: false });
     expect(f.host.automations.next()).toBeNull();
-    expect(f.host.automations.claims(watcher)).toContainEqual(expect.objectContaining({
+    expect(f.host.automations.claims(watcher).claims).toContainEqual(expect.objectContaining({
       state: "failed", error: "chain-stopped", attempts: 0, depth: 4, actor: { kind: "agent", depth: 4, appId, userId: "person-local" } }));
   });
 

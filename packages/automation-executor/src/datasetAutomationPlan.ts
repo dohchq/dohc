@@ -6,7 +6,7 @@ import type { DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/se
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import { chatReachStepsOf, datasetFindOf, operationsOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
 import type { ChatDirectory } from "./automationChat";
-import { datasetFieldKey, type ReachCollection, type ReachDatasetGrants, type ReachStep } from "./automationReach";
+import { checkAutomationReach, datasetFieldKey, type ReachCollection, type ReachDatasetGrants, type ReachRoster, type ReachStep } from "./automationReach";
 
 // How a dataset Collection's automation maps onto the dataset's approved
 // operations. A dataset changes only through them, so each step names one:
@@ -455,6 +455,30 @@ export function datasetReachSteps(
       reads: reads.filter((read) => read.tableId === own.tableId && read.fieldIds.includes(field.fieldId)).map(reach),
     }])),
   ];
+}
+
+/**
+ * The approved deletes an Undo may use on a record an automation added to
+ * `tableId`: the table's deletes that every editor of the automation can use
+ * (ADR 0012), so an Undo deletes nothing its editors could not. The builder,
+ * a run's plan, and Undo all ask this.
+ */
+export function datasetUndoDeletes(
+  roster: ReachRoster,
+  collection: ReachCollection,
+  definition: DatasetDefinition,
+  tableId: string,
+  grants: ReachDatasetGrants,
+): DatasetOperation[] {
+  const deletes = definition.operations.filter((operation) => operation.kind === "delete" && operation.tableId === tableId);
+  const verdicts = checkAutomationReach(roster, {
+    id: "", collection, codeFiles: [],
+    steps: deletes.map((operation): ReachStep => ({
+      kind: "dataset-operation", collection, datasetId: definition.datasetId, grants,
+      operation: { operationId: operation.operationId, name: operation.name, access: operation.access },
+    })),
+  });
+  return deletes.filter((_, index) => verdicts[index]!.allowed);
 }
 
 /**
