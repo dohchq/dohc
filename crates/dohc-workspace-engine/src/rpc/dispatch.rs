@@ -874,6 +874,14 @@ impl EngineService {
                 self.automations_list_claims(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.getClaim" => {
+                self.automations_get_claim(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.pruneHistory" => {
+                self.automations_prune_history(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "automations.settle" => {
                 self.automations_settle(&ctx, request.workspace, request.params)
                     .await?
@@ -1187,9 +1195,11 @@ mod tests {
             "automations.claimNext",
             "automations.claimSchedule",
             "automations.failures",
+            "automations.getClaim",
             "automations.groupSkips",
             "automations.listClaims",
             "automations.press",
+            "automations.pruneHistory",
             "automations.release",
             "automations.releaseGroups",
             "automations.retry",

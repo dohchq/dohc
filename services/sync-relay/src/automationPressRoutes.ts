@@ -38,6 +38,7 @@ const HOST_MAX_OWNERS = 10_000;
 export const AUTOMATION_PRESS_MAX_WAIT_MS = 25_000;
 const MAX_RECORD_ID_CHARS = 1024;
 const MAX_AUTOMATION_ID_CHARS = 4096;
+const MAX_COLLECTION_PATH_CHARS = 4096;
 const OUTCOMES: readonly AutomationPressOutcome[] = ["done", "skipped", "failed", "ended", "busy"];
 
 /**
@@ -107,8 +108,8 @@ export function createAutomationPressRoutes(input: {
     if (!rateLimiters.press.allow(grant.grantId, nowMs())) throw relayError("automation_press_rate_limited");
     const body = await readBody(request);
     // Exactly these keys: who pressed comes from the session, never the body.
-    if (Object.keys(body).some((key) => !["pressId", "automationId", "definitionHash", "recordId"].includes(key))) {
-      throw badRequest("a press names only pressId, automationId, definitionHash, and recordId");
+    if (Object.keys(body).some((key) => !["pressId", "automationId", "collectionPath", "definitionHash", "recordId"].includes(key))) {
+      throw badRequest("a press names only pressId, automationId, collectionPath, definitionHash, and recordId");
     }
     const definitionHash = body.definitionHash;
     if (typeof definitionHash !== "string" || !AUTOMATION_DEFINITION_HASH_PATTERN.test(definitionHash)) throw badRequest("definitionHash is invalid");
@@ -119,6 +120,7 @@ export function createAutomationPressRoutes(input: {
       userId: actorUserId,
       pressId: line(body.pressId, "pressId", AUTOMATION_PRESS_ID_MAX_CHARS),
       automationId: line(body.automationId, "automationId", MAX_AUTOMATION_ID_CHARS),
+      collectionPath: line(body.collectionPath, "collectionPath", MAX_COLLECTION_PATH_CHARS),
       definitionHash,
       recordId: line(body.recordId, "recordId", MAX_RECORD_ID_CHARS),
       nowMs: nowMs(),

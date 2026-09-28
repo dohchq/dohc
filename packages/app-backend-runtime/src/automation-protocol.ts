@@ -65,6 +65,12 @@ export interface AutomationScope {
   /** The Group message that triggered the run. Formulas read `null` for other triggers. */
   message?: JsonObject;
   bindings?: JsonObject;
+  /**
+   * Names of other steps' results this formula or code step cannot read,
+   * because those steps have not run, each with why. Reading one throws a
+   * ReferenceError with that text instead of reading nothing.
+   */
+  unavailable?: Record<string, string>;
   now: string;
   /**
    * The only keys of the trigger record that formulas may read, as `record`

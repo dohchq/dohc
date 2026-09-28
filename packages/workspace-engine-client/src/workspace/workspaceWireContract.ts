@@ -44,6 +44,8 @@ export const WORKSPACE_METHOD = {
   automationsFailures: "automations.failures",
   automationsGroupSkips: "automations.groupSkips",
   automationsListClaims: "automations.listClaims",
+  automationsGetClaim: "automations.getClaim",
+  automationsPruneHistory: "automations.pruneHistory",
   automationsSettle: "automations.settle",
   automationsRetry: "automations.retry",
   automationsRelease: "automations.release",
@@ -251,7 +253,7 @@ export type AutomationClaimNextParams = WorkspaceJsonObject & {
   /**
    * Serve only claims whose automation id starts with this. The Collection
    * executor drains "collection:" (ids
-   * "collection:<collection path>#<automation id>").
+   * "collection:<collection id>#<automation id>").
    */
   automationIdPrefix: string;
 };
@@ -276,13 +278,29 @@ export type AutomationReleaseParams = WorkspaceJsonObject & {
 
 export type AutomationListClaimsParams = WorkspaceJsonObject & {
   automationId: string;
+  /** The `next` of the page before. Omitted for the newest page. */
+  before?: string;
+  /** 1 to 100 claims. 20 when omitted. */
+  limit?: number;
+};
+
+/** A claim by its id, or by its automation and the trigger key it claimed under. */
+export type AutomationGetClaimParams = WorkspaceJsonObject & (
+  | { claimId: string }
+  | { automationId: string; key: string }
+);
+
+export type AutomationPruneHistoryParams = WorkspaceJsonObject & {
+  /** Claims to keep past their time: the runs an unfinished Undo still names. */
+  keep: string[];
+  nowMs?: number;
 };
 
 /** Mirrors AutomationPressParams in crates/dohc-workspace-engine. */
 export type AutomationPressParams = WorkspaceJsonObject & {
   /** The pressing window's id for the press. Send the same id again after a lost reply. */
   pressId: string;
-  /** The Collection automation the button runs: "collection:<path>#<id>". */
+  /** The Collection automation the button runs: "collection:<collection id>#<id>". */
   automationId: string;
   recordId: string;
   /**
@@ -305,7 +323,7 @@ export type AutomationPressActor =
 
 /** Mirrors AutomationRunNowParams in crates/dohc-workspace-engine. */
 export type AutomationRunNowParams = WorkspaceJsonObject & {
-  /** The Collection automation to run: "collection:<path>#<id>". */
+  /** The Collection automation to run: "collection:<collection id>#<id>". */
   automationId: string;
   /** The skipped-run notice whose Run now this is. One claim per notice. */
   noticeId: string;
@@ -314,7 +332,7 @@ export type AutomationRunNowParams = WorkspaceJsonObject & {
 
 /** Mirrors AutomationClaimScheduleParams in crates/dohc-workspace-engine. */
 export type AutomationClaimScheduleParams = WorkspaceJsonObject & {
-  /** The Collection automation the schedule runs: "collection:<path>#<id>". */
+  /** The Collection automation the schedule runs: "collection:<collection id>#<id>". */
   automationId: string;
   /** The scheduler's hash of the schedule. A new hash starts a new mark. */
   scheduleHash: string;
@@ -353,9 +371,17 @@ export type AutomationFailuresResult =
 export type AutomationGroupSkipsResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsGroupSkips];
 
-/** One automation's newest claims in every state, newest first (at most 100). */
+/** One page of an automation's run history, newest first, and the cursor of the next page, or null after the oldest. */
 export type AutomationListClaimsResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsListClaims];
+
+/** One claim in run history, however old, or null. */
+export type AutomationGetClaimResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsGetClaim];
+
+/** How many claims left run history, and whether more are past their time. */
+export type AutomationPruneHistoryResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsPruneHistory];
 
 /**
  * The claim that runs a press: new, or the same person's earlier press of
@@ -419,6 +445,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsFailures]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.automationsGroupSkips]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.automationsListClaims]: AutomationListClaimsParams;
+  [WORKSPACE_METHOD.automationsGetClaim]: AutomationGetClaimParams;
+  [WORKSPACE_METHOD.automationsPruneHistory]: AutomationPruneHistoryParams;
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
   [WORKSPACE_METHOD.automationsRetry]: AutomationRetryParams;
   [WORKSPACE_METHOD.automationsRelease]: AutomationReleaseParams;
@@ -789,6 +817,7 @@ const CollectionSchemaSchema = mutableStruct({
 
 const CollectionSummarySchema = mutableStruct({
   path: Schema.String,
+  objectId: Schema.String,
   status: Schema.Literals(["valid", "degraded"]),
   reasons: Schema.mutable(Schema.Array(CollectionSchemaReasonSchema)),
   omittedReasons: Schema.optionalKey(Schema.Int),
@@ -796,6 +825,7 @@ const CollectionSummarySchema = mutableStruct({
 
 const CollectionDetailsSchema = mutableStruct({
   path: Schema.String,
+  objectId: Schema.String,
   status: Schema.Literals(["valid", "degraded"]),
   reasons: Schema.mutable(Schema.Array(CollectionSchemaReasonSchema)),
   schema: CollectionSchemaSchema,
@@ -986,7 +1016,11 @@ const automationClaimFields = {
   ]),
   /** The record the claim runs on; null for a message or a schedule. */
   recordId: Schema.NullOr(Schema.NonEmptyString),
-  collectionPath: Schema.NonEmptyString,
+  /**
+   * The Collection the changed record was in. A claim that names its
+   * automation, a press, a due time, a Run now, or a Group message, has none.
+   */
+  collectionPath: Schema.NullOr(Schema.NonEmptyString),
   depth: Schema.Int,
   state: Schema.Literals(["pending", "running", "done", "failed"]),
   /**
@@ -1279,6 +1313,14 @@ const WorkspaceResultSchemas = {
   }),
   [WORKSPACE_METHOD.automationsListClaims]: mutableStruct({
     claims: Schema.mutable(Schema.Array(AutomationClaimSummarySchema)),
+    next: Schema.NullOr(Schema.NonEmptyString),
+  }),
+  [WORKSPACE_METHOD.automationsGetClaim]: mutableStruct({
+    claim: Schema.NullOr(AutomationClaimSummarySchema),
+  }),
+  [WORKSPACE_METHOD.automationsPruneHistory]: mutableStruct({
+    pruned: Schema.Int,
+    more: Schema.Boolean,
   }),
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRetry]: AutomationClaimSummarySchema,

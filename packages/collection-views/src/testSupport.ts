@@ -68,7 +68,7 @@ export function makeRecord(
 }
 
 export function makeSummary(): CollectionSummary {
-  return { path: "tasks", status: "valid", reasons: [] };
+  return { path: "tasks", objectId: "collection-tasks", status: "valid", reasons: [] };
 }
 
 export function makeQueryResult(

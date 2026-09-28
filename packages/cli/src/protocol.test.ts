@@ -255,6 +255,20 @@ describe("collection result schemas", () => {
     ).toEqual({ ok: false, reason: "refused" });
   });
 
+  it("parses a run's dataset changes with the versions and deletes Undo reads", () => {
+    const rules = { datasetId: "d", revision: 2, revisionSha256: "r" };
+    const run = {
+      run: "atc_1", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2,
+      trigger: { kind: "changed", recordId: "a", by: "human", sharedAuthor: null, depth: 0 }, definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+      steps: [{ step: 1, changes: [
+        { kind: "dataset-edit", rules, operationId: "edit", tableId: "t", recordId: "a", expectedVersion: 1, version: 2, fields: [] },
+        { kind: "dataset-created", rules, operationId: "create", tableId: "t", recordId: 7, version: 1, deletes: ["delete"] },
+      ] }],
+      failedStep: null, startsOver: false,
+    };
+    expect(parseCliResult("automationRun", { ok: true, run })).toEqual({ ok: true, run });
+  });
+
   it("refuses a result that does not match the verb", () => {
     expect(() => parseCliResult("collectionSetFields", { recordPath: "x" })).toThrow();
     expect(() =>

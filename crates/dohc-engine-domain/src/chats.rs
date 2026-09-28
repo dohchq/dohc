@@ -319,18 +319,10 @@ pub struct ChatThread {
 /// automation wrote arrives without it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessageAutomation {
-    /// `collection:<collection path>#<automation id>`.
+    /// `collection:<collection id>#<automation id>`.
     pub automation_id: String,
     /// One more than the depth of the change that triggered the automation.
     pub chain_depth: u32,
-}
-
-impl ChatMessageAutomation {
-    /// The Collection the automation belongs to. Writes validate the id, so a
-    /// stored one always has a path.
-    pub fn collection_path(&self) -> &str {
-        crate::automations::collection_automation_path(&self.automation_id).unwrap_or_default()
-    }
 }
 
 /// A durable chat message row.
@@ -1581,7 +1573,7 @@ pub fn normalize_agent_owner_name(
 }
 
 /// An automation message must name its Collection automation and chain
-/// depth, and no other message may. The id is `collection:<path>#<id>`, and
+/// depth, and no other message may. The id is `collection:<collection id>#<id>`, and
 /// the depth is bounded like a record change's declared depth.
 fn normalize_message_automation(
     author_kind: ChatActorKind,
@@ -1601,9 +1593,9 @@ fn normalize_message_automation(
         }
         (_, None) => return Ok(None),
     };
-    if crate::automations::collection_automation_path(&automation.automation_id).is_none() {
+    if !crate::automations::is_collection_automation_id(&automation.automation_id) {
         return Err(DomainError::InvalidInput {
-            reason: "automation id must be collection:<path>#<id>",
+            reason: "automation id must be collection:<collection id>#<id>",
         });
     }
     if automation.chain_depth == 0

@@ -67,8 +67,10 @@ export interface FormerEditor {
 /** What this computer knows about who can edit and reach what in a workspace. */
 export type ReachRoster =
   // The owner's computer. A workspace that does not sync has no grants, and
-  // its owner is this computer's person, whose account may be unknown.
-  | { kind: "owner"; ownerUserId: string | null; grants: readonly RosterGrant[]; formerEditors?: readonly FormerEditor[] }
+  // its owner is this computer's person, whose account may be unknown. In a
+  // workspace proved never shared, `localPersonId` is this computer's own id
+  // for that person, which names them with or without an account.
+  | { kind: "owner"; ownerUserId: string | null; localPersonId?: string; grants: readonly RosterGrant[]; formerEditors?: readonly FormerEditor[] }
   | { kind: "unknown"; problem: RosterProblem }
   // A collaborator's computer. The relay tells a recipient only about their
   // own grant, so the other editors are unknown. The recipient's grant bounds
@@ -93,7 +95,8 @@ export interface ReachPerson {
  * and paths as the engine lists them. Steps inside an If count like any
  * other step.
  */
-export type ReachStep =
+export type ReachStep = (
+  | { kind: "unavailable"; reason: string }
   // Set fields, add records, or change found records in `collection`.
   | { kind: "change-records"; collection: ReachCollection }
   | { kind: "find-records"; collection: ReachCollection }
@@ -101,11 +104,11 @@ export type ReachStep =
   // operations. File Edit on a dataset grants no record access: every other
   // editor must hold a current data grant that lists the operation, and an
   // operation only the owner can use needs the owner to be the only editor.
-  | { kind: "dataset-operation"; collection: ReachCollection; operation: ReachDatasetOperation; grants: ReachDatasetGrants }
+  | { kind: "dataset-operation"; collection: ReachCollection; datasetId: string; operation: ReachDatasetOperation; grants: ReachDatasetGrants }
   // A dataset field an automation's formulas may see: only while every other
   // editor holds a data grant on a read that shows it. A stopped field is
   // hidden from formulas; it does not stop the run.
-  | { kind: "dataset-field"; collection: ReachCollection; field: { fieldId: string; name: string }; reads: readonly ReachDatasetOperation[]; grants: ReachDatasetGrants }
+  | { kind: "dataset-field"; collection: ReachCollection; datasetId: string; tableId: string; field: { fieldId: string; name: string }; reads: readonly ReachDatasetOperation[]; grants: ReachDatasetGrants }
   // `channelWireId` is null for a Group that has not synced yet.
   | { kind: "post"; group: { channelWireId: string | null; name: string } }
   // A Group whose messages start the automation: every editor must be able
@@ -113,7 +116,8 @@ export type ReachStep =
   | { kind: "read-group"; group: { channelWireId: string | null; name: string } }
   | { kind: "notify"; person: ReachPerson }
   // A personal step, such as waking this person's agent.
-  | { kind: "personal"; person: ReachPerson };
+  | { kind: "personal"; person: ReachPerson }
+) & { /** Retains a static step's existing hold identity when storage-specific checks expand. */ identity?: string };
 
 /** A dataset operation a step invokes. */
 export interface ReachDatasetOperation {
@@ -329,6 +333,7 @@ function checkOwnerStep(
   editors: readonly Person[],
 ): StepReach {
   switch (step.kind) {
+    case "unavailable": return stop(step.reason);
     case "change-records": {
       const blocked = editors.find((person) => !reaches(person, step.collection.path, "edit"));
       return blocked ? stop(`${nameOf(blocked)} cannot edit ${step.collection.name}.`, nameOf(blocked)) : ALLOWED;
@@ -357,7 +362,7 @@ function checkOwnerStep(
       return blocked ? stop(`${nameOf(blocked)} cannot post in ${step.group.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "notify": {
-      if (step.person.userId === roster.ownerUserId) return ALLOWED;
+      if (step.person.userId === roster.ownerUserId || step.person.userId === roster.localPersonId) return ALLOWED;
       const person = people.find((candidate) => candidate.userId === step.person.userId);
       return person && reaches(person, collection.path, "view")
         ? ALLOWED
@@ -370,10 +375,13 @@ function checkOwnerStep(
     }
     case "personal": {
       // A personal step acts as its person, so it must name this computer's
-      // person. With no account known, dohc cannot tell who the step names,
-      // so it runs for nobody.
-      if (roster.ownerUserId === null) return stop(PERSONAL_NEEDS_ACCOUNT);
-      if (step.person.userId !== roster.ownerUserId) {
+      // person: by their account, or by this computer's own id for them in a
+      // workspace nobody else ever had a part in. Naming anyone else with no
+      // account known, dohc cannot tell who the step names, so it runs for
+      // nobody.
+      const local = roster.localPersonId !== undefined && step.person.userId === roster.localPersonId;
+      if (!local && roster.ownerUserId === null) return stop(PERSONAL_NEEDS_ACCOUNT);
+      if (!local && step.person.userId !== roster.ownerUserId) {
         const person = people.find((candidate) => candidate.userId === step.person.userId);
         return stop(`This step acts as ${person?.email ?? step.person.name}, and you can also edit ${collection.name}.`);
       }
@@ -386,19 +394,24 @@ function checkOwnerStep(
 /**
  * What a step's verdict and its confirmation are keyed by. A document step
  * is its place in the automation, which only an edit of the automation can
- * move. A dataset step is its operation's name or its field's id, so a
- * schema change that adds or removes fields cannot move a hold onto another
- * field's verdict.
+ * move. Dataset operations and fields include their destination identity,
+ * so matching names in different Collections cannot share a verdict.
  */
 export function reachStepId(step: ReachStep, index: number): string {
+  if (step.identity !== undefined) return step.identity;
   switch (step.kind) {
     case "dataset-operation":
-      return `operation:${step.operation.name}`;
+      return JSON.stringify(["operation", step.datasetId, step.operation.operationId]);
     case "dataset-field":
-      return `field:${step.field.fieldId}`;
+      return JSON.stringify(["field", step.datasetId, step.tableId, step.field.fieldId]);
     default:
       return String(index);
   }
+}
+
+/** A formula-visible field belongs to one dataset and table. */
+export function datasetFieldKey(datasetId: string, tableId: string, fieldId: string): string {
+  return JSON.stringify([datasetId, tableId, fieldId]);
 }
 
 export const PERSONAL_NEEDS_ACCOUNT =

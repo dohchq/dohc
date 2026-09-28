@@ -319,12 +319,18 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
   listCollectionAutomationRuns: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomationRuns, payload),
+  getCollectionAutomationRun: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getCollectionAutomationRun, payload),
   retryCollectionAutomation: (payload) =>
     ipcRenderer.invoke(CHANNELS.retryCollectionAutomation, payload),
   undoCollectionAutomationRun: (payload) =>
     ipcRenderer.invoke(CHANNELS.undoCollectionAutomationRun, payload),
   listAutomationTargets: (payload) =>
     ipcRenderer.invoke(CHANNELS.listAutomationTargets, payload),
+  listAutomationGroups: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listAutomationGroups, payload),
+  listAutomationPeople: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listAutomationPeople, payload),
   checkCollectionAutomation: (payload) =>
     ipcRenderer.invoke(CHANNELS.checkCollectionAutomation, payload),
   stopAndRestore: (payload) =>
@@ -355,6 +361,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listCollectionFieldMarks, payload),
   findDatasetCollection: (payload) =>
     ipcRenderer.invoke(CHANNELS.findDatasetCollection, payload),
+  findAutomationCollection: (payload) =>
+    ipcRenderer.invoke(CHANNELS.findAutomationCollection, payload),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onAutomationRunsChanged: (

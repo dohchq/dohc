@@ -18,6 +18,10 @@ export interface ChatDirectoryChannel {
   wireId: string;
   /** The direct message's one running conversation, or null before its first message. */
   runningThreadId: string | null;
+  /** A joined Group whose grant is read-only, or ended, so this computer may not post in it. */
+  readOnly?: true;
+  /** A joined Group whose grant ended: its copy here takes no new messages. */
+  ended?: true;
 }
 
 interface ChatGroupTarget {
@@ -25,7 +29,14 @@ interface ChatGroupTarget {
   wireId: string;
   name: string;
   lane: ChatThreadLane;
+  readOnly: boolean;
+  ended: boolean;
 }
+
+/** Why an automation cannot post in a Group this computer may only read. */
+export const GROUP_READ_ONLY = "This computer can only read this Group, so an automation cannot post in it.";
+/** Why a Group whose grant ended cannot start an automation. */
+export const GROUP_ENDED = "This Group's share ended, so its messages no longer reach this computer.";
 
 interface ChatDirectMessageTarget {
   channelId: string;
@@ -53,29 +64,38 @@ export function chatDirectoryOf(
   roster: Exclude<ReachRoster, { kind: "unknown" }>,
 ): ChatDirectory {
   const grants = roster.kind === "owner" ? roster.grants : [];
-  const ownerUserId = roster.kind === "owner" ? roster.ownerUserId : null;
-  const personName = (userId: string) => userId === ownerUserId
+  // This computer's person, by their account or, in a workspace proved never
+  // shared, by this computer's own id for them.
+  const isOwner = (userId: string) =>
+    roster.kind === "owner" && (userId === roster.ownerUserId || userId === roster.localPersonId);
+  const personName = (userId: string) => isOwner(userId)
     ? "you"
     : grants.find((grant) => grant.recipientUserId === userId && grant.recipientEmail)?.recipientEmail ?? "that person";
   return {
     person: personName,
     noticeRecipient(userId) {
-      if (userId === ownerUserId || grants.some((grant) => grant.recipientUserId === userId)) {
+      if (isOwner(userId) || grants.some((grant) => grant.recipientUserId === userId)) {
         return { name: personName(userId) };
       }
       return { problem: "dohc cannot find that person among the people this workspace is shared with. They may not have accepted your share yet." };
     },
     group(name) {
-      const matches = channels.filter((channel) =>
-        channel.kind === "channel" && (channel.name === name || channel.slug === name));
+      // A slug names one Group; a name can match several, or another Group's slug.
+      const groups = channels.filter((channel) => channel.kind === "channel");
+      const bySlug = groups.find((channel) => channel.slug === name);
+      const matches = bySlug ? [bySlug] : groups.filter((channel) => channel.name === name);
       if (matches.length === 0) return { problem: `dohc cannot find the Group ${name}.` };
-      if (matches.length > 1) return { problem: `More than one Group is called ${name}. Rename one of them.` };
+      if (matches.length > 1) {
+        return { problem: `More than one Group is called ${name}. Name one by its slug instead: ${matches.map((channel) => channel.slug).join(" or ")}.` };
+      }
       const [channel] = matches as [ChatDirectoryChannel];
       return {
         channelId: channel.id,
         wireId: channel.wireId,
         name: channel.name,
         lane: channel.type === "chat" ? "chat" : "posts",
+        readOnly: channel.readOnly === true,
+        ended: channel.ended === true,
       };
     },
     directMessage(userId) {
@@ -236,6 +256,8 @@ export async function readChatDirectory(
   workspaceId: string,
   roster: Exclude<ReachRoster, { kind: "unknown" }>,
   needs: ChatNeeds,
+  /** What this computer may do in a joined Group, by its wire id; null for one it owns. */
+  joined: (wireId: string) => { readOnly: boolean; ended: boolean } | null = () => null,
 ): Promise<ChatDirectory> {
   const channels = await store.listChannels({ workspaceId });
   const grants = roster.kind === "owner" ? roster.grants : [];
@@ -253,7 +275,12 @@ export async function readChatDirectory(
     const base = { id: channel.id, name: channel.name, slug: channel.slug, kind: channel.kind, type: channel.type };
     if (channel.kind === "channel" && (needs.groups.has(channel.name) || needs.groups.has(channel.slug))) {
       const wireId = (await store.getChannelWireId({ workspaceId, channelId: channel.id })) ?? channel.id;
-      entries.push({ ...base, wireId, runningThreadId: null });
+      const access = joined(wireId);
+      entries.push({
+        ...base, wireId, runningThreadId: null,
+        ...(access?.readOnly || access?.ended ? { readOnly: true as const } : {}),
+        ...(access?.ended ? { ended: true as const } : {}),
+      });
     } else if (channel.kind === "dm") {
       const person = onePerson(channel.id);
       if (person === undefined || !needs.people.has(person)) continue;

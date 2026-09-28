@@ -7,24 +7,25 @@
 //! Group message claims.
 
 use dohc_engine_domain::{
-    AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_CLAIM_HISTORY_LIMIT,
-    AUTOMATION_GROUP_COVERAGE_MS, AUTOMATION_GROUP_FUTURE_MS, AUTOMATION_RECLAIM_EXHAUSTED,
-    AutomationChange, AutomationChangeKind, AutomationClaim, AutomationClaimState,
-    AutomationFactValue, AutomationFieldFact, AutomationGroupHandover,
+    AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_GROUP_COVERAGE_MS,
+    AUTOMATION_GROUP_FUTURE_MS, AUTOMATION_HISTORY_RETENTION_MS, AUTOMATION_RECLAIM_EXHAUSTED,
+    AutomationChange, AutomationChangeKind, AutomationClaim, AutomationClaimLookup,
+    AutomationClaimState, AutomationFactValue, AutomationFieldFact, AutomationGroupHandover,
     AutomationGroupHandoverAutomation, AutomationGroupMessage, AutomationGroupRelayRecord,
     AutomationGroupSkips, AutomationGroupSubscription, AutomationGroupWatch,
     AutomationGroupWatched, AutomationRetry, AutomationSettle, AutomationSubscription,
     AutomationTrigger, ChangeActorKind, ChangeAttribution, ChatActorKind, ChatChannelKind,
     ChatMessageAutomation, ChatThreadLane, CollectionFieldChangeFact, CollectionRecordApplyFacts,
-    DispatchClaim, DomainError, LinkedChatStore, MAX_AUTOMATION_FIELD_FACTS_BYTES,
-    MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES, MAX_AUTOMATION_SUBSCRIPTION_FIELDS,
-    MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES, NoFaults, SendMessage, SharedChangeAuthor,
-    StartChannelThread, TxnOutcome, claim_automation_triggers_in_tx, claim_group_message_in_tx,
-    claim_next_pending_automation, list_automation_claims, list_automation_failures,
-    moment_author_attribution, moment_author_json, read_automation_group_skips,
-    reclaim_running_automations, release_automation_claim, release_automation_groups,
-    retry_automation_claim, settle_automation_claim, subscribe_automation, unsubscribe_automation,
-    watch_automation_groups,
+    DispatchClaim, DomainError, LinkedChatStore, MAX_AUTOMATION_CLAIM_PAGE,
+    MAX_AUTOMATION_FIELD_FACTS_BYTES, MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES,
+    MAX_AUTOMATION_SUBSCRIPTION_FIELDS, MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES,
+    NoFaults, SendMessage, SharedChangeAuthor, StartChannelThread, TxnOutcome,
+    claim_automation_triggers_in_tx, claim_group_message_in_tx, claim_next_pending_automation,
+    get_automation_claim, list_automation_claims, list_automation_failures,
+    moment_author_attribution, moment_author_json, prune_automation_history,
+    read_automation_group_skips, reclaim_running_automations, release_automation_claim,
+    release_automation_groups, retry_automation_claim, settle_automation_claim,
+    subscribe_automation, unsubscribe_automation, watch_automation_groups,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -379,7 +380,7 @@ fn a_local_apply_claims_once_per_subscribed_automation_and_replay_dedupes() {
             "a synced-lineage change keys on its replication coordinate"
         );
         assert_eq!(claim.state, AutomationClaimState::Pending);
-        assert_eq!(claim.collection_path, "tasks");
+        assert_eq!(claim.collection_path.as_deref(), Some("tasks"));
         assert_eq!(claim.depth, 0);
     }
 
@@ -1135,17 +1136,109 @@ fn a_crash_requeue_keeps_the_run_and_a_retried_run_that_crashes_is_exhausted() {
     assert_eq!(third.run, 3);
 }
 
+/// Every claim of an automation, a page at a time, newest first.
+fn every_claim(store: &EngineStore, automation_id: &str, limit: i64) -> Vec<AutomationClaim> {
+    let mut claims = Vec::new();
+    let mut before = None;
+    loop {
+        let page = list_automation_claims(store, WS, automation_id, before.as_ref(), limit)
+            .expect("list claims");
+        claims.extend(page.claims);
+        match page.next {
+            Some(next) => before = Some(next),
+            None => return claims,
+        }
+    }
+}
+
+fn automation_claim_rows(store: &EngineStore, automation_id: &str) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM automation_claims \
+                 WHERE workspace_id = ?1 AND automation_id = ?2",
+                [WS, automation_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("count claims")
+}
+
+/// Failed claims past 30 days leave run history, except the automation's
+/// newest failure, which its notice offers. An expired failure cannot run
+/// again, and every failure stays counted.
 #[test]
-fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
+fn failed_claims_expire_after_30_days_except_the_newest() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe(&mut store, "collection:triage", "tasks");
+    let fail = |store: &mut EngineStore, seq: i64, now_ms: i64| {
+        claim_for(store, WS, &field_change(seq, &["status"]), now_ms);
+        let claim = claim_next(store, "collection:", now_ms).expect("pending claim");
+        settle_automation_claim(
+            store,
+            WS,
+            &claim.claim_id,
+            &AutomationSettle::Failed {
+                error: "run threw".to_owned(),
+            },
+            now_ms,
+            &NO_FAULTS,
+        )
+        .expect("settle");
+        claim.claim_id
+    };
+    let count = 50;
+    let failed = (1..=count)
+        .map(|seq| fail(&mut store, seq, 1_000 + seq))
+        .collect::<Vec<_>>();
+    let generation =
+        |store: &EngineStore| list_automation_failures(store, WS).expect("failures")[0].generation;
+    assert_eq!(generation(&store), count);
+
+    let later = 1_000 + count + AUTOMATION_HISTORY_RETENTION_MS + 1;
+    let pruned = prune_automation_history(&mut store, WS, &[], later, &NO_FAULTS).expect("prune");
+    assert_eq!((pruned.pruned as i64, pruned.more), (count - 1, false));
+    let newest = failed.last().expect("a failure").clone();
+    assert_eq!(
+        every_claim(&store, "collection:triage", 20)
+            .iter()
+            .map(|claim| claim.claim_id.clone())
+            .collect::<Vec<_>>(),
+        vec![newest.clone()]
+    );
+    assert_eq!(generation(&store), count, "every failure stays counted");
+    assert!(matches!(
+        retry_automation_claim(&mut store, WS, &failed[0], later, &NO_FAULTS),
+        Err(DomainError::InvalidInput { .. })
+    ));
+
+    // A newer failure takes over the notice, and the old newest expires.
+    let newer = fail(&mut store, count + 1, later);
+    let pruned = prune_automation_history(
+        &mut store,
+        WS,
+        &[],
+        later + AUTOMATION_HISTORY_RETENTION_MS,
+        &NO_FAULTS,
+    )
+    .expect("prune");
+    assert_eq!(pruned.pruned, 1);
+    assert_eq!(
+        list_automation_failures(&store, WS).expect("failures")[0].claim_id,
+        newer
+    );
+    assert_eq!(generation(&store), count + 1);
+}
+
+#[test]
+fn the_claim_history_pages_newest_first_and_keeps_done_claims_30_days() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
     subscribe(&mut store, "collection:triage", "tasks");
     subscribe(&mut store, "collection:other", "tasks");
-    let limit = AUTOMATION_CLAIM_HISTORY_LIMIT;
-
-    // The oldest triage claim fails and must survive pruning; the rest
-    // succeed.
-    for seq in 0..limit + 5 {
+    let count = MAX_AUTOMATION_CLAIM_PAGE + 5;
+    for seq in 0..count {
         claim_for(
             &mut store,
             WS,
@@ -1153,13 +1246,16 @@ fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
             100 + seq,
         );
     }
-    let mut failed_one = false;
-    for index in 0..2 * (limit + 5) {
+
+    // The first two triage claims fail. The first then runs again and is
+    // done; the second stays failed.
+    let mut failed = Vec::new();
+    for index in 0..2 * count {
         let claim = claim_next(&mut store, "collection:", 1_000 + index).expect("pending claim");
-        let settle = if !failed_one && claim.automation_id == "collection:triage" {
-            failed_one = true;
+        let settle = if failed.len() < 2 && claim.automation_id == "collection:triage" {
+            failed.push(claim.claim_id.clone());
             AutomationSettle::Failed {
-                error: "first run threw".to_owned(),
+                error: "run threw".to_owned(),
             }
         } else {
             AutomationSettle::Done
@@ -1174,47 +1270,93 @@ fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
         )
         .expect("settle");
     }
+    retry_automation_claim(&mut store, WS, &failed[0], 2_000, &NO_FAULTS).expect("retry");
+    let rerun = claim_next(&mut store, "collection:triage", 2_001).expect("the retried claim");
+    settle_automation_claim(
+        &mut store,
+        WS,
+        &rerun.claim_id,
+        &AutomationSettle::Done,
+        2_002,
+        &NO_FAULTS,
+    )
+    .expect("settle the retry");
+    let generation =
+        |store: &EngineStore| list_automation_failures(store, WS).expect("failures")[0].generation;
+    assert_eq!(generation(&store), 2);
 
-    let history = list_automation_claims(&store, WS, "collection:triage").expect("list claims");
-    assert_eq!(history.len(), limit as usize);
+    let history = every_claim(&store, "collection:triage", 20);
+    assert_eq!(history.len() as i64, count);
     assert!(
         history
             .windows(2)
             .all(|pair| pair[0].created_at_ms > pair[1].created_at_ms),
-        "newest first"
+        "newest first, across pages"
     );
-    assert!(
-        history
-            .iter()
-            .all(|claim| claim.automation_id == "collection:triage")
-    );
-    let rows = |automation: &str| -> i64 {
-        store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM automation_claims \
-                     WHERE workspace_id = ?1 AND automation_id = ?2",
-                    [WS, automation],
-                    |row| row.get(0),
-                )
-            })
-            .expect("count claims")
-    };
     assert_eq!(
-        rows("collection:triage"),
-        limit + 1,
-        "done claims past the limit are pruned; the failed one stays"
+        history,
+        every_claim(&store, "collection:triage", MAX_AUTOMATION_CLAIM_PAGE)
     );
-    assert_eq!(rows("collection:other"), limit);
+    for limit in [0, MAX_AUTOMATION_CLAIM_PAGE + 1] {
+        assert!(matches!(
+            list_automation_claims(&store, WS, "collection:triage", None, limit),
+            Err(DomainError::InvalidInput { .. })
+        ));
+    }
+    let empty =
+        list_automation_claims(&store, WS, "collection:missing", None, 20).expect("list claims");
+    assert!(empty.claims.is_empty() && empty.next.is_none());
+
+    // Within 30 days of settling, every claim stays.
+    let pruned = prune_automation_history(
+        &mut store,
+        WS,
+        &[],
+        1_000 + AUTOMATION_HISTORY_RETENTION_MS,
+        &NO_FAULTS,
+    )
+    .expect("prune");
+    assert_eq!((pruned.pruned, pruned.more), (0, false));
+    assert_eq!(automation_claim_rows(&store, "collection:triage"), count);
+
+    // Past it, a done claim goes unless the prune keeps it. A failed claim
+    // stays, and the retried claim's first failure still counts.
+    let kept = every_claim(&store, "collection:other", 20)[0]
+        .claim_id
+        .clone();
+    let pruned = prune_automation_history(
+        &mut store,
+        WS,
+        std::slice::from_ref(&kept),
+        2_002 + AUTOMATION_HISTORY_RETENTION_MS + 1,
+        &NO_FAULTS,
+    )
+    .expect("prune");
+    assert_eq!((pruned.pruned as i64, pruned.more), (2 * count - 2, false));
+    assert_eq!(automation_claim_rows(&store, "collection:triage"), 1);
+    assert_eq!(automation_claim_rows(&store, "collection:other"), 1);
     assert_eq!(
-        list_automation_failures(&store, WS).expect("failures")[0].generation,
-        1,
+        generation(&store),
+        2,
         "pruning never lowers the failure generation"
     );
-    assert!(
-        list_automation_claims(&store, WS, "collection:missing")
-            .expect("list claims")
-            .is_empty()
+    assert_eq!(
+        get_automation_claim(&store, WS, &AutomationClaimLookup::Id(kept.clone()))
+            .expect("get")
+            .map(|claim| claim.claim_id),
+        Some(kept)
+    );
+    assert_eq!(
+        get_automation_claim(&store, WS, &AutomationClaimLookup::Id(failed[0].clone()))
+            .expect("get"),
+        None
+    );
+    assert_eq!(
+        every_claim(&store, "collection:triage", 20)
+            .iter()
+            .map(|claim| claim.claim_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![failed[1].as_str()]
     );
 }
 
@@ -1349,8 +1491,8 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
 // ------------------------------------------------------- Group messages
 
 const GROUP: &str = "gen-1";
-const TASK: &str = "collection:Trip/Tasks#task";
-const ALL: &str = "collection:Trip/Tasks#all";
+const TASK: &str = "collection:object-tasks#task";
+const ALL: &str = "collection:object-tasks#all";
 
 fn open_group(scratch: &ScratchDir) -> EngineStore {
     let mut store = open_store(scratch);
@@ -1560,7 +1702,7 @@ fn a_group_message_claims_each_matching_subscription_once() {
         }
     );
     assert_eq!(claim.record_id, None);
-    assert_eq!(claim.collection_path, "Trip/Tasks");
+    assert_eq!(claim.collection_path, None);
     assert_eq!(claim.depth, 0);
     assert_eq!(
         claim.change,
@@ -1808,9 +1950,9 @@ fn an_automations_message_skips_its_writer_and_stops_at_the_cap() {
 }
 
 /// A body too long for the claim budget travels as its size, and
-/// `get_message` reads it whole. Past the claim history, a settled message
-/// claim keeps its key without its message, so the message never claims
-/// twice.
+/// `get_message` reads it whole. Once run history expires a settled
+/// message claim, it keeps its key without its message, so the message
+/// never claims twice.
 #[test]
 fn a_long_message_travels_truncated_and_a_settled_claim_keeps_its_key() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1837,11 +1979,19 @@ fn a_long_message_travels_truncated_and_a_settled_claim_keeps_its_key() {
     );
     settle_done(&mut store, &claim.claim_id, 22);
 
-    for index in 0..AUTOMATION_CLAIM_HISTORY_LIMIT {
-        posted(&mut store, &post(&format!("m{index}"), "Hi", 30 + index));
-        let claim = claim_next(&mut store, ALL, 1_000 + index).expect("pending claim");
-        settle_done(&mut store, &claim.claim_id, 1_000 + index);
-    }
+    let expire = |store: &mut EngineStore| {
+        prune_automation_history(
+            store,
+            WS,
+            &[],
+            22 + AUTOMATION_HISTORY_RETENTION_MS + 1,
+            &NO_FAULTS,
+        )
+        .expect("prune")
+        .pruned
+    };
+    assert_eq!(expire(&mut store), 1);
+    assert_eq!(expire(&mut store), 0, "an expired key is not read again");
     let kept: (i64, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(
@@ -1853,11 +2003,13 @@ fn a_long_message_travels_truncated_and_a_settled_claim_keeps_its_key() {
         })
         .expect("kept claim");
     assert_eq!(kept, (1, None));
+    assert!(
+        every_claim(&store, ALL, 20).is_empty(),
+        "a key is not history"
+    );
     assert_eq!(
-        list_automation_claims(&store, WS, ALL)
-            .expect("history")
-            .len(),
-        AUTOMATION_CLAIM_HISTORY_LIMIT as usize
+        get_automation_claim(&store, WS, &AutomationClaimLookup::Id(claim.claim_id)).expect("get"),
+        None
     );
 }
 
