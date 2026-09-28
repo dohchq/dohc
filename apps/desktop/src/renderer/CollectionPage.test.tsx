@@ -2171,6 +2171,7 @@ describe("Button fields", () => {
     await waitFor(() => expect(screen.queryByTestId("collection-fields-dialog")).toBeNull());
     const panel = await screen.findByTestId("collection-automations-panel");
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Archive");
-    expect(within(panel).getByRole("combobox", { name: "Trigger" }).textContent).toContain("When someone clicks Archive");
+    expect((within(panel).getByRole("combobox", { name: "Trigger" }) as HTMLSelectElement).value).toBe("button");
+    expect((within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value).toBe("Archive");
   });
 });

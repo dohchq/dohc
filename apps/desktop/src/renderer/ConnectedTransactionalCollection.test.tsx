@@ -376,7 +376,8 @@ describe("a dataset table's ⚡ panel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Confirm");
-    expect(within(panel).getByRole("combobox", { name: "Trigger" }).textContent).toContain("When someone clicks Confirm");
+    expect((within(panel).getByRole("combobox", { name: "Trigger" }) as HTMLSelectElement).value).toBe("button");
+    expect((within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value).toBe("Confirm");
   });
 
   it("adds an action as a button, closes Fields after approval, and opens the builder on it, saving nothing before Save", async () => {

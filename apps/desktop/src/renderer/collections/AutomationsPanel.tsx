@@ -479,6 +479,8 @@ export function AutomationsPanel(props: {
   onOpenFile: (path: string) => void;
   /** Opens the setting where the owner chooses which computer runs schedules. */
   onOpenScheduleSettings: () => void;
+  /** Opens the dialog that adds fields, such as a Button field; undefined where this person cannot. */
+  onOpenFields?: () => void;
   onError: ErrorReport;
   onNotice: (message: string, undo?: () => void) => void;
 }) {
@@ -904,6 +906,7 @@ export function AutomationsPanel(props: {
             onSave={saveEdited}
             onCancel={() => leave(() => setEditing(null))}
             onOpenFile={props.onOpenFile}
+            onOpenFields={props.onOpenFields}
             onError={onError}
           />
         ) : runsOf ? (

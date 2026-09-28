@@ -156,13 +156,13 @@ export function idFor(name: string, taken: ReadonlySet<string>): string {
 
 /**
  * The dataset table a ⚡ panel shows, which is a Collection: its name, the
- * names of the approved operations on it, and the names of every table in
- * its dataset.
+ * names of the approved operations on it, and every table in its dataset
+ * with its fields, Button fields too, which a trigger on that table offers.
  */
 export interface AutomationTable {
   name: string;
   operations: ReadonlySet<string>;
-  tables: ReadonlySet<string>;
+  tables: ReadonlyMap<string, readonly FieldDefinition[]>;
   /**
    * The dataset's actions, by name, label, and table; `reversible` when the
    * rules name a reverse. A new step offers this table's; a step the file
@@ -187,7 +187,8 @@ export function buttonAutomation(field: string, table: string | null, steps: Aut
  * today" is a few choices away. `table` is the dataset table it watches,
  * or null for a document Collection.
  */
-export function newAutomation(fields: readonly FieldDefinition[], table: string | null): Automation {
+export function newAutomation(all: readonly FieldDefinition[], table: string | null): Automation {
+  const fields = all.filter((field) => field.type !== "button");
   const watched = fields.find((field) => field.type === "select") ?? fields[0];
   const set = fields.find((field) => field.type === "date" && field !== watched) ??
     fields.find((field) => field !== watched) ?? watched;
