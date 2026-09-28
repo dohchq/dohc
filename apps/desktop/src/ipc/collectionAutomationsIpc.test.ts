@@ -26,6 +26,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const pinOperations = vi.fn(async (_path: string, automations: readonly Automation[], _saved: readonly Automation[]) => [...automations]);
   const draftCannotRun = vi.fn(async (_path: string, _automation: Automation): Promise<string | null> => "Budget has no approved operation named gone.");
   const missingCodeFiles = vi.fn(async (_path: string, _automation: Automation): Promise<string[]> => []);
+  const groupsFor = vi.fn(async (_path: string) => [{ name: "Trip", slug: "trip", ref: "Trip", readStopped: null, postStopped: "ana@dohc.test cannot post in Trip." }]);
   const stop = {
     automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: "0", seq: 3,
     collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "ana@dohc.test",
@@ -37,7 +38,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const runs = vi.fn(async () => ({ runs: [], next: null }));
   const listedRun = vi.fn(async (_automationId: string, claimId: string) => (claimId === oldRun.claimId ? oldRun : null));
   const executor = {
-    runs, listedRun, pinOperations, draftCannotRun, missingCodeFiles, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+    runs, listedRun, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -63,7 +64,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const marks = (collectionPath: string) =>
     handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
   const check = (payload: Record<string, unknown>) => call(CHANNELS.checkCollectionAutomation, payload);
-  return { write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, draftCannotRun, missingCodeFiles, dismissStops, shareImpact, check, createFile, writeText, reindexed };
+  return { write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, dismissStops, shareImpact, check, createFile, writeText, reindexed };
 }
 
 describe("steps a share stops", () => {
@@ -220,6 +221,21 @@ describe("writing automations.yaml from the panel", () => {
     f.missingCodeFiles.mockRejectedValueOnce(new Error("The executor is not open."));
     await expect(f.check({ collectionPath: "Tasks", automation: coded })).resolves.toMatchObject({ missingFiles: [] });
     expect(f.createFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("listing the Groups the builder offers", () => {
+  it("names each Group with why it cannot start or take the automation's message, and nothing in a shared view", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listAutomationGroups, { collectionPath: "Tasks" })).resolves.toEqual({
+      groups: [{ name: "Trip", slug: "trip", ref: "Trip", readStopped: null, postStopped: "ana@dohc.test cannot post in Trip." }],
+    });
+    expect(f.groupsFor).toHaveBeenCalledWith("Tasks");
+    const shared = fixture({ sharedView: true });
+    await expect(shared.call(CHANNELS.listAutomationGroups, { collectionPath: "Tasks" })).resolves.toEqual({ status: "unavailable" });
+    expect(shared.groupsFor).not.toHaveBeenCalled();
+    // A path outside the workspace is refused before anything is read.
+    await expect(f.call(CHANNELS.listAutomationGroups, { collectionPath: "../Other" })).rejects.toThrow();
   });
 });
 

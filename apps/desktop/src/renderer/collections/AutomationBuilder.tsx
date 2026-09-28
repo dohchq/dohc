@@ -5,7 +5,7 @@ import { flushSync } from "react-dom";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
 import type { AutomationDiagnostic, AutomationScheduleTrigger, AutomationWeekday } from "@dohc/workspace-contracts/automations";
 import { nextDue, UnknownTimeZoneError } from "@dohc/workspace-contracts/automation-schedule";
-import type { CheckCollectionAutomationResult, ListAutomationTargetsResult } from "../../ipc/bridgeContract";
+import type { CheckCollectionAutomationResult, ListAutomationGroupsResult, ListAutomationTargetsResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
@@ -15,6 +15,7 @@ import {
   conditionFormula,
   conditionRows,
   defaultValueFor,
+  fieldAccess,
   idFor,
   literalFor,
   literalText,
@@ -46,8 +47,8 @@ import {
 
 // The builder: When, Only if, and Do, with choices instead of formulas, and
 // a formula wherever a person wants one. A trigger watches a record, a
-// button, or a schedule, or, in the file only for now, a Group; in a
-// dataset it watches one table, whose fields Only if and Set fields offer.
+// button, a schedule, or a Group's messages; in a dataset it watches one
+// table, whose fields Only if and Set fields offer.
 // An If holds a condition and its own Do and Otherwise steps, which edit
 // like the automation's. Steps the builder cannot edit yet, such as a
 // message, stay as they are and read as their sentence; the file edits
@@ -63,6 +64,8 @@ type SetStep = Extract<AutomationStep, { kind: "set" }>;
 type AddStep = Extract<AutomationStep, { kind: "add-record" }>;
 type FindStep = Extract<AutomationStep, { kind: "find" }>;
 type CodeStep = Extract<AutomationStep, { kind: "run" | "run-file" }>;
+type YourStep = Extract<AutomationStep, { kind: "notify" | "wake-agent" }>;
+type Group = Extract<ListAutomationGroupsResult, { groups: unknown }>["groups"][number];
 type FieldValue = SetStep["values"][number];
 type Reach = ValidAutomationSummary["reach"];
 
@@ -80,6 +83,7 @@ const TRIGGER_LABELS = {
   "starts-matching": "A record starts to match",
   button: "Someone clicks a button",
   schedule: "On a schedule",
+  "group-message": "Someone posts in a Group",
 } as const;
 type BuilderTrigger = keyof typeof TRIGGER_LABELS;
 
@@ -841,7 +845,7 @@ function placeOf(
   if (head === "when") {
     const keys: Partial<Record<string, string>> = {
       to: "when/to", "field-changed": "when/field", "starts-matching": "when/condition", "record-changed": "when/fields", button: "when/button",
-      at: "when/at", days: "when/days", timezone: "when/timezone",
+      at: "when/at", days: "when/days", timezone: "when/timezone", "group-message": "when/group", "starts-with": "when/startsWith",
     };
     return { key: keys[option ?? ""] ?? "when", name: null };
   }
@@ -860,6 +864,7 @@ function placeOf(
     if (name === undefined) {
       // A Find's condition, a result's name, and a Set's records each have a control where the step edits.
       const control = kind === "find" || kind === "if" ? "condition" : kind === "run" || kind === "run-file" ? "source"
+        : kind === "post" || kind === "notify" || kind === "wake-agent" ? "message" : kind === "group" ? "group"
         : kind === "as" || kind === "records" ? kind : null;
       return { key: control !== null && edits(entry) ? `step-${entry.key}/${control}` : `step-${entry.key}`, name: null, step: entry.step.kind };
     }
@@ -914,9 +919,24 @@ function triggerFor(
       return current.kind === "starts-matching" ? current : { kind, condition: "", table };
     case "schedule":
       return current.kind === "schedule" ? current : scheduleFor("day", current);
+    case "group-message":
+      return current.kind === "group-message" ? current : { kind, group: "", startsWith: null };
     default:
       return { kind, table };
   }
+}
+
+/**
+ * A step for this computer's person that the builder edits: notify you, or
+ * wake your agent. `you` is how steps name that person, which the builder
+ * writes and never shows; null where no step can name them that way.
+ */
+function yourStep(step: AutomationStep, you: string | null): YourStep | null {
+  if (you === null) return null;
+  if (step.kind === "wake-agent") return step.person === you ? step : null;
+  if (step.kind !== "notify" || step.to.length !== 1) return null;
+  const [person] = step.to;
+  return person?.kind === "literal" && person.value === you ? step : null;
 }
 
 /** The trigger kind the builder edits, or null when only the file can. */
@@ -1046,6 +1066,8 @@ export function AutomationBuilder(props: {
   onOpenFile: (path: string) => void;
   /** Opens the dialog that adds fields, such as a Button field; undefined where this person cannot. */
   onOpenFields?: () => void;
+  /** How a step names this computer's person, in a workspace proved never shared; otherwise null. */
+  you: string | null;
   /** What stops or delays this workspace's schedules, from the panel; shown under a schedule. */
   scheduleHost: ReactNode;
   onError: ErrorReport;
@@ -1058,6 +1080,15 @@ export function AutomationBuilder(props: {
   const [checking, setChecking] = useState(false);
   const [saveChosen, setSaveChosen] = useState(false);
   const [targets, setTargets] = useState<Target[] | null>(null);
+  // The Groups a Group trigger or a Post in a Group step can name: null until main answers, "failed" when it
+  // could not, and "unavailable" in a shared view, whose automations run on the owner's computer.
+  const [groupList, setGroupList] = useState<readonly Group[] | null | "failed" | "unavailable">(null);
+  const groups = groupList === "failed" || groupList === "unavailable" ? null : groupList;
+  /** The first Group whose messages can start the automation, or that can take its post, as a step names it; "" when none can. */
+  const firstGroup = (use: "read" | "post") => {
+    const found = (groups ?? []).find((group) => (use === "read" ? group.readStopped : group.postStopped) === null);
+    return found?.ref ?? "";
+  };
   const [schemas, setSchemas] = useState(() => new Map<string, readonly FieldDefinition[]>([[collectionPath, props.fields.filter(holdsValue)]]));
   const [checked, setChecked] = useState<{
     key: string;
@@ -1188,7 +1219,8 @@ export function AutomationBuilder(props: {
   const full = ordered.length >= MAX_STEPS;
   const editableOf = (entry: StepEntry) => editableStep(entry.step, table, triggerTable);
   const edits = (entry: StepEntry) =>
-    entry.step.kind === "if" || entry.step.kind === "run" || entry.step.kind === "run-file" || editableAction(entry.step, table) !== null || editableOf(entry) !== null || editableFind(entry.step, table, triggerTable) !== null;
+    entry.step.kind === "if" || entry.step.kind === "run" || entry.step.kind === "run-file" || entry.step.kind === "post" ||
+    yourStep(entry.step, props.you) !== null || editableAction(entry.step, table) !== null || editableOf(entry) !== null || editableFind(entry.step, table, triggerTable) !== null;
   const dirty = JSON.stringify(automation) !== JSON.stringify(props.baseline);
   // What Save writes: a draft without a name takes its sentence, and a new
   // one an id from its name. Main checks exactly this.
@@ -1226,6 +1258,48 @@ export function AutomationBuilder(props: {
     if (props.leaveRequested && !dirty) props.onLeave();
     if (!props.leaveRequested) setSaveChosen(false);
   }, [props.leaveRequested]);
+
+  // The Groups on this computer, read while a Group choice is on screen, and
+  // again when the window gets focus, as after a Group or a share changes.
+  const groupRequests = useRequestSequence([workspaceId, collectionPath]);
+  // A failure is reported once, until a read succeeds again.
+  const groupsFailed = useRef(false);
+  // The reading that is on now: a Try again from an earlier one, as after its Group choices went, reads nothing.
+  const groupsReading = useRef<object | null>(null);
+  const readGroups = (reading: object) => {
+    if (reading !== groupsReading.current) return;
+    const token = groupRequests.next();
+    const current = () => reading === groupsReading.current && groupRequests.isCurrent(token);
+    void bridge()
+      .listAutomationGroups({ workspaceId, collectionPath })
+      .then((result) => {
+        if (!current()) return;
+        groupsFailed.current = false;
+        setGroupList("groups" in result ? result.groups : "unavailable");
+      })
+      .catch((error: unknown) => {
+        if (!current()) return;
+        setGroupList((list) => (list === null || list === "failed" ? "failed" : list));
+        if (groupsFailed.current) return;
+        groupsFailed.current = true;
+        onError("dohc could not list the Groups an automation can use.", error, () => readGroups(reading));
+      });
+  };
+  const choosesGroups = draft.when.kind === "group-message" || ordered.some(({ entry }) => entry.step.kind === "post");
+  useEffect(() => {
+    if (!choosesGroups) return;
+    const reading = {};
+    groupsReading.current = reading;
+    // Its first failure is reported, with a Try again that works.
+    groupsFailed.current = false;
+    const read = () => readGroups(reading);
+    read();
+    window.addEventListener("focus", read);
+    return () => {
+      groupsReading.current = null;
+      window.removeEventListener("focus", read);
+    };
+  }, [workspaceId, collectionPath, choosesGroups]);
 
   // The Collections a Find or an Add a record step can reach. A dataset's
   // steps stay in its own tables, so it asks for none.
@@ -1327,6 +1401,10 @@ export function AutomationBuilder(props: {
     }
   };
   const noRecord = automation.when.kind === "schedule" || automation.when.kind === "group-message";
+  if (automation.when.kind === "group-message" && automation.when.group === "") problems.set("when/group", "Choose a Group.");
+  if (automation.when.kind === "group-message" && /^\s/u.test(automation.when.startsWith ?? "")) {
+    problems.set("when/startsWith", "Remove the space at the start.");
+  }
   if (automation.when.kind === "schedule") {
     const schedule = automation.when;
     if (schedule.at === "") problems.set("when/at", "Choose a time.");
@@ -1349,6 +1427,11 @@ export function AutomationBuilder(props: {
     else if (bound !== null && !RESULT_NAME.test(bound.name)) {
       problems.set(`step-${key}/as`, "A result name starts with a letter or _, then uses only letters, digits, and _.");
     }
+    if (step.kind === "post") {
+      if (step.group === "") problems.set(`step-${key}/group`, "Choose a Group.");
+      if (step.text.trim() === "") problems.set(`step-${key}/message`, "Write a message.");
+    }
+    if (yourStep(step, props.you)?.text.trim() === "") problems.set(`step-${key}/message`, "Write a message.");
     if (step.kind === "run" || step.kind === "run-file") {
       if (step.kind === "run" && step.code.trim() === "") problems.set(`step-${key}/source`, "Write the code this step runs.");
       else if (step.kind === "run" && step.code.length > MAX_CODE_LENGTH) {
@@ -1507,12 +1590,100 @@ export function AutomationBuilder(props: {
   const setRows = (key: number, rows: Row[]) => setStep(key, (entry) => ({ ...entry, rows }));
   const newCondition = (): ConditionEntry => ({ key: newKey(), row: { field: recordFields[0]?.name ?? "", operator: "is", value: comparedValue(recordFields[0]) } });
 
+  /**
+   * A Group choice: Groups whose messages can start the automation for the
+   * trigger, or that can take its post for a step. One that cannot is
+   * offered disabled with why; a saved one stays chosen with why beside it.
+   */
+  const groupPicker = (label: string, value: string, use: "read" | "post", key: string, focus: string, onChange: (group: string) => void) => {
+    const stopOf = (group: Group) => (use === "read" ? group.readStopped : group.postStopped);
+    // A saved text names a Group as a run reads it: a slug first, then a name only one Group has.
+    const named = (groups ?? []).filter((group) => group.name === value);
+    const current = groups?.find((group) => group.slug === value) ?? (named.length === 1 ? named[0] : undefined);
+    const ambiguous = current === undefined && named.length > 1;
+    const stopped = current === undefined ? null : stopOf(current);
+    return (
+      <>
+        <select
+          aria-label={label}
+          data-focus={focus}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className={selectClass}
+          {...invalid(problem(key))}
+        >
+          {value === "" ? (
+            <option value="" disabled>
+              {groupList === "failed" ? "Groups could not be listed" : groupList === "unavailable" ? "Groups are unavailable here" : groups === null ? "Loading Groups" : "Choose a Group"}
+            </option>
+          ) : null}
+          {value !== "" && current?.ref !== value ? <option value={value}>{value}</option> : null}
+          {(groups ?? []).map((group) => {
+            const stop = stopOf(group);
+            const label = group.ref === group.name ? group.name : `${group.name}, ${group.slug}`;
+            return (
+              <option key={group.slug} value={group.ref} disabled={stop !== null && group.ref !== value}>
+                {stop === null ? label : `${label} (${stop})`}
+              </option>
+            );
+          })}
+        </select>
+        {groupList === "unavailable" ? (
+          <p className="m-0 text-[12px] text-muted">Groups are unavailable in a shared view.</p>
+        ) : groupList === "failed" ? (
+          <p className="m-0 text-[12px] text-muted">dohc could not list this computer's Groups.</p>
+        ) : stopped !== null ? (
+          <StatusLine tone="warning" icon={AlertTriangle} label="Out of reach">{stopped}</StatusLine>
+        ) : ambiguous ? (
+          <StatusLine tone="warning" icon={AlertTriangle} label="More than one Group">More than one Group is called {value}. Choose one.</StatusLine>
+        ) : value !== "" && groups !== null && current === undefined ? (
+          <StatusLine tone="warning" icon={AlertTriangle} label="No Group">This computer has no Group named {value}. Choose another.</StatusLine>
+        ) : groups !== null && groups.length === 0 ? (
+          <p className="m-0 text-[12px] text-muted">This workspace has no Groups yet. Create one, then choose it here.</p>
+        ) : null}
+        <Problem shown={problem(key)} />
+      </>
+    );
+  };
+  /**
+   * A message: text with {expressions} for values, as the file keeps it.
+   * Insert value adds a value at the end, written as an expression.
+   */
+  const messageEditor = (number: number, key: number, text: string, onChange: (text: string) => void, focus: string | null) => (
+    <>
+      <textarea
+        aria-label={`Step ${number}, message`}
+        data-focus={focus ?? undefined}
+        value={text}
+        rows={3}
+        placeholder="Message"
+        onChange={(event) => onChange(event.target.value)}
+        className={`${inputClass} resize-y`}
+        {...invalid(problem(`step-${key}/message`))}
+      />
+      <select
+        aria-label={`Step ${number}, insert value`}
+        value=""
+        onChange={(event) => {
+          if (event.target.value !== "") onChange(`${text}{${event.target.value}}`);
+        }}
+        className={`${selectClass} w-auto self-start`}
+      >
+        <option value="" disabled>Insert value</option>
+        {noRecord ? null : recordFields.map((field) => <option key={field.name} value={fieldAccess(field.name)}>{field.name}</option>)}
+        {draft.when.kind === "group-message" ? <option value="message.body">The message</option> : null}
+        <option value="today()">Today</option>
+      </select>
+      <Problem shown={problem(`step-${key}/message`)} />
+    </>
+  );
   /** One step: its controls, or its sentence where the builder cannot edit it yet. */
   const stepItem = ({ entry, list, listId, index, number, scope }: (typeof ordered)[number]): ReactNode => {
     const { key, step, rows } = entry;
     const editable = editableOf(entry);
     const find = editableFind(step, table, triggerTable);
     const action = editableAction(step, table);
+    const yours = yourStep(step, props.you);
     const chosen = action === null ? undefined : table?.actions.find((candidate) => candidate.name === action.operation);
     const targetPath = targetOf(entry);
     // Main lists the Collections a step can change; a Find's read reach shows in its saved verdict.
@@ -1603,6 +1774,9 @@ export function AutomationBuilder(props: {
             : action !== null ? "Run an action"
             : step.kind === "run" || step.kind === "run-file" ? "Run code"
             : step.kind === "if" ? "If"
+            : step.kind === "post" ? "Post in a Group"
+            : yours?.kind === "notify" ? "Notify you"
+            : yours?.kind === "wake-agent" ? "Wake your agent"
             : `Step ${number}`}
           </span>
           <IconButton
@@ -1792,6 +1966,14 @@ export function AutomationBuilder(props: {
             {resultName(step)}
             <Problem shown={problem(`step-${key}/as`)} />
           </div>
+        ) : step.kind === "post" ? (
+          <div className="flex flex-col gap-2">
+            {groupPicker(`Step ${number}, Group`, step.group, "post", `step-${key}/group`, `step-${key}-first`,
+              (group) => setStep(key, (current) => ({ ...current, step: { ...step, group } })))}
+            {messageEditor(number, key, step.text, (text) => setStep(key, (current) => ({ ...current, step: { ...step, text } })), null)}
+          </div>
+        ) : yours !== null ? (
+          messageEditor(number, key, yours.text, (text) => setStep(key, (current) => ({ ...current, step: { ...yours, text } })), `step-${key}-first`)
         ) : entry.branches !== null && entry.condition !== null && step.kind === "if" ? (
           <div className="flex flex-col gap-2">
             <ConditionEditor
@@ -2019,6 +2201,37 @@ export function AutomationBuilder(props: {
             <Plus size={12} aria-hidden />
             Run code
           </SecondaryButton>
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1"
+            disabled={full}
+            onClick={() => addStep(listId, { kind: "post", text: "", group: firstGroup("post") })}
+          >
+            <Plus size={12} aria-hidden />
+            Post in a Group
+          </SecondaryButton>
+          {props.you !== null ? (
+            <>
+              <SecondaryButton
+                size="compact"
+                className="flex items-center gap-1"
+                disabled={full}
+                onClick={() => addStep(listId, { kind: "notify", text: "", to: [{ kind: "literal", value: props.you! }] })}
+              >
+                <Plus size={12} aria-hidden />
+                Notify you
+              </SecondaryButton>
+              <SecondaryButton
+                size="compact"
+                className="flex items-center gap-1"
+                disabled={full}
+                onClick={() => addStep(listId, { kind: "wake-agent", text: "", person: props.you! })}
+              >
+                <Plus size={12} aria-hidden />
+                Wake your agent
+              </SecondaryButton>
+            </>
+          ) : null}
         </div>
         {full ? <p className="m-0 text-[12px] text-muted">An automation holds at most {MAX_STEPS} steps. Remove a step to add another.</p> : null}
         {deepest ? (
@@ -2104,7 +2317,10 @@ export function AutomationBuilder(props: {
               const kind = event.target.value as BuilderTrigger;
               setDraft((current) => ({
                 ...current,
-                when: triggerFor(kind, current.when, recordFields, buttonFields, table?.name ?? null),
+                when: kind === "group-message" && current.when.kind !== "group-message"
+                  // A new Group trigger starts on the first Group whose messages can start it.
+                  ? { kind, group: firstGroup("read"), startsWith: null }
+                  : triggerFor(kind, current.when, recordFields, buttonFields, table?.name ?? null),
                 // A record starts to match rows, until someone writes a formula.
                 matching: kind === "starts-matching" && current.matching.mode === "always"
                   ? { mode: "rows", formula: "", rows: [newCondition()], saved: null }
@@ -2285,6 +2501,20 @@ export function AutomationBuilder(props: {
               </select>
               <Problem shown={problem("when/timezone")} />
               {nextRun === null ? null : <StatusLine tone="muted" icon={Clock} label="Schedule">{nextRun.text}</StatusLine>}
+              {props.scheduleHost}
+            </>
+          ) : trigger.kind === "group-message" ? (
+            <>
+              {groupPicker("Group", trigger.group, "read", "when/group", "group-first", (group) => setWhen({ ...trigger, group }))}
+              <input
+                aria-label="Starts with"
+                value={trigger.startsWith ?? ""}
+                placeholder="Starts with, such as /task"
+                onChange={(event) => setWhen({ ...trigger, startsWith: event.target.value === "" ? null : event.target.value })}
+                className={inputClass}
+                {...invalid(problem("when/startsWith"))}
+              />
+              <Problem shown={problem("when/startsWith")} />
               {props.scheduleHost}
             </>
           ) : trigger.kind === "button" ? (

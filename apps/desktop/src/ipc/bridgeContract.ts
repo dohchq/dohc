@@ -23,6 +23,7 @@ import type {
   CollectionAutomationsFile,
   CollectionAutomationStop,
   CollectionFieldMark,
+  CollectionAutomationGroup,
   CollectionAutomationTarget,
   CollectionAutomationUndo,
   PressSettled,
@@ -4586,6 +4587,16 @@ export const ListAutomationTargetsPayload = z.object({
 export type ListAutomationTargetsPayload = z.infer<typeof ListAutomationTargetsPayload>;
 export type ListAutomationTargetsResult = { collections: CollectionAutomationTarget[] } | { status: "unavailable" };
 
+// The builder's Group pickers: the Groups on this computer, with why one
+// cannot start this Collection's automations or take their posts, or null.
+// A shared view gets none: its automations run on the owner's computer.
+export const ListAutomationGroupsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListAutomationGroupsPayload = z.infer<typeof ListAutomationGroupsPayload>;
+export type ListAutomationGroupsResult = { groups: CollectionAutomationGroup[] } | { status: "unavailable" };
+
 // The builder checks a draft the way saving would: what the file contract
 // refuses, the syntax error of each formula and message in it, at its JSON
 // Pointer from the automation, why dohc would not run it in its
@@ -6115,6 +6126,7 @@ export interface DohcDesktopBridge
   retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
+  listAutomationGroups(payload: ListAutomationGroupsPayload): Promise<ListAutomationGroupsResult>;
   checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
   stopAndRestore(payload: StopAndRestorePayload): Promise<StopAndRestoreResult>;
   undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;

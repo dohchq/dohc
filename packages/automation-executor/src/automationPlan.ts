@@ -30,6 +30,7 @@ import {
   automationThreadId,
   automationWakeThreadId,
   cutText,
+  GROUP_READ_ONLY,
   type AutomationNotice,
   type ChatDirectory,
 } from "./automationChat";
@@ -1631,6 +1632,7 @@ export function planStep(
       if (step.kind === "post") {
         const group = chat.group(step.group);
         if ("problem" in group) return { problem: group.problem };
+        if (group.readOnly) return { problem: GROUP_READ_ONLY };
         const effectId = `${seed}/post`;
         return done([{
           kind: "message",

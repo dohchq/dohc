@@ -721,6 +721,17 @@ describe("messages", () => {
     expect(planAt(ctx, 0, inputsOf(), ok(" \n"))).toEqual({ problem: "The message in step 1 is empty." });
     expect(planAt(ctx, 0, inputsOf(), ok(5))).toEqual({ problem: "The message in step 1 is not text." });
   });
+
+  it("refuses to post in a Group this computer may only read", () => {
+    const readOnly = chatDirectoryOf(
+      [{ id: "trip", name: "Trip", slug: "trip", kind: "channel", type: "both", wireId: "trip", runningThreadId: null, readOnly: true }],
+      { kind: "owner", ownerUserId: null, grants: [] },
+    );
+    const ctx = context(tell, { chat: readOnly, key: { claimId: "atc_1", hash: "h" } });
+    expect(planAt(ctx, 0, inputsOf(), ok("Hi Done"))).toEqual({
+      problem: "This computer can only read this Group, so an automation cannot post in it.",
+    });
+  });
 });
 
 describe("code steps", () => {

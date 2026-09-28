@@ -230,7 +230,7 @@ import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "@dohc/automation-executor/skipped-runs-notice";
 import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
-import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
+import { provedNeverShared, readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
 import {
@@ -270,11 +270,7 @@ import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
 } from "./workspaces/workspaceSummaryProjection";
-import {
-  assertSharedChannelWritable,
-  relayFetchWithTimeout,
-  RELAY_FETCH_TIMEOUT_MS,
-} from "./workspaces/sharedChannels";
+import { RELAY_FETCH_TIMEOUT_MS, assertSharedChannelWritable, joinedSharedChannelForWireId, relayFetchWithTimeout } from "./workspaces/sharedChannels";
 import {
   resolveChatRelayIdentity,
   resolveWorkspaceRelayAuthorId,
@@ -1254,6 +1250,13 @@ const shareRosters = createShareRosters({
   localUserId: async () => {
     await warmCredentialCache().catch(() => undefined);
     return cachedCredentials?.userId ?? null;
+  },
+  // This computer's own id for its person names them, signed in or not, only
+  // where nobody else ever had a part in the workspace.
+  localPersonId: async (workspace) => {
+    const proved = await provedNeverShared(workspace, () =>
+      withEngineAdapter(workspace, (adapter) => adapter.remoteChangesApplied()).catch(() => null));
+    return proved ? localReactorFallbackId() : null;
   },
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
@@ -3723,8 +3726,12 @@ function createCollectionAutomationsFor(
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
     chat: {
+      // A joined Group this computer may only read is marked, as a chat write refuses it (assertJoinedChannelWritable).
       directory: (roster, needs) => withWorkspaceAttachmentAsync(workspace, (lease) =>
-        readChatDirectory(linkedChatStoreFor(lease), workspaceId, roster, needs)),
+        readChatDirectory(linkedChatStoreFor(lease), workspaceId, roster, needs, (wireId) => {
+          const joined = joinedSharedChannelForWireId(findWorkspace(workspaceId)?.sharedChannels, wireId);
+          return joined === null ? null : { readOnly: joined.access === "read-only", ended: joined.ended === true };
+        })),
       // The same write path as every other chat write, as the automation.
       write: (signal, message) => withWorkspaceAttachmentAsync(workspace, async (lease) => {
         const place = { workspaceId, store: linkedChatStoreFor(lease) };
@@ -3762,7 +3769,12 @@ function createCollectionAutomationsFor(
           : await chatWrites.sendMessage(place, { ...common, threadId: message.target.threadId });
       }),
     },
-    postNotice: (notice, signal) => noticeStore().postNotice({ workspaceId, ...notice, signal }),
+    // A notice to this computer's own id for its person stays here, even
+    // after a sign-in: the reach check allowed it as this computer's person.
+    postNotice: ({ recipientUserId, ...notice }, signal) => noticeStore().postNotice({
+      workspaceId, ...notice, signal,
+      ...(recipientUserId === localReactorFallbackId() ? { onlyHere: true } : { recipientUserId }),
+    }),
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
     groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
@@ -3773,6 +3785,10 @@ function createCollectionAutomationsFor(
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
     onSchedulesChanged: () => automationScheduler.wake(),
     hostCanRun: () => hostCanRun(workspaceId),
+    // The builder's Group pickers name this computer's Groups; direct messages are not Groups.
+    groupList: () => withWorkspaceAttachmentAsync(workspace, async (lease) =>
+      (await linkedChatStoreFor(lease).listChannels({ workspaceId }))
+        .flatMap((channel) => (channel.kind === "channel" ? [{ name: channel.name, slug: channel.slug }] : []))),
     personName: (userId) => (userId === localUserId() ? localUserDisplayName() : userId),
     mayRetryPress: async (pressedBy) => pressedBy === (await pressingPerson()) || (await localPersonOwns(workspaceId)),
     onPressSettled: (event) => {

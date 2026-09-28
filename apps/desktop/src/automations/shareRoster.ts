@@ -329,11 +329,13 @@ export async function listRosterGrants(
  *
  * `latest` is a listing this computer learned but could not save yet. It is
  * newer than the registry's copy, so it wins. `next` is what a person can do
- * when dohc has no listing it can use.
+ * when dohc has no listing it can use. `localPersonId` is this computer's
+ * own id for its person, given only for a workspace proved never shared.
  */
 export function reachRosterFor(input: {
   entry: RegistryEntry;
   localUserId: string | null;
+  localPersonId: string | null;
   latest: RosterListing | null;
   next: string;
 }): ReachRoster {
@@ -341,7 +343,10 @@ export function reachRosterFor(input: {
   if (entry.shareView) return { kind: "shared-view" };
   // Only this computer's person can edit a workspace that does not sync, even
   // with no account signed in.
-  if (!entry.remote) return { kind: "owner", ownerUserId: input.localUserId, grants: [] };
+  if (!entry.remote) {
+    const local = input.localPersonId === null ? {} : { localPersonId: input.localPersonId };
+    return { kind: "owner", ownerUserId: input.localUserId, grants: [], ...local };
+  }
   // The registry is a file on disk. A copy it cannot read is unchecked, not empty.
   const stored = StoredRoster.safeParse(input.latest ?? entry.shareRoster);
   if (!stored.success) return { kind: "unknown", problem: { kind: "unchecked", next: input.next } };
@@ -423,6 +428,8 @@ export function createShareRosters(dependencies: {
   markRosterPulled(workspaceId: string): void;
   listRoster(workspace: RegistryEntry): Promise<RosterAnswer>;
   localUserId(): Promise<string | null>;
+  /** This computer's own id for its person, when the workspace is proved never shared; otherwise null. */
+  localPersonId(workspace: RegistryEntry): Promise<string | null>;
   logError(workspaceId: string, error: unknown): void;
   /** A listing answered, so claims waiting to check who can edit can run. */
   onListed?(workspaceId: string): void;
@@ -565,6 +572,7 @@ export function createShareRosters(dependencies: {
     return reachRosterFor({
       entry,
       localUserId: entry.remote ? null : await dependencies.localUserId(),
+      localPersonId: entry.remote ? null : await dependencies.localPersonId(entry),
       latest: state.unsaved?.listing ?? null,
       next: noAnswer?.next ?? "Try again in a moment.",
     });

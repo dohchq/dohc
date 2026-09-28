@@ -238,7 +238,27 @@ describe("reach check", () => {
   it("stops a personal step when no account says who this computer's person is", () => {
     const local: ReachRoster = { kind: "owner", ownerUserId: null, grants: [] };
     expect(check(local, personal("u-anyone"))).toEqual(stopped(PERSONAL_NEEDS_ACCOUNT));
+    expect(check(local, notify("u-anyone", "Someone"))).toEqual(stopped("Someone cannot view Trip."));
     expect(check(local, change(budget))).toEqual(allowed);
+  });
+
+  it("names this computer's person by its own id for them only where the roster proves nobody else had a part", () => {
+    const signedOut: ReachRoster = { kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] };
+    expect(check(signedOut, personal("install-here"))).toEqual(allowed);
+    expect(check(signedOut, notify("install-here"))).toEqual(allowed);
+    expect(check(signedOut, personal("install-elsewhere"))).toEqual(stopped(PERSONAL_NEEDS_ACCOUNT));
+    expect(check(signedOut, personal(OWNER))).toEqual(stopped(PERSONAL_NEEDS_ACCOUNT));
+    expect(check(signedOut, notify("install-elsewhere", "Someone"))).toEqual(stopped("Someone cannot view Trip."));
+    const signedIn: ReachRoster = { ...signedOut, ownerUserId: OWNER };
+    expect(check(signedIn, personal("install-here"))).toEqual(allowed);
+    expect(check(signedIn, personal(OWNER))).toEqual(allowed);
+    expect(check(signedIn, personal("install-elsewhere", "Cai"))).toEqual(stopped("This step acts as Cai, and you can also edit Trip."));
+    // Another editor still stops it, as for an account.
+    expect(check({ ...signedOut, grants: [grant(ana, { paths: ["Trip"], access: "edit" })] }, personal("install-here")))
+      .toEqual(stopped("This step acts as you, and ana@dohc.test can also edit Trip."));
+    // Without the proof, the same id names nobody.
+    expect(check({ kind: "owner", ownerUserId: null, grants: [] }, personal("install-here"))).toEqual(stopped(PERSONAL_NEEDS_ACCOUNT));
+    expect(check({ kind: "owner", ownerUserId: OWNER, grants: [] }, notify("install-here", "Someone"))).toEqual(stopped("Someone cannot view Trip."));
   });
 
   it("counts a grant pinned to a saved version as an editor only when it names paths, and never as reach", () => {

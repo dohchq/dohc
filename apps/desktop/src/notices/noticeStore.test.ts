@@ -676,6 +676,19 @@ describe("notices that stay on this computer", () => {
     expect((await other.store.list()).notices).toEqual([]);
   });
 
+  it("keeps a notice only here when asked, even signed in to an account that syncs the workspace", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    // A retry posts the same id, and it is kept once.
+    await laptop.store.postNotice(notice({ kind: "automation-notify", onlyHere: true }));
+    await laptop.store.postNotice(notice({ kind: "automation-notify", onlyHere: true }));
+    await laptop.store.sync();
+    expect(await titles(laptop)).toEqual(["local:Your agent finished"]);
+    const other = await computer(account(server, "ana"));
+    await other.store.sync();
+    expect((await other.store.list()).notices).toEqual([]);
+  });
+
   it("keeps notices local and says so once when the server has no notice list", async () => {
     const server = await relay();
     server.outdated = true;

@@ -566,6 +566,8 @@ async function world(options: {
     onSwitchedOff: (switched) => { switchedOff.push(switched); wake(); },
     onHoldsChanged: () => { holdsChanged += 1; wake(); },
     onAutomationsChanged: () => { automationsChanged += 1; wake(); },
+    groupList: async () => (options.channels ?? []).flatMap((channel) =>
+      (channel.kind === "channel" ? [{ name: channel.name, slug: channel.slug }] : [])),
     chat: {
       directory: async (current, needs) => {
         directoryNeeds.push(needs);
@@ -3168,6 +3170,29 @@ describe("Collection automations that post", () => {
   ].join("\n");
 
 
+  it("lists the Groups the builder offers, with why an editor keeps one from starting or taking a message", async () => {
+    const board: ChatDirectoryChannel = { ...TRIP, id: "board", name: "Board", slug: "board", wireId: "board", readOnly: true };
+    const old: ChatDirectoryChannel = { ...TRIP, id: "old", name: "Old", slug: "old", wireId: "old", readOnly: true, ended: true };
+    // "ops" is one Group's name and the other's slug; the slug names the Group, so the first is written by its slug.
+    const opsNamed: ChatDirectoryChannel = { ...TRIP, id: "ops-1", name: "ops", slug: "ops-team", wireId: "ops-1" };
+    const opsSlug: ChatDirectoryChannel = { ...TRIP, id: "ops-2", name: "Ops", slug: "ops", wireId: "ops-2" };
+    const w = await world({ channels: [TRIP, board, old, opsNamed, opsSlug, DM_ANA], automations: {} });
+    await w.executor.open();
+    // Direct messages are not Groups; with only the owner editing, every Group can be read, and posted in unless it is read-only here.
+    await expect(w.executor.groupsFor("Tasks")).resolves.toEqual([
+      { name: "Board", slug: "board", ref: "Board", readStopped: null, postStopped: "This computer can only read this Group, so an automation cannot post in it." },
+      { name: "Old", slug: "old", ref: "Old", readStopped: "This Group's share ended, so its messages no longer reach this computer.",
+        postStopped: "This computer can only read this Group, so an automation cannot post in it." },
+      { name: "ops", slug: "ops-team", ref: "ops-team", readStopped: null, postStopped: null },
+      { name: "Ops", slug: "ops", ref: "Ops", readStopped: null, postStopped: null },
+      { name: "Trip", slug: "trip", ref: "Trip", readStopped: null, postStopped: null },
+    ]);
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    const trip = (await w.executor.groupsFor("Tasks")).find((group) => group.name === "Trip");
+    expect(trip).toMatchObject({ name: "Trip", readStopped: expect.stringContaining("bob@dohc.test"), postStopped: expect.stringContaining("bob@dohc.test") });
+    expect(w.authored).toEqual([]);
+  });
+
   it("includes chat steps in share warnings and held summaries", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: post("      - post: Done", "        group: Trip") } });
     await w.executor.open();
@@ -3680,6 +3705,92 @@ describe("Collection automations that wake your agent", () => {
     await w.executor.open();
     await w.settledClaim(claim);
     expect(claim).toMatchObject({ state: "failed", error: PERSONAL_NEEDS_ACCOUNT });
+  });
+
+  describe("signed out, in a workspace proved never shared", () => {
+    const local = [
+      "  - id: local",
+      "    name: Ask and tell me",
+      "    when: {field-changed: Status}",
+      "    do: [{wake-agent: Plan, person: install-here}, {notify: Done, to: [install-here]}]",
+    ].join("\n");
+    const provedLocal: ReachRoster = { kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] };
+
+    it("wakes this computer's agent and notifies its person by this computer's id for them", async () => {
+      const w = await world({ automations: { Tasks: local } });
+      w.setRoster(provedLocal);
+      const claim = w.claim("collection:Tasks#local", w.addRecord("Tasks", "one", { Status: "Done" }));
+      await w.executor.open();
+      await w.settledClaim(claim);
+
+      expect(claim.state).toBe("done");
+      expect(w.messages).toEqual([expect.objectContaining({ target: { kind: "agent" }, body: "Plan" })]);
+      expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["install-here"]);
+      const [run] = (await w.executor.runs("collection:Tasks#local")).runs;
+      expect(run!.writes).toEqual([
+        { kind: "message", messageId: w.messages[0]!.messageId, name: "your agent" },
+        expect.objectContaining({ kind: "notice", name: "you" }),
+      ]);
+    });
+
+    it("tells the builder how steps name you only there", async () => {
+      const w = await world({ collections: ["Tasks", "Notes"], automations: { Tasks: local } });
+      w.setRoster(provedLocal);
+      await w.executor.open();
+      expect(await w.executor.automationsIn("Tasks")).toMatchObject({ status: "read", you: "install-here" });
+      expect(await w.executor.automationsIn("Notes")).toEqual({ status: "missing", you: "install-here" });
+      w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+      expect(await w.executor.automationsIn("Tasks")).not.toHaveProperty("you");
+      expect(await w.executor.automationsIn("Notes")).toEqual({ status: "missing" });
+    });
+
+    it("refuses a step for another computer's id or an account, and starts no direct message", async () => {
+      const step = (id: string, action: string) => [
+        `  - id: ${id}`,
+        `    name: ${id}`,
+        "    when: {field-changed: Status}",
+        `    do: [${action}]`,
+      ].join("\n");
+      const w = await world({ automations: { Tasks: [
+        step("copied", "{wake-agent: Plan, person: install-elsewhere}"),
+        step("account", "{wake-agent: Plan, person: user-owner}"),
+        step("tell", "{notify: Done, to: [user-ana@dohc.test]}"),
+        step("dm", "{direct-message: Done, to: [install-here]}"),
+      ].join("\n") } });
+      w.setRoster(provedLocal);
+      const task = w.addRecord("Tasks", "one", { Status: "Done" });
+      const claims = ["copied", "account", "tell", "dm"].map((id) => w.claim(`collection:Tasks#${id}`, task));
+      await w.executor.open();
+      for (const claim of claims) await w.settledClaim(claim);
+
+      expect(claims.map((claim) => [claim.state, claim.error])).toEqual([
+        ["failed", PERSONAL_NEEDS_ACCOUNT],
+        ["failed", PERSONAL_NEEDS_ACCOUNT],
+        ["failed", "that person cannot view Tasks."],
+        ["failed", "There is no direct message with you yet. Start one first: automations never start one."],
+      ]);
+      expect(w.messages).toEqual([]);
+      expect(w.notices).toEqual([]);
+    });
+
+    it("keeps the same person after a sign-in, and stops once the workspace is no longer proved never shared", async () => {
+      const w = await world({ automations: { Tasks: local } });
+      w.setRoster({ ...provedLocal, ownerUserId: "user-owner" });
+      const task = w.addRecord("Tasks", "one", { Status: "Done" });
+      const signedIn = w.claim("collection:Tasks#local", task);
+      await w.executor.open();
+      await w.settledClaim(signedIn);
+      expect(signedIn.state).toBe("done");
+      expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["install-here"]);
+
+      w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+      const synced = w.claim("collection:Tasks#local", task);
+      w.executor.notifyClaimed();
+      await w.settledClaim(synced);
+      expect(synced).toMatchObject({ state: "failed", error: "This step acts as that person, and you can also edit Tasks." });
+      expect(w.messages).toHaveLength(1);
+      expect(w.notices).toHaveLength(1);
+    });
   });
 
   it("stops when someone else can also edit the Collection, or the step names another person", async () => {
