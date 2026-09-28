@@ -238,6 +238,7 @@ const conflict: ConflictRecord = {
 
 const collectionSummary = {
   path: "projects",
+  objectId: "object-projects",
   status: "degraded",
   reasons: [{ code: "unknown-field-reference", path: "/views/0/groupBy" }],
 };
@@ -1618,6 +1619,7 @@ describe("VersionedLiveAdapter", () => {
     const results = {
       [WORKSPACE_METHOD.collectionsGet]: {
         path: "projects",
+        objectId: "object-projects",
         status: "valid",
         reasons: [],
         schema: {
@@ -1629,13 +1631,13 @@ describe("VersionedLiveAdapter", () => {
         recordCount: 1,
       },
       [WORKSPACE_METHOD.collectionsQuery]: {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         records: [record],
         groups: null,
         nextCursor: null,
       },
       [WORKSPACE_METHOD.collectionsGetRecord]: {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         record,
         history: [],
         nextBeforeHistoryId: null,

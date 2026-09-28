@@ -37,6 +37,14 @@ Supply `find` as document text without Markdown syntax. For `Hello **world**.`, 
 
 An `applied` edit includes the durable host acknowledgement. Markdown settlement can happen later.
 If the outcome is `unknown`, read the live document before retrying.
+
+Edit links on main also expose `dohc_write_collection_files`, the same write the viewer's **Edit file** makes for `collection.yaml` and `automations.yaml`.
+It edits a Collection's schema, creates or replaces its automations, or creates a Collection with up to 500 Markdown records.
+It needs the Public Edit release, not the document host. The relay names the link as the author and applies the checks it applies to a named recipient.
+`accepted` means the relay recorded the change in the owner's history. The owner's computer applies it at its next sync.
+An MCP request that carries a write may be up to 9 MiB, room for 4 MiB of text that JSON escapes in two bytes. A file can go as base64 instead of text, as the viewer sends it in a request of up to 7 MiB.
+A write goes in an MCP request of its own, never in a batch.
+Share-web holds one such body per link and four in all, across both. Other MCP requests stay at 32 KiB.
 Settled file reads can lag live documents. File reads are limited to 256 KiB; other tool results are limited to 1 MiB.
 
 The bearer uses the same bounded, in-memory session store as browser links.
@@ -153,7 +161,7 @@ A device host also requires
 configured device delivery and owner admission. An absent or incompatible marker
 on either service prevents a successful public Edit exchange.
 
-Edit links cover existing live Markdown documents on the main version.
+Edit links cover existing live Markdown documents on the main version, and a shared Collection's schema and automations.
 Pinned versions cannot receive Edit links. The desktop obtains supported access
 levels from authenticated relay inventory; the relay revalidates mutations.
 Disabling release blocks Edit creation, widening, rotation, exchange, and renewal.

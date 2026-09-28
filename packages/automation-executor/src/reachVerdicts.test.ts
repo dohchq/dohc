@@ -10,6 +10,29 @@ describe("reach verdicts", () => {
     expect(nextReachVerdict(undefined, stoppedByBob, true)).toEqual({ verdict: "stopped", stoppedFor: "bob@dohc.test" });
   });
 
+  it("holds an allowed step once for each link that could have written it and stopped editing", () => {
+    const trip = { evidence: "g-trip#1", name: "Anyone who had your share link to Trip" };
+    const notes = { evidence: "g-notes#1", name: "Anyone who had your share link to Notes" };
+    const former = { allowed: true, formerStops: [trip] } as const;
+    const held = { verdict: "held", stoppedFor: trip.name, accountedLinks: ["g-trip#1"] };
+    expect(nextReachVerdict(undefined, former, true)).toEqual(held);
+    // Allowed before the link ended: the link may have switched it on since.
+    expect(nextReachVerdict({ verdict: "allowed", stoppedFor: null }, former, true)).toEqual(held);
+    // Confirmed with that link in view: not asked again, until another link appears.
+    const confirmed = { verdict: "allowed", stoppedFor: null, accountedLinks: ["g-trip#1"] } as const;
+    expect(nextReachVerdict(confirmed, former, true)).toEqual(confirmed);
+    expect(nextReachVerdict(confirmed, { allowed: true, formerStops: [trip, notes] }, true))
+      .toEqual({ verdict: "held", stoppedFor: notes.name, accountedLinks: ["g-notes#1", "g-trip#1"] });
+    // A step stopped for a current editor stays stopped, and keeps what it accounted for.
+    expect(nextReachVerdict(confirmed, stoppedByBob, true))
+      .toEqual({ verdict: "stopped", stoppedFor: "bob@dohc.test", narrowed: true, accountedLinks: ["g-trip#1"] });
+    expect(nextReachVerdict({ verdict: "held", stoppedFor: "ana@dohc.test" }, former, true))
+      .toEqual({ verdict: "held", stoppedFor: "ana@dohc.test", accountedLinks: ["g-trip#1"] });
+    // The same link, after an editing period under a newer generation, is new evidence.
+    expect(nextReachVerdict(confirmed, { allowed: true, formerStops: [{ ...trip, evidence: "g-trip#2" }] }, true))
+      .toEqual({ verdict: "held", stoppedFor: trip.name, accountedLinks: ["g-trip#1", "g-trip#2"] });
+  });
+
   it("holds a stopped step that becomes allowed, and keeps holding it until someone confirms", () => {
     const held = nextReachVerdict({ verdict: "stopped", stoppedFor: "bob@dohc.test" }, allowed, true);
     expect(held).toEqual({ verdict: "held", stoppedFor: "bob@dohc.test" });

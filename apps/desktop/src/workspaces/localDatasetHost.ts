@@ -32,11 +32,17 @@ type OwnerContext = { readonly owner: true };
  * operation code sees as an automation, not the owner. Only main creates
  * one, through the host, and the host object never leaves main. `depth` is
  * the chain depth its writes declare, one more than the claim that started
- * the run.
+ * the run. `person` is who its writes are made for: the person whose change
+ * started it, or null for nobody.
  */
-export interface LocalDatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number }
-/** The owner's agent in a run an automation started: the owner's authority, at the run's chain depth. */
-type AgentContext = { readonly agentDepth: number };
+export interface LocalDatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number; readonly person: string | null }
+/**
+ * The owner's agent, as main derives it for one invocation: the owner's
+ * authority, attributed to the agent at its run's chain depth, 0 outside a
+ * chain. Attribution never grants access.
+ */
+export interface LocalDatasetAgent { readonly depth: number }
+type AgentContext = { readonly agent: LocalDatasetAgent };
 type LocalContext = OwnerContext | LocalDatasetAppContext | LocalDatasetAutomationContext | AgentContext;
 type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration" | "accountCheckpointStage">;
 export interface LocalDatasetHostOptions {
@@ -54,8 +60,25 @@ export interface LocalDatasetHostOptions {
   capacityBytes?: number;
   /** File associations must use this database and transaction, never a later write. */
   resources?(storage: { db: JournalDb; transaction: <T>(run: () => T) => T }): Resources;
-  /** A commit made automation claims. A hint for the executor, which also drains at open. */
-  onAutomationClaims?(): void;
+  /**
+   * The agent run active in this workspace attachment now, or null. Main
+   * derives it, and throws when the attachment is no longer current. A local
+   * app's invocation reads it once at its start and writes as that run's
+   * agent, whoever clicked.
+   */
+  agentRun?(): LocalDatasetAgent | null;
+  /**
+   * The person on this computer: the account, or this installation's id when
+   * signed out. The owner's, the agent's and a local app's commits are made
+   * for them. Never the dataset owner key, which only authorizes.
+   */
+  localPersonId(): string;
+  /**
+   * A commit made automation claims, and `failed` when it made any failed, as
+   * a chain stop does. A hint for the executor, which also drains and
+   * reports failures at open.
+   */
+  onAutomationClaims?(failed: boolean): void;
   /** A dataset's approved rules or lifecycle changed, so the executor re-indexes. */
   onDatasetsChanged?(): void;
 }
@@ -73,11 +96,10 @@ export interface LocalDatasetInvocation {
   idempotencyKey: string;
   signal?: AbortSignal;
   /**
-   * Set by main for the owner's agent in a run an automation started: the
-   * chain depth the run's writes declare, so the claims its commit makes
-   * carry the chain on.
+   * Set by main when the owner's agent invokes, so its commit names the
+   * agent and the claims it makes carry the run's chain on.
    */
-  agentDepth?: number;
+  agent?: LocalDatasetAgent;
 }
 export interface LocalDatasetUpload {
   datasetId: string;
@@ -210,7 +232,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     let apps: ReturnType<typeof createLocalDatasetApps>;
     const exportDirectory = join(directory, "exports");
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime, persistentRuntime: options.persistentRuntime,
-      wakeAutomations: () => { if (!closed) options.onAutomationClaims?.(); },
+      wakeAutomations: (_scope, failed) => { if (!closed) options.onAutomationClaims?.(failed); },
       recovery: {
         directory: exportDirectory, limits: { maxTotalBytes: maxStoredBytes },
         install: { allowOwnerRecoveryClaim: true, account(_context, allocation) { charge(allocation.datasetId,allocation.bytes); },
@@ -256,10 +278,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         const agent = agentContexts.has(context as AgentContext) ? context as AgentContext : null;
         if (context !== owner && automation === null && agent === null) return apps.resolveAuthority(context as LocalDatasetAppContext, request);
         if (request.workspaceId !== workspaceId || request.access.kind !== "data") throw new Error("Collection access is not permitted.");
-        if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: { depth: agent.agentDepth } };
-        if (automation === null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId };
+        if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: { depth: agent.agent.depth }, person: options.localPersonId() };
+        if (automation === null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, person: options.localPersonId() };
         return { caller: { kind: "automation", automationId: automation.automationId }, principalKey: automationKey(automation.automationId),
-          chainDepth: automation.depth };
+          chainDepth: automation.depth, ...(automation.person === null ? {} : { person: automation.person }) };
       },
       async compileOperations(source, sourcePath) {
         const compiled = await compile(source, sourcePath, lifetime.signal);
@@ -370,13 +392,13 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     function invoke(input: LocalDatasetInvocation, readOnly?: boolean): Promise<DatasetInvocationResult> {
       return tracked(async () => {
         checkInvocation(input, readOnly);
-        const context = input.agentDepth ? agentContext(input.agentDepth) : owner;
+        const context = input.agent === undefined ? owner : agentContext(input.agent);
         return host.invoke(context, {workspaceId, datasetId: input.datasetId, revision: input.revision, revisionSha256: input.revisionSha256, operationId: input.operationId, input: input.input,
           idempotencyKey: input.idempotencyKey, signal: signal(input.signal)});
       });
     }
-    function agentContext(agentDepth: number): AgentContext {
-      const context = Object.freeze({ agentDepth });
+    function agentContext(agent: LocalDatasetAgent): AgentContext {
+      const context = Object.freeze({ agent: Object.freeze({ depth: agent.depth }) });
       agentContexts.add(context);
       return context;
     }
@@ -478,9 +500,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       action: (input: LocalDatasetInvocation) => invoke(input, false),
       /** For main's automation executor only. Claims are this workspace's, from the host's ledger. */
       automations: {
-        context(input: { automationId: string; claimId: string; depth: number }): LocalDatasetAutomationContext {
+        context(input: { automationId: string; claimId: string; depth: number; person: string | null }): LocalDatasetAutomationContext {
           assertCurrent();
-          const context = Object.freeze({ automationId: input.automationId, claimId: input.claimId, depth: input.depth });
+          const context = Object.freeze({ automationId: input.automationId, claimId: input.claimId, depth: input.depth, person: input.person });
           automationContexts.add(context);
           return context;
         },
@@ -544,7 +566,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           assertCurrent(); host.automationClaims.release({ workspaceId, claimId: started.claimId, attempts: started.attempts });
         },
         retry(claimId: string) { assertCurrent(); return host.automationClaims.retry({ workspaceId, claimId }); },
-        claims(automationId: string) { assertCurrent(); return host.automationClaims.claims(workspaceId, automationId); },
+        claims(automationId: string, page?: { before?: string; limit?: number }) { assertCurrent(); return host.automationClaims.claims(workspaceId, automationId, page); },
+        pruneHistory(keep: readonly string[]) { assertCurrent(); return host.automationClaims.pruneHistory(workspaceId, keep); },
         claim(automationId: string, claimId: string) { assertCurrent(); return host.automationClaims.claim(workspaceId, automationId, claimId); },
         failures() { assertCurrent(); return host.automationClaims.failures(workspaceId); },
         /**
@@ -576,7 +599,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         })();
       },
     };
-    apps = createLocalDatasetApps({ db, workspaceId, ownerId, assertCurrent, charge,
+    apps = createLocalDatasetApps({ db, workspaceId, ownerId, assertCurrent, charge, agentRun: () => options.agentRun?.() ?? null, localPersonId: () => options.localPersonId(),
       approved: datasetId => host.approvedArtifacts(owner, { workspaceId, datasetId }),
       bind: (datasetId, appId, binding, commit) => host.setBinding(owner, { workspaceId, datasetId, appId, binding }, commit),
       invoke: (context, input) => tracked(() => host.invoke(context, { ...input, signal: signal(input.signal) })),

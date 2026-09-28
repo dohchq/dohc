@@ -6,7 +6,7 @@ import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationT
 import type { JsonValue } from "./protocol.js";
 
 export { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES } from "./automation-protocol.js";
-export type { AutomationError, AutomationErrorCode, AutomationFormula, AutomationOutcome, AutomationRecordChange, AutomationScope, AutomationTextPart, CodeStepReturn, JsonObject } from "./automation-protocol.js";
+export type { AutomationError, AutomationErrorCode, AutomationFormula, AutomationOutcome, AutomationRecordChange, AutomationScope, AutomationTextPart, AutomationTimeSpent, CodeStepReturn, JsonObject } from "./automation-protocol.js";
 export type { JsonValue } from "./protocol.js";
 
 /** Time an item gets beyond its limits before its worker is replaced. */
@@ -24,12 +24,14 @@ export interface AutomationEvaluatorOptions {
 /**
  * The scope and formulas must be plain JSON data: no bigints, functions, symbols, class instances, or cycles.
  * When the queue is full, every item returns `busy`; the caller runs the automation again later.
+ * A run that makes several requests passes the same `spent` to each. Each request adds the time its items took,
+ * so the run's time budgets cover all of them, as they cover one request.
  */
 export interface AutomationEvaluator {
   /** Evaluates one run's formulas in one request. Each result is a JSON value or an error. */
-  evaluate(scope: AutomationScope, formulas: readonly AutomationFormula[]): Promise<AutomationOutcome<JsonValue>[]>;
+  evaluate(scope: AutomationScope, formulas: readonly AutomationFormula[], spent?: AutomationTimeSpent): Promise<AutomationOutcome<JsonValue>[]>;
   /** Runs a code step's function body with a frozen `ctx`. The result says what to change; nothing is written. */
-  runCode(scope: AutomationScope, source: string): Promise<AutomationOutcome<CodeStepReturn>>;
+  runCode(scope: AutomationScope, source: string, spent?: AutomationTimeSpent): Promise<AutomationOutcome<CodeStepReturn>>;
   close(): Promise<void>;
 }
 
@@ -50,7 +52,12 @@ function scopeProblem(scope: AutomationScope): string | undefined {
   if (scope.recordKeys !== undefined && (!Array.isArray(scope.recordKeys) || !scope.recordKeys.every(key => typeof key === "string"))) {
     return "The automation scope's record keys must be a list of names.";
   }
-  const taken = Object.keys(scope.bindings ?? {}).find(name => !BINDING_NAME.test(name) || AUTOMATION_SCOPE_NAMES.includes(name));
+  const unavailable = scope.unavailable ?? {};
+  if (typeof unavailable !== "object" || Array.isArray(unavailable) || !Object.values(unavailable).every(why => typeof why === "string")) {
+    return "The automation scope's unavailable names must each say why.";
+  }
+  const taken = [...Object.keys(scope.bindings ?? {}), ...Object.keys(unavailable)]
+    .find(name => !BINDING_NAME.test(name) || AUTOMATION_SCOPE_NAMES.includes(name) || (Object.hasOwn(unavailable, name) && Object.hasOwn(scope.bindings ?? {}, name)));
   return taken === undefined ? undefined : `The automation scope cannot bind the name ${JSON.stringify(taken)}.`;
 }
 
@@ -265,7 +272,7 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   }
 
   /** Called at once after `busy` returns nothing, so the queue cannot fill in between. */
-  async function run(scope: AutomationScope, items: AutomationWorkerItem[]): Promise<AutomationOutcome<JsonValue>[]> {
+  async function run(scope: AutomationScope, items: AutomationWorkerItem[], spent: AutomationTimeSpent): Promise<AutomationOutcome<JsonValue>[]> {
     const problem = scopeProblem(scope);
     if (problem) throw new Error(problem);
     // Dependents share condition objects. Guard references are bounded at admission; charge each value only once.
@@ -279,7 +286,6 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
     const context: Run = { id: ++nextRunId, scope: structuredClone(scope) };
     queued++;
     const done = queue.then(async () => {
-      const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
       for (;;) {
         const waiting: number[] = [];
         for (const [index, item] of items.entries()) {
@@ -319,7 +325,7 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   }
 
   return {
-    async evaluate(scope, formulas) {
+    async evaluate(scope, formulas, spent = { prepareMs: 0, runMs: 0 }) {
       const full = busy(formulas.length);
       if (full) return full;
       if (formulas.length > AUTOMATION_LIMITS.formulasPerBatch) throw new Error(`One run can evaluate at most ${AUTOMATION_LIMITS.formulasPerBatch} formulas.`);
@@ -330,13 +336,13 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
           && ("truthy" in guard ? typeof guard.truthy === "boolean" && !("equals" in guard) : "equals" in guard && guard.equals !== undefined))))) {
         throw new Error("A formula guard must refer to an earlier formula and require truthiness or a JSON value.");
       }
-      return formulas.length === 0 ? [] : run(scope, [...formulas]);
+      return formulas.length === 0 ? [] : run(scope, [...formulas], spent);
     },
-    async runCode(scope, source) {
+    async runCode(scope, source, spent = { prepareMs: 0, runMs: 0 }) {
       const full = busy(1);
       if (full) return full[0]!;
       if (typeof source !== "string") throw new Error("A code step's source must be text.");
-      const [result] = await run(scope, [{ kind: "code", source }]);
+      const [result] = await run(scope, [{ kind: "code", source }], spent);
       // The worker checked the shape of a successful result.
       return result as AutomationOutcome<CodeStepReturn>;
     },

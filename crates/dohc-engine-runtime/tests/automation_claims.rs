@@ -299,7 +299,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     let claim = &append.automation_claims[0];
     assert_eq!(claim.automation_id, AUTOMATION);
     assert_eq!(claim.state, AutomationClaimState::Pending);
-    assert_eq!(claim.collection_path, "tasks");
+    assert_eq!(claim.collection_path.as_deref(), Some("tasks"));
     assert_eq!(claim.record_id.as_deref(), Some(RECORD));
     let facts = append
         .outcome
@@ -321,6 +321,8 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     assert_eq!(
         claim.change,
         AutomationChange {
+            shared_author: None,
+            live_cursor: None,
             kind: AutomationChangeKind::Changed,
             author_origin_id: Some("agent-editor".to_owned()),
             actor_kind: Some(ChangeActorKind::Agent),
@@ -1284,7 +1286,7 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
             &AutomationGroupWatch {
                 generation: 0,
                 subscriptions: vec![AutomationGroupSubscription {
-                    automation_id: "collection:Trip/Tasks#task".to_owned(),
+                    automation_id: "collection:object-tasks#task".to_owned(),
                     channel_id: "trip".to_owned(),
                     starts_with: Some("/task".to_owned()),
                 }],

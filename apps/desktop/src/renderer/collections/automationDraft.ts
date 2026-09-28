@@ -1,3 +1,4 @@
+import type { DatasetOperationKind } from "@dohc/security-contract/dataset";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
 import type { Automation, AutomationStep, AutomationValue } from "./automationSentence";
 
@@ -9,6 +10,12 @@ import type { Automation, AutomationStep, AutomationValue } from "./automationSe
 // Mirrors of the file contract, which the renderer never loads.
 const MAX_ID_LENGTH = 64;
 export const MAX_NAME_LENGTH = 120;
+// Steps in one automation, counting each If and the steps inside it.
+export const MAX_STEPS = 25;
+// About 100 lines of inline code; longer code belongs in its own file.
+export const MAX_CODE_LENGTH = 8_000;
+// An If inside an If inside an If; the file refuses a fourth.
+export const MAX_IF_DEPTH = 3;
 
 export type ConditionOperator = "is" | "is-not" | "contains";
 
@@ -64,8 +71,15 @@ export function conditionRows(expression: string): ConditionRow[] | null {
     const contains = comparison ? null : CONTAINS.exec(rest);
     const match = comparison ?? contains;
     if (!match) return null;
-    const field = fieldOf(match[1], match[2]);
-    const value = JSON.parse(comparison ? match[4]! : match[3]!) as ConditionRow["value"];
+    let field: string;
+    let value: ConditionRow["value"];
+    try {
+      field = fieldOf(match[1], match[2]);
+      value = JSON.parse(comparison ? match[4]! : match[3]!) as ConditionRow["value"];
+    } catch {
+      // A JavaScript escape JSON does not have, such as "\x41", stays a formula.
+      return null;
+    }
     const operator: ConditionOperator = contains ? "contains" : match[3] === "==" ? "is" : "is-not";
     rows.push({ field, operator, value });
     rest = rest.slice(match[0].length);
@@ -153,20 +167,25 @@ export function idFor(name: string, taken: ReadonlySet<string>): string {
 }
 
 /**
- * The dataset table a ⚡ panel shows, which is a Collection: its name, the
- * names of the approved operations on it, and the names of every table in
- * its dataset.
+ * The dataset table a ⚡ panel shows, which is a Collection: its name, and
+ * every table in its dataset by name, with its fields, Button fields too,
+ * which a trigger on that table offers, and its approved operations.
  */
 export interface AutomationTable {
   name: string;
-  operations: ReadonlySet<string>;
-  tables: ReadonlySet<string>;
+  tables: ReadonlyMap<string, AutomationDatasetTable>;
   /**
    * The dataset's actions, by name, label, and table; `reversible` when the
    * rules name a reverse. A new step offers this table's; a step the file
    * wrote may run another table's.
    */
   actions: ReadonlyArray<{ name: string; label: string; table: string; reversible: boolean }>;
+}
+
+/** One table of a dataset: its fields, and its approved operations by name and kind. */
+export interface AutomationDatasetTable {
+  fields: readonly FieldDefinition[];
+  operations: ReadonlyArray<{ name: string; kind: DatasetOperationKind }>;
 }
 
 /**
@@ -185,7 +204,8 @@ export function buttonAutomation(field: string, table: string | null, steps: Aut
  * today" is a few choices away. `table` is the dataset table it watches,
  * or null for a document Collection.
  */
-export function newAutomation(fields: readonly FieldDefinition[], table: string | null): Automation {
+export function newAutomation(all: readonly FieldDefinition[], table: string | null): Automation {
+  const fields = all.filter((field) => field.type !== "button");
   const watched = fields.find((field) => field.type === "select") ?? fields[0];
   const set = fields.find((field) => field.type === "date" && field !== watched) ??
     fields.find((field) => field !== watched) ?? watched;
@@ -208,7 +228,8 @@ export function reachPlaces(steps: readonly AutomationStep[], first = 0): number
   let next = first;
   const walk = (list: readonly AutomationStep[], into: number[]) => {
     for (const step of list) {
-      if (step.kind === "set" || step.kind === "add-record" || step.kind === "find" || step.kind === "post" || step.kind === "wake-agent") into.push(next++);
+      if (step.kind === "set" || step.kind === "add-record" || step.kind === "find" || step.kind === "post" || step.kind === "wake-agent" ||
+        step.kind === "run" || step.kind === "run-file") into.push(next++);
       if (step.kind === "direct-message" || step.kind === "notify") {
         for (const person of step.to) {
           if (person.kind === "literal" && typeof person.value === "string") into.push(next++);

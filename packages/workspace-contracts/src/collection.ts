@@ -158,6 +158,8 @@ type CollectionStatus = CollectionSchemaParseResult["status"];
 
 export interface CollectionSummary {
   path: string;
+  /** The object id of its collection.yaml. It names the Collection wherever the Collection moves. */
+  objectId: string;
   status: CollectionStatus;
   reasons: CollectionSchemaReason[];
   /**

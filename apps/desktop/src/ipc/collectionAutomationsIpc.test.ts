@@ -24,6 +24,12 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const datasetFieldMarks = vi.fn(async (datasetId: string, table: string) => [{ field: "Status", automations: [`Close in ${datasetId} ${table}`] }]);
   const datasetCollection = vi.fn(async () => ({ status: "found" as const, collectionPath: "Budget" }));
   const pinOperations = vi.fn(async (_path: string, automations: readonly Automation[], _saved: readonly Automation[]) => [...automations]);
+  const draftCannotRun = vi.fn(async (_path: string, _automation: Automation): Promise<string | null> => "Budget has no approved operation named gone.");
+  const missingCodeFiles = vi.fn(async (_path: string, _automation: Automation): Promise<string[]> => []);
+  const groupsFor = vi.fn(async (_path: string) => [{ name: "Trip", slug: "trip", ref: "Trip", readStopped: null, postStopped: "ana@dohc.test cannot post in Trip." }]);
+  const peopleFor = vi.fn(async (_path: string) => ({ status: "listed" as const, people: [
+    { userId: "user-ana", name: "ana@dohc.test", you: false, dmStopped: null, noticeStopped: "ana@dohc.test cannot view Tasks." },
+  ] }));
   const stop = {
     automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: "0", seq: 3,
     collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "ana@dohc.test",
@@ -31,8 +37,11 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const dismissStops = vi.fn(async () => undefined);
   const shareStop = { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" as const };
   const shareImpact = vi.fn(async () => [shareStop]);
+  const oldRun = { claimId: "atc_old", state: "done" as const, writes: [] };
+  const runs = vi.fn(async () => ({ runs: [], next: null }));
+  const listedRun = vi.fn(async (_automationId: string, claimId: string) => (claimId === oldRun.claimId ? oldRun : null));
   const executor = {
-    pinOperations, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+    runs, listedRun, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -58,7 +67,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const marks = (collectionPath: string) =>
     handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
   const check = (payload: Record<string, unknown>) => call(CHANNELS.checkCollectionAutomation, payload);
-  return { write, call, marks, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, dismissStops, shareImpact, check, createFile, writeText, reindexed };
+  return { write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, dismissStops, shareImpact, check, createFile, writeText, reindexed };
 }
 
 describe("steps a share stops", () => {
@@ -185,20 +194,89 @@ describe("writing automations.yaml from the panel", () => {
 
   it("checks a draft the way a save would, and each formula's syntax without running it", async () => {
     const f = fixture();
-    await expect(f.check({ automation: stamp, formulas: ["today()", "record.Status =="] })).resolves.toEqual({
+    await expect(f.check({ collectionPath: "Tasks", automation: { ...stamp, if: "record.Status ==" } })).resolves.toEqual({
       diagnostics: [],
-      formulaProblems: [null, "Unexpected token."],
+      formulaProblems: [{ path: "/if", problem: "Unexpected token." }],
+      cannotRun: "Budget has no approved operation named gone.",
+      missingFiles: [],
     });
+    expect(f.draftCannotRun).toHaveBeenCalledWith("Tasks", { ...stamp, if: "record.Status ==" });
     const removed = { ...stamp, when: { kind: "record-removed", table: null } };
-    await expect(f.check({ automation: removed, formulas: [] }))
-      .resolves.toMatchObject({ diagnostics: [{ code: "step-needs-record" }] });
+    // A draft the file contract refuses has no run status to check.
+    await expect(f.check({ collectionPath: "Tasks", automation: removed }))
+      .resolves.toMatchObject({ diagnostics: [{ code: "step-needs-record" }], cannotRun: null });
+    expect(f.draftCannotRun).toHaveBeenCalledOnce();
+    await expect(fixture({ sharedView: true }).check({ collectionPath: "Tasks", automation: stamp })).resolves.toMatchObject({ cannotRun: null });
+    // An executor that is not open yet gives no status, and the rest of the check still answers.
+    f.draftCannotRun.mockRejectedValueOnce(new Error("The executor is not open."));
+    await expect(f.check({ collectionPath: "Tasks", automation: { ...stamp, if: "record.Status ==" } })).resolves.toEqual({
+      diagnostics: [], formulaProblems: [{ path: "/if", problem: "Unexpected token." }], cannotRun: null, missingFiles: [],
+    });
+    // Main names the code files the executor cannot find, and a failed look names none.
+    const coded = { ...stamp, do: [{ kind: "run-file", file: "total.js", as: null }] };
+    f.missingCodeFiles.mockResolvedValueOnce(["total.js"]);
+    await expect(f.check({ collectionPath: "Tasks", automation: coded })).resolves.toMatchObject({ missingFiles: ["total.js"] });
+    expect(f.missingCodeFiles).toHaveBeenLastCalledWith("Tasks", coded);
+    // Other problems in the draft do not hide a missing file.
+    f.missingCodeFiles.mockResolvedValueOnce(["total.js"]);
+    await expect(f.check({ collectionPath: "Tasks", automation: { ...coded, when: { kind: "record-removed", table: null }, do: [...coded.do, stamp.do[0]] } }))
+      .resolves.toMatchObject({ diagnostics: [{ code: "step-needs-record" }], missingFiles: ["total.js"] });
+    f.missingCodeFiles.mockRejectedValueOnce(new Error("The executor is not open."));
+    await expect(f.check({ collectionPath: "Tasks", automation: coded })).resolves.toMatchObject({ missingFiles: [] });
     expect(f.createFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("listing the Groups the builder offers", () => {
+  it("names each Group with why it cannot start or take the automation's message, and nothing in a shared view", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listAutomationGroups, { collectionPath: "Tasks" })).resolves.toEqual({
+      groups: [{ name: "Trip", slug: "trip", ref: "Trip", readStopped: null, postStopped: "ana@dohc.test cannot post in Trip." }],
+    });
+    expect(f.groupsFor).toHaveBeenCalledWith("Tasks");
+    const shared = fixture({ sharedView: true });
+    await expect(shared.call(CHANNELS.listAutomationGroups, { collectionPath: "Tasks" })).resolves.toEqual({ status: "unavailable" });
+    expect(shared.groupsFor).not.toHaveBeenCalled();
+    // A path outside the workspace is refused before anything is read.
+    await expect(f.call(CHANNELS.listAutomationGroups, { collectionPath: "../Other" })).rejects.toThrow();
+  });
+});
+
+describe("listing the people the builder offers", () => {
+  it("names each person with why a step cannot reach them, and nobody in a shared view", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listAutomationPeople, { collectionPath: "Tasks" })).resolves.toEqual({
+      status: "listed",
+      people: [{ userId: "user-ana", name: "ana@dohc.test", you: false, dmStopped: null, noticeStopped: "ana@dohc.test cannot view Tasks." }],
+    });
+    expect(f.peopleFor).toHaveBeenCalledWith("Tasks");
+    const shared = fixture({ sharedView: true });
+    await expect(shared.call(CHANNELS.listAutomationPeople, { collectionPath: "Tasks" })).resolves.toEqual({ status: "unavailable" });
+    expect(shared.peopleFor).not.toHaveBeenCalled();
+    // A path outside the workspace, or no path, is refused before anything is read.
+    await expect(f.call(CHANNELS.listAutomationPeople, { collectionPath: "../Other" })).rejects.toThrow();
+    await expect(f.call(CHANNELS.listAutomationPeople, {})).rejects.toThrow();
+    expect(f.peopleFor).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("reading a Collection's automation runs", () => {
   it("answers unavailable in a shared view, as the list does", async () => {
-    await expect(fixture({ sharedView: true }).call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp" }))
+    const f = fixture({ sharedView: true });
+    await expect(f.call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp" }))
       .resolves.toEqual({ status: "unavailable" });
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_old" }))
+      .resolves.toEqual({ status: "unavailable" });
+  });
+
+  it("reads the page after the one before, and one run by its id however old", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp", before: "5:atc_five" }))
+      .resolves.toEqual({ status: "listed", runs: [], next: null });
+    expect(f.runs).toHaveBeenCalledWith("collection:Tasks#stamp", "5:atc_five");
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_old" }))
+      .resolves.toEqual({ status: "found", run: f.oldRun });
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_gone" }))
+      .resolves.toEqual({ status: "missing" });
   });
 });

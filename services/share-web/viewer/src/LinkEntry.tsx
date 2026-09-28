@@ -15,7 +15,7 @@ export function LinkEntry({ meta, hasFiles, canEditFile }: {
       <p>
         {hasFiles && "Choose a file in Files to read it. "}
         {meta.access === "view" ? "Read the discussion in Comments. " : "Use Comments to read or post comments. "}
-        {canEditFile && "Choose Edit file to edit this Markdown file. "}
+        {canEditFile && "Choose Edit file to edit this file. "}
         Choose Open in dohc to continue in the desktop app.
       </p>
       <details>

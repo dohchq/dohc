@@ -8,10 +8,11 @@ import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { ClosedAppBuild } from "./closedAppCompiler";
-import type { LocalDatasetUpload } from "./localDatasetHost";
+import type { LocalDatasetAgent, LocalDatasetUpload } from "./localDatasetHost";
 import { parseDatasetAttemptRequest, type DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 
-export interface LocalDatasetAppContext { publicationId: string; authorityRevision: number }
+/** One invocation's app authority, and the agent it writes as, read once when the invocation starts. */
+export interface LocalDatasetAppContext { readonly publicationId: string; readonly authorityRevision: number; readonly agent: LocalDatasetAgent | null }
 type Prepared = { candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] };
 type Row = { publication_id: string; app_root: string; dataset_id: string; authority_revision: number; candidate: string; storage_bytes: number; active: number };
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -20,6 +21,10 @@ const hash = (value: string | Uint8Array) => createHash("sha256").update(value).
 export function createLocalDatasetApps(options: {
   db: JournalDb; workspaceId: string; ownerId: string;
   assertCurrent(): void; charge(datasetId: string, bytes: number): void;
+  /** The agent run active in this workspace attachment now, or null. */
+  agentRun(): LocalDatasetAgent | null;
+  /** The person on this computer, whom a local app's commits are made for. */
+  localPersonId(): string;
   approved(datasetId: string): { revision: DatasetRevision; active: boolean };
   bind(datasetId: string, appId: string, binding: AppDatasetBinding | null, commit: () => void): void;
   invoke(context: LocalDatasetAppContext, input: InvokeDatasetInput): Promise<DatasetInvocationResult>;
@@ -55,11 +60,16 @@ export function createLocalDatasetApps(options: {
     const checked = current(context.publicationId, context.authorityRevision);
     if (request.datasetId !== checked.row.dataset_id) throw new Error("App access is not permitted.");
     return { caller: { kind: "owner", userId: options.ownerId }, principalKey: `${options.ownerId}:app:${context.publicationId}`,
-      appId: context.publicationId, authorityToken: String(context.authorityRevision) };
+      appId: context.publicationId, authorityToken: String(context.authorityRevision), person: options.localPersonId(),
+      ...(context.agent === null ? {} : { agent: { depth: context.agent.depth } }) };
   }
   async function inContext<T>(id: string, expected: number, signal: AbortSignal | undefined, work: (context: LocalDatasetAppContext) => Promise<T>): Promise<T> {
     signal?.throwIfAborted(); current(id, expected);
-    const context = Object.freeze({ publicationId: id, authorityRevision: expected }); contexts.add(context);
+    // The app cannot tell a person's click from an agent's request, so while
+    // an agent run is active every invocation is the run's, which keeps its
+    // chain depth. The invocation keeps it after the run ends.
+    const run = options.agentRun(), agent = run === null ? null : Object.freeze({ depth: run.depth });
+    const context = Object.freeze({ publicationId: id, authorityRevision: expected, agent }); contexts.add(context);
     try { const result = await work(context); signal?.throwIfAborted(); current(id, expected); return result; }
     finally { contexts.delete(context); }
   }

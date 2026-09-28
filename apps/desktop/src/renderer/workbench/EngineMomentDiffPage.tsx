@@ -5,6 +5,7 @@ import { bridge } from "../bridge";
 import { momentDiffSides } from "./momentDiffSides";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import {OwnerRestoreDialog} from "../OwnerRestoreDialog";
+import type { StopTarget } from "../StopAndRestoreDialog";
 import { SectionLabel } from "../ui/controls";
 import {
   UnifiedDiffLines,
@@ -65,8 +66,9 @@ export function EngineMomentDiffPage({
   onPathResolved: (momentId: string, path: string) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
   onRestored: () => void;
-  // Opens the shell's Stop and restore for a person the owner shared with.
-  onStopAndRestore: (person: { userId: string; label: string }) => void;
+  // Opens the shell's Stop and restore for a person the owner shared with,
+  // or for the Edit share link that wrote this change.
+  onStopAndRestore: (target: StopTarget) => void;
 }) {
   const momentId = useMemo(() => parseMomentDiffTabPath(tabPath), [tabPath]);
   const [state, setState] = useState<
@@ -223,6 +225,13 @@ export function EngineMomentDiffPage({
   // body shows "Contents are protected" instead. Restore still works (it
   // rides the encrypted path end to end).
   const isProtected = moment.protected === true;
+  // Who wrote this change directly, when the owner can stop them and restore
+  // what they wrote: a person they shared with, or an Edit share link.
+  const stopTarget: StopTarget | null = moment.namedAuthor
+    ? { target: { kind: "person", userId: moment.namedAuthor.userId }, label: moment.namedAuthor.label }
+    : moment.linkAuthor
+      ? { target: { kind: "link", grantId: moment.linkAuthor.grantId }, label: "Edit link" }
+      : null;
   // Each side presents by its own kind (see momentDiffSides).
   const {
     beforeIsBinary,
@@ -367,9 +376,9 @@ export function EngineMomentDiffPage({
           onClick={() => setSharedRestoreOpen(true)}
           className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
         >Restore shared file…</button>}
-        {moment.namedAuthor ? <button
+        {stopTarget ? <button
           type="button" data-testid="engine-diff-stop-and-restore" disabled={restoreBusy}
-          onClick={() => moment.namedAuthor && onStopAndRestore(moment.namedAuthor)}
+          onClick={() => onStopAndRestore(stopTarget)}
           className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
         >Stop and restore…</button> : null}
         {undoMomentId ? (

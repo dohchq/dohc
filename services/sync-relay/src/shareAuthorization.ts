@@ -22,6 +22,7 @@ export type ShareAction =
   | "read"
   | "append"
   | "propose"
+  | "direct-write"
   | "presence"
   | "live-edit"
   | "list-own-proposals"
@@ -239,6 +240,14 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
     case "propose": {
       const files = fileSideOf(authorized.effectiveSelector);
       return files !== null && files.paths.length > 0 && files.access === "edit";
+    }
+    // Writing a Collection's own files straight into the owner's workspace
+    // (ADR 0013), for an Edit share link. A named recipient keeps the
+    // proposal rule and its own route; neither widens the other.
+    case "direct-write": {
+      const files = fileSideOf(authorized.effectiveSelector);
+      return authorized.grant.principalKind === "link" &&
+        files !== null && files.paths.length > 0 && files.access === "edit";
     }
     case "live-edit":
       return (authorized.grant.principalKind === "user" || authorized.grant.principalKind === "link")

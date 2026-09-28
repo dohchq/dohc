@@ -93,7 +93,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const sender = {id: 7,isDestroyed: () => false,send: (channel: string,payload: unknown) => listeners.get(channel)?.(payload),once() {return this;}};
     ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: "workspace",generation: 1,isCurrent: () => true}),
       acquireWorkspace: () => ({workspace,assertCurrent() {},release() {}}),captureFor: () => capture,ensureCaptureFor: async () => undefined,
-      isSharedView: () => false,resolveDocumentPath: async (_workspace,path) => path,onError: (message,error) => {console.error(message,error);}});
+      isSharedView: () => false,resolveDocumentPath: async (_workspace,path) => path,localPersonId: () => "person-local",onError: (message,error) => {console.error(message,error);}});
     const openRenderer = async (sessionId: string) => {
       let seq = 0;
       return bindEngineYDoc({

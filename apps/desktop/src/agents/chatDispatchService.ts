@@ -144,10 +144,10 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   onRunUpdated?(workspace: ChatDispatchWorkspace): void;
   onDispatchNotice?(workspace: ChatDispatchWorkspace, notice: Omit<ChatDispatchNotice, "id">): void;
   // Every write the agent makes while the run holds the slot is the run's,
-  // at the run's chain depth.
+  // at the run's chain depth, for the person main names.
   setRunAttribution(
     workspace: ChatDispatchWorkspace,
-    run: { agentId: string; onBehalfOf: string; agentRunId: string; depth: number } | null,
+    run: { agentId: string; agentRunId: string; depth: number } | null,
   ): void | Promise<void>;
   runSlotOccupied?(workspace: ChatDispatchWorkspace): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
@@ -764,7 +764,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const identity = await options.identityFor(workspace);
       await options.setRunAttribution(workspace, {
         agentId: "dohc-chat-runner",
-        onBehalfOf: "local",
         agentRunId: claim.run.runId,
         depth: claim.chainDepth,
       });
@@ -1477,7 +1476,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         }
         await options.setRunAttribution(workspace, {
           agentId: "dohc-chat-runner-self-test",
-          onBehalfOf: "local",
           agentRunId: runId,
           depth: 0,
         });
