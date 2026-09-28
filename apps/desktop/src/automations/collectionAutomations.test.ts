@@ -3679,7 +3679,7 @@ describe("Collection automations that wake your agent", () => {
       expect(claim.state).toBe("done");
       expect(w.messages).toEqual([expect.objectContaining({ target: { kind: "agent" }, body: "Plan" })]);
       expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["install-here"]);
-      const [run] = await w.executor.runs("collection:Tasks#local");
+      const [run] = (await w.executor.runs("collection:Tasks#local")).runs;
       expect(run!.writes).toEqual([
         { kind: "message", messageId: w.messages[0]!.messageId, name: "your agent" },
         expect.objectContaining({ kind: "notice", name: "you" }),

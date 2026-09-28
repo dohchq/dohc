@@ -1399,7 +1399,7 @@ export class CollectionAutomations {
       const [newest] = (await this.claimPage(automationId, { limit: 1 }))?.claims ?? [];
       return [automationId, newest ? { state: newest.state, atMs: newest.updatedAtMs } : null] as const;
     })));
-    const automations = file.entries.map((entry): CollectionAutomationSummary => {
+    const automations = indexed.file.entries.map((entry): CollectionAutomationSummary => {
       if (entry.status === "invalid") {
         return { valid: false, id: entry.id, name: entry.name, diagnostics: entry.diagnostics };
       }

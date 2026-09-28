@@ -362,8 +362,8 @@ describe("the roster the reach check reads", () => {
     expect(reachRosterFor({ entry, localUserId: null, localPersonId: "install-here", latest: null, next: "" }))
       .toEqual({ kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] });
     expect(reachRosterFor({
-      entry: { ...entry, remote, shareRoster: { version: 1, grants: [] } }, localUserId: null, localPersonId: "install-here", latest: null, next: "",
-    })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [] });
+      entry: { ...entry, remote, shareRoster: { version: 1, grants: [], links: [], formerGrants: [] } }, localUserId: null, localPersonId: "install-here", latest: null, next: "",
+    })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [], formerEditors: [] });
   });
 
   it("knows only the Collection itself on a collaborator's computer", () => {
@@ -519,7 +519,7 @@ describe("keeping the roster current", () => {
     const localPersonId = vi.fn(async (workspace: RegistryEntry) => (proved ? `install-for-${workspace.workspaceId}` : null));
     const r = createShareRosters({
       findWorkspace: store.find, saveRoster: store.setShareRoster, markRosterPulled: store.markShareRosterPulled,
-      listRoster: async () => answered({ grants: [] }), localUserId: async () => null, localPersonId, logError: vi.fn(), nowMs: () => now,
+      listRoster: async () => answered({ grants: [], links: [], formerGrants: [] }), localUserId: async () => null, localPersonId, logError: vi.fn(), nowMs: () => now,
     });
     expect(await r.forRun("w-local")).toEqual({ kind: "owner", ownerUserId: null, localPersonId: "install-for-w-local", grants: [] });
     proved = false;
