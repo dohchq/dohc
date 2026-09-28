@@ -222,13 +222,15 @@ describe("transactional Collection page", () => {
   });
 
   it("keeps creation outside management and returns focus when its disclosure closes", async () => {
-    const onReviewSchema = vi.fn(); setup({onReviewSchema}); await screen.findByText("Alice");
+    const onReviewSchema = vi.fn(); const onCustomize = vi.fn(); setup({onReviewSchema, onCustomize}); await screen.findByText("Alice");
     const manage = screen.getByLabelText("Manage Collection");
     const details = manage.closest("details")!;
     expect(screen.getByRole("button",{name:"New record"}).closest("details")).toBeNull();
     fireEvent.click(manage); expect(details.open).toBe(true);
     const fields = screen.getByRole("button",{name:"Fields and names"});
     fireEvent.click(fields); expect(onReviewSchema).toHaveBeenCalledOnce();
+    fireEvent.click(manage); fireEvent.click(screen.getByRole("button",{name:"Customize…"})); expect(onCustomize).toHaveBeenCalledOnce();
+    fireEvent.click(manage);
     fields.focus(); fireEvent.keyDown(fields,{key:"Escape"});
     expect(details.open).toBe(false); expect(document.activeElement).toBe(manage);
   });

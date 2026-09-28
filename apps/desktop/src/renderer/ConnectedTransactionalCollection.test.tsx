@@ -21,7 +21,7 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   readScheduleHost: vi.fn(async () => ({ kind: "this-computer" })), onScheduleHostChanged: vi.fn(() => () => undefined),
   writeCollectionAutomations: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void }) => <>
   {props.automationsButton}
   {props.buttons?.fields.map(field => <span key={field}>{props.buttons!.render(field, { id: 12, version: 1, values: {} })}</span>)}
   <input aria-label="Collection view state" data-records-version={props.recordsVersion} defaultValue="" />
@@ -31,6 +31,7 @@ vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (
   {props.onTransferCsv && <button onClick={props.onTransferCsv}>Import or export CSV</button>}
   {props.onPendingResponses && <button onClick={props.onPendingResponses}>Pending responses</button>}
   {props.onExportRecovery && <button onClick={props.onExportRecovery}>Export recovery</button>}
+  {props.onCustomize && <button onClick={props.onCustomize}>Customize…</button>}
 </> }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
@@ -314,6 +315,23 @@ describe("a dataset table's ⚡ panel", () => {
       do: [{ kind: "set", values: [{ field: "Name", value: { kind: "literal", value: "Welcome" } }], records: null, operation: null }] },
   });
   const renderPage = () => render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+
+  it("names the automations file from Customize… once dohc finds the dataset's folder", async () => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset });
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    renderPage();
+    const customize = await screen.findByRole("button", { name: "Customize…" });
+    customize.focus();
+    fireEvent.click(customize);
+    // The tab shows the table, so the dialog names it too.
+    const dialog = await screen.findByRole("dialog", { name: "Customize Registrations" });
+    expect(within(dialog).getByText("Fundraiser/automations.yaml")).toBeTruthy();
+    // Without a workspace shell there is no agent to ask.
+    expect(within(dialog).queryByTestId("ask-agent")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(customize);
+  });
 
   it("finds the dataset's folder, counts this table's automations, and lists them in the panel", async () => {
     const donors = { tableId: id(9), name: "Donors", fields: dataset.tables[0]!.fields };
