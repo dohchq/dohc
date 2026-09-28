@@ -1162,8 +1162,12 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
-  it("serves collection reads through the engine port and translates wire values both ways", async () => {
+  it.each(["valid", "unsupported", "unbound"])("serves collection reads and diagnoses unsupported schemas: %s", async (state) => {
+    const unsupported = state !== "valid";
     const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
+    const collection: Awaited<ReturnType<CliCollectionsPort["query"]>>["collection"] = unsupported
+      ? { path: "tasks", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }] }
+      : { path: "tasks", status: "valid", reasons: [] };
     const queries: Array<Parameters<CliCollectionsPort["query"]>[0]> = [];
     const recordReads: Array<Parameters<CliCollectionsPort["getRecord"]>[0]> = [];
     context.collections = {
@@ -1178,7 +1182,7 @@ describe("CLI socket server", () => {
       async query(params) {
         queries.push(params);
         return {
-          collection: { path: "tasks", status: "valid", reasons: [] },
+          collection,
           records: [
             {
               id: recordId,
@@ -1200,8 +1204,9 @@ describe("CLI socket server", () => {
       },
       async getRecord(params) {
         recordReads.push(params);
+        if (state === "unbound") throw new Error("collection-record-not-found");
         return {
-          collection: { path: "tasks", status: "valid", reasons: [] },
+          collection,
           record: {
             id: recordId,
             path: "tasks/a.md",
@@ -1228,6 +1233,12 @@ describe("CLI socket server", () => {
 
     // The filter value arrives marker-encoded and reaches the engine port as
     // a real 64-bit integer; the result value leaves marker-encoded again.
+    if (unsupported) {
+      const expected = { ok: false, reason: "tasks/collection.yaml uses a newer version. Update dohc to read this file." };
+      await expect(invoke("collectionQuery", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks" })).resolves.toEqual(expected);
+      await expect(invoke("collectionRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", recordId, historyLimit: 25 })).resolves.toEqual(expected);
+      return;
+    }
     await expect(invoke("collectionQuery", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -1353,6 +1364,84 @@ describe("CLI socket server", () => {
       reason: "A shared view has no automation runs. The owner's computer runs this workspace's automations.",
     });
     expect(retries).toHaveLength(3);
+  });
+
+  it("presses a button through the press path and reports the run, asking before actions dohc cannot undo", async () => {
+    const presses: Array<Parameters<NonNullable<CliWorkspaceContext["buttons"]>["press"]>[0]> = [];
+    const actions = [{ name: "sendInvoice", label: "Send invoice" }];
+    const pressedBy: unknown[] = [];
+    context.buttons = {
+      press: vi.fn(async (input, by) => {
+        presses.push(input);
+        pressedBy.push(by);
+        if (input.field === "Send" && !input.confirm.includes("sendInvoice")) return { result: { confirm: actions }, waiting: null };
+        if (input.field === "Busy") return { result: { busy: true as const, reason: "Running for this record." }, waiting: null };
+        if (input.collectionPath === "shared") return { result: { busy: false as const, relayed: true as const }, waiting: null };
+        return { result: { busy: false as const, claimId: "atc_1", settled: null }, waiting: "roster" as const };
+      }),
+    };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", field: "Mark paid", record: "rec_1", confirm: [] };
+
+    await expect(invoke("automationPress", args)).resolves.toEqual({
+      ok: true, run: "atc_1", outcome: null, error: null, waiting: "Waiting to check who can edit this Collection.",
+    });
+    await expect(invoke("automationPress", { ...args, field: "Send" })).resolves.toEqual({
+      ok: false,
+      reason: 'This press runs actions dohc cannot undo: "Send invoice" (--confirm sendInvoice). Confirm each by name to run them.',
+      confirm: actions,
+    });
+    await expect(invoke("automationPress", { ...args, field: "Send", confirm: ["sendInvoice"] })).resolves.toMatchObject({ ok: true, run: "atc_1" });
+    await expect(invoke("automationPress", { ...args, field: "Busy" })).resolves.toEqual({ ok: false, reason: "Running for this record." });
+
+    // The same request id answers the same press without pressing again, and refuses another request.
+    const pressed = presses.length;
+    const first = await invoke("automationPress", { ...args, requestId: "press-1" });
+    await expect(invoke("automationPress", { ...args, requestId: "press-1" })).resolves.toEqual(first);
+    expect(presses).toHaveLength(pressed + 1);
+    await expect(invoke("automationPress", { ...args, collectionPath: "billing", requestId: "press-1" })).resolves.toEqual({
+      ok: false, reason: "request id press-1 was already used for a different request",
+    });
+    // After a restart forgets the request, the request id is still the press's key, which the executor's press id comes from.
+    const restart = async () => {
+      await server?.close();
+      serverOptions = { ...serverOptions };
+      if (server) {
+        server = await startCliServer(serverOptions);
+        token = (await readFile(server.tokenPath, "utf8")).trim();
+      }
+    };
+    await restart();
+    await invoke("automationPress", { ...args, requestId: "press-1" });
+    await restart();
+    await invoke("automationPress", { ...args, collectionPath: "billing", requestId: "press-1" });
+    expect([presses[pressed]!, ...presses.slice(-2)].map((press) => [press.collectionPath, press.pressKey]))
+      .toEqual([["tasks", "press-1"], ["tasks", "press-1"], ["billing", "press-1"]]);
+    // A press with no request id gets a key of its own.
+    await invoke("automationPress", args);
+    await invoke("automationPress", args);
+    const [one, two] = presses.slice(-2).map((press) => press.pressKey);
+    expect(one).not.toBe(two);
+    // A press refused for its question is not remembered, so the same id can confirm it.
+    await expect(invoke("automationPress", { ...args, field: "Send", requestId: "press-3" })).resolves.toMatchObject({ ok: false });
+    await expect(invoke("automationPress", { ...args, field: "Send", confirm: ["sendInvoice"], requestId: "press-3" }))
+      .resolves.toMatchObject({ ok: true, run: "atc_1" });
+    expect(presses[0]).toMatchObject({ collectionPath: "tasks", field: "Mark paid", recordId: "rec_1", confirm: [] });
+
+    // The press is the agent's, as a collection write through the socket is: named as dohc-mcp, at its run's depth.
+    expect(pressedBy[0]).toEqual({ kind: "agent", originId: "dohc-mcp", depth: 0 });
+    await invoke("automationPress", { ...args, actor: "human" });
+    expect(pressedBy.at(-1)).toEqual({ kind: "human" });
+    // A run an automation started presses at its depth, whatever actor the caller names, so the chain cap counts it.
+    agentRunDepth = 2;
+    await invoke("automationPress", { ...args, actor: "human" });
+    expect(pressedBy.at(-1)).toEqual({ kind: "agent", originId: "dohc-mcp", depth: 2 });
+    agentRunDepth = 0;
+    const count = presses.length;
+    await expect(invoke("automationPress", { ...args, collectionPath: "shared-with-me/tasks" })).resolves.toMatchObject({ ok: false });
+    expect(presses).toHaveLength(count);
+    // A shared view's press goes the app's relayed way.
+    context.readOnly = true;
+    await expect(invoke("automationPress", { ...args, collectionPath: "shared" })).resolves.toEqual({ ok: true, relayed: true });
   });
 
   it("routes collection writes through the write seam with a server-derived author", async () => {

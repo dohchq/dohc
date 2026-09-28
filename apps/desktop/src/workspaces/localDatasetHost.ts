@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
-import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import type { AutomationPressActor, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES, appBackendFileSignatureMatches, parseAppBackendUploadRequest, parseAppBackendFile, type AppBackendFile } from "@dohc/security-contract/app-backend";
@@ -553,10 +553,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
          * uses the owner's approved operations, which are theirs, through the
          * automation caller.
          */
-        press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string }): DatasetPressed {
+        press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string; by: AutomationPressActor }): DatasetPressed {
           assertCurrent();
-          const { pressedBy, ...press } = input;
-          return host.automationClaims.press({ workspaceId, datasetId, ...press, presser: { kind: "owner", userId: pressedBy } });
+          const { pressedBy, by, ...press } = input;
+          // An agent's press carries its run's depth; the dataset has no agent origin to record.
+          const agent = by.kind === "agent" ? { agent: { depth: by.depth } } : {};
+          return host.automationClaims.press({ workspaceId, datasetId, ...press, presser: { kind: "owner", userId: pressedBy, ...agent } });
         },
         /** Throws why this host cannot take a press of this button, as `press` would. */
         assertPressable(datasetId: string, button: Pick<DatasetPressInput, "tableId" | "fieldId">) {

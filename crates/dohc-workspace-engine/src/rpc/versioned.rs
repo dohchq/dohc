@@ -164,6 +164,11 @@ struct VersionedTextDeleteParams {
     path: String,
     #[serde(default)]
     expected_object_id: Option<String>,
+    /// Delete only if the path is still missing on disk when the engine
+    /// applies the delete: the caller saw it missing, and a replace can empty
+    /// the name for a moment.
+    #[serde(default)]
+    only_if_absent_on_disk: bool,
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
@@ -697,6 +702,7 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
                 params.expected_object_id,
+                params.only_if_absent_on_disk,
                 open.root.clone(),
                 Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),

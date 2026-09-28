@@ -14,6 +14,7 @@ import {
   DOHC_TRANSPORT_UNAVAILABLE_REASON,
   queryCollection,
   listAutomationRuns,
+  pressButton,
   readAutomationRun,
   readRecord,
   retryAutomationRun,
@@ -100,6 +101,15 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
 }
 
 describe("desktop CLI collection proxy", () => {
+  it("preserves the update diagnostic for collection queries and record reads", async () => {
+    await withWorkspace(async (base) => {
+      await mkdir(join(base.root, "tasks"));
+      const failure = { ok: false as const, reason: "tasks/collection.yaml uses a newer version. Update dohc to read this file." };
+      const ctx: ToolContext = { ...base, request: vi.fn(async () => failure) };
+      await expect(queryCollection(ctx, { collectionPath: "tasks" })).resolves.toEqual(failure);
+      await expect(readRecord(ctx, { collectionPath: "tasks", recordId: record.id })).resolves.toEqual(failure);
+    });
+  });
   it("maps all four collection tools to their CLI verbs with the MCP workspace and agent actor", async () => {
     await withWorkspace(async (base) => {
       await mkdir(join(base.root, "tasks"), { recursive: true });
@@ -396,6 +406,29 @@ describe("desktop CLI automation proxy", () => {
       await expect(retryAutomationRun(ctx, { collectionPath: "shared-with-me/trip", automation: "stamp", run: "atc_1" }))
         .resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
       expect(ctx.request).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe("desktop CLI button proxy", () => {
+  it("maps dohc_press_button to the press verb, and refuses a mounted share before any request", async () => {
+    await withWorkspace(async (base) => {
+      await mkdir(join(base.root, "Billing"), { recursive: true });
+      await mkdir(join(base.root, "shared-with-me", "trip"), { recursive: true });
+      const pressed = { ok: true, run: "atc_1", outcome: null, error: null, waiting: null } satisfies CliResultByVerb["automationPress"];
+      const request = vi.fn(async (_request: CliRequestWithoutToken) => pressed);
+      const ctx: ToolContext = { ...base, request };
+      await expect(pressButton(ctx, { collectionPath: "Billing", button: "Send", recordId: "12", confirm: ["sendInvoice"], requestId: "press-1" }))
+        .resolves.toEqual(pressed);
+      expect(request).toHaveBeenCalledWith(expect.objectContaining({
+        verb: "automationPress",
+        args: {
+          cwd: base.root, actor: "agent", collectionPath: "Billing", field: "Send", record: "12", confirm: ["sendInvoice"], requestId: "press-1",
+        },
+      }));
+      await expect(pressButton(ctx, { collectionPath: "shared-with-me/trip", button: "Send", recordId: "12" }))
+        .resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+      expect(request).toHaveBeenCalledTimes(1);
     });
   });
 });

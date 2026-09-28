@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +12,11 @@ it("starts an isolated desktop E2E relay with inherited device-delivery configur
   try {
     relay = await spawnSyncRelay({ dbPath: join(root, "relay.sqlite") });
     expect(relay.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    expect(existsSync(`${relay.dbPath}-wal`)).toBe(true);
+    await relay.stop();
+    // SQLite removes its WAL when its last connection closes normally.
+    expect(existsSync(`${relay.dbPath}-wal`)).toBe(false);
+    expect(existsSync(`${relay.dbPath}-shm`)).toBe(false);
   } finally {
     vi.unstubAllEnvs();
     await relay?.stop();

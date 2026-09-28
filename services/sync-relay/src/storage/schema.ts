@@ -6,7 +6,7 @@ import { initializeServiceHostEnrollmentSchema } from "./serviceHostEnrollment";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
 import { initializeNoticeSchema, initializeShareNoticeDeliverySchema } from "./noticeSchema";
 import { initializeAutomationHostSchema } from "./automationHostSchema";
-import { initializeAutomationGroupHandoverSchema } from "./automationHosts";
+import { initializeAutomationGroupHandoverSchema, initializeAutomationHostPlacementSchema } from "./automationHosts";
 import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
@@ -1212,6 +1212,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);
     initializeAutomationGroupHandoverSchema(db);
+    initializeAutomationHostPlacementSchema(db);
     initializeCurrentFileKeySchema(db);
     initializeCollectionWriteSchema(db);
     initializeAutomationPressSchema(db);

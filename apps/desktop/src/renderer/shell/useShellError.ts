@@ -14,6 +14,9 @@ export type ShellErrorKind =
   | "cloud-sync"
   | "import-files"
   | "share-refresh"
+  | "drive-no-atomic-placement"
+  | "file-recovery-unavailable"
+  | "kept-files"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 
@@ -201,6 +204,52 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
+  // A drive limit: one row that a remount files again without a toast.
+  const reportDriveLimit = useCallback(
+    (notice: { message: string; toast: boolean }) =>
+      push(
+        {
+          message: notice.message,
+          details: [["Detail", "no-atomic-placement"]],
+          retry: null,
+          kind: "drive-no-atomic-placement",
+        },
+        !notice.toast,
+      ),
+    [push],
+  );
+  const reportRecoveryUnavailable = useCallback(
+    (unavailable: boolean, retry: () => void, openFolder: () => void) => {
+      if (!unavailable) {
+        clearKind("file-recovery-unavailable");
+        return;
+      }
+      push({
+        message: "dohc could not read the recovery folder. File recovery is waiting. Check folder access, then try again.",
+        details: [["Folder", ".dohc/engine/displaced"]],
+        retry,
+        action: { label: "Show recovery folder", run: openFolder },
+        kind: "file-recovery-unavailable",
+      });
+    },
+    [clearKind, push],
+  );
+  const reportKeptFiles = useCallback(
+    (notice: { paths: readonly (readonly [string, string])[]; toast: boolean }, openFolder: () => void) => {
+      if (!notice.paths.length) {
+        clearKind("kept-files");
+        return;
+      }
+      push({
+        message: "dohc kept recovery copies of files. Review the copies in .dohc/engine/displaced inside your workspace folder.",
+        details: notice.paths.map(([original, copy]) => [original || "Copy", copy] as const),
+        retry: null,
+        action: { label: "Show recovery folder", run: openFolder },
+        kind: "kept-files",
+      }, !notice.toast);
+    },
+    [clearKind, push],
+  );
   // Snapshot lanes share one surface. Keep the lane in the message so the
   // user can tell which value went stale, then show the cause and a retry.
   //
@@ -311,6 +360,9 @@ export function useShellError(workspaceId: string) {
     clearSearchError,
     reportSyncFailure,
     clearSyncFailure,
+    reportDriveLimit,
+    reportKeptFiles,
+    reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,

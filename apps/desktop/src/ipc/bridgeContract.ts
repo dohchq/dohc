@@ -1,3 +1,4 @@
+import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
@@ -125,6 +126,7 @@ import {
 // The renderer never sees raw Electron APIs.
 
 const OPAQUE_ID = z.string().min(1).max(200);
+const CHAT_CHANNEL_SLUG = z.string().min(1).refine(value => nameByteLength(value) <= 200);
 
 // Length caps: IPC payloads are untrusted; bound every renderer-supplied
 // string so a hostile/buggy caller cannot cause memory/latency pressure.
@@ -360,6 +362,11 @@ export const WorkspaceIdPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
+
+export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
+  recoveryCopies: z.boolean().optional(),
+});
+export type RevealWorkspaceFolderPayload = z.infer<typeof RevealWorkspaceFolderPayload>;
 
 // Who asked for a sync pass now. A person's retry counts toward the attempts
 // a failure's notice weighs; a retry on reconnecting or waking does not.
@@ -1014,7 +1021,7 @@ const WorkspaceGraphChatThreadNode = WorkspaceGraphNodeBase.extend({
   channelId: OPAQUE_ID.optional(),
   channelWireId: z.string().min(1).max(256).optional(),
   channelName: z.string().min(1).max(100).optional(),
-  channelSlug: z.string().min(1).max(100).optional(),
+  channelSlug: CHAT_CHANNEL_SLUG.optional(),
   channelKind: z.enum(["channel", "dm", "agent"]).optional(),
   filePath: z.never().optional(),
   headingAnchor: z.never().optional(),
@@ -1241,6 +1248,13 @@ const SYNC_STATUS_BASE_FIELDS = {
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
   historyShareView: z.boolean(),
+  // True when the workspace's drive cannot refuse to replace a file (FAT,
+  // exFAT, some network shares), so a save can lose another program's change
+  // made at the same moment. Optional, unlike its neighbours: an omitted
+  // warning reads as "no warning", which is the safe reading.
+  atomicPlacementUnavailable: z.boolean().optional(),
+  recoveryUnavailable: z.boolean().optional(),
+  keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
@@ -1604,7 +1618,7 @@ export const ChatFileMentionRecord = z.object({
   channelId: OPAQUE_ID.optional(),
   channelWireId: z.string().min(1).max(256).optional(),
   channelName: z.string().min(1).max(100).optional(),
-  channelSlug: z.string().min(1).max(100).optional(),
+  channelSlug: CHAT_CHANNEL_SLUG.optional(),
   channelKind: z.enum(["channel", "dm", "agent"]).optional(),
 });
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
@@ -1912,7 +1926,7 @@ const CHAT_CHANNEL_NAME_MAX = 80;
 export const ChatChannelRecord = z.object({
   id: OPAQUE_ID,
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
   // What the group holds and why it exists. Older fixtures omit them.
   type: z.enum(["posts", "chat", "both"]).optional(),
@@ -2017,7 +2031,7 @@ const ChatFeedChannelRecord = z.object({
   id: OPAQUE_ID,
   wireId: z.string().min(1).max(256).optional(),
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
 });
 
@@ -5463,6 +5477,8 @@ export const RetryAutomationNoticeResult = z.union([
 const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
 const ScheduleHostComputer = z.object({
   installId: z.string().min(1).max(256),
+  // "server" for the dohc server, listed first while it runs automations.
+  kind: z.enum(["computer", "server"]),
   label: z.string().min(1).max(64),
   lastSeenMs: z.number().int().nonnegative(),
   thisComputer: z.boolean(),
@@ -5838,7 +5854,7 @@ export interface DohcDesktopBridge
     payload: AttachWorkspaceFolderPayload,
   ): Promise<WorkspaceSummary>;
   forgetWorkspace(payload: WorkspaceIdPayload): Promise<void>;
-  revealWorkspaceFolder(payload: WorkspaceIdPayload): Promise<void>;
+  revealWorkspaceFolder(payload: RevealWorkspaceFolderPayload): Promise<void>;
   // Opens (or focuses) a window for the workspace and leaves this window as
   // it is. The manager window closes itself after.
   openWorkspaceWindow(payload: WorkspaceIdPayload): Promise<void>;
@@ -6164,6 +6180,7 @@ export interface DohcDesktopBridge
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
+  retryFileRecovery(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.
   retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(

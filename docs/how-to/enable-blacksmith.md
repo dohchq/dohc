@@ -29,8 +29,8 @@ Defer app installation too if Blacksmith must receive no repository activity bef
 
 1. Install the Blacksmith GitHub App for `dohc-ai/dohc` only.
 2. Restrict its runner group's repository access to `dohc-ai/dohc`.
-3. Set the billing email and an early monthly spending alert in Blacksmith.
-4. Confirm an acceptable monthly budget and any provider-enforced cutoff before enabling automatic runs.
+3. Set a monitored primary email under Account, then configure a $50 monthly threshold under Spending Alerts.
+4. Plan for $100 per month. Confirm any provider-enforced cutoff before enabling automatic runs.
 5. While private, keep fork PR workflows disabled in GitHub Actions settings.
 6. Before making the repository public, require approval for all external contributors in GitHub Actions settings.
 7. Inspect workflow changes before approving any outside contributor's run.
@@ -70,6 +70,34 @@ Shared inputs still select full coverage. Each test job has a 60-minute timeout.
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
 Record elapsed time, billed cost, peak memory, and disk use for each gate.
 The first Linux cloud run remains a launch check; local verification cannot establish its runtime or cost.
+
+Run the first benchmark on `main`, then repeat it to measure cache reuse.
+PRs can restore caches from their base branch and the default branch.
+Caches created by a PR cannot warm unrelated PRs.
+Confirm that a warm PR run restores the `main` cache before budgeting for reuse.
+Repeat the `main` benchmark after dependency or Rust toolchain changes when the shared cache needs refreshing.
+Keep the separate JavaScript and Rust cache keys. Their build outputs differ.
+
+## Keep runs within budget
+
+Keep implementation PRs in draft until focused checks pass and the change is ready for review.
+Batch review fixes into one push. If substantial implementation resumes, return the PR to draft.
+Every material fix still needs passing verification before merge.
+Reuse passing cloud evidence instead of repeating the full gates locally.
+Keep focused local checks for platform-specific behavior.
+
+Review spending, runs per PR, and cancelled runner minutes each week.
+Cancellation stops future work; Blacksmith still bills time already used.
+At the $50 alert, compare the month's projected spend with the $100 budget.
+If projected spending exceeds the budget, reduce unnecessary reruns or follow the shutdown procedure below.
+Continue required verification locally while cloud execution is off.
+
+At $0.008 per minute, 950 PRs averaging ten combined 4-vCPU runner-minutes each cost $76 before credits and overhead.
+Count both test jobs across every run on each PR, including cancelled runs.
+The 2-vCPU selection and verdict jobs add cost beyond those test-job minutes.
+Use ten minutes per PR as a planning target, not a measured runtime or permission to remove required tests.
+The free allowance is shared across the organization; check its remaining balance before including it in the budget.
+An 8-vCPU runner costs twice as much per minute. Choose it only after comparing cost per passing run.
 
 ## Read the result
 

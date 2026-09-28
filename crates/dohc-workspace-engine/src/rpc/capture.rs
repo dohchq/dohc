@@ -2,7 +2,9 @@ use crate::EngineService;
 use crate::capture_driver;
 use crate::lock;
 use crate::rpc::dispatch::initial_capture_phase_requires_fence;
+use crate::rpc::error::map_runtime;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::request::validated_author;
 use crate::rpc::workspace::OpenWorkspace;
@@ -35,11 +37,19 @@ pub(super) fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireErro
 }
 
 impl EngineService {
-    pub(super) fn watcher_status(
+    pub(super) async fn watcher_status(
         &self,
         handle: Option<WorkspaceHandle>,
     ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
+        // A write here found a filesystem with no atomic no-replace rename.
+        let recovery_unavailable = dohc_engine_files::workspace_recovery_unavailable(&open.root);
+        let no_atomic_placement = dohc_engine_files::workspace_lacks_atomic_placement(&open.root);
+        let kept_files = open
+            .actor
+            .kept_materialization_files(open.workspace_id.clone(), open.root.clone())
+            .await
+            .unwrap_or_default();
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
@@ -52,6 +62,9 @@ impl EngineService {
                     "degraded": snapshot.degraded,
                     "terminal": snapshot.terminal,
                     "phase": snapshot.phase.as_str(),
+                    "noAtomicPlacement": no_atomic_placement,
+                    "keptFiles": kept_files,
+                    "recoveryUnavailable": recovery_unavailable,
                 })
             }
             // The driver is only absent mid-teardown; report an honest
@@ -61,6 +74,9 @@ impl EngineService {
                 "degraded": true,
                 "terminal": false,
                 "phase": "degraded",
+                "noAtomicPlacement": no_atomic_placement,
+                "keptFiles": kept_files,
+                    "recoveryUnavailable": recovery_unavailable,
             }),
         })
     }
@@ -158,6 +174,28 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
     ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
+        if dohc_engine_files::workspace_recovery_unavailable(&open.root) {
+            let cancellation = OperationCancellation::new(ctx);
+            let _capture = tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => return Err(cancellation.interruption("file recovery")),
+                guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+            };
+            let _sessions = tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => return Err(cancellation.interruption("file recovery")),
+                guard = Arc::clone(&open.session_ops).lock_owned() => guard,
+            };
+            open.actor
+                .materialize_replay_pending_for_fence(
+                    open.root.clone(),
+                    open.workspace_id.clone(),
+                    Arc::new(self.self_writes.scoped(&open.root)),
+                    now_ms()?,
+                )
+                .await
+                .map_err(map_runtime)?;
+        }
         if let Some(driver) = lock(&open.capture).as_ref() {
             driver.request_manifest_refresh();
         }
@@ -307,5 +345,39 @@ mod tests {
             .workspace_close(Some(full_handle))
             .await
             .expect("close full workspace");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unavailable_recovery_allows_open_and_explicit_reconcile_retries_it() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let params =
+            json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "recovery" });
+        let first = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(first["workspace"].clone()).unwrap();
+        service.workspace_close(Some(handle)).await.unwrap();
+        let staging = scratch.path().join(".dohc/engine/displaced");
+        std::fs::write(&staging, b"unavailable").unwrap();
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let status = service.watcher_status(Some(handle.clone())).await.unwrap();
+        assert_eq!(status["recoveryUnavailable"], json!(true));
+        assert_eq!(std::fs::read(&staging).unwrap(), b"unavailable");
+        std::fs::remove_file(&staging).unwrap();
+        service
+            .capture_reconcile(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .unwrap();
+        let status = service.watcher_status(Some(handle.clone())).await.unwrap();
+        assert_eq!(status["recoveryUnavailable"], json!(false));
+        service.workspace_close(Some(handle)).await.unwrap();
     }
 }

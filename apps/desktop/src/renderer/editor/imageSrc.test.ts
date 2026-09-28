@@ -188,3 +188,8 @@ describe("makeImageNodeView", () => {
     expect(img.getAttribute("alt")).toBe("alt text");
   });
 });
+
+it("percent-encodes Unicode image paths once at the URL boundary", () => {
+  expect(resolveWorkspaceImageSrc({ workspaceId: "ws1", docPath: "notes/plan.md" }, "assets/会议-фото.png"))
+    .toBe("dohc-file://ws1/notes/assets/%E4%BC%9A%E8%AE%AE-%D1%84%D0%BE%D1%82%D0%BE.png");
+});

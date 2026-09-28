@@ -1,6 +1,7 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { escapeHtml } from "@dohc/workspace-core/html";
 import { isRecord } from "@dohc/workspace-core/records";
+import { fileVersionError, fileVersionReason } from "@dohc/workspace-contracts/file-version";
 // Pure MCP tool implementations. Each operates on a workspace ROOT dir and a
 // state HOME (the desktop registry/state location). Every workspace-relative
 // write path is validated through validateUserMaterializePath (reads through
@@ -1604,7 +1605,13 @@ async function detectSiteAt(
         message: "dohc.json must contain a JSON object.",
       });
     } else {
-      config = parsed.value;
+      const versionError = fileVersionError(parsed.value.version, configPath);
+      const versionReason = fileVersionReason(parsed.value.version);
+      if (versionError && versionReason) {
+        diagnostics.push({ severity: "error", code: versionReason, path: configPath, message: versionError });
+      } else {
+        config = parsed.value;
+      }
     }
   }
 
@@ -2056,6 +2063,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
             path: relativeJoin(root.normalized, "dohc.json"),
             content: `${JSON.stringify(
               {
+                version: 1,
                 type: "site",
                 title,
                 preview: { mode: "static", entry: "index.html" },
@@ -2632,6 +2640,24 @@ export async function retryAutomationRun(
     automation: args.automation,
     run: args.run,
     startOver: args.startOver ?? false,
+  });
+}
+
+// A press of a Button field, through the desktop's press path. A press
+// changes records, so the path must clear the write rules.
+export async function pressButton(
+  ctx: ToolContext,
+  args: { collectionPath: string; button: string; recordId: string; table?: string; confirm?: string[]; requestId?: string },
+) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "automationPress", {
+    collectionPath: resolved.normalized,
+    field: args.button,
+    record: args.recordId,
+    ...(args.table === undefined ? {} : { table: args.table }),
+    confirm: args.confirm ?? [],
+    ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
   });
 }
 

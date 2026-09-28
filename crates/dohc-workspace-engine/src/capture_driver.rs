@@ -27,7 +27,10 @@ use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, PolicyState, SelfWriteSuppression, StoreCaptureSink,
     StoreCaptureSinkParams,
 };
-use crate::{CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
+use crate::{
+    CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT,
+    CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, EngineEvents,
+};
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
@@ -1025,6 +1028,7 @@ impl CaptureDriver {
                 events,
                 apply_probe,
                 scan: drive_scan,
+                no_atomic_placement_announced: false,
             };
             drive_loop(
                 &mut env,
@@ -1388,10 +1392,7 @@ const NARROWED_SEED_SENTINEL_SHA: &str = "policy-narrowed-reoffer";
 /// An unavailable policy holds the run dirty for recovery.
 fn read_capture_policy(root: &Path) -> PolicyState {
     let snapshot = dohc_engine_runtime::search::read_engine_search_policy(root);
-    if snapshot.diagnostics.iter().any(|diagnostic| {
-        diagnostic.file == "files.toml"
-            && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
-    }) {
+    if snapshot.holds_file_capture() {
         return PolicyState::Unavailable;
     }
     PolicyState::Known(snapshot.files_policy)
@@ -1911,9 +1912,28 @@ struct RealEnv {
     events: EngineEvents,
     apply_probe: Option<CaptureApplyProbe>,
     scan: ScanGauge,
+    /// Whether this driver already announced that the workspace's drive has
+    /// no atomic no-replace rename. Announced once; `watcher.status` stays
+    /// the backstop for a dropped event.
+    no_atomic_placement_announced: bool,
 }
 
 impl RealEnv {
+    /// Announce, once, that a placement in this workspace had to fall back
+    /// to a check-then-rename.
+    fn announce_no_atomic_placement(&mut self) {
+        if self.no_atomic_placement_announced
+            || !dohc_engine_files::workspace_lacks_atomic_placement(&self.root)
+        {
+            return;
+        }
+        self.no_atomic_placement_announced = true;
+        self.events.emit(
+            CAPTURE_NO_ATOMIC_PLACEMENT_EVENT,
+            serde_json::json!({ "workspaceId": self.workspace_id }),
+        );
+    }
+
     fn capture_author(&self) -> Option<String> {
         self.author_json
             .lock()
@@ -2156,6 +2176,9 @@ impl DriverEnv for RealEnv {
     }
 
     async fn tick(&mut self, layer: &FilesLayer, cancel: &CancellationToken) -> TickIo {
+        // A write, or a recovery at open, fell back since the last tick; its
+        // own rename is what woke this tick.
+        self.announce_no_atomic_placement();
         if let Some(probe) = &self.apply_probe {
             probe.observe_gate_wait_if_armed();
         }

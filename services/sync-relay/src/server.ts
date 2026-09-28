@@ -95,6 +95,7 @@ import {
 import { parseShareId, parseString, parseWorkspaceId, relayPathSegments } from "./requestInputs";
 import type { ShareSelector } from "./shareFilter";
 import { type SyncRelayStorage } from "./storage";
+import type { AutomationServer } from "./storage/automationHosts";
 import {
   authorizeShareAction,
   type AuthorizedShareAction,
@@ -167,6 +168,8 @@ export interface CreateSyncRelayHandlerOptions {
   noticePostRateLimiter?: TokenBucketLimiter;
   // Changes to a workspace's automation host, keyed by owner.
   automationHostRateLimiter?: TokenBucketLimiter;
+  // This server while it runs workspaces' automations; absent when it does not.
+  automationServer?: AutomationServer;
   // Button presses from shared views, per grant, and the host's answers, per owner.
   automationPressRateLimiters?: ReturnType<typeof createAutomationPressRateLimiters>;
   linkFreshnessPageSize?: number;
@@ -275,6 +278,7 @@ export function createSyncRelayHandler({
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
+  automationServer,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
 } {
@@ -447,7 +451,9 @@ export function createSyncRelayHandler({
     deliverPendingShareNotices,
     noticePostRateLimiter,
   );
-  const respondToAutomationHost = createAutomationHostRoutes(storage, nowMs, automationHostRateLimiter);
+  const respondToAutomationHost = createAutomationHostRoutes(
+    storage, nowMs, automationHostRateLimiter, automationServer ?? null,
+  );
   const automationPresses = createAutomationPressRoutes({
     storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
   });
