@@ -127,7 +127,7 @@ describe("app without app.publish.json", () => {
   it("names a file the page links but the folder cannot publish", async () => {
     const h = harness();
     page(h, { "app/index.html": '<!doctype html><img alt="Map" src="my%20map.png">', "app/my map.png": "png" });
-    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it using only letters, digits, and _ @ . / -, then publish again.");
+    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it without spaces or symbols, then publish again.");
   });
 
   it("includes every type the compiler accepts, and leaves out build configuration and installed packages", async () => {
@@ -210,4 +210,11 @@ describe("owner dataset publication", () => {
     await expect(h.prepare()).rejects.toMatchObject({ name: "AbortError" });
     expect(h.compile).not.toHaveBeenCalled();
   });
+});
+
+it.each(["会议", "Cafe\u0301"])("publishes Unicode source names from disk without renaming %s", root => {
+  const h = harness(); h.sources.clear();
+  h.sources.set(root + "/index.html", '<!doctype html><script src="' + encodeURIComponent("скрипт.js") + '"></script>');
+  h.sources.set(root + "/скрипт.js", 'document.title = "Ready";');
+  return expect(h.prepare(root)).resolves.toMatchObject({ candidate: { appRoot: root, entryPath: root + "/index.html" } });
 });

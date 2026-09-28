@@ -23,6 +23,11 @@ import {
 } from "./imagePaste";
 
 describe("slugifyBaseName", () => {
+  it("keeps a whole syllable at the pasted-image byte limit", () => {
+    expect(slugifyBaseName("界".repeat(12) + "कि.png")).toBe("界".repeat(12));
+    expect(slugifyBaseName("界".repeat(11) + "क्ष.png")).toBe("界".repeat(11));
+    expect(slugifyBaseName("कि".repeat(8) + ".png")).toBe("कि".repeat(6));
+  });
   it("lowercases, dashes non-alphanumerics, and drops the extension", () => {
     expect(slugifyBaseName("My Photo.PNG")).toBe("my-photo");
     expect(slugifyBaseName("Screen Shot 2026-07-11.jpeg")).toBe(
@@ -1539,4 +1544,12 @@ describe("attachment settings are read at use time", () => {
     await vi.waitFor(() => expect(dispatched).toHaveLength(1));
     warn.mockRestore();
   });
+});
+
+it("preserves scripts and NFC in pasted image names within the byte limit", () => {
+  expect(slugifyBaseName("हिन्दी फोटो.png")).toBe("हिन्दी-फोटो");
+  expect(slugifyBaseName("Cafe\u0301.png")).toBe("café");
+  expect(slugifyBaseName("界".repeat(80) + ".png")).toBe("界".repeat(13));
+  expect(slugifyBaseName("CON.png")).toBe("name-con");
+  expect(generateAssetFilename("会议.png", "image/png", new Uint8Array([1]))).toMatch(/^会议-[a-z0-9]+\.png$/u);
 });

@@ -375,7 +375,7 @@ describe("registered channels and personal chat projections", () => {
       .rejects.toThrow("A group with that name already exists.");
     test.storeMethods.createChannel.mockRejectedValueOnce(new Error("invalid-channel-name"));
     await expect(test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "Team" }))
-      .rejects.toThrow("Use 1 to 80 characters, with at least one letter from a to z or a digit.");
+      .rejects.toThrow("Use 1 to 80 characters, including at least one letter or number.");
     // Any other engine refusal keeps its own reason.
     test.storeMethods.createChannel.mockRejectedValueOnce(new Error("disk full"));
     await expect(test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "Team" }))

@@ -1,3 +1,4 @@
+import { nameSlug } from "@dohc/workspace-contracts/names";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   CLI_PROTOCOL_VERSION,
@@ -2942,7 +2943,7 @@ async function dispatch(
           threadId: thread.thread.id,
         });
         const result = await buildThreadContent(context, thread, messages);
-        const channelDir = join(outputRoot, safePathSegment(thread.group.slug));
+        const channelDir = join(outputRoot, nameSlug(thread.group.slug) || "chat");
         await mkdir(channelDir, { recursive: true });
         const publicThreadId = cliThreadId(thread.thread.id);
         const path = join(channelDir, `${safePathSegment(publicThreadId)}.md`);

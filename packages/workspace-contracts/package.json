@@ -9,6 +9,7 @@
     "./automations": "./src/automations.ts",
     "./chat-identity": "./src/chatIdentity.ts",
     "./chat-identity-values": "./src/chatIdentityValues.ts",
+    "./names": "./src/names.ts",
     "./chat-mentions": "./src/chatMentions.ts",
     "./collection": "./src/collection.ts",
     "./collection-data": "./src/collectionData.ts",
