@@ -83,7 +83,7 @@ import {
   pinDatasetOperations,
   type DatasetRecordId,
 } from "./datasetAutomationPlan";
-import { datasetPresser, datasetRecordExists, runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
+import { datasetPresser, datasetRecordExists, runDatasetAutomation, type DatasetRunClaim, type DatasetRunHost } from "./datasetAutomationRun";
 import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
@@ -116,7 +116,10 @@ import { automationFailureKey, type AutomationFailure, type ReportedRun } from "
 export const AUTOMATIONS_FILE_NAME = "automations.yaml";
 const DATASET_FILE_NAME = "dataset.json";
 const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml", DATASET_FILE_NAME]);
+const KEPT_ANOTHER_WAY_UNDO = "This run ran before this Collection changed how it keeps its records, so dohc cannot undo it.";
 const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so its automations cannot run.";
+// A dataset's records are kept on one computer, and its schedules run only there.
+const DATASET_SCHEDULES_ELSEWHERE = "Schedules run on another computer, but this Collection's records are kept on this one. Choose this computer under Schedules run on in Settings.";
 
 const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
 // A workspace that synced before, or that has no record of whether it did,
@@ -643,6 +646,16 @@ type SettleInput = { state: "done" } | { state: "failed"; error: string };
 /** A claim this computer holds, from the ledger that made it. */
 type HeldClaim = { source: "engine"; claim: AutomationClaim } | { source: "dataset"; claim: DatasetAutomationClaim };
 
+/**
+ * How a held claim runs: through the dataset its Collection keeps, or as a
+ * document Collection's engine claim. An engine claim in a dataset
+ * Collection is a due time, and runs through the dataset.
+ */
+function runnerOf(held: HeldClaim, datasetId: string | undefined): { kind: "dataset"; held: DatasetRunClaim } | { kind: "document"; claim: AutomationClaim } {
+  if (held.source === "dataset") return { kind: "dataset", held };
+  return datasetId === undefined ? { kind: "document", claim: held.claim } : { kind: "dataset", held: { ...held, datasetId } };
+}
+
 /** Whether a held claim runs a button's press, whose window hears how it runs. */
 function isPress(held: HeldClaim): boolean {
   return held.source === "engine" ? held.claim.change.kind === "button" : held.claim.fact?.kind === "button";
@@ -672,8 +685,9 @@ type LedgerHistory = { claims: HistoryClaim[]; failure: string | null };
  */
 type LedgerClaim = { ledger: "dataset" | "engine"; state: AutomationClaimSummary["state"]; pressedBy: string | null | undefined };
 /** What a released claim waits for; later drains pass it by until that clears. */
-type WaitReason = "roster" | "held" | "busy" | "session";
-export type PressWaitReason = WaitReason;
+export type PressWaitReason = "roster" | "held" | "busy" | "session";
+/** A press's reasons, or a dataset whose host has not opened, which a press never waits for. */
+type WaitReason = PressWaitReason | "dataset";
 /**
  * What the engine must hear about a claim this computer holds: hand it back
  * to wait, or settle it. `settled` runs once the engine takes the settle.
@@ -774,6 +788,8 @@ export class CollectionAutomations {
   private busyTimer: ReturnType<typeof setTimeout> | null = null;
   private runAbort = new AbortController();
   private readonly nowMs: () => number;
+  // The Collection each claim waiting for its dataset to be indexed is in.
+  private datasetWaits = new Map<string, string>();
   // Each enabled schedule's switch-on time, as the index last read them.
   private enabledSince = new Map<string, number | null>();
 
@@ -809,6 +825,7 @@ export class CollectionAutomations {
       this.noteEnabledSchedules(true);
       this.state = "open";
       this.waitingFor.clear();
+      this.datasetWaits.clear();
       await this.reconcile(true);
       this.publishHolds();
     }).then(
@@ -879,6 +896,8 @@ export class CollectionAutomations {
       await this.reconcile(false);
       // An edited or removed automation's held steps leave the notices.
       this.publishHolds();
+      // A descriptor fixed or removed: its waiting due times look again.
+      this.wakeDatasetWaits((path) => folders.has(path));
     })
       // A new or changed step gets its verdict now, while the people who
       // could have written it can still edit the Collection.
@@ -923,8 +942,26 @@ export class CollectionAutomations {
       await this.readFile(path);
     }
     await this.noteSwitches();
+    // A schedule found now counts from now, as one switched on does.
+    this.noteEnabledSchedules(false);
     await this.reconcile(false);
     this.publishHolds();
+    this.options.onSchedulesChanged?.();
+    this.wakeDatasetWaits((path) => this.datasets.has(path));
+  }
+
+  /**
+   * Wakes each due time that waited for its dataset in a Collection `wake`
+   * accepts, so the next drain looks again: it runs once the dataset is
+   * indexed, and settles once the folder holds no dataset.
+   */
+  private wakeDatasetWaits(wake: (path: string) => boolean): void {
+    const woken = [...this.datasetWaits].filter(([, path]) => wake(path));
+    for (const [claimId] of woken) {
+      this.datasetWaits.delete(claimId);
+      this.waitingFor.delete(claimId);
+    }
+    if (woken.length > 0) this.notifyClaimed();
   }
 
   /** The wake-up: a claim event landed, a retry queued a claim, or a reconcile registered work. */
@@ -1086,6 +1123,24 @@ export class CollectionAutomations {
     return true;
   }
 
+  /**
+   * Why Run now cannot run an automation on this computer, or null. A
+   * dataset's schedule runs only where its records are kept, so a computer
+   * without them refuses before it wins the notice's dismissal.
+   */
+  async runNowRefusal(automationId: string): Promise<string | null> {
+    await this.ready();
+    const id = parseCollectionAutomationId(automationId);
+    if (id === null || this.collections.has(id.collectionPath)) return null;
+    const dataset = () => this.options.pathExists(`${id.collectionPath}/${DATASET_FILE_NAME}`);
+    if (this.datasets.has(id.collectionPath) || !(await dataset())) return null;
+    // A dataset whose host has not opened yet may still be kept here.
+    await this.enqueue(() => this.indexDatasets(true));
+    if (this.datasets.has(id.collectionPath)) return null;
+    const { name } = collectionNamed(id.collectionPath);
+    return `This computer does not keep ${name}'s records. Run it from the computer that keeps them.`;
+  }
+
   /** Every schedule's mark in this workspace, or null while the engine is not answering. */
   async scheduleMarks(): Promise<AutomationScheduleMark[] | null> {
     const listed = await this.withLiveEngine((engine) => engine.listAutomationScheduleMarks());
@@ -1126,6 +1181,8 @@ export class CollectionAutomations {
       unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
     const roster = await this.options.cachedRoster();
     const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
+    // Only the computer that keeps a dataset can run its schedules.
+    const keptHereOnly = hostCanRun && this.datasets.has(collectionPath) && (await this.options.groupHost()) === null;
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionPath, entry.automation.id), collectionPath, automation: entry.automation }]
@@ -1151,7 +1208,8 @@ export class CollectionAutomations {
       const { automation } = entry;
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
-      const cannotRun = unsupported(automation) ?? this.groupProblem(automation) ?? (hostCanRun ? null
+      const cannotRun = unsupported(automation) ?? this.groupProblem(automation) ?? (hostCanRun
+        ? (keptHereOnly && automation.when.kind === "schedule" ? DATASET_SCHEDULES_ELSEWHERE : null)
         : automation.when.kind === "schedule" ? SCHEDULES_NEED_SYNC
         : automation.when.kind === "group-message" ? GROUP_MESSAGES_NEED_SYNC
         : null);
@@ -1808,7 +1866,9 @@ export class CollectionAutomations {
   ): Promise<CollectionAutomationPress> {
     if (claim.state === "failed") return { busy: false, claimId: claim.claimId, settled: { outcome: "failed", error: claim.error ?? null } };
     if (claim.state === "done") return { busy: false, claimId: claim.claimId, settled: { outcome: await this.doneOutcome(claim), error: null } };
-    watch(claim.claimId, this.waitingFor.get(claim.claimId) ?? null);
+    // A press never waits for a dataset to open: its ledger claimed it there.
+    const waiting = this.waitingFor.get(claim.claimId) ?? null;
+    watch(claim.claimId, waiting === "dataset" ? null : waiting);
     this.notifyClaimed();
     return { busy: false, claimId: claim.claimId, settled: null };
   }
@@ -2131,6 +2191,11 @@ export class CollectionAutomations {
       if (runs.length > 0 && runs.every((run) => run.undo === "done")) {
         return { status: "refused", reason: "You already undid this run." };
       }
+      // A run's changes go back the way it made them. One made while the
+      // Collection kept its records the other way has nothing here to undo.
+      if (runs.some((run) => (run.datasetId !== null) !== dataset)) {
+        return { status: "refused", reason: KEPT_ANOTHER_WAY_UNDO };
+      }
       // Every run of the claim changed records, one a person started over
       // under a newer definition too. One whose Undo stopped part way is
       // undone again: what is already back stays as it is.
@@ -2319,7 +2384,10 @@ export class CollectionAutomations {
     this.schemaFields.clear();
     this.datasets.clear();
     for (const path of this.collections) await this.readFile(path);
-    for (const [path, definition] of (await this.datasetFolders()) ?? []) {
+    // A dataset's schedules run with the host closed, so the index opens it
+    // whenever this workspace has a dataset store. It does so before the
+    // schedules are noted, so one seen now is not taken as switched on now.
+    for (const [path, definition] of (await this.datasetFolders(true)) ?? []) {
       if (this.collections.has(path)) continue;
       this.datasets.set(path, definition);
       await this.readFile(path);
@@ -2888,7 +2956,7 @@ export class CollectionAutomations {
           release.push(held);
           if (action.waitsFor) {
             this.waitingFor.set(claimId, action.waitsFor);
-            if (isPress(held)) this.options.onPressWaiting({ claimId, reason: action.waitsFor });
+            if (isPress(held) && action.waitsFor !== "dataset") this.options.onPressWaiting({ claimId, reason: action.waitsFor });
           }
           continue;
         }
@@ -3019,12 +3087,23 @@ export class CollectionAutomations {
     // roster lists cannot bring a step from an editor the roster lacks.
     const automation = id ? this.definitionFor(id) : null;
     const definition = id ? this.datasets.get(id.collectionPath)?.definition : undefined;
+    // A due time names only its Collection, of either kind.
+    const dueTime = held.source === "engine" && held.claim.change.kind === "schedule";
     // An engine claim's change is in a document Collection, and not in a
     // Collection inside this one, which the subscription's path also covers.
     // A dataset claim's change is in the dataset this Collection keeps.
     const inCollection = id !== null && (held.source === "engine"
-      ? definition === undefined && held.claim.collectionPath === id.collectionPath
+      ? held.claim.collectionPath === id.collectionPath && (definition === undefined || dueTime)
       : definition?.datasetId === held.claim.datasetId);
+    // A due time for a dataset whose host has not opened, or whose store
+    // failed to open, waits for the dataset instead of being lost.
+    if (dueTime && id !== null && automation === null && !this.collections.has(id.collectionPath) && !this.datasets.has(id.collectionPath) &&
+      await this.options.pathExists(`${id.collectionPath}/${DATASET_FILE_NAME}`)) {
+      this.datasetWaits.set(claim.claimId, id.collectionPath);
+      void this.enqueue(() => this.indexDatasets(true))
+        .catch((error: unknown) => this.options.onError("open this workspace's dataset store", error));
+      return { kind: "release", waitsFor: "dataset" };
+    }
     if (id === null || automation === null || !automation.enabled || !inCollection) {
       // The automation is gone or off, so its subscription is stale.
       if (id !== null && !this.isSubscribed(held)) void this.enqueue(() => this.dropStaleSubscription(held));
@@ -3088,10 +3167,11 @@ export class CollectionAutomations {
       hostHold = taken;
     }
     const collection = collectionNamed(id.collectionPath);
-    const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => held.source === "engine"
-      ? runCollectionAutomation(this.runDependencies(), { claim: held.claim, automation, collection, roster, signal, stopped: stop })
+    const runner = runnerOf(held, definition?.datasetId);
+    const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => runner.kind === "document"
+      ? runCollectionAutomation(this.runDependencies(), { claim: runner.claim, automation, collection, roster, signal, stopped: stop })
       : runDatasetAutomation({ ...this.runDependencies(), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
-        { claim: held.claim, automation, collection, roster, signal, stopped: stop }), hostHold);
+        { held: runner.held, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
     // A pause or close stopped the run; its progress is saved, and the next
     // drain resumes it.

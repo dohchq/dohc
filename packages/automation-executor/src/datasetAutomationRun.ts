@@ -5,6 +5,7 @@ import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-a
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
+import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import {
   definitionDigest,
@@ -13,9 +14,11 @@ import {
   formulaPeople,
   MAX_FOUND_RECORDS,
   planRun,
+  scheduleDueAt,
   triggerMatches,
   type PlannedEffect,
   type PlannedStep,
+  type RunClaim,
   type RunInputs,
   type RunRecord,
 } from "./automationPlan";
@@ -58,6 +61,10 @@ import {
 // already holds its planned value is done, a field still at its planned
 // before value is sent again under a new key at the new version, and a
 // field someone changed to anything else keeps their change.
+//
+// A due time has no record: the engine claims it, as for a document
+// Collection, and the run reads only what its Finds find. Formulas read
+// `now` as the due time.
 //
 // A button press's run reads its record as it is now, and formulas see the
 // person who pressed. It runs only the automation the press was checked
@@ -114,8 +121,17 @@ export function datasetPresser(claim: Pick<DatasetAutomationClaim, "fact" | "act
   return claim.fact?.kind === "button" && (actor.kind === "owner" || actor.kind === "named") ? actor.userId ?? null : null;
 }
 
+/**
+ * The claim a dataset run runs: a record change or a press the dataset's
+ * ledger claimed, or a due time the engine claimed. An engine claim names
+ * only its Collection, so it comes with the dataset the Collection keeps.
+ */
+export type DatasetRunClaim =
+  | { source: "dataset"; claim: DatasetAutomationClaim }
+  | { source: "engine"; claim: AutomationClaim; datasetId: string };
+
 export interface DatasetAutomationRunInput {
-  claim: DatasetAutomationClaim;
+  held: DatasetRunClaim;
   automation: Automation;
   /** The Collection whose folder holds the dataset. */
   collection: ReachCollection;
@@ -233,13 +249,22 @@ export async function datasetRecordExists(
   return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), trigger.read, trigger.table, recordId)) !== null;
 }
 
+const datasetIdOf = (held: DatasetRunClaim) => (held.source === "dataset" ? held.claim.datasetId : held.datasetId);
+
 export async function runDatasetAutomation(
   dependencies: DatasetAutomationRunDependencies,
   input: DatasetAutomationRunInput,
 ): Promise<CollectionAutomationRunOutcome> {
-  const { claim, automation, collection, roster } = input;
+  const { held, automation, collection, roster } = input;
+  const { claim } = held;
+  const datasetId = datasetIdOf(held);
   const saved = await savedRunOf(dependencies.store, claim, automation);
   if ("outcome" in saved) return saved.outcome;
+  // A plan reads and writes the dataset it was made for. When the
+  // Collection now keeps another one, reach would check that one while the
+  // saved effects write the first, or send what was read from it, so the
+  // run stops before either.
+  if (saved.current?.plan && saved.current.datasetId !== datasetId) return failed(RULES_CHANGED_ERROR);
 
   // Where the automation's messages go, found once for the reach check and
   // the plan.
@@ -255,9 +280,9 @@ export async function runDatasetAutomation(
   // rules this checked, so an approval landing meanwhile cannot bring in a
   // read reach never saw.
   const checked = await dependencies.withHost((host) => {
-    const approved = host.revision(claim.datasetId);
-    const datasetRules: DatasetRules = { definition: approved.definition, generated: host.generated(claim.datasetId) };
-    return { approved, datasetRules, steps: datasetReachSteps(automation, collection, datasetRules, host.dataGrants(claim.datasetId), chat) };
+    const approved = host.revision(datasetId);
+    const datasetRules: DatasetRules = { definition: approved.definition, generated: host.generated(datasetId) };
+    return { approved, datasetRules, steps: datasetReachSteps(automation, collection, datasetRules, host.dataGrants(datasetId), chat) };
   });
   if (checked === null) return { kind: "wait", reason: "engine" };
   const { approved, datasetRules, steps } = checked;
@@ -290,7 +315,7 @@ export async function runDatasetAutomation(
     }
     if (input.stopped.aborted) return stopped;
     if (planned.kind === "stop") return planned.outcome;
-    run = { ...newRun(claim, automation, keySeed, planned.steps, dependencies.nowMs()), readableFields: [...readable].sort() };
+    run = { ...newRun(claim, automation, keySeed, planned.steps, dependencies.nowMs()), readableFields: [...readable].sort(), datasetId };
     // Every effect's record, with every field planned, must fit what the
     // store reads back.
     if (Buffer.byteLength(JSON.stringify(run)) * 2 > RUN_PLAN_BUDGET_BYTES) {
@@ -322,11 +347,13 @@ async function plan(
   datasetRules: DatasetRules,
   chat: ChatDirectory | null,
 ): Promise<{ kind: "plan"; steps: StoredStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
-  const { claim, automation, collection, signal } = input;
+  const { held, automation, collection, signal } = input;
+  const { claim } = held;
+  const datasetId = datasetIdOf(held);
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
   // A press names its table and button by id, since its record id means
   // nothing in any other table, and the automation its presser was checked against.
-  const pressed = claim.fact?.kind === "button" ? claim.fact : null;
+  const pressed = held.source === "dataset" && held.claim.fact?.kind === "button" ? held.claim.fact : null;
   if (pressed !== null) {
     const button = datasetButtonOf(automation, approved.definition);
     if (button?.tableId !== pressed.tableId || button.fieldId !== pressed.fieldId || definitionDigest(automation) !== pressed.definitionHash) {
@@ -336,7 +363,7 @@ async function plan(
   }
   const read = await dependencies.withHost(async (host) => {
     const steps = datasetStepsOf(automation, datasetRules);
-    const rules: Rules = { datasetId: claim.datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
+    const rules: Rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
     const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth: claim.depth + 1 });
     // Each record the plan read, by identity, with the version it read.
     const versions = new Map<string, { id: DatasetRecordId; version: number }>();
@@ -344,20 +371,29 @@ async function plan(
       versions.set(datasetRecordKey(rules.datasetId, table.tableId, row.id), { id: row.id, version: row.version });
       return runRecordOf(row, rules.datasetId, table, readable);
     };
-    // A change to a record cannot start an automation that now waits for a
-    // schedule or a Group message.
-    if (steps.trigger === null) return { skipped: true } as const;
+    // What changed, as planning reads it. A due time is not a record
+    // change, and the reverse, so a claim whose automation changed trigger
+    // since starts nothing.
+    let runClaim: RunClaim;
     let record: RunRecord | null = null;
-    if (steps.trigger.read !== null && claim.fact !== null && claim.fact.kind !== "removed") {
-      const row = await readRecord(host, context, rules, steps.trigger.read, steps.trigger.table, claim.fact.recordId, signal);
-      // The record was removed before its automation ran.
-      if (row === null) return { skipped: true } as const;
-      record = remember(row, steps.trigger.table);
-    } else if (!datasetRules.generated && claim.fact !== null && claim.fact.kind !== "removed") {
-      // Operations someone wrote are not read for the run's own purposes, so
-      // the record is its id alone.
-      const { recordId } = claim.fact;
-      record = { id: String(recordId), key: recordId, path: datasetRecordKey(rules.datasetId, steps.trigger.table.tableId, recordId), values: {} };
+    if (held.source === "engine") {
+      if (steps.trigger !== null) return { skipped: true } as const;
+      runClaim = held.claim;
+    } else {
+      if (steps.trigger === null) return { skipped: true } as const;
+      runClaim = datasetRunClaim(held.claim, collection.path, steps.trigger.table, readable);
+      const { fact } = held.claim;
+      if (steps.trigger.read !== null && fact !== null && fact.kind !== "removed") {
+        const row = await readRecord(host, context, rules, steps.trigger.read, steps.trigger.table, fact.recordId, signal);
+        // The record was removed before its automation ran.
+        if (row === null) return { skipped: true } as const;
+        record = remember(row, steps.trigger.table);
+      } else if (!datasetRules.generated && fact !== null && fact.kind !== "removed") {
+        // Operations someone wrote are not read for the run's own purposes, so
+        // the record is its id alone.
+        const { recordId } = fact;
+        record = { id: String(recordId), key: recordId, path: datasetRecordKey(rules.datasetId, steps.trigger.table.tableId, recordId), values: {} };
+      }
     }
     const found = new Map<number, RunRecord[]>();
     const truncatedFinds = new Set<number>();
@@ -381,22 +417,23 @@ async function plan(
         found.set(ordinal, rows.map((row) => remember(row, table)));
       }
     }
-    return { skipped: false, record, found, truncatedFinds, steps, table: steps.trigger.table, rules, versions } as const;
+    return { skipped: false, runClaim, record, found, truncatedFinds, steps, rules, versions } as const;
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.skipped) return stop({ kind: "skipped" });
-  const pressedBy = datasetPresser(claim);
+  const pressedBy = held.source === "dataset" ? datasetPresser(held.claim) : null;
   const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
-  const runClaim = datasetRunClaim(claim, collection.path, read.table, readable);
-  const inputs: RunInputs = { person, message: null, chat, automation, claim: runClaim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds,
+  const inputs: RunInputs = { person, message: null, chat, automation, claim: read.runClaim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds,
     // Without a read, the record is its id: a formula that reads a field stops instead of reading nothing.
     ...(datasetRules.generated ? {} : { recordKeys: ["id"] }) };
   if (!datasetRules.generated) {
-    const problem = unreadComparison(automation, runClaim);
+    const problem = unreadComparison(automation, read.runClaim);
     if (problem !== null) return stop(failed(problem));
   }
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
-  const request = evaluationRequest(inputs, claim.createdAtMs);
+  // Formulas read `now` as the time of the change, or a schedule's due
+  // time, so every attempt plans the same values.
+  const request = evaluationRequest(inputs, scheduleDueAt(read.runClaim) ?? claim.createdAtMs);
   const results = request.formulas.length === 0 ? [] : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
   if (results === "busy") return stop({ kind: "wait", reason: "busy" });
   // Only the conversations of the people the formulas named are read.
@@ -489,8 +526,8 @@ async function reachNow(
 ): Promise<CollectionAutomationRunOutcome | null> {
   const roster = await dependencies.cachedRoster();
   if (roster.kind === "unknown") return { kind: "wait", reason: "roster" };
-  const { automation, collection, claim } = input;
-  const steps = datasetReachSteps(automation, collection, datasetRules, host.dataGrants(claim.datasetId), chat);
+  const { automation, collection, held } = input;
+  const steps = datasetReachSteps(automation, collection, datasetRules, host.dataGrants(datasetIdOf(held)), chat);
   // The rules reach checked at the start no longer resolve the automation.
   if (steps === null) return failed(RULES_CHANGED_ERROR);
   const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps });
@@ -508,7 +545,7 @@ async function applyPlan(
   datasetRules: DatasetRules,
   chat: ChatDirectory | null,
 ): Promise<CollectionAutomationRunOutcome> {
-  const { claim, signal, automation } = input;
+  const { held: { claim }, signal, automation } = input;
   const effects = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
   const firstUnrecorded = run.applied.length;
   const outcome = await dependencies.withHost(async (host): Promise<CollectionAutomationRunOutcome> => {
