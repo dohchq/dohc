@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { StoredRun } from "./automationRunStore";
+import { unrecordedEffect } from "./automationStepRun";
 import { rebaseRun, type CollectionAutomationReads, type CollectionRecordWrites } from "./collectionAutomationRun";
 
 // Undo for one run of a Collection automation (AGENTS.md: every reversible
@@ -45,18 +46,32 @@ export interface CollectionAutomationUndoDependencies {
   collectionPathOf(collectionId: string): string | null;
 }
 
+/** One write of one field, oldest first; `sure` is false for one a stopped run may have made without recording it. */
+type FieldWrite = { before: JsonValue; after: JsonValue; sure: boolean };
+
 interface RecordChanges {
   recordId: string;
-  /** Where the run last wrote the record. Records live directly in their Collection's folder. */
+  /** Where the runs last wrote the record. Records live directly in their Collection's folder. */
   path: string;
-  /** Per field, the value before the run's first write and after its last. */
-  fields: Map<string, { before: JsonValue; after: JsonValue }>;
+  /** Each field's writes by the runs, oldest first. */
+  fields: Map<string, FieldWrite[]>;
 }
 
-/** What the runs changed, oldest first: the records they added and each field they wrote. */
+/**
+ * What the runs changed, oldest first: the records they added, and each
+ * field they wrote. That includes the effect a stopped run may have landed
+ * without recording it. A record such an effect may have added is among
+ * `added`, and is found only if it exists.
+ */
 function changesOf(runs: readonly StoredRun[]): { added: Map<string, string>; records: Map<string, RecordChanges> } {
   const added = new Map<string, string>();
   const records = new Map<string, RecordChanges>();
+  const wrote = (recordId: string, path: string, field: string, write: FieldWrite) => {
+    const record = records.get(recordId) ?? { recordId, path, fields: new Map<string, FieldWrite[]>() };
+    record.path = path;
+    record.fields.set(field, [...(record.fields.get(field) ?? []), write]);
+    records.set(recordId, record);
+  };
   for (const run of [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs)) {
     // A record is listed as created before its fields are written, so one a
     // run stopped after creating is still found.
@@ -64,16 +79,40 @@ function changesOf(runs: readonly StoredRun[]): { added: Map<string, string>; re
     for (const { writes } of run.applied) {
       for (const write of writes) {
         if (write.kind === "created") added.set(write.recordId, write.path);
-        if (write.kind !== "field") continue;
-        const record = records.get(write.recordId) ?? { recordId: write.recordId, path: write.path, fields: new Map() };
-        record.path = write.path;
-        const earlier = record.fields.get(write.field);
-        record.fields.set(write.field, { before: earlier ? earlier.before : write.before, after: write.after });
-        records.set(write.recordId, record);
+        if (write.kind === "field") wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: true });
       }
+    }
+    const unrecorded = unrecordedEffect(run)?.effect;
+    if (unrecorded?.kind === "add" && !run.created.some((created) => created.planned === unrecorded.recordId)) {
+      added.set(unrecorded.recordId, `${unrecorded.collectionPath}/${unrecorded.name}.md`);
+    } else if (unrecorded?.kind === "set") {
+      for (const { field, before, after } of unrecorded.fields) wrote(unrecorded.target.recordId, unrecorded.target.path, field, { before, after, sure: false });
     }
   }
   return { added, records };
+}
+
+/**
+ * How one field goes back: to what it held before the runs' last unbroken
+ * chain of writes, from each value the chain may have left it at. A write
+ * that found someone else's value starts the chain again, so Undo puts back
+ * theirs. A write the runs did not record may not have landed, so the chain
+ * may end at its before value too. Undo writes the field once, from what the
+ * chain left straight to that value, so an Undo that stops part way leaves
+ * each field where it was or where it goes.
+ */
+function wayBack(writes: readonly FieldWrite[]): { to: JsonValue; from: JsonValue[] } {
+  const last = writes.at(-1)!;
+  const from = last.sure ? [last.after] : [last.after, last.before];
+  let value = last.before;
+  for (let index = writes.length - 2; index >= 0; index -= 1) {
+    const earlier = writes[index]!;
+    if (isDeepStrictEqual(earlier.after, value)) value = earlier.before;
+    // An unrecorded write the next one did not find never landed.
+    else if (!earlier.sure && isDeepStrictEqual(earlier.before, value)) continue;
+    else break;
+  }
+  return { to: value, from: from.filter((candidate) => !isDeepStrictEqual(candidate, value)) };
 }
 
 /** Where the record with `recordId` is now, or null when it left the Collection. */
@@ -96,10 +135,11 @@ async function locate(
 }
 
 /**
- * Undoes what these runs of one claim changed, oldest first, so each field
- * goes back to what it held before the first run. Safe to run again after
- * it stops part way: a field already back where it was is left alone, and
- * an added record already in the trash is not found again.
+ * Undoes what these runs of one claim changed: each field goes back, in one
+ * write, to what it held before the runs' last unbroken chain of writes to
+ * it. Pass every run of the claim, those already undone too. Safe to run
+ * again after it stops part way: a field already back is left alone, and an
+ * added record already in the trash is not found again.
  */
 export async function undoCollectionAutomationRuns(
   dependencies: CollectionAutomationUndoDependencies,
@@ -117,24 +157,38 @@ export async function undoCollectionAutomationRuns(
   for (const record of records.values()) {
     // A record the run added goes to the trash whole.
     if (added.has(record.recordId)) continue;
-    const fields = [...record.fields].filter(([, { before, after }]) => !isDeepStrictEqual(before, after));
+    const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ from }) => from.length > 0);
     if (fields.length === 0) continue;
     const path = await locate(dependencies, record.path, record.recordId);
     if (path === null) {
       undone.missing += fields.length;
       continue;
     }
-    const result = await dependencies.withRecordWrites(signal, (edit) =>
-      edit.setFields({
-        recordPath: path,
-        fields: Object.fromEntries(fields.map(([field, { before }]) => [field, before])),
-        // Only a field that still holds what the run wrote goes back.
-        expectedBefore: Object.fromEntries(fields.map(([field, { after }]) => [field, after])),
-        author: PERSON,
-      }),
-    );
-    undone.reverted += Object.keys(result.replaced).length;
-    undone.changedSince += Object.keys(result.kept).length;
+    // Each field goes back only from a value the runs left it at: first the
+    // likeliest, then, for a write the runs did not record, the value before it.
+    let pending = fields.map((entry) => ({ ...entry, attempt: 0 }));
+    while (pending.length > 0) {
+      const result = await dependencies.withRecordWrites(signal, (edit) =>
+        edit.setFields({
+          recordPath: path,
+          fields: Object.fromEntries(pending.map(({ field, to }) => [field, to])),
+          expectedBefore: Object.fromEntries(pending.map(({ field, from, attempt }) => [field, from[attempt]])),
+          author: PERSON,
+        }),
+      );
+      undone.reverted += Object.keys(result.replaced).length;
+      const next: typeof pending = [];
+      for (const entry of pending) {
+        if (!Object.hasOwn(result.kept, entry.field)) continue;
+        const current = result.kept[entry.field] as JsonValue;
+        // Already back, from an Undo that stopped part way.
+        if (isDeepStrictEqual(current, entry.to)) continue;
+        const again = entry.from.findIndex((candidate, index) => index > entry.attempt && isDeepStrictEqual(candidate, current));
+        if (again >= 0) next.push({ ...entry, attempt: again });
+        else undone.changedSince += 1;
+      }
+      pending = next;
+    }
   }
   for (const [recordId, path] of added) {
     const current = await locate(dependencies, path, recordId);

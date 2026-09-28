@@ -634,10 +634,17 @@ function tryAgainOf(
   return { ...runs, startsOver: runs.current === null && runs.changedSince !== null };
 }
 
-/** The step whose change a run had not landed when it stopped, from its saved plan and progress, numbered from 1. */
+/** The step a run failed at, or whose change it had not landed when it stopped, numbered from 1. */
 function stoppedAtStep(run: StoredRun | undefined): number | null {
-  if (run?.plan === null || run?.plan === undefined) return null;
-  const ordinals = run.plan.flatMap((step) => step.effects.map(() => step.ordinal));
+  if (run === undefined) return null;
+  // The step a run failed at, until a later attempt lands all of it.
+  if (run.outcome?.state === "failed") {
+    const failed = run.outcome.step;
+    const through = run.steps.findIndex((step) => step.ordinal === failed);
+    const planned = run.steps.slice(0, through + 1).reduce((count, step) => count + step.effects.length, 0);
+    if (through < 0 || planned > run.applied.length) return failed + 1;
+  }
+  const ordinals = run.steps.flatMap((step) => step.effects.map(() => step.ordinal));
   const next = ordinals[run.applied.length];
   return next === undefined ? null : next + 1;
 }
@@ -2422,7 +2429,7 @@ export class CollectionAutomations {
       }
       // A run's changes go back the way it made them. One made while the
       // Collection kept its records the other way has nothing here to undo.
-      if (runs.some((run) => (run.datasetId !== null) !== dataset)) {
+      if (runs.some((run) => (run.rules !== null) !== dataset)) {
         return { status: "refused", reason: KEPT_ANOTHER_WAY_UNDO };
       }
       // Every run of the claim changed records, one a person started over
@@ -2456,7 +2463,10 @@ export class CollectionAutomations {
           withRecordWrites: this.options.withRecordWrites,
           trash,
           collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
-        }, pending, this.runAbort.signal);
+        // Every run of the claim, those saved undone too: each field goes
+        // back to one value, which a retry after only some were saved done
+        // must find again.
+        }, runs, this.runAbort.signal);
       if (undone === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
       for (const run of pending) await this.options.store.save({ ...run, undo: "done" });
       return { status: "undone", ...undone };
@@ -3377,10 +3387,10 @@ export class CollectionAutomations {
     return claim.change.kind !== "removed" || claim.collectionPath === collectionPath;
   }
 
-  /** Whether a claim's run saved a plan it has not finished: it resumes wherever its Collection is now. */
+  /** Whether a claim's run saved steps it has not finished: it resumes wherever its Collection is now. */
   private async hasSavedPlan(claim: AutomationClaim): Promise<boolean> {
     const { runs } = await this.options.store.runsOf(claim.automationId, claim.claimId);
-    return runs.some((run) => run.plan !== null && !run.superseded);
+    return runs.some((run) => run.outcome?.state !== "done" && !run.superseded);
   }
 
   private async execute(held: HeldClaim, stop: AbortSignal): Promise<ClaimAction | null> {

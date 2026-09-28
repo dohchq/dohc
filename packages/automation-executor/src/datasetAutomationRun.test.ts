@@ -24,13 +24,12 @@ import { definitionDigest, definitionHash, stepKey } from "./automationPlan";
 import type { ReachRoster, RosterGrant } from "./automationReach";
 import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import { createAutomationRunStore } from "./automationRunStore";
-import { DEADLINE_ERROR, evaluateFindValues, GROUP_CHANGED_ERROR } from "./collectionAutomationRun";
+import { DEADLINE_ERROR, GROUP_CHANGED_ERROR, RULES_CHANGED_ERROR } from "./collectionAutomationRun";
 import { datasetEffectKey } from "./datasetAutomationPlan";
 import {
   ACCESS_NARROWED_ERROR,
   type DatasetAutomationRunDependencies,
   type DatasetAutomationRunInput,
-  RULES_CHANGED_ERROR,
   runDatasetAutomation,
   type DatasetAutomationContext,
   type DatasetInvocation,
@@ -180,6 +179,36 @@ describe("a dataset automation run", () => {
     expect(await runWithRoster(dependencies(third.surface), { ...input(new AbortController().signal), held: fromLedger(later) }))
       .toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
     expect(third.sent).toEqual([]);
+  });
+
+  it("stops a resumed run once the rules its landed steps used no longer resolve, before the next step reads", async () => {
+    const twoSteps = automationFrom(`  - id: close
+    name: Close
+    when: record-added
+    do:
+      - set:
+          Status: Closed
+        operation: invoices.edit
+      - set:
+          Status: '=record.Status + "!"'
+        operation: invoices.edit
+`);
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const run = (surface: DatasetRunHost) => runWithRoster({
+      withHost: async (work) => await work(surface),
+      // The second step's formula meets a busy evaluator, so the run waits once the first step landed.
+      evaluator: { runCode: noCode, evaluate: async () => "busy" as const },
+      store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
+    }, {
+      held: fromLedger(claim), automation: twoSteps, collection: { path: "Budget", name: "Budget" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
+    });
+    const first = host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
+    expect(await run(first.surface)).toEqual({ kind: "wait", reason: "busy" });
+    expect(first.sent.filter((sent) => sent.operationId === EDIT)).toHaveLength(1);
+    const later = host({ resolves: () => false, edit: async () => { throw new Error("unreachable"); } });
+    expect(await run(later.surface)).toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
+    expect(later.sent).toEqual([]);
   });
 });
 
@@ -339,23 +368,6 @@ describe("a Group message on a dataset", () => {
 });
 
 describe("a Find's formulas", () => {
-  it("keeps a timed-out formula's failure when another formula in the same Find fails after it", async () => {
-    const evaluated = await evaluateFindValues({ runCode: noCode,
-      evaluate: async () => [
-        { ok: false as const, error: { code: "timeout" as const, message: "It ran out of time." } },
-        { ok: false as const, error: { code: "runtime" as const, message: "It threw." } },
-        { ok: true as const, value: "Open" },
-      ],
-    }, { automation, claim: { automationId: "collection:Budget#close", claimId: "c", createdAtMs: 1, collectionPath: "Budget", change: { kind: "added", fields: [], fieldsOmitted: 0 } }, record: null, message: null, person: null }, [
-      { ordinal: 0, values: [{ kind: "formula", expression: "a()" }, { kind: "formula", expression: "b()" }] },
-      { ordinal: 1, values: [{ kind: "formula", expression: "\"Open\"" }] },
-    ], 1);
-    expect(evaluated).toEqual({
-      values: new Map([["1:0", "Open"]]),
-      failed: new Map([[0, { error: "The Find in step 1 failed. It ran out of time.", timedOut: true }]]),
-    });
-  });
-
   it("reads nothing for a value the field would refuse, and names the mismatch", async () => {
     const COUNT = id(20);
     const table = definition.tables[0]!;
@@ -414,7 +426,8 @@ describe("the rules a dataset run uses", () => {
       held: fromLedger(claim), automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "done" });
-    expect(script.sent.map((sent) => [sent.operationId, sent.revision])).toEqual([[LIST, 3], [EDIT, 3]]);
+    // The trigger record is read for the run's conditions, then again when its step starts.
+    expect(script.sent.map((sent) => [sent.operationId, sent.revision])).toEqual([[LIST, 3], [LIST, 3], [EDIT, 3]]);
   });
 
   it("skips a record change once its automation starts on a schedule instead, before it reads anything", async () => {
@@ -477,8 +490,8 @@ automations:
     }, {
       held: fromLedger(claim), automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
       roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "failed", error: "A Find matched more than 50 records. Narrow its condition, then try again.", timedOut: false });
-    expect(sent.map((input) => input.operationId)).toEqual([LIST, LIST]);
+    })).toEqual({ kind: "failed", error: "The Find in step 1 matched more than 50 records. Narrow its condition, then try again.", timedOut: false });
+    expect(sent.map((input) => input.operationId)).toEqual([LIST, LIST, LIST]);
     expect((await store.runsOf(claim.automationId, claim.claimId)).runs).toEqual([]);
   });
 });
@@ -529,23 +542,25 @@ automations:
     roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: new AbortController().signal,
   });
 
-  it("plans again from fresh reads when the record changed between them, so no write uses one read's values at the other's version", async () => {
+  it("reads a step again when the record changed between its reads, so no write uses one read's values at the other's version", async () => {
     const script = conflicting(2);
     budgets.clear();
     requests = 0;
     expect(await runConflicting(script)).toEqual({ kind: "done" });
-    expect(script.plans()).toBe(3);
-    // Each of the three plans evaluated its Find's value before the Find read, all against one budget for the run.
+    // The run's start reads the trigger record, the Find's step reads twice, and the Set's step once.
+    expect(script.plans()).toBe(4);
+    // Each read of the Find's step evaluated its value before the Find read, all against one budget for the run.
     expect(requests).toBeGreaterThanOrEqual(3);
     expect(budgets.size).toBe(1);
-    // One edit, sent at the version both reads of the third plan saw.
-    expect(script.sent.filter((input) => input.operationId === EDIT).map((input) => (input.input as { expectedVersion: number }).expectedVersion)).toEqual([3]);
+    // One edit, sent at the version the Set's step read.
+    expect(script.sent.filter((input) => input.operationId === EDIT).map((input) => (input.input as { expectedVersion: number }).expectedVersion)).toEqual([4]);
   });
 
   it("fails with Try again, before any write, when the record keeps changing between the reads", async () => {
     const script = conflicting(Infinity);
     expect(await runConflicting(script)).toEqual({ kind: "failed", error: "The record kept changing while this automation ran. Try again.", timedOut: false });
-    expect(script.plans()).toBe(6);
+    // The run's start, then six reads of the Find's step.
+    expect(script.plans()).toBe(7);
     expect(script.sent.some((input) => input.operationId === EDIT)).toBe(false);
   });
 

@@ -62,7 +62,12 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 //
 // `as` names a step's result for later steps and formulas. A find step binds
 // a list of records, an add-record step binds the one record it added, and a
-// run step binds the value its code returns. A name is a JavaScript
+// run step binds the value its code returns. Each step starts once the steps
+// before it have landed and reads records as they are then, so it sees what
+// those steps changed, in the trigger record and in the records a find or an
+// add-record step bound. A later find queries again. A step can use only the
+// results of steps that ran before it, and a formula gets a result only by
+// writing its name; code gets every one. A name is a JavaScript
 // identifier that is not in AUTOMATION_RESERVED_NAMES: a formula name, a
 // reserved word, or a standard global such as Math.
 //

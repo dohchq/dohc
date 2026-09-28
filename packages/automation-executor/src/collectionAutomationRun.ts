@@ -12,40 +12,33 @@ import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
-  codeChangesOf,
   codeFilesOf,
   codeRecordKey,
   codeStepOrdinals,
+  conditionsHold,
+  conditionsRequest,
   definitionHash,
   evaluateRequest,
-  evaluationRequest,
-  filterValue,
-  FIND_OVERFLOW_ERROR,
-  findsOf,
-  findValueKey,
-  findValuesRequest,
-  formulaPeople,
+  findOverflowError,
+  findQueryOf,
   MAX_FOUND_RECORDS,
   parseCollectionAutomationId,
-  planRun,
   reachStepsOf,
   runRecordOf,
   scheduleDueAt,
   stepKey,
   stepsInOrder,
+  bindingsIn,
   triggerMatches,
   type CodeChange,
   type PlannedEffect,
   type PlannedField,
-  type PlannedStep,
-  type FindValue,
-  type FindValueInputs,
-  type RunInputs,
+  type RunClaim,
+  type RunContext,
   type RunRecord,
 } from "./automationPlan";
 import { checkAutomationReach, type ReachCollection, type ReachRoster, type ReachStep, type StepReach } from "./automationReach";
 import {
-  AutomationChatSessionWait,
   chatNeedsOf,
   NoticeNotSentError,
   type AutomationChatMessage,
@@ -53,11 +46,12 @@ import {
   type ChatDirectory,
   type ChatNeeds,
 } from "./automationChat";
-import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
+import type { AutomationRunStore, RunWrite, StoredRun, StoredStep } from "./automationRunStore";
+import { KEPT_CHANGING_ERROR, runSteps, StepRecordChanged, unfinishedStep, type EffectMode, type StepBackend } from "./automationStepRun";
 
-// One run of one claim: check reach, read, evaluate, save the plan, then
-// apply the plan's effects in order, saving each one as it lands. The
-// executor settles the claim with the outcome.
+// One run of one claim: check reach, check the trigger and its conditions,
+// then run the steps in order (automationStepRun.ts). The executor settles
+// the claim with the outcome.
 
 export const RECORD_NOT_FOUND = "collection-record-not-found";
 
@@ -97,6 +91,7 @@ export const UNREADABLE_RUN_ERROR =
   "dohc could not read this run's saved progress in .dohc/automations, so it did not run again. Move that folder aside, then try again.";
 export const UNDONE_RUN_ERROR = "You undid this run, so dohc does not run it again.";
 export const LOST_COLLECTION_ERROR = "A Collection this run changes is no longer in this workspace, so the run stopped.";
+export const RULES_CHANGED_ERROR = "Collection rules changed after this run started.";
 
 /** The engine reads a run makes. VersionedLiveAdapter satisfies it. */
 export interface CollectionAutomationReads {
@@ -253,10 +248,6 @@ export interface CollectionAutomationRunInput {
 const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
 const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped" };
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /** A Collection as reach and messages name it, from its workspace path. */
 const collectionNamed = (path: string): ReachCollection => ({ path, name: path.split("/").at(-1) ?? path });
 
@@ -337,24 +328,24 @@ export async function savedRunOf(
   return { current };
 }
 
-/** A new run's record, before its plan is saved. */
-export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, plan: StoredStep[], nowMs: number): StoredRun {
+/** A new run's record, before anything of it is saved. */
+export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, nowMs: number): StoredRun {
   return {
-    version: 4,
+    version: 5,
     claimId: claim.claimId,
     automationId: claim.automationId,
     definitionHash: definitionHash(automation),
     keySeed,
     startedAtMs: nowMs,
     finishedAtMs: null,
-    plan,
+    steps: [],
     applied: [],
     created: [],
     replans: [],
     undoRequests: [],
     readableFields: null,
     collections: [],
-    datasetId: null,
+    rules: null,
     superseded: false,
     undo: null,
     settled: false,
@@ -371,15 +362,18 @@ export async function runCollectionAutomation(
   const saved = await savedRunOf(store, claim, automation);
   if ("outcome" in saved) return saved.outcome;
   const { current } = saved;
+  // A run that started while the Collection kept its records in a dataset
+  // wrote them there; it never goes on as document writes.
+  if (current !== null && current.rules !== null) return failed(RULES_CHANGED_ERROR);
 
   // Where the automation's messages go, found once for the reach check and
-  // the plan.
+  // the steps.
   let chat: ChatDirectory | null = null;
   if (readsChats(automation)) {
     chat = await dependencies.chat.directory(roster, chatNeedsOf([automation]));
     if (chat === null) return { kind: "wait", reason: "engine" };
   }
-  const groupChanged = groupChangedOutcome(automation, claim, chat, Boolean(current?.plan));
+  const groupChanged = groupChangedOutcome(automation, claim, chat, current !== null);
   if (groupChanged !== null) return groupChanged;
   // Reach (ADR 0012), before anything is read. The targets are in the file,
   // so the check needs only the roster.
@@ -387,84 +381,114 @@ export async function runCollectionAutomation(
   for (const verdict of checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps })) {
     if (!verdict.allowed) return failed(verdict.reason);
   }
-  let run = current?.plan ? current : null;
-  const resumed = run !== null;
-  // The file names no Collection a code step changes, so a saved plan's
-  // are checked again here, as the file's are above.
-  if (run !== null) {
-    const checked = await checkCodeTargets(dependencies, input, savedCodeTargets(automation, run));
+  // Saved steps write where they planned, followed to where those
+  // Collections are now, and checked there on every resume.
+  if (current !== null) {
+    const followed = await followCollections(dependencies, input, current, true);
+    if (followed !== null) return followed;
+  }
+  // The Collections the file names for steps not saved yet must still be
+  // ones this executor can use; a saved step's were followed above.
+  const savedSteps = new Set(current?.steps.map((step) => step.ordinal));
+  for (const target of fileTargets(automation, collection, savedSteps)) {
+    const problem = await targetProblem(dependencies, target);
+    if (problem !== null) return failed(problem);
+  }
+
+  // The file names no Collection a code step changes, so the step an
+  // earlier attempt left part way has its checked again here, as the file's
+  // are above.
+  const unfinished = current === null ? null : unfinishedStep(current);
+  if (unfinished !== null) {
+    const checked = await checkCodeTargets(dependencies, input, savedCodeTargets(automation, unfinished));
     if (checked !== null) return checked;
   }
-  // A new plan's keys and added record ids come from the definition and the
+  let message: RunContext["message"] = null;
+  if (claim.change.kind === "message") {
+    const got = await groupMessage(dependencies, claim, automation, chat);
+    if ("outcome" in got) return got.outcome;
+    message = got.message;
+  }
+  // A Group message's formulas name its author from the message itself.
+  const personId = claim.change.kind === "message" ? null : claimPerson(claim);
+  // A new run's keys and added record ids come from the definition and the
   // claim's run, never from what history kept: a start-over is a new run, so
   // the engine takes its writes as new, and a crash requeue keeps the run,
-  // so it replays the same keys. A resumed plan keeps its own seed.
-  const keySeed = `${definitionHash(automation)}-${claim.run}`;
-  if (run === null) {
-    const targets = new Map<string, ReachCollection>();
-    for (const step of steps) {
-      if (step.kind === "change-records" || step.kind === "find-records") targets.set(step.collection.path, step.collection);
-    }
-    for (const target of targets.values()) {
-      const problem = await targetProblem(dependencies, target);
-      if (problem !== null) return failed(problem);
-    }
-    let planned: Awaited<ReturnType<typeof plan>>;
-    try {
-      planned = await plan(dependencies, input, keySeed, chat);
-    } catch (error) {
-      return input.stopped.aborted ? stopped : failed(errorText(error));
-    }
-    if (input.stopped.aborted) return stopped;
-    if (planned.kind === "stop") return planned.outcome;
-    run = { ...newRun(claim, automation, keySeed, planned.steps, dependencies.nowMs()), collections: collectionsOf(dependencies, planned.steps) };
-    // The plan with every effect recorded must fit what the store reads
-    // back, and one that does not is refused before anything is written.
-    if (Buffer.byteLength(JSON.stringify({ ...run, applied: projectedProgress(planned.steps) })) > RUN_PLAN_BUDGET_BYTES) {
-      return failed("This run would change more data than dohc can save for it. Narrow its Find steps, or split it into smaller automations.");
-    }
-    // The plan is on disk before the first write, so a run that stops part
-    // way continues with these values instead of evaluating again.
-    await store.save(run);
-  } else {
-    // A saved plan writes where it planned, followed to where those
-    // Collections are now, and checked there on every resume.
-    const checked = await followCollections(dependencies, input, run, true);
-    if (checked !== null) return checked;
+  // so it replays the same keys. A resumed run keeps its own seed.
+  const run = current ?? newRun(claim, automation, `${definitionHash(automation)}-${claim.run}`, dependencies.nowMs());
+  const ctx: RunContext = {
+    automation,
+    // A claim made before its Collection moved runs where the Collection is now.
+    claim: { ...claim, collectionPath: collection.path },
+    message,
+    person: personId === null ? null : { id: personId, name: dependencies.personName(personId) },
+    chat,
+    // Formulas read `now` as the time of the change, or a schedule's due
+    // time, so every attempt reads the same.
+    nowMs: scheduleDueAt(claim) ?? claim.createdAtMs,
+    key: { claimId: claim.claimId, hash: run.keySeed },
+  };
+  const backend = documentBackend(dependencies, input, ctx);
+  // One evaluator budget for the whole attempt: its conditions, then every step.
+  const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
+  if (current === null) {
+    const started = await startRun(dependencies.evaluator, backend, ctx, spent);
+    if (started !== null) return input.stopped.aborted ? stopped : started;
   }
-  const messages = await checkPlannedMessages(dependencies, { automationId: claim.automationId, automation, collection, roster }, run, chat);
-  if ("outcome" in messages) return messages.outcome;
-  const outcome = await applyPlan(dependencies, input, run, resumed, messages.chat);
-  // A stopped run keeps its progress and no outcome; the next drain resumes it.
-  if (outcome.kind === "wait") return outcome;
-  if (outcome.kind === "failed") {
-    run.outcome = { state: "failed", error: outcome.error, run: claim.run };
-  } else {
-    run.outcome = { state: "done" };
-    run.plan = null;
-  }
-  run.finishedAtMs = dependencies.nowMs();
-  await store.save(run);
-  return outcome;
+  return await runSteps(dependencies, backend, { ...input, claimRun: claim.run }, ctx, run, current !== null, spent);
 }
 
 /**
- * Checks every message and notice in a run's plan again under this roster,
- * before anything is sent, and answers the directory the run sends with. A
- * person only a formula named has no verdict from the file, so they keep one
- * here: one an editor's leaving allowed waits for Allow. A saved direct
- * message is checked against its conversation as it is now, read for the
- * plan's own people, resumed or not.
+ * Checks a new run's trigger and conditions against the trigger record, once:
+ * a resumed run went ahead already. Null when the run goes ahead, or how it
+ * ends instead.
+ */
+export async function startRun(
+  evaluator: AutomationFormulaEvaluator,
+  backend: StepBackend,
+  ctx: RunContext,
+  spent: AutomationTimeSpent,
+): Promise<CollectionAutomationRunOutcome | null> {
+  const { automation, claim } = ctx;
+  const read = await backend.step(async (reads) => ({ record: await reads.trigger() }));
+  if (read === null) return { kind: "wait", reason: "engine" };
+  if (read === "moved") return { kind: "wait", reason: "moved" };
+  if (read === "changed") return failed(KEPT_CHANGING_ERROR);
+  const { record } = read;
+  // The record was removed before its automation ran.
+  if (record === null && claim.change.kind !== "removed" && hasTriggerRecord(claim)) return { kind: "skipped" };
+  if (!triggerMatches(automation, claim, record)) return { kind: "skipped" };
+  const request = conditionsRequest(ctx, record);
+  if (request.items.length === 0) return null;
+  const results = await evaluateRequest(evaluator, claim.automationId, request, spent);
+  if (results === "busy") return { kind: "wait", reason: "busy" };
+  const holds = conditionsHold(ctx, record, request, results);
+  if (holds === "go") return null;
+  return holds === "skip" ? { kind: "skipped" } : failed(holds.error, holds.timedOut);
+}
+
+/** Whether the claim names a record: a schedule or a Group message has none. */
+function hasTriggerRecord(claim: RunClaim): boolean {
+  return claim.change.kind !== "message" && claim.change.kind !== "schedule";
+}
+
+/**
+ * Checks every message and notice of the steps under this roster, before
+ * anything is sent, and answers the directory the step sends with. A person
+ * only a formula named has no verdict from the file, so they keep one here:
+ * one an editor's leaving allowed waits for Allow. A saved direct message is
+ * checked against its conversation as it is now, read for the steps' own
+ * people.
  */
 export async function checkPlannedMessages(
   dependencies: Pick<CollectionAutomationRunDependencies, "chat" | "recipientVerdicts">,
   input: { automationId: string; automation: Automation; collection: ReachCollection; roster: Exclude<ReachRoster, { kind: "unknown" }> },
-  run: StoredRun,
+  planned: readonly StoredStep[],
   chat: ChatDirectory | null,
 ): Promise<{ chat: ChatDirectory | null } | { outcome: CollectionAutomationRunOutcome }> {
   const { automation, collection, roster } = input;
-  const planned = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
-  const messages = planned.flatMap(({ ordinal, effect }): Array<{ ordinal: number; effect: PlannedEffect; step: ReachStep }> => {
+  const effects = planned.flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
+  const messages = effects.flatMap(({ ordinal, effect }): Array<{ ordinal: number; effect: PlannedEffect; step: ReachStep }> => {
     if (effect.kind === "message") {
       return [{ ordinal, effect, step: { kind: "post", group: { channelWireId: effect.channelWireId, name: effect.name } } }];
     }
@@ -473,6 +497,7 @@ export async function checkPlannedMessages(
     }
     return [];
   });
+  if (messages.length === 0) return { chat };
   const verdicts = checkAutomationReach(roster, {
     id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: messages.map(({ step }) => step),
   });
@@ -491,48 +516,21 @@ export async function checkPlannedMessages(
   const stoppedReach = verdicts.find((reach) => !reach.allowed);
   if (stoppedReach && !stoppedReach.allowed) return { outcome: failed(stoppedReach.reason) };
   if (kept.includes("held")) return { outcome: { kind: "wait", reason: "held" } };
-  const planPeople = new Set(planned.flatMap(({ effect }) =>
+  const planPeople = new Set(effects.flatMap(({ effect }) =>
     effect.kind === "message" && effect.to.kind === "direct-message" ? [effect.to.userId] : []));
   if (planPeople.size === 0) return { chat };
   const sendChat = await dependencies.chat.directory(roster, { groups: new Set(), people: planPeople });
   return sendChat === null ? { outcome: { kind: "wait", reason: "engine" } } : { chat: sendChat };
 }
 
-/**
- * The values Finds compare with that formulas give, by findValueKey, and
- * the Finds whose formula failed, which read nothing: the run fails only if
- * one of their branches runs. Waits while the evaluator is busy. Only a run
- * whose Finds use formulas asks the evaluator.
- */
-export async function evaluateFindValues(
-  evaluator: AutomationFormulaEvaluator,
-  inputs: FindValueInputs,
-  finds: ReadonlyArray<{ ordinal: number; values: readonly FindValue[] }>,
-  nowMs: number,
-  /** The run's evaluator time, which its later requests go on counting. */
-  spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 },
-): Promise<{ values: Map<string, JsonValue>; failed: Map<number, { error: string; timedOut: boolean }> } | { outcome: CollectionAutomationRunOutcome }> {
-  const request = findValuesRequest(inputs, finds, nowMs);
-  const values = new Map<string, JsonValue>();
-  const failedFinds = new Map<number, { error: string; timedOut: boolean }>();
-  if (request.formulas.length === 0) return { values, failed: failedFinds };
-  const results = await evaluator.evaluate(inputs.claim.automationId, request.scope, request.formulas, spent);
-  if (results === "busy") return { outcome: { kind: "wait", reason: "busy" } };
-  for (const [position, { ordinal, index }] of request.slots.entries()) {
-    const result = results[position];
-    if (!result) return { outcome: failed("The evaluator did not answer every formula.") };
-    if (result.ok) {
-      values.set(findValueKey(ordinal, index), result.value);
-      continue;
-    }
-    // A timeout counts toward switching the automation off, so another
-    // formula's failure in the same Find never hides one.
-    const timedOut = result.error.code === "timeout";
-    if (failedFinds.get(ordinal)?.timedOut !== true && (timedOut || !failedFinds.has(ordinal))) {
-      failedFinds.set(ordinal, { error: `The Find in step ${ordinal + 1} failed. ${result.error.message}`, timedOut });
-    }
+/** A document record by its id, or null when it left the Collection. */
+async function readDocumentRecord(reads: CollectionAutomationReads, collectionPath: string, recordId: string): Promise<RunRecord | null> {
+  try {
+    return runRecordOf((await reads.getCollectionRecord({ collectionPath, recordId, historyLimit: 1 })).record);
+  } catch (error) {
+    if (error instanceof Error && error.message === RECORD_NOT_FOUND) return null;
+    throw error;
   }
-  return { values, failed: failedFinds };
 }
 
 /**
@@ -545,138 +543,133 @@ export function claimPerson(claim: AutomationClaim): string | null {
   return claim.change.kind === "schedule" ? null : claim.change.onBehalfOf;
 }
 
-async function plan(
-  dependencies: CollectionAutomationRunDependencies,
-  input: CollectionAutomationRunInput,
-  keySeed: string,
-  chat: ChatDirectory | null,
-): Promise<{ kind: "plan"; steps: PlannedStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
-  const { automation } = input;
-  // A claim made before its Collection moved plans where the Collection is now.
-  const claim = { ...input.claim, collectionPath: input.collection.path };
-  const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
-  let message: RunInputs["message"] = null;
-  if (claim.change.kind === "message") {
-    const got = await groupMessage(dependencies, claim, automation, chat);
-    if ("outcome" in got) return stop(got.outcome);
-    message = got.message;
-  }
-  // A Group message's formulas name its author from the message itself.
-  const personId = claim.change.kind === "message" ? null : claimPerson(claim);
-  const person = personId === null ? null : { id: personId, name: dependencies.personName(personId) };
-  // Formulas read `now` as the time of the change, or a schedule's due
-  // time, so every attempt plans the same values.
-  const nowMs = scheduleDueAt(claim) ?? claim.createdAtMs;
-  // One evaluator budget for the whole run: its Finds' values, then its formulas and code.
-  const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
-  const read = await dependencies.withReads(async (reads) => {
-    let record: RunRecord | null = null;
-    // A claim with no record (a message or a schedule) reads none.
-    const recordId = claim.recordId;
-    if (claim.change.kind !== "removed" && recordId !== null) {
-      try {
-        const result = await reads.getCollectionRecord({
-          collectionPath: claim.collectionPath,
-          recordId,
-          historyLimit: 1,
-        });
-        record = runRecordOf(result.record);
-      } catch (error) {
-        // The record was removed before its automation ran.
-        if (error instanceof Error && error.message === RECORD_NOT_FOUND) return { removed: true } as const;
-        throw error;
-      }
-    }
-    const finds = findsOf(automation);
-    const computed = await evaluateFindValues(dependencies.evaluator, { automation, claim, record, message, person },
-      finds.map(({ ordinal, query }) => ({ ordinal, values: query.match === "all" ? [] : [query.value] })), nowMs, spent);
-    if ("outcome" in computed) return { removed: false, stopped: computed.outcome } as const;
-    const found = new Map<number, RunRecord[]>();
-    const unreadFinds = new Map(computed.failed);
-    for (const find of finds) {
-      if (unreadFinds.has(find.ordinal)) continue;
-      const { query } = find;
-      const filter = query.match === "all" ? undefined : {
-        field: query.field,
-        operator: query.operator,
-        value: filterValue(query.value, record, computed.values, findValueKey(find.ordinal, 0)),
-      };
-      const result = await reads.queryCollectionRecords({
-        collectionPath: find.collection ?? claim.collectionPath,
-        ...(filter ? { filter } : {}),
-        limit: MAX_FOUND_RECORDS,
+/**
+ * How a document Collection's run reads and writes: through the engine,
+ * which answers each read with the writes of the steps before it, since each
+ * write settles before it returns.
+ */
+function documentBackend(dependencies: CollectionAutomationRunDependencies, input: CollectionAutomationRunInput, ctx: RunContext): StepBackend {
+  const { automation, signal } = input;
+  // The claim as the steps read it: where its Collection is now.
+  const claim = { ...input.claim, collectionPath: ctx.claim.collectionPath };
+  const home = parseCollectionAutomationId(claim.automationId)?.collectionId ?? null;
+  const ordered = new Map(stepsInOrder(automation).map(({ ordinal, step }) => [ordinal, step]));
+  // The Collection the Find or Add record step at `ordinal` reads or adds to.
+  const collectionOf = (ordinal: number) => {
+    const step = ordered.get(ordinal);
+    return (step && (step.kind === "find" || step.kind === "add-record") ? step.collection : null) ?? claim.collectionPath;
+  };
+  // The run's writes carry its person on, so a change they cause names the
+  // same person, and a run with nobody names nobody.
+  const personId = claimPerson(claim);
+  const author: ChangeAuthor = {
+    kind: "automation",
+    automationId: claim.automationId,
+    ...(personId === null ? {} : { onBehalfOf: personId }),
+    depth: claim.depth + 1,
+  };
+  return {
+    async step(work) {
+      return await dependencies.withReads(async (reads) => {
+        const homePath = home === null ? null : dependencies.collectionPathOf(home);
+        if (homePath === null) throw new Error("This automation's Collection is gone.");
+        if (homePath !== input.collection.path) return "moved" as const;
+        // Each record the step read, by Collection and id, so one step sees
+        // one version of it however many ways it reads it.
+        const seen = new Map<string, RunRecord>();
+        const remember = (collectionPath: string, record: RunRecord) => {
+          const key = JSON.stringify([collectionPath, record.id]);
+          const earlier = seen.get(key);
+          if (earlier === undefined) {
+            seen.set(key, record);
+            return record;
+          }
+          if (!isDeepStrictEqual(earlier.values, record.values)) throw new StepRecordChanged();
+          return earlier;
+        };
+        const read = async (collectionPath: string, recordId: string) => {
+          const earlier = seen.get(JSON.stringify([collectionPath, recordId]));
+          if (earlier !== undefined) return earlier;
+          const record = await readDocumentRecord(reads, collectionPath, recordId);
+          return record === null ? null : remember(collectionPath, record);
+        };
+        try {
+          return await work({
+            trigger: async () => (claim.change.kind === "removed" || claim.recordId === null ? null : await read(claim.collectionPath, claim.recordId)),
+            async bound(ordinal, refs) {
+              const records: RunRecord[] = [];
+              for (const ref of refs) {
+                // A record lives directly in its Collection's folder, which a move of the Collection carries.
+                const record = await read(posix.dirname(ref.path), ref.id);
+                if (record !== null) records.push(record);
+              }
+              return records;
+            },
+            findValues(ordinal) {
+              const step = ordered.get(ordinal);
+              const query = step?.kind === "find" ? findQueryOf(step.condition) : { problem: "" };
+              return "problem" in query || query.match === "all" ? [] : [query.value];
+            },
+            async find(ordinal, values) {
+              const step = ordered.get(ordinal);
+              const query = step?.kind === "find" ? findQueryOf(step.condition) : null;
+              if (query === null || "problem" in query) throw new Error(query?.problem ?? `Step ${ordinal + 1} is not a Find.`);
+              const result = await reads.queryCollectionRecords({
+                collectionPath: collectionOf(ordinal),
+                ...(query.match === "all" ? {} : { filter: { field: query.field, operator: query.operator, value: values[0] ?? null } }),
+                limit: MAX_FOUND_RECORDS,
+              });
+              // Never bind a partial page.
+              return result.nextCursor !== null ? { problem: findOverflowError(ordinal) } : result.records.map((record) => remember(collectionOf(ordinal), runRecordOf(record)));
+            },
+            codeRecords: (changes) => codeRecords(dependencies, input, read, changes),
+            // A record's Collection is the folder it is in, wherever the file last named it.
+            effects: (_ordinal, planned) => planned.map((effect) => (effect.kind === "set"
+              ? { ...effect, target: { ...effect.target, collectionPath: posix.dirname(effect.target.path) } }
+              : effect)),
+          });
+        } catch (error) {
+          if (error instanceof StepRecordChanged) return "changed" as const;
+          throw error;
+        }
       });
-      if (result.nextCursor !== null) {
-        // The planner refuses this Find only if its branch runs. Never bind a partial page.
-        unreadFinds.set(find.ordinal, { error: FIND_OVERFLOW_ERROR, timedOut: false });
-      } else {
-        found.set(find.ordinal, result.records.map(runRecordOf));
+    },
+    collectionsOf: (step) => collectionsOf(dependencies, [step]),
+    added(run, ordinal) {
+      const created = run.applied.find((entry) => entry.ordinal === ordinal)?.writes.find((write) => write.kind === "created");
+      return created?.kind === "created" ? { id: created.recordId, path: created.path } : null;
+    },
+    async apply(run, planned, place, chat) {
+      // Another Collection the steps write moved: followed, and checked there.
+      const followed = await followCollections(dependencies, input, run, false);
+      if (followed !== null) return { outcome: followed };
+      const effect = run.steps.find((step) => step.ordinal === place.ordinal)?.effects[place.part] ?? planned;
+      // The automation's own Collection moved since the run was checked: who
+      // can edit it, and where a relayed press may run, are decided again
+      // before it writes, just before each effect starts.
+      const homePath = home === null ? null : dependencies.collectionPathOf(home);
+      if (homePath === null) return { outcome: failed("This automation's Collection is gone.") };
+      if (homePath !== input.collection.path) return { outcome: { kind: "wait", reason: "moved" } };
+      // Only a dataset Collection's run plans dataset effects.
+      if (effect.kind !== "set" && effect.kind !== "add" && effect.kind !== "message" && effect.kind !== "notice" && effect.kind !== "wake" && effect.kind !== "invoke") {
+        return { outcome: failed(UNREADABLE_RUN_ERROR) };
       }
-    }
-    return { removed: false, stopped: null, record, found, unreadFinds } as const;
-  });
-  if (read === null) return stop({ kind: "wait", reason: "engine" });
-  if (read.removed) return stop({ kind: "skipped" });
-  if (read.stopped !== null) return stop(read.stopped);
-  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, unreadFinds: read.unreadFinds, message, chat, person };
-  if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
-  const codeFiles = await readCodeFiles(dependencies, automation, claim.collectionPath);
-  if (typeof codeFiles === "string") return stop(failed(codeFiles));
-  inputs.codeFiles = codeFiles;
-  const request = evaluationRequest(inputs, nowMs);
-  const results = await evaluateRequest(dependencies.evaluator, claim.automationId, request, spent);
-  if (results === "busy") return stop({ kind: "wait", reason: "busy" });
-  const changes = codeChangesOf(request, results, claim.collectionPath);
-  if (!("problem" in changes) && changes.length > 0) {
-    const records = await codeRecords(dependencies, input, changes);
-    if ("outcome" in records) return stop(records.outcome);
-    inputs.codeRecords = records.records;
-  }
-  // Only the conversations of the people the formulas named are read.
-  const named = formulaPeople(request, results);
-  if (named.length > 0) {
-    const needs = chatNeedsOf([automation]);
-    for (const userId of named) needs.people.add(userId);
-    inputs.chat = await dependencies.chat.directory(input.roster, needs);
-    if (inputs.chat === null) return stop({ kind: "wait", reason: "engine" });
-  }
-  const planned = planRun(inputs, request, results, { claimId: claim.claimId, hash: keySeed });
-  if (planned.kind === "skip") return stop({ kind: "skipped" });
-  if (planned.kind === "failed") return stop(failed(planned.error, planned.timedOut));
-  return { kind: "plan", steps: planned.steps };
-}
-
-/** The text of each code file the steps run, by the path its step names, or why one cannot run. */
-export async function readCodeFiles(
-  dependencies: Pick<CollectionAutomationRunDependencies, "readCode">,
-  automation: Automation,
-  collectionPath: string,
-): Promise<Map<string, string> | string> {
-  const files = new Map<string, string>();
-  for (const { ordinal, step } of stepsInOrder(automation)) {
-    if (step.kind !== "run-file" || files.has(step.file)) continue;
-    const path = `${collectionPath}/${step.file}`;
-    const read = await dependencies.readCode(path);
-    if (read === null) return `Step ${ordinal + 1} runs ${path}, and dohc cannot find that file.`;
-    if (read.truncated) return `Step ${ordinal + 1} runs ${path}, which is too large to run.`;
-    files.set(step.file, read.text);
-  }
-  return files;
+      return await applyEffect(dependencies, { run, author, signal, ordinal: place.ordinal, automationName: automation.name, depth: claim.depth + 1, chat }, effect, place.mode);
+    },
+  };
 }
 
 /** A Collection a code step changes records in, and the fields it sets there. */
 type CodeTarget = { ordinal: number; collection: string; fields: readonly string[] };
 
-/** The Collections the code steps of a saved plan change records in. */
-function savedCodeTargets(automation: Automation, run: StoredRun): CodeTarget[] {
-  const code = codeStepOrdinals(automation);
-  return (run.plan ?? []).filter((step) => code.has(step.ordinal)).flatMap(({ ordinal, effects }) => effects.flatMap((effect): CodeTarget[] => {
+/** The Collections a saved code step changes records in. */
+function savedCodeTargets(automation: Automation, { ordinal, effects }: StoredStep): CodeTarget[] {
+  if (!codeStepOrdinals(automation).has(ordinal)) return [];
+  return effects.flatMap((effect): CodeTarget[] => {
     if (effect.kind === "add") return [{ ordinal, collection: effect.collectionPath, fields: effect.fields.map(({ field }) => field) }];
-    if (effect.kind === "set" && !("addedBy" in effect.target)) {
-      return [{ ordinal, collection: effect.target.collectionPath, fields: effect.fields.map(({ field }) => field) }];
-    }
+    if (effect.kind === "set") return [{ ordinal, collection: effect.target.collectionPath, fields: effect.fields.map(({ field }) => field) }];
     return [];
-  }));
+  });
 }
 
 /**
@@ -726,31 +719,26 @@ async function checkCodeTargets(
 }
 
 /**
- * Checks what the code steps change, then reads each record they change. A
- * record that is not in its Collection is left out, and the plan says so.
+ * Checks what a code step changes, then reads each record it changes. A
+ * record that is not in its Collection is left out, and the step says so.
  */
 async function codeRecords(
   dependencies: CollectionAutomationRunDependencies,
   input: CollectionAutomationRunInput,
+  read: (collectionPath: string, recordId: string) => Promise<RunRecord | null>,
   changes: readonly CodeChange[],
 ): Promise<{ records: Map<string, RunRecord> } | { outcome: CollectionAutomationRunOutcome }> {
   const checked = await checkCodeTargets(dependencies, input, changes.map(({ ordinal, collection, fields }) => ({ ordinal, collection, fields: Object.keys(fields) })));
   if (checked !== null) return { outcome: checked };
   const records = new Map<string, RunRecord>();
-  const read = await dependencies.withReads(async (reads) => {
-    for (const change of changes) {
-      if (change.action !== "change" || change.id === null) continue;
-      const key = codeRecordKey(change.collection, change.id);
-      if (records.has(key)) continue;
-      try {
-        records.set(key, runRecordOf((await reads.getCollectionRecord({ collectionPath: change.collection, recordId: change.id, historyLimit: 1 })).record));
-      } catch (error) {
-        if (!(error instanceof Error && error.message === RECORD_NOT_FOUND)) throw error;
-      }
-    }
-    return records;
-  });
-  return read === null ? { outcome: { kind: "wait", reason: "engine" } } : { records: read };
+  for (const change of changes) {
+    if (change.action !== "change" || change.id === null) continue;
+    const key = codeRecordKey(change.collection, change.id);
+    if (records.has(key)) continue;
+    const record = await read(change.collection, change.id);
+    if (record !== null) records.set(key, record);
+  }
+  return { records };
 }
 
 /**
@@ -801,79 +789,6 @@ async function locate(
   return found.path;
 }
 
-async function applyPlan(
-  dependencies: CollectionAutomationRunDependencies,
-  input: CollectionAutomationRunInput,
-  run: StoredRun,
-  resumed: boolean,
-  chat: ChatDirectory | null,
-): Promise<CollectionAutomationRunOutcome> {
-  const { claim, signal } = input;
-  // The run's writes carry its person on, so a change they cause names the
-  // same person, and a run with nobody names nobody.
-  const personId = claimPerson(claim);
-  const author: ChangeAuthor = {
-    kind: "automation",
-    automationId: claim.automationId,
-    ...(personId === null ? {} : { onBehalfOf: personId }),
-    depth: claim.depth + 1,
-  };
-  const effectsOf = (saved: StoredRun) => (saved.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
-  let effects = effectsOf(run);
-  const firstUnrecorded = run.applied.length;
-  const home = parseCollectionAutomationId(claim.automationId)?.collectionId ?? null;
-  for (let index = firstUnrecorded; index < effects.length; index += 1) {
-    if (input.stopped.aborted) return stopped;
-    if (signal.aborted) return failed(DEADLINE_ERROR, true);
-    if (index > firstUnrecorded) {
-      // Another Collection the plan writes moved: followed, and checked there.
-      const checked = await followCollections(dependencies, input, run, false);
-      if (checked !== null) return checked;
-      effects = effectsOf(run);
-    }
-    // The automation's own Collection moved since the run was checked: who
-    // can edit it, and where a relayed press may run, are decided again
-    // before it writes, just before each effect starts.
-    const homePath = home === null ? null : dependencies.collectionPathOf(home);
-    if (homePath === null) return failed("This automation's Collection is gone.");
-    if (homePath !== input.collection.path) return { kind: "wait", reason: "moved" };
-    const { ordinal, effect } = effects[index]!;
-    // Only a dataset Collection's run plans dataset effects.
-    if (effect.kind !== "set" && effect.kind !== "add" && effect.kind !== "message" && effect.kind !== "notice" && effect.kind !== "wake") return failed(UNREADABLE_RUN_ERROR);
-    // After a stop, records may have changed while the run waited, so every
-    // effect checks each field before it writes. Only the first effect the
-    // run had not recorded may have landed before the stop.
-    const mode: EffectMode = !resumed ? "fresh" : index === firstUnrecorded ? "may-have-landed" : "resumed";
-    let writes: RunWrite[];
-    try {
-      writes = await applyEffect(
-        dependencies,
-        { run, author, signal, ordinal, automationName: input.automation.name, depth: claim.depth + 1, chat },
-        effect,
-        mode,
-      );
-    } catch (error) {
-      if (input.stopped.aborted) return stopped;
-      if (error instanceof AutomationChatSessionWait) return { kind: "wait", reason: "session" };
-      return signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
-    }
-    const applied = { ordinal, writes };
-    await dependencies.store.appendEffect(run, applied);
-    run.applied.push(applied);
-  }
-  // A stop that came during the last write or its record leaves the run to
-  // the next drain, which finds every effect recorded and completes it.
-  if (input.stopped.aborted) return stopped;
-  return { kind: "done" };
-}
-
-/**
- * How an effect writes: a fresh run writes as planned; after a stop, every
- * effect writes only fields still at their planned before value, and the
- * first effect the run had not recorded may already have landed.
- */
-type EffectMode = "fresh" | "may-have-landed" | "resumed";
-
 // What a field write did, from the seam's answer. A field the seam kept
 // belongs to whoever changed it since the plan, so it is not the
 // automation's write, and Undo leaves it alone.
@@ -901,33 +816,6 @@ function fieldWrites(
   return writes;
 }
 
-/** Every effect's record if it lands as planned, to size a run before it writes. */
-function projectedProgress(plan: readonly PlannedStep[]): StoredRun["applied"] {
-  return plan.flatMap((step) => step.effects.map((effect) => {
-    if (effect.kind === "message") {
-      return { ordinal: step.ordinal, writes: [{ kind: "message" as const, messageId: effect.messageId, name: effect.name }] };
-    }
-    if (effect.kind === "notice") {
-      return { ordinal: step.ordinal, writes: [{ kind: "notice" as const, noticeId: effect.notice.noticeId, name: effect.name }] };
-    }
-    if (effect.kind === "wake") {
-      return { ordinal: step.ordinal, writes: [{ kind: "message" as const, messageId: effect.messageId, name: WAKE_TARGET_NAME }] };
-    }
-    // An action's changes are its own; its record holds no fields.
-    if (effect.kind === "invoke") return { ordinal: step.ordinal, writes: [] };
-    if (effect.kind === "add") {
-      const path = `${effect.collectionPath}/${effect.name}.md`;
-      return { ordinal: step.ordinal, writes: [
-        { kind: "created" as const, recordId: effect.recordId, path },
-        ...effect.fields.map(({ field, value }) => ({ kind: "field" as const, recordId: effect.recordId, path, field, before: null, after: value })),
-      ] };
-    }
-    const target = "addedBy" in effect.target ? { recordId: "rec_".padEnd(30, "x"), path: "" } : effect.target;
-    return { ordinal: step.ordinal, writes: effect.fields.map(({ field, before, after }) =>
-      ({ kind: "field" as const, recordId: target.recordId, path: target.path, field, before, after })) };
-  }));
-}
-
 async function applyEffect(
   dependencies: CollectionAutomationRunDependencies,
   context: {
@@ -953,7 +841,10 @@ async function applyEffect(
       fields: Object.fromEntries(fields.map(({ field, after }) => [field, after])),
       author,
       idempotencyKeyPrefix: `${key}/${recordId}`,
-      ...(mode === "fresh" ? {} : { expectedBefore: Object.fromEntries(fields.map(({ field, before }) => [field, before])) }),
+      // Every write lands only on the value its step read, so a write that
+      // landed before a crash replaced exactly that value, and a change
+      // someone made since the step read the record stays.
+      expectedBefore: Object.fromEntries(fields.map(({ field, before }) => [field, before])),
     });
 
   if (effect.kind === "add") {
@@ -982,10 +873,9 @@ async function applyEffect(
     return [...writes, ...fieldWrites(created, fields, result, mode)];
   }
 
-  // Find the record again by its id: it may have moved since the plan, and
-  // a saved path alone could name another file now.
-  const planned = "addedBy" in effect.target ? addedRecord(run, effect.target.addedBy) : effect.target;
-  if (planned === null) throw new Error("dohc cannot find the record an earlier step added.");
+  // Find the record again by its id: it may have moved since the step read
+  // it, and a saved path alone could name another file now.
+  const planned = effect.target;
   const path = await locate(dependencies, planned.collectionPath, planned.recordId);
   if (path === null) {
     return [{ kind: "skipped", recordId: planned.recordId, path: planned.path, reason: "The record is no longer in the Collection." }];
@@ -1052,15 +942,28 @@ export async function applyChatEffect(
   return [{ kind: "notice", noticeId: effect.notice.noticeId, name: effect.name }];
 }
 
-function addedRecord(run: StoredRun, ordinal: number): { recordId: string; collectionPath: string; path: string } | null {
-  const add = run.plan?.find((step) => step.ordinal === ordinal)?.effects.find((effect) => effect.kind === "add");
-  const created = run.applied.find((entry) => entry.ordinal === ordinal)?.writes.find((write) => write.kind === "created");
-  return add?.kind === "add" && created?.kind === "created"
-    ? { recordId: created.recordId, collectionPath: add.collectionPath, path: created.path }
-    : null;
+/**
+ * The Collections the file names for the steps not in `saved`: those a Find
+ * reads, an Add record adds to, or a Set changes the records of, as reach
+ * counts them.
+ */
+function fileTargets(automation: Automation, collection: ReachCollection, saved: ReadonlySet<number>): ReachCollection[] {
+  const bindings = bindingsIn(automation);
+  const targets = new Map<string, ReachCollection>();
+  for (const { ordinal, step } of stepsInOrder(automation)) {
+    if (saved.has(ordinal)) continue;
+    const path = step.kind === "find" || step.kind === "add-record" ? step.collection
+      : step.kind === "set" && step.records !== null ? (bindings.get(step.records)?.collection ?? null)
+      : step.kind === "set" || step.kind === "run" || step.kind === "run-file" ? null
+      : undefined;
+    if (path === undefined) continue;
+    const target = path === null ? collection : collectionNamed(path);
+    targets.set(target.path, target);
+  }
+  return [...targets.values()];
 }
 
-/** Each document Collection a plan writes, with its Collection id. */
+/** Each document Collection the steps write, with its Collection id. */
 function collectionsOf(
   dependencies: Pick<CollectionAutomationRunDependencies, "collectionIdOf">,
   steps: readonly StoredStep[],
@@ -1069,7 +972,7 @@ function collectionsOf(
   for (const { effects } of steps) {
     for (const effect of effects) {
       if (effect.kind === "add") paths.add(effect.collectionPath);
-      if (effect.kind === "set" && !("addedBy" in effect.target)) paths.add(effect.target.collectionPath);
+      if (effect.kind === "set") paths.add(effect.target.collectionPath);
     }
   }
   return [...paths].flatMap((path) => {
@@ -1131,14 +1034,16 @@ export function rebaseRun(run: StoredRun, collectionPathOf: (collectionId: strin
     const moved = moves.get(posix.dirname(path));
     return moved === undefined ? path : `${moved}/${posix.basename(path)}`;
   };
-  run.plan = run.plan?.map((step) => ({
+  run.steps = run.steps.map((step) => ({
     ...step,
     effects: step.effects.map((effect) => {
       if (effect.kind === "add") return { ...effect, collectionPath: folder(effect.collectionPath) };
-      if (effect.kind !== "set" || "addedBy" in effect.target) return effect;
+      if (effect.kind !== "set") return effect;
       return { ...effect, target: { ...effect.target, collectionPath: folder(effect.target.collectionPath), path: record(effect.target.path) } };
     }),
-  })) ?? null;
+    // A Find's records live in their Collection's folder too.
+    ...(step.output?.kind === "find" ? { output: { kind: "find" as const, records: step.output.records.map((ref) => ({ ...ref, path: record(ref.path) })) } } : {}),
+  }));
   run.applied = run.applied.map((entry) => ({
     ...entry,
     writes: entry.writes.map((write) => "path" in write ? { ...write, path: record(write.path) } : write),

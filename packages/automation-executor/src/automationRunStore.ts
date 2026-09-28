@@ -4,23 +4,23 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
-import type { PlannedEffect } from "./automationPlan";
+import type { PlannedEffect, StepOutput } from "./automationPlan";
 import type { StoredReachVerdict } from "./reachVerdicts";
 
 // This computer's record of each Collection automation run, under
 // <workspace>/.dohc/automations. Claims are local to the computer that ran
-// them, so their runs are too. A run's plan is saved once, before its first
-// write, and each effect is appended to its progress as it lands, before the
-// next one starts. A run that stops part way, from a crash or a failed
-// write, resumes from here instead of evaluating again, so no effect lands
-// twice. Undo and run history read the same records.
+// them, so their runs are too. Each step is appended to a run's progress once
+// it is planned, before its first effect, and each effect as it lands, before
+// the next one starts. A run that stops part way, from a crash or a failed
+// write, resumes from here: it evaluates no saved step again, so no effect
+// lands twice. Undo and run history read the same records.
 //
 // A whole file is written to a temporary name, flushed to disk, and renamed
 // over the old one, so a crash leaves the old record or the new one. An
 // appended line is flushed before the next effect starts.
 
-// The executor refuses a run whose plan, with every effect recorded as
-// planned, is larger than this, before it writes anything.
+// The executor refuses a step that would make a run's saved steps, with every
+// effect recorded as planned, larger than this, before the step writes.
 export const RUN_PLAN_BUDGET_BYTES = 4 * 1024 * 1024;
 // The largest saved run this store writes or reads. It leaves room for
 // values other people changed that are larger than the plan expected.
@@ -37,10 +37,7 @@ const EXPIRE_BATCH_RUNS = 200;
 // Values are this computer's own writes, read back as JSON.parse left them;
 // the write seam checks each one again before it writes.
 const JsonValueSchema = z.custom<JsonValue>((value) => value !== undefined);
-const TargetSchema = z.union([
-  z.object({ recordId: z.string(), collectionPath: z.string(), path: z.string() }),
-  z.object({ addedBy: z.number().int().nonnegative() }),
-]);
+const TargetSchema = z.object({ recordId: z.string(), collectionPath: z.string(), path: z.string() });
 const DatasetRecordIdSchema = z.union([z.string(), z.number()]);
 // The approved rules a dataset effect was planned under. It runs under them
 // or not at all.
@@ -64,8 +61,8 @@ const EffectSchema = z.union([
     rules: DatasetRulesSchema,
     operationId: z.string(),
     tableId: z.string(),
-    // A record the plan read, at the version it read; or one an earlier step adds.
-    target: z.union([z.object({ recordId: DatasetRecordIdSchema, version: z.number().int().positive() }), z.object({ addedBy: z.number().int().nonnegative() })]),
+    // A record the step read, at the version it read.
+    target: z.object({ recordId: DatasetRecordIdSchema, version: z.number().int().positive() }),
     fields: z.array(DatasetFieldSchema),
   }),
   z.object({
@@ -120,6 +117,22 @@ const EffectSchema = z.union([
     byFormula: z.boolean().optional(),
   }),
 ]);
+const RefSchema = z.object({ id: z.string(), key: DatasetRecordIdSchema.optional(), path: z.string() });
+const OutputSchema = z.union([
+  z.object({ kind: z.literal("find"), records: z.array(RefSchema) }),
+  z.object({ kind: z.literal("if"), branch: z.boolean() }),
+  z.object({ kind: z.literal("code"), value: JsonValueSchema }),
+]);
+// A step as it was planned: its effects, and what it leaves for later steps.
+const CollectionRefSchema = z.object({ collectionId: z.string().min(1), path: z.string().min(1) });
+// A step as it was planned: its effects, what it leaves for later steps, and
+// each Collection it writes that the run had not named before it.
+const StepSchema = z.object({
+  ordinal: z.number().int().nonnegative(),
+  effects: z.array(EffectSchema),
+  output: OutputSchema.optional(),
+  collections: z.array(CollectionRefSchema).optional(),
+});
 const WriteSchema = z.union([
   z.object({
     kind: z.literal("field"),
@@ -201,40 +214,40 @@ const UndoRequestSchema = z.object({
   version: z.number().int().positive(),
   values: z.record(z.string(), JsonValueSchema),
 });
-// Version 4 keeps progress in a file beside the plan, names each Collection
-// the plan writes by its Collection id, and records when the run ended. A
-// run in any other format cannot be read, and the claim fails instead of
-// starting over.
+// Version 5 plans and saves one step at a time, in the progress file beside
+// the run's state, names each Collection the steps write by its Collection
+// id, and records when the run ended. A run in any other format cannot be
+// read, and the claim fails instead of starting over.
 const StoredRunSchema = z.object({
-  version: z.literal(4),
+  version: z.literal(5),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
   keySeed: z.string().min(1),
   startedAtMs: z.number(),
   finishedAtMs: z.number().nullable(),
-  plan: z.array(z.object({ ordinal: z.number().int().nonnegative(), effects: z.array(EffectSchema) })).nullable(),
+  steps: z.array(StepSchema),
   applied: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
   created: z.array(CreatedSchema),
   replans: z.array(ReplanSchema),
   undoRequests: z.array(UndoRequestSchema),
   readableFields: z.array(z.string()).nullable(),
-  collections: z.array(z.object({ collectionId: z.string().min(1), path: z.string().min(1) })),
-  datasetId: z.string().min(1).nullable(),
+  collections: z.array(CollectionRefSchema),
+  rules: DatasetRulesSchema.nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
   settled: z.boolean(),
   outcome: z.union([
     z.object({ state: z.literal("done") }),
-    z.object({ state: z.literal("failed"), error: z.string(), run: z.number().int().positive() }),
+    z.object({ state: z.literal("failed"), error: z.string(), run: z.number().int().positive(), step: z.number().int().nonnegative() }),
   ]).nullable(),
 });
 
 // A saved run's plan file: everything but its progress.
-const HeaderSchema = StoredRunSchema.omit({ applied: true, created: true, replans: true, undoRequests: true });
+const HeaderSchema = StoredRunSchema.omit({ steps: true, applied: true, created: true, replans: true, undoRequests: true });
 // What run history's expiry reads of a run.
 const RunEndSchema = StoredRunSchema.pick({
-  version: true, claimId: true, automationId: true, keySeed: true, datasetId: true, finishedAtMs: true, undo: true,
+  version: true, claimId: true, automationId: true, keySeed: true, rules: true, finishedAtMs: true, undo: true,
 });
 // A plan file in an earlier format that still names its claim. Expiry
 // counts its 30 days from when the file last changed.
@@ -262,15 +275,22 @@ export type RunWrite = z.infer<typeof WriteSchema>;
 export type DatasetEffect = Extract<z.infer<typeof EffectSchema>, { kind: "dataset-edit" | "dataset-create" | "dataset-action" }>;
 export type DatasetReplan = z.infer<typeof ReplanSchema>;
 export type DatasetUndoRequest = z.infer<typeof UndoRequestSchema>;
-/** One step's effects, on document records or on dataset records. */
+/** One planned step: its effects, on document records or on dataset records, and its result. */
 export interface StoredStep {
   ordinal: number;
   effects: Array<PlannedEffect | DatasetEffect>;
+  output?: StepOutput;
+  /**
+   * Each document Collection the step writes that the run had not named
+   * before it, saved in the same line as the step, so its identity is never
+   * missing while the step is there.
+   */
+  collections?: Array<{ collectionId: string; path: string }>;
 }
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 4;
+  version: 5;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -284,12 +304,9 @@ export interface StoredRun {
    * leaves run history when it would have anyway.
    */
   finishedAtMs: number | null;
-  /**
-   * The steps' planned effects, saved once every formula has an answer and
-   * dropped when the run is done. Its writes stay.
-   */
-  plan: StoredStep[] | null;
-  /** What each effect that landed did, in plan order, one entry per effect. */
+  /** The steps planned so far, in the order they ran, each saved before its first effect. */
+  steps: StoredStep[];
+  /** What each effect that landed did, in step order, one entry per effect. */
   applied: Array<{ ordinal: number; writes: RunWrite[] }>;
   /**
    * Records the run created, each under the id its plan gave it and the id
@@ -306,17 +323,17 @@ export interface StoredRun {
    */
   readableFields: string[] | null;
   /**
-   * Each document Collection the plan writes, by its Collection id and its
-   * path when the run last saw it. A resume or an Undo moves the run's
+   * Each document Collection the saved steps write, by its Collection id and
+   * its path when the run last saw it. A resume or an Undo moves the run's
    * paths to where each Collection is now.
    */
   collections: Array<{ collectionId: string; path: string }>;
   /**
-   * The dataset a dataset Collection's plan read and writes, or null for a
-   * document Collection. A plan resumes only while its Collection keeps
-   * that dataset.
+   * The dataset and approved rules a dataset Collection's run started under,
+   * or null for a document Collection. A run resumes only while its
+   * Collection keeps that dataset and those rules still resolve.
    */
-  datasetId: string | null;
+  rules: { datasetId: string; revision: number; revisionSha256: string } | null;
   /** A person chose to run the claim again from the start under a newer definition. */
   superseded: boolean;
   /**
@@ -328,8 +345,11 @@ export interface StoredRun {
   undo: "started" | "done" | null;
   /** The engine accepted this run's claim as done, so nothing will resume it. */
   settled: boolean;
-  /** A failed run names the claim's run it failed in: 1, plus one per Try again. */
-  outcome: { state: "done" } | { state: "failed"; error: string; run: number } | null;
+  /**
+   * A failed run names the claim's run it failed in (1, plus one per Try
+   * again) and the step it failed at.
+   */
+  outcome: { state: "done" } | { state: "failed"; error: string; run: number; step: number } | null;
 }
 
 const SubscriptionsSchema = z.object({
@@ -516,11 +536,13 @@ export interface AutomationRunStore {
    */
   runsOf(automationId: string, claimId: string): Promise<{ runs: StoredRun[]; unreadable: boolean }>;
   /**
-   * Saves a run: its plan and state, and its progress as `applied` holds
+   * Saves a run: its state, and its progress as `steps` and `applied` hold
    * it. Refuses a run too large to read back.
    */
   save(run: StoredRun): Promise<void>;
-  /** Records one landed effect after the run's saved progress, without writing the plan again. */
+  /** Records one planned step after the run's saved progress, before its first effect. */
+  appendStep(run: StoredRun, step: StoredStep): Promise<void>;
+  /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
   /**
    * Records the record an add-record step created, with the id the engine
@@ -577,12 +599,14 @@ export interface AutomationRunStore {
 }
 
 type ProgressLine =
+  | ({ kind: "step" } & StoredStep)
   | ({ kind: "effect" } & StoredRun["applied"][number])
   | ({ kind: "created" } & StoredRun["created"][number])
   | ({ kind: "replan" } & DatasetReplan)
   | ({ kind: "undo-request" } & DatasetUndoRequest);
 
 const ProgressLineSchema = z.union([
+  StepSchema.extend({ kind: z.literal("step") }),
   z.object({ kind: z.literal("effect"), ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) }),
   CreatedSchema.extend({ kind: z.literal("created") }),
   ReplanSchema.extend({ kind: z.literal("replan") }),
@@ -591,6 +615,7 @@ const ProgressLineSchema = z.union([
 
 function progressText(run: StoredRun): string {
   const lines: ProgressLine[] = [
+    ...run.steps.map((step) => ({ kind: "step" as const, ...step })),
     ...run.created.map((created) => ({ kind: "created" as const, ...created })),
     ...run.replans.map((replan) => ({ kind: "replan" as const, ...replan })),
     ...run.applied.map((applied) => ({ kind: "effect" as const, ...applied })),
@@ -650,13 +675,13 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     await writeDurably(await undosFile(), `${JSON.stringify({ version: 1, runs: [...next.values()] })}\n`);
     undos = next;
   };
-  // Every run keeps its plan and state in one file, written whole, and its
-  // progress in a second, one line per landed effect.
+  // Every run keeps its state in one file, written whole, and its progress
+  // in a second, one line per planned step and per landed effect.
   const readRun = async (folder: string, name: string, automationId: string): Promise<StoredRun | null> => {
     const header = HeaderSchema.safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
     if (!header.success || header.data.automationId !== automationId) return null;
     if (runName(header.data.claimId, header.data.keySeed) !== name) return null;
-    const run: StoredRun = { ...header.data, applied: [], created: [], replans: [], undoRequests: [] };
+    const run: StoredRun = { ...header.data, steps: [], applied: [], created: [], replans: [], undoRequests: [] };
     // Every saved run has its progress file, empty or not.
     const progress = await readBounded(join(folder, `${name}${PROGRESS_SUFFIX}`));
     if (progress === null || progress === undefined) return null;
@@ -672,7 +697,15 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       }
       const entry = ProgressLineSchema.safeParse(parsed);
       if (!entry.success) return null;
-      if (entry.data.kind === "effect") run.applied.push({ ordinal: entry.data.ordinal, writes: entry.data.writes });
+      if (entry.data.kind === "step") {
+        const { kind: _kind, ...step } = entry.data;
+        run.steps.push(step);
+        // The run's state names each Collection where it last saw it; a step
+        // names one only until the state is saved again.
+        for (const named of step.collections ?? []) {
+          if (!run.collections.some((known) => known.collectionId === named.collectionId)) run.collections.push(named);
+        }
+      } else if (entry.data.kind === "effect") run.applied.push({ ordinal: entry.data.ordinal, writes: entry.data.writes });
       else if (entry.data.kind === "replan") run.replans.push({ effect: entry.data.effect, replan: entry.data.replan, version: entry.data.version, fields: entry.data.fields, kept: entry.data.kept });
       else if (entry.data.kind === "undo-request") {
         const { kind: _kind, ...request } = entry.data;
@@ -684,6 +717,10 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         run.created = [...run.created.filter((created) => created.planned !== planned), { ordinal, planned, recordId, path }];
       }
     }
+    // Steps run in order, and an effect lands only after its step was saved.
+    const planned = run.steps.reduce((count, step) => count + step.effects.length, 0);
+    if (run.steps.some((step, index) => index > 0 && step.ordinal <= run.steps[index - 1]!.ordinal)) return null;
+    if (run.applied.length > planned || run.replans.some((replan) => replan.effect >= planned)) return null;
     return run;
   };
   // Appends one line durably. A torn line a crash left at the end goes first,
@@ -758,7 +795,8 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       }
       const current = RunEndSchema.safeParse(json);
       if (current.success && runName(current.data.claimId, current.data.keySeed) === name) {
-        runs.push(current.data);
+        const { rules, ...end } = current.data;
+        runs.push({ ...end, datasetId: rules?.datasetId ?? null });
         continue;
       }
       const older = OlderRunSchema.safeParse(json);
@@ -800,7 +838,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     return true;
   });
   const header = (run: StoredRun) => {
-    const { applied: _applied, created: _created, replans: _replans, undoRequests: _undoRequests, ...rest } = run;
+    const { steps: _steps, applied: _applied, created: _created, replans: _replans, undoRequests: _undoRequests, ...rest } = run;
     return rest;
   };
 
@@ -857,6 +895,9 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         const known = await readUndos();
         return known === null ? null : new Set([...known.values()].map((entry) => entry.claimId));
       });
+    },
+    appendStep(run, step) {
+      return serial(() => appendLine(run, { kind: "step", ...step }));
     },
     appendEffect(run, applied) {
       return serial(() => appendLine(run, { kind: "effect", ...applied }));

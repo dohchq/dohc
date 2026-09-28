@@ -558,6 +558,38 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
+  it("gives each step what the steps before it wrote: a Find sees a status just set, and an added record reads with its values", async () => {
+    const f = await world();
+    await f.writeAutomations(closePaid(`      - set:
+          Status: Closed
+        operation: invoices.status
+      - find: record.Status == "Closed"
+        as: closed
+        operation: invoices.list
+      - add-record:
+          Notes: '="Closed " + closed.length'
+          Status: Logged
+        as: log
+        operation: invoices.create
+      - find: record.Notes == log.Notes
+        as: logs
+        operation: invoices.list
+      - set:
+          Notes: '=log.Notes + " / " + logs.length + " / " + log.Paid'
+        operation: invoices.edit
+`));
+    await f.executor.open();
+    const invoice = await f.create({ [NOTES]: "first" });
+    await f.create({ [NOTES]: "other" });
+    await f.edit(invoice.id, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    const rows = await f.records();
+    // The added record reads with the default its Collection gave Paid.
+    expect(rows.find((row) => row.id === invoice.id)?.values).toMatchObject({ [STATUS]: "Closed", [NOTES]: "Closed 1 / 1 / false" });
+    expect(rows.filter((row) => row.values[STATUS] === "Logged").map((row) => row.values[NOTES])).toEqual(["Closed 1"]);
+    await f.executor.dispose();
+  });
+
   it("sends a stale edit again at the record's new version, and keeps a field someone else changed", async () => {
     let interfere: (() => Promise<void>) | null = null;
     const base = sharedEvaluator.forWorkspace("workspace");
@@ -1527,7 +1559,7 @@ describe("dataset automation claims in both ledgers", () => {
     const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
     const [ledgerRun] = (await store.runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
     // An engine run from when Budget kept its records in documents.
-    await store.save({ ...ledgerRun!, claimId: "atc_document", datasetId: null, applied: [{ ordinal: 0, writes: [
+    await store.save({ ...ledgerRun!, claimId: "atc_document", rules: null, applied: [{ ordinal: 0, writes: [
       { kind: "field", recordId: "rec_one", path: "Budget/one.md", field: "Status", before: "Open", after: "Closed" },
     ] }] });
     f.engineClaims.push(engineClaim("atc_document", "done", 1));
@@ -1574,11 +1606,11 @@ describe("dataset automation claims in both ledgers", () => {
     const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
     const saved = (claimId: string, outcome: StoredRun["outcome"], rest: Partial<StoredRun> = {}): StoredRun => ({
-      version: 4, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, plan: null,
-      applied: [], created: [], replans: [], undoRequests: [], readableFields: null, collections: [], datasetId: null,
+      version: 5, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
+      applied: [], created: [], replans: [], undoRequests: [], readableFields: null, collections: [], rules: null,
       superseded: false, undo: null, settled: outcome?.state === "done", outcome, ...rest,
     });
-    const failed = { state: "failed" as const, error: "Not yet.", run: 1 };
+    const failed = { state: "failed" as const, error: "Not yet.", run: 1, step: 0 };
     await store.save(saved("atc_done", { state: "done" }));
     // Undone since, which does not keep it longer.
     await store.save(saved("atc_undone", { state: "done" }, { undo: "done" }));
@@ -1589,7 +1621,7 @@ describe("dataset automation claims in both ledgers", () => {
     // No ledger holds it any more.
     await store.save(saved("atc_gone", failed));
     // Its dataset's ledger may hold it, and cannot say while its host is closed.
-    await store.save(saved("atc_dataset", failed, { datasetId: "budget" }));
+    await store.save(saved("atc_dataset", failed, { rules: { datasetId: "budget", revision: 1, revisionSha256: "r" } }));
     await f.executor.open();
     await f.until(() => f.expiries() > 0);
     const left: string[] = [];
@@ -2183,7 +2215,7 @@ describe("code steps on a dataset", () => {
     await f.executor.dispose();
   });
 
-  it("plans every step's change to a record from one read that shows all the fields they change", async () => {
+  it("saves a code step with the values it read before its first write, and plans the next step only once it lands", async () => {
     const f = await world();
     await f.writeAutomations(coded(
       "return { records: [{ action: 'change', collection: 'Budget', id: ctx.record.Notes, fields: { Status: 'Closed' } }] };",
@@ -2192,13 +2224,13 @@ describe("code steps on a dataset", () => {
     await f.executor.open();
     const other = await f.create({ [NOTES]: "other" });
     const { id: invoice } = await f.create({ [NOTES]: other.id });
-    // The saved plan stays readable once its first write fails.
+    // The saved step stays readable once its first write fails.
     f.afterNextSave(() => f.dropRules());
     await f.edit(invoice, { [PAID]: true });
     await f.until(() => f.claims()[0]?.state === "failed");
     const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
-    expect(run!.plan!.map(({ effects }) => effects.map((effect) => effect.kind === "dataset-edit" ? effect.fields.map(({ field, before }) => [field, before]) : null)))
-      .toEqual([[[["Status", "Open"]]], [[["Notes", "other"]]]]);
+    expect(run!.steps.map(({ effects }) => effects.map((effect) => effect.kind === "dataset-edit" ? effect.fields.map(({ field, before }) => [field, before]) : null)))
+      .toEqual([[[["Status", "Open"]]]]);
     await f.executor.dispose();
   });
 
