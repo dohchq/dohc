@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { serveFetchHandler, TokenBucketLimiter } from "@dohc/service-http";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
-import { MAX_COLLECTION_WRITE_BODY_BYTES } from "./collectionWriteRoutes";
+import { MAX_COLLECTION_WRITE_BODY_BYTES, MAX_LINK_COLLECTION_WRITE_BODY_BYTES } from "./collectionWriteRoutes";
+import { hashLinkBearer } from "./linkSecurity";
+import { normalizeLinkRefusal } from "./linkRefusal";
+import { guardRelayResponses } from "./relayResponseStanding";
 import { pathCollisionKey } from "./pathCollisionKey";
 import { streamsRequestBody, type SyncRelayHandler } from "./server";
 import {
@@ -23,11 +26,14 @@ import {
   inspectDatabase,
   json,
   jsonBody,
+  LINK_KEY,
+  linkRequest,
   putBlob,
   reopenTestStorage,
   request,
   seedDependentGrant,
   seedLinkGrant,
+  seedLinkSession,
   sha256,
   storagePath,
   testHandler,
@@ -62,9 +68,14 @@ interface Relay {
 }
 
 async function relay(
-  options: { overrides?: HandlerOverrides; paths?: string[]; access?: "view" | "comment" | "edit" } = {},
+  options: {
+    overrides?: HandlerOverrides;
+    paths?: string[];
+    access?: "view" | "comment" | "edit";
+    storage?: Parameters<typeof testStorage>[0];
+  } = {},
 ): Promise<Relay> {
-  const storage = await testStorage();
+  const storage = await testStorage(options.storage);
   const h = testHandler(storage, { nowMs: () => CLOCK, ...options.overrides });
   await claimWorkspace(h, OWNER, WORKSPACE);
   const owner = new Owner(h);
@@ -465,7 +476,7 @@ describe("direct writes to a Collection's own files", () => {
       shareId: r.shareId,
       grantId: r.grantId,
       grantGeneration: 1,
-      userId: RECIPIENT,
+      writer: { kind: "named", userId: RECIPIENT },
       submitId: "submit-1",
       rawChanges: changes,
       write: decision.write,
@@ -992,5 +1003,477 @@ describe("the direct-write decision", () => {
     expect(decision.allowed && decision.write.kind === "new-collection" && decision.write.changes.length).toBe(501);
     expect(decision.allowed && decision.write.kind === "new-collection" && decision.write.changes[0]!.afterPath)
       .toBe("trip/ideas/collection.yaml");
+  });
+});
+
+// An Edit share link writes the same files through its own route (ADR 0013),
+// with its content in the request and its authority from the capability.
+describe("direct writes through an Edit share link", () => {
+  async function expectOpaque(response: Response) {
+    expect(response.status).toBe(404);
+    expect(await json(response)).toEqual({ ok: false, error: "not found" });
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+  }
+
+  const LINK_GRANT = "grant-link";
+  const TOKEN = "a".repeat(43);
+  const OTHER_TOKEN = "b".repeat(43);
+  const PROFILE = "c".repeat(43);
+  const OTHER_PROFILE = "d".repeat(43);
+  const release: HandlerOverrides = {
+    publicEditRelease: { version: 1 },
+    relayExchangeKey: "link-direct-write-relay-key-at-least-32",
+    namedBrowserSessionLimits: { maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000 },
+  };
+
+  async function linkRelay(
+    options: { access?: "view" | "comment" | "edit"; overrides?: HandlerOverrides; storage?: Parameters<typeof testStorage>[0] } = {},
+  ): Promise<Relay> {
+    const r = await relay({ overrides: { ...release, ...options.overrides }, storage: options.storage });
+    seedLinkGrant(r.storage, { grantId: LINK_GRANT, shareId: r.shareId, secretHash: "link-secret-hash", access: options.access ?? "edit" });
+    seedLinkSession(r.storage, { grantId: LINK_GRANT, capabilityHash: hashLinkBearer(TOKEN, LINK_KEY) });
+    seedLinkSession(r.storage, { grantId: LINK_GRANT, sessionId: "other-session", capabilityHash: hashLinkBearer(OTHER_TOKEN, LINK_KEY) });
+    return r;
+  }
+
+  const encoded = (text: string) => Buffer.from(text).toString("base64");
+  function linkEdit(path: string, before: string, after: string): Record<string, unknown> {
+    return {
+      basedOnPath: path, basedOnBlobSha256: sha256(before), operation: "write",
+      afterPath: path, afterContentKind: "text", afterContentBase64: encoded(after), recordedAtMs: 1,
+    };
+  }
+  function linkCreate(path: string, text: string): Record<string, unknown> {
+    return { ...linkEdit(path, "", text), basedOnPath: null, basedOnBlobSha256: null };
+  }
+
+  async function linkWrite(
+    r: Relay,
+    changes: unknown,
+    options: { submitId?: string; token?: string; profile?: string; headers?: Record<string, string>; body?: BodyInit } = {},
+  ): Promise<Response> {
+    return await r.h(linkRequest(options.token ?? TOKEN, "/sync/link/collection-writes", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-dohc-link-profile-secret": options.profile ?? PROFILE, ...options.headers },
+      body: options.body ?? JSON.stringify({ submitId: options.submitId ?? "submit-1", changes }),
+      ...(options.body instanceof ReadableStream ? { duplex: "half" } : {}),
+    } as RequestInit));
+  }
+
+  function ledger(r: Relay): Array<Record<string, unknown>> {
+    const db = inspectDatabase(storagePath(r.storage));
+    try {
+      return db.prepare("SELECT grant_id, author_kind, user_id, principal_id, grant_generation FROM sync_relay_collection_writes").all();
+    } finally {
+      db.close();
+    }
+  }
+  function principals(r: Relay): number {
+    const db = inspectDatabase(storagePath(r.storage));
+    try {
+      return Number(db.prepare("SELECT COUNT(*) AS n FROM sync_relay_link_principals").get()?.n);
+    } finally {
+      db.close();
+    }
+  }
+  function sql(r: Relay, statement: string): void {
+    const db = inspectDatabase(storagePath(r.storage));
+    try {
+      db.exec(statement);
+    } finally {
+      db.close();
+    }
+  }
+
+  it("writes an automations file under the link, never a person, with content the relay hashed", async () => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    const response = await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, one)]);
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await json(response)).toMatchObject({ ok: true, submitId: "submit-1", paths: [`${PACKING}/automations.yaml`], created: true });
+
+    const [moment, ...rest] = await r.owner.directMoments();
+    expect(rest).toEqual([]);
+    expect(moment!.originId).toBe(`relay:collection-file:${LINK_GRANT}`);
+    const author = moment!.payload.author as Record<string, unknown>;
+    expect(author).toEqual({ kind: "link", grantId: LINK_GRANT, grantGeneration: 1, principalId: expect.any(String) });
+    expect(moment!.payload).toMatchObject({ payloadAfterBlobSha256: sha256(one), payloadAfterByteLength: bytes(one) });
+    expect(Buffer.from(r.storage.getBlob(WORKSPACE, sha256(one))!).toString()).toBe(one);
+    expect(ledger(r)).toEqual([{
+      grant_id: LINK_GRANT, author_kind: "link", user_id: null, principal_id: author.principalId, grant_generation: 1,
+    }]);
+    // Nothing about the capability or the profile reaches the owner's log.
+    expect(JSON.stringify(moment)).not.toContain(PROFILE);
+    expect(JSON.stringify(moment)).not.toContain(hashLinkBearer(TOKEN, LINK_KEY));
+
+    // The owner reads the link's writes, for stop and restore.
+    const owned = await r.h(request(OWNER, `/sync/${WORKSPACE}/collection-writes/${LINK_GRANT}`));
+    expect(await json(owned)).toMatchObject({ writes: [{ submitId: "submit-1", files: [{ path: `${PACKING}/automations.yaml`, created: true }] }] });
+  });
+
+  it("answers a retry from its receipt, and a submit id another browser or payload reuses with a conflict", async () => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    const changes = [linkCreate(`${PACKING}/automations.yaml`, one)];
+    const first = await json(await linkWrite(r, changes));
+    // The same browser in another session is the same principal.
+    const retried = await linkWrite(r, changes, { token: OTHER_TOKEN });
+    expect(await json(retried)).toEqual({ ...first, created: false });
+    expect((await r.owner.directMoments()).length).toBe(1);
+    // Another browser, with a session of its own, reusing the submit id.
+    await expectCode(await linkWrite(r, changes, { token: OTHER_TOKEN, profile: OTHER_PROFILE }), 409, "conflict");
+    // A session already bound to one browser answers for no other.
+    await expectOpaque(await linkWrite(r, changes, { profile: OTHER_PROFILE }));
+    await expectCode(await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, automations(STAMP, STAMP.replace("stamp", "other")))]), 409, "conflict");
+    expect((await r.owner.directMoments()).length).toBe(1);
+  });
+
+  it.each(["view", "comment"] as const)("refuses a %s link as a missing share, enrolling nobody", async (access) => {
+    const r = await linkRelay({ access });
+    await expectOpaque(await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, automations(STAMP))]));
+    expect(await r.owner.directMoments()).toEqual([]);
+    expect(principals(r)).toBe(0);
+  });
+
+  it("keeps missing or bad credentials opaque even for a malformed write", async () => {
+    const r = await linkRelay();
+    for (const authorization of ["", "LinkCapability short", `LinkCapability ${"z".repeat(43)}`]) {
+      await expectOpaque(await r.h(request(null, "/sync/link/collection-writes", {
+        method: "POST", headers: { authorization, "content-type": "application/json", "x-dohc-link-profile-secret": PROFILE }, body: "{",
+      })));
+    }
+    await expectOpaque(await linkWrite(r, null, { headers: { "x-dohc-link-profile-secret": "" }, body: "{" }));
+  });
+
+  it("keeps a mismatched profile opaque before body validation or rate admission", async () => {
+    const r = await linkRelay({ overrides: { collectionWriteRateLimiter: new TokenBucketLimiter(1, 0.001, 10) } });
+    expect((await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, automations(STAMP))])).status).toBe(200);
+    await expectOpaque(await linkWrite(r, null, { profile: OTHER_PROFILE, body: "{" }));
+    await expectOpaque(await linkWrite(r, null, { profile: OTHER_PROFILE, headers: { "content-type": "text/plain" } }));
+  });
+
+  it("keeps paths outside the share opaque before rejecting content", async () => {
+    const r = await linkRelay();
+    for (const change of [
+      linkCreate("private/automations.yaml", "invalid content"),
+      { ...linkCreate(`${PACKING}/automations.yaml`, "invalid content"), basedOnPath: "private/automations.yaml" },
+    ]) {
+      await expectOpaque(await linkWrite(r, [change]));
+    }
+    expect(principals(r)).toBe(0);
+  });
+
+  it("preserves verified reasons through both relay normalizers and the response guard", async () => {
+    const r = await linkRelay();
+    const guarded = guardRelayResponses(r.storage, r.h);
+    // main.ts normalizes again after the guard wraps the application's response.
+    r.h = Object.assign(async (request: Request) => normalizeLinkRefusal(
+      await guarded(request), new URL(request.url).pathname,
+    ), r.h);
+    const malformed = await linkWrite(r, null, { body: "{" });
+    expect(await expectCode(malformed, 400, "bad_request")).toMatchObject({ error: "request body must be valid JSON" });
+    const changes = [
+      { ...linkCreate(`${PACKING}/automations.yaml`, automations(STAMP)), author: { kind: "named", userId: OWNER } },
+    ];
+    const response = await linkWrite(r, changes);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await expectCode(response, 403, "share_op_rejected")).toEqual({ ok: false, code: "share_op_rejected", error: "an op is outside this share" });
+    await expectOpaque(await linkWrite(r, changes, { token: "z".repeat(43) }));
+    await expectOpaque(await linkWrite(r, changes, { profile: "short" }));
+    await expectOpaque(await linkWrite(r, [linkCreate("private/automations.yaml", "invalid content")]));
+  });
+
+  it("rejects too many changes before walking their scope", async () => {
+    const r = await linkRelay();
+    const changes = Array.from({ length: MAX_NEW_COLLECTION_RECORDS + 3 }, () =>
+      linkCreate("private/automations.yaml", "invalid content"));
+    expect(await expectCode(await linkWrite(r, changes), 403, "share_op_rejected"))
+      .toEqual({ ok: false, code: "share_op_rejected", error: "an op is outside this share" });
+    expect(principals(r)).toBe(0);
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("refuses without the Edit release, with an account cookie, with a bad profile, or with authority in the query", async () => {
+    const closed = await linkRelay({ overrides: { publicEditRelease: undefined } });
+    const changes = [linkCreate(`${PACKING}/automations.yaml`, automations(STAMP))];
+    await expectOpaque(await linkWrite(closed, changes));
+    const r = await linkRelay();
+    await expectOpaque(await linkWrite(r, changes, { headers: { cookie: "session=ana" } }));
+    await expectOpaque(await linkWrite(r, changes, { profile: "short" }));
+    const query = await r.h(linkRequest(TOKEN, `/sync/link/collection-writes?shareId=${r.shareId}`, {
+      method: "POST", headers: { "content-type": "application/json", "x-dohc-link-profile-secret": PROFILE },
+      body: JSON.stringify({ submitId: "submit-1", changes }),
+    }));
+    await expectOpaque(query);
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it.each([
+    ["the link is revoked", (r: Relay) => { expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: LINK_GRANT, revokedAtMs: CLOCK }).ok).toBe(true); }],
+    ["the link was rotated", (r: Relay) => sql(r, `UPDATE sync_relay_share_grants SET generation = 2 WHERE grant_id = '${LINK_GRANT}'`)],
+    ["the session expired", (r: Relay) => sql(r, `UPDATE sync_relay_link_sessions SET expires_at_ms = ${CLOCK}`)],
+    ["the link was narrowed to View", (r: Relay) => sql(r, `UPDATE sync_relay_share_grants SET access = 'view' WHERE grant_id = '${LINK_GRANT}'`)],
+    ["the owner paused link writes", (r: Relay) => sql(r, `UPDATE sync_relay_shares SET link_writes_paused_at_ms = 1 WHERE share_id = '${r.shareId}'`)],
+    ["the owner blocked this browser", (r: Relay) => sql(r, "UPDATE sync_relay_link_principals SET blocked_at_ms = 1")],
+  ] as const)("refuses a write and its retry once %s", async (_case, change) => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    expect((await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, one)])).status).toBe(200);
+    change(r);
+    const two = automations(STAMP.replace("Packed", "Ready"));
+    const next = [linkEdit(`${PACKING}/automations.yaml`, one, two)];
+    await expectOpaque(await linkWrite(r, next, { submitId: "submit-2" }));
+    await expectOpaque(await linkWrite(r, null, { body: "{" }));
+    // A retry of the write that landed learns nothing either.
+    await expectOpaque(await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, one)]));
+    expect((await r.owner.directMoments()).length).toBe(1);
+  });
+
+  it("refuses a write whose link is revoked inside the write, after the route read its capability", async () => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    const decision = filterCollectionWriteForShare(
+      { versionId: null, paths: ["trip"], access: "edit" },
+      [{ ...linkCreate(`${PACKING}/automations.yaml`, one), afterContentBase64: undefined, afterBlobSha256: sha256(one), afterByteLength: bytes(one) }],
+    );
+    if (!decision.allowed) throw new Error("expected the write to be allowed");
+    expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: LINK_GRANT, revokedAtMs: CLOCK }).ok).toBe(true);
+    expect(() => r.storage.commitCollectionWrite({
+      shareId: r.shareId, grantId: LINK_GRANT, grantGeneration: 1,
+      writer: {
+        kind: "link", capabilityHash: hashLinkBearer(TOKEN, LINK_KEY), profileTokenHash: "profile-hash",
+        content: new Map([[sha256(one), Buffer.from(one)]]), now: () => CLOCK,
+      },
+      submitId: "submit-1", rawChanges: decision.write.kind === "automations" ? [decision.write.change] : [], write: decision.write,
+      nowMs: CLOCK, newId: () => "id",
+    })).toThrow(expect.objectContaining({ code: "not_found" }));
+    expect(await r.owner.directMoments()).toEqual([]);
+    expect(principals(r)).toBe(0);
+    expect(r.storage.getBlob(WORKSPACE, sha256(one))).toBeNull();
+  });
+
+  it("refuses a write whose link is revoked while its body streams in, storing nothing", async () => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    const body = new TextEncoder().encode(JSON.stringify({ submitId: "submit-1", changes: [linkCreate(`${PACKING}/automations.yaml`, one)] }));
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: LINK_GRANT, revokedAtMs: CLOCK }).ok).toBe(true);
+        controller.enqueue(body);
+        controller.close();
+      },
+    });
+    await expectOpaque(await linkWrite(r, null, { body: stream }));
+    expect(await r.owner.directMoments()).toEqual([]);
+    expect(r.storage.getBlob(WORKSPACE, sha256(one))).toBeNull();
+  });
+
+  it("keeps a body error opaque when the link is revoked while streaming", async () => {
+    const r = await linkRelay();
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: LINK_GRANT, revokedAtMs: CLOCK }).ok).toBe(true);
+        controller.enqueue(new TextEncoder().encode("{"));
+        controller.close();
+      },
+    });
+    await expectOpaque(await linkWrite(r, null, { body: stream }));
+  });
+
+  it.each([
+    ["names a hash of its own", { afterBlobSha256: sha256("x") }],
+    ["names a size of its own", { afterByteLength: 3 }],
+    ["sends base64 that is not canonical", { afterContentBase64: "YQ=" }],
+    ["sends base64 with a character outside it", { afterContentBase64: "YW*j" }],
+    ["sends no content", { afterContentBase64: undefined }],
+    ["names an author", { author: { kind: "named", userId: "ana" } }],
+  ])("refuses a change that %s", async (_case, patch) => {
+    const r = await linkRelay();
+    const change = { ...linkCreate(`${PACKING}/automations.yaml`, automations(STAMP)), ...patch };
+    await expectCode(await linkWrite(r, [JSON.parse(JSON.stringify(change))]), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("refuses content the shared parsers refuse, and text that is not UTF-8", async () => {
+    const r = await linkRelay();
+    expect(await expectCode(await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, "version: 1\nautomations: nope\n")]), 403, "share_op_rejected"))
+      .toMatchObject({ error: `${PACKING}/automations.yaml has an automation that is not valid` });
+    await expectCode(await linkWrite(r, [linkEdit(`${PACKING}/collection.yaml`, SCHEMA, "fields: [\n")]), 403, "share_op_rejected");
+    const notText = { ...linkCreate(`${PACKING}/automations.yaml`, ""), afterContentBase64: Buffer.from([0xff, 0xfe, 0x00]).toString("base64") };
+    await expectCode(await linkWrite(r, [notText]), 403, "share_op_rejected");
+    // A personal step stays on the named lane's rule too.
+    await expectCode(await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, automations(NUDGE))]), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("refuses authority fields beside the write, storing and enrolling nothing", async () => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    for (const [key, value] of [
+      ["workspaceId", "workspace-b"], ["grantId", "grant-other"], ["userId", RECIPIENT],
+      ["principalId", "someone"], ["author", { kind: "named", userId: RECIPIENT }],
+    ] as const) {
+      const response = await linkWrite(r, null, {
+        body: JSON.stringify({ submitId: "submit-1", changes: [linkCreate(`${PACKING}/automations.yaml`, one)], [key]: value }),
+      });
+      await expectCode(response, 403, "share_op_rejected");
+    }
+    expect(await r.owner.directMoments()).toEqual([]);
+    expect(principals(r)).toBe(0);
+    expect(r.storage.getBlob(WORKSPACE, sha256(one))).toBeNull();
+  });
+
+  it("refuses a session that expires while the write waits, reading the clock inside the write", async () => {
+    let now = CLOCK;
+    const r = await linkRelay({ overrides: { nowMs: () => now } });
+    sql(r, `UPDATE sync_relay_link_sessions SET expires_at_ms = ${CLOCK + 1}`);
+    const one = automations(STAMP);
+    const decision = filterCollectionWriteForShare(
+      { versionId: null, paths: ["trip"], access: "edit" },
+      [{ ...linkCreate(`${PACKING}/automations.yaml`, one), afterContentBase64: undefined, afterBlobSha256: sha256(one), afterByteLength: bytes(one) }],
+    );
+    if (!decision.allowed) throw new Error("expected the write to be allowed");
+    now = CLOCK + 1;
+    expect(() => r.storage.commitCollectionWrite({
+      shareId: r.shareId, grantId: LINK_GRANT, grantGeneration: 1,
+      writer: {
+        kind: "link", capabilityHash: hashLinkBearer(TOKEN, LINK_KEY), profileTokenHash: "profile-hash",
+        content: new Map([[sha256(one), Buffer.from(one)]]), now: () => now,
+      },
+      submitId: "submit-1", rawChanges: decision.write.kind === "automations" ? [decision.write.change] : [], write: decision.write,
+      // Sampled before the write waited.
+      nowMs: CLOCK, newId: () => "id",
+    })).toThrow(expect.objectContaining({ code: "not_found" }));
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("tells a guessed base apart from no other: any base that is not the current file is stale", async () => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    await r.owner.write("object-automations", `${PACKING}/automations.yaml`, one);
+    // Private content the link cannot read, stored in the same workspace.
+    const hidden = automations(STAMP.replace("stamp", "hidden"));
+    await r.owner.write("object-hidden", "budget/automations.yaml", hidden);
+    const after = automations(STAMP.replace("Packed", "Ready"));
+    const answers = [];
+    for (const guess of [hidden, "never stored"]) {
+      const response = await linkWrite(r, [linkEdit(`${PACKING}/automations.yaml`, guess, after)], { submitId: `guess-${answers.length}` });
+      answers.push({ status: response.status, body: await json(response) });
+    }
+    expect(answers[0]).toEqual(answers[1]);
+    expect(answers[0]).toMatchObject({ status: 409, body: { code: "stale", currentBlobSha256: sha256(one) } });
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("answers a retried automations edit from its receipt, for a link and for a named recipient", async () => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    const two = automations(STAMP.replace("Packed", "Ready"));
+    await r.owner.write("object-automations", `${PACKING}/automations.yaml`, one);
+    const changes = [linkEdit(`${PACKING}/automations.yaml`, one, two)];
+    const first = await json(await linkWrite(r, changes));
+    expect(first).toMatchObject({ ok: true, created: true });
+    expect(await json(await linkWrite(r, changes))).toEqual({ ...first, created: false });
+
+    const named = await relay();
+    await named.owner.write("object-automations", `${PACKING}/automations.yaml`, one);
+    await upload(named, two);
+    const edits = [edit(`${PACKING}/automations.yaml`, one, two)];
+    const landed = await json(await write(named, edits));
+    expect(landed).toMatchObject({ ok: true, created: true });
+    expect(await json(await write(named, edits))).toEqual({ ...landed, created: false });
+  });
+
+  it("says nothing about the current automations to a link revoked while its body streams", async () => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    await r.owner.write("object-automations", `${PACKING}/automations.yaml`, one);
+    const body = new TextEncoder().encode(JSON.stringify({
+      submitId: "submit-1", changes: [linkEdit(`${PACKING}/automations.yaml`, "a guess", automations(STAMP.replace("Packed", "Ready")))],
+    }));
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: LINK_GRANT, revokedAtMs: CLOCK }).ok).toBe(true);
+        controller.enqueue(body);
+        controller.close();
+      },
+    });
+    const response = await linkWrite(r, null, { body: stream });
+    await expectOpaque(response);
+
+    // Nor whether a guessed base is current, through a content refusal.
+    const current = await linkRelay();
+    await current.owner.write("object-automations", `${PACKING}/automations.yaml`, one);
+    for (const base of [one, "a guess"]) {
+      const personal = new TextEncoder().encode(JSON.stringify({
+        submitId: `personal-${base.length}`, changes: [linkEdit(`${PACKING}/automations.yaml`, base, automations(STAMP, NUDGE))],
+      }));
+      let revoked = false;
+      const streamed = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!revoked) {
+            expect(current.storage.revokeShareGrant({ shareId: current.shareId, grantId: LINK_GRANT, revokedAtMs: CLOCK }).ok).toBe(true);
+            revoked = true;
+          }
+          controller.enqueue(personal);
+          controller.close();
+        },
+      });
+      await expectOpaque(await linkWrite(current, null, { body: streamed }));
+      // Seed the link again for the next guess.
+      sql(current, `UPDATE sync_relay_share_grants SET status = 'active', revoked_at_ms = NULL, generation = 1 WHERE grant_id = '${LINK_GRANT}'`);
+    }
+  });
+
+  it("answers a stale base with the current file, writing nothing", async () => {
+    const r = await linkRelay();
+    const stale = await linkWrite(r, [linkEdit(`${PACKING}/collection.yaml`, SCHEMA_TWO, SCHEMA)]);
+    expect(await expectCode(stale, 409, "stale")).toMatchObject({ path: `${PACKING}/collection.yaml`, currentBlobSha256: sha256(SCHEMA) });
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("refuses an envelope past its bound before reading it", async () => {
+    const r = await linkRelay();
+    const response = await linkWrite(r, [], { headers: { "content-length": String(MAX_LINK_COLLECTION_WRITE_BODY_BYTES + 1) } });
+    await expectCode(response, 413, "payload_too_large");
+  });
+
+  it("spends one bucket for every browser of a link, before reading the body", async () => {
+    const r = await linkRelay({ overrides: { collectionWriteRateLimiter: new TokenBucketLimiter(1, 0.001, 10) } });
+    expect((await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, automations(STAMP))])).status).toBe(200);
+    await expectCode(await linkWrite(r, "not even changes", { token: OTHER_TOKEN, profile: OTHER_PROFILE, submitId: "submit-2" }), 429, "collection_write_rate_limited");
+  });
+
+  it("holds one body per link in memory at a time", async () => {
+    const r = await linkRelay();
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => { finish = resolve; });
+    const body = new TextEncoder().encode(JSON.stringify({ submitId: "submit-1", changes: [linkCreate(`${PACKING}/automations.yaml`, automations(STAMP))] }));
+    const slow = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await held;
+        controller.enqueue(body);
+        controller.close();
+      },
+    });
+    const first = linkWrite(r, null, { body: slow });
+    await expectCode(await linkWrite(r, [], { token: OTHER_TOKEN, submitId: "submit-2" }), 429, "collection_write_rate_limited");
+    finish();
+    expect((await first).status).toBe(200);
+  });
+
+  it("counts a link's content and new browser against the workspace quota, and stores nothing past it", async () => {
+    const r = await linkRelay({ storage: { workspaceQuotaBytes: 4096 } });
+    const big = automations(STAMP) + "# " + "x".repeat(8192) + "\n";
+    const response = await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, big)]);
+    expect(response.status).toBe(413);
+    expect(principals(r)).toBe(0);
+    expect(r.storage.getBlob(WORKSPACE, sha256(big))).toBeNull();
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("streams its body instead of the adapter buffering it", () => {
+    expect(streamsRequestBody(new URL("http://relay.test/sync/link/collection-writes"), "POST")).toBe(true);
   });
 });

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   MAX_AUTOMATIONS_FILE_BYTES,
   parseAutomationsFile,
@@ -10,9 +10,10 @@ import { parseCollectionRecordFields, parseCollectionSchema } from "@dohc/worksp
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { stableJsonStringify } from "../canonicalJson";
 import { notFound, relayError, RelayError } from "../errors";
-import { proposalBase, proposalMomentPayload, type NamedMomentAuthor } from "../recipientMoments";
+import { proposalBase, proposalMomentPayload, type DirectWriteMomentAuthor } from "../recipientMoments";
 import { COLLECTION_FILE_ORIGIN_PREFIX } from "../relayLogInputs";
 import { currentCollectionEditGrant } from "../collectionEditGrant";
+import { authorizeLinkShareAction, type AuthorizedShareAction } from "../shareAuthorization";
 import {
   COLLECTION_AUTOMATIONS_FILE,
   COLLECTION_SCHEMA_FILE,
@@ -23,8 +24,17 @@ import {
 } from "../shareFilter";
 import type { StorageContext } from "./context";
 import { SyncRelayBlobMissingError } from "./errors";
+import {
+  commitLinkEnrollment,
+  linkPrincipalLimitReached,
+  linkPrincipalStorageBytes,
+  linkWriteRefusal,
+  readLinkEnrollment,
+  type LinkEnrollment,
+} from "./linkEnrollment";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import type { SqliteDb } from "./types";
+import { assertWorkspaceQuota } from "./workspaces";
 
 // The same bound the relay puts on a schema it reads for an app Collection.
 const MAX_COLLECTION_SCHEMA_BYTES = 65_536;
@@ -123,14 +133,31 @@ export class CollectionWriteStaleError extends RelayError {
   }
 }
 
+/**
+ * Who writes, as the route authenticated them. A named recipient's content
+ * is already stored, uploaded blob by blob. An Edit link carries its content
+ * in the request, hashed by the relay, and is authorized again inside the
+ * write from its capability and profile, never from anything it claims.
+ */
+export type CollectionWriter =
+  | { kind: "named"; userId: string }
+  | {
+      kind: "link";
+      capabilityHash: string;
+      profileTokenHash: string;
+      /** The bytes of every file the write names, by the hash the relay computed. */
+      content: ReadonlyMap<string, Uint8Array>;
+      /** The relay's clock, read inside the write, so a session that expired while it waited writes nothing. */
+      now(): number;
+    };
+
 export interface CommitCollectionWriteInput {
   shareId: string;
   // Pinned when the route found the grant; a grant that changed since
   // refuses the write.
   grantId: string;
   grantGeneration: number;
-  // Derived from the authenticated caller.
-  userId: string;
+  writer: CollectionWriter;
   submitId: string;
   // The changes as the recipient sent them, decided again inside the write.
   rawChanges: unknown;
@@ -147,10 +174,14 @@ export interface CommittedCollectionWrite {
 
 /**
  * Commits one direct write to a Collection's own files: the relay mints the
- * owner's moments under `relay:collection-file:<grantId>` with a named
- * author, in one transaction with the ledger row. The grant, the decision,
- * and every file's base are checked again inside that transaction. A submit
- * id the ledger holds returns its receipt, or `conflict` for another write.
+ * owner's moments under `relay:collection-file:<grantId>` with a named or
+ * link author, in one transaction with the ledger row, and for a link with
+ * its new blobs and its principal's enrollment. Content is checked before
+ * the transaction. Inside it, the writer's authority comes first, then the
+ * decision, then a submit id the ledger holds, which returns its receipt or
+ * `conflict` for another write, then every file's base. A revocation,
+ * rotation, downgrade, pause, or block that commits first refuses the write,
+ * a retry included.
  */
 export function commitCollectionWrite(
   storage: StorageContext,
@@ -159,30 +190,58 @@ export function commitCollectionWrite(
   const payloadSha256 = writeDigest(input.shareId, input.write);
   const workspaceId = storage.getShare(input.shareId)?.workspaceId;
   if (workspaceId === undefined) throw notFound();
-  const prior = () => replayed(storage, input, payloadSha256);
-  const replay = storage.readTx(prior);
-  if (replay) return { receipt: replay, created: false };
-  validateContent(storage, workspaceId, input.write);
+  const { writer } = input;
+  // The writer's authority first, so content checks answer nobody who may
+  // not write. The transaction checks it again, and decides.
+  storage.readTx(() => currentWriter(storage, input));
+  const unchecked = validateContent(storage, workspaceId, input.write, writer.kind === "link"
+    ? suppliedBytes(writer.content)
+    : storedBytes(storage, workspaceId, input.write));
 
   return storage.tx(() => {
-    const again = prior();
-    if (again) return { receipt: again, created: false };
-    // Edit on files, as a proposal needs; the decision then narrows it.
-    const authorized = currentCollectionEditGrant(storage, input);
-    const decision = filterCollectionWriteForShare(authorized.effectiveSelector, input.rawChanges, {
+    const current = currentWriter(storage, input);
+    const decision = filterCollectionWriteForShare(current.authorized.effectiveSelector, input.rawChanges, {
       channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
     });
     if (!decision.allowed || writeDigest(input.shareId, decision.write) !== payloadSha256) {
       throw relayError("share_op_rejected");
     }
+    const again = replayed(storage, input, current, payloadSha256);
+    if (again) return { receipt: again, created: false };
+    // An automations file whose base was not the current file when its
+    // content was checked had no personal steps compared. It is stale now,
+    // answered only after the writer's authority passed.
+    for (const path of unchecked) {
+      throw new CollectionWriteStaleError(path, currentFile(storage, workspaceId, path)?.blobSha256 ?? null);
+    }
     checkBases(storage, workspaceId, decision.write);
 
-    const author: NamedMomentAuthor = {
-      kind: "named",
-      userId: input.userId,
-      grantId: input.grantId,
-      grantGeneration: input.grantGeneration,
-    };
+    let addedBytes = 0;
+    let principalId: string | null = null;
+    if (current.kind === "link") {
+      if (linkPrincipalLimitReached(storage, current.enrollment)) {
+        throw relayError("quota_exceeded", "This link has as many browsers as it can hold.");
+      }
+      principalId = current.enrollment.principal?.principalId ?? randomUUID();
+      if (!current.enrollment.principal) {
+        addedBytes += linkPrincipalStorageBytes(principalId, input.grantId, current.profileTokenHash);
+      }
+      addedBytes += newBlobBytes(storage, workspaceId, current.content);
+      assertWorkspaceQuota(storage, workspaceId, addedBytes);
+      commitLinkEnrollment(storage, {
+        capabilityHash: current.capabilityHash,
+        profileTokenHash: current.profileTokenHash,
+        enrollment: current.enrollment,
+        principalId,
+        displayName: null,
+        createdAtMs: input.nowMs,
+        discussionRevision: Number(current.enrollment.authority.discussion_revision),
+      });
+      insertNewBlobs(storage, workspaceId, current.content, input.nowMs);
+    }
+    const author: DirectWriteMomentAuthor = current.kind === "named"
+      ? { kind: "named", userId: current.userId, grantId: input.grantId, grantGeneration: input.grantGeneration }
+      : { kind: "link", grantId: input.grantId, grantGeneration: input.grantGeneration, principalId: principalId! };
     const originId = `${COLLECTION_FILE_ORIGIN_PREFIX}${input.grantId}`;
     const firstOriginSeq = maxOriginSeq(storage, workspaceId, originId) + 1;
     const ops = changesOf(decision.write).map((change, index) => ({
@@ -195,16 +254,19 @@ export function commitCollectionWrite(
     const receipt: CollectionWriteReceipt = { submitId: input.submitId, paths, committedAtMs: input.nowMs };
     const pathsJson = JSON.stringify(paths);
     const receiptJson = JSON.stringify(receipt);
+    const authorId = author.kind === "named" ? author.userId : author.principalId;
     const storageBytes = Buffer.byteLength(pathsJson) + Buffer.byteLength(receiptJson) +
-      Buffer.byteLength(input.grantId) + Buffer.byteLength(input.userId) + Buffer.byteLength(originId) + 256;
+      Buffer.byteLength(input.grantId) + Buffer.byteLength(authorId) + Buffer.byteLength(originId) + 256;
     // The ledger row goes first, so the append's quota check counts it.
     storage.db.prepare(
       `INSERT INTO sync_relay_collection_writes (
-         grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, payload_sha256,
-         origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms, storage_bytes
-       ) VALUES (?, ?, ?, ?, ?, 'named', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, principal_id,
+         payload_sha256, origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms,
+         storage_bytes
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      input.grantId, input.submitId, workspaceId, input.shareId, input.grantGeneration, input.userId,
+      input.grantId, input.submitId, workspaceId, input.shareId, input.grantGeneration, author.kind,
+      author.kind === "named" ? author.userId : null, author.kind === "link" ? author.principalId : null,
       payloadSha256, originId, firstOriginSeq, firstOriginSeq + ops.length - 1, pathsJson, receiptJson,
       input.nowMs, storageBytes,
     );
@@ -232,20 +294,101 @@ function writeDigest(shareId: string, write: CollectionWrite): string {
     .digest("hex");
 }
 
+// The writer as the transaction finds them now. A named recipient's grant
+// is checked as before. A link's session, grant, generation, Edit access,
+// pause, and block are read again from its capability and profile.
+type CurrentWriter =
+  | { kind: "named"; userId: string; authorized: AuthorizedShareAction }
+  | {
+      kind: "link";
+      authorized: AuthorizedShareAction;
+      enrollment: LinkEnrollment;
+      capabilityHash: string;
+      profileTokenHash: string;
+      content: ReadonlyMap<string, Uint8Array>;
+    };
+
+function currentWriter(storage: StorageContext, input: CommitCollectionWriteInput): CurrentWriter {
+  const { writer } = input;
+  if (writer.kind === "named") {
+    const authorized = currentCollectionEditGrant(storage, { ...input, userId: writer.userId });
+    return { kind: "named", userId: writer.userId, authorized };
+  }
+  return { ...writer, ...authorizeLinkCollectionWrite(storage, {
+    ...input, ...writer, nowMs: writer.now(),
+  }) };
+}
+
+export function authorizeLinkCollectionWrite(storage: StorageContext, input: {
+  shareId: string;
+  grantId: string;
+  grantGeneration: number;
+  capabilityHash: string;
+  profileTokenHash: string;
+  nowMs: number;
+}) {
+  const enrollment = readLinkEnrollment(storage, input, input.nowMs);
+  const authority = enrollment?.authority;
+  if (
+    !enrollment || linkWriteRefusal(enrollment) ||
+    authority!.grant_id !== input.grantId || authority!.share_id !== input.shareId ||
+    Number(authority!.grant_generation) !== input.grantGeneration
+  ) {
+    throw notFound();
+  }
+  const authorized = authorizeLinkShareAction({ storage, grantId: input.grantId, action: "direct-write" });
+  if (!authorized.ok || authorized.grant.generation !== input.grantGeneration) throw notFound();
+  return { authorized, enrollment };
+}
+
+// A submit id names one write by one author under one grant. A named
+// recipient's retry matches their user and payload; a link's matches its
+// principal, generation, and payload, so another browser holding the link,
+// or the link after a rotation, gets a conflict and learns nothing.
 function replayed(
   storage: StorageContext,
   input: CommitCollectionWriteInput,
+  current: CurrentWriter,
   payloadSha256: string,
 ): CollectionWriteReceipt | null {
   const row = storage.db.prepare(
-    `SELECT author_kind, user_id, payload_sha256, receipt_json FROM sync_relay_collection_writes
-     WHERE grant_id = ? AND submit_id = ?`,
+    `SELECT author_kind, user_id, principal_id, grant_generation, payload_sha256, receipt_json
+     FROM sync_relay_collection_writes WHERE grant_id = ? AND submit_id = ?`,
   ).get(input.grantId, input.submitId);
   if (!row) return null;
-  if (row.author_kind !== "named" || row.user_id !== input.userId || row.payload_sha256 !== payloadSha256) {
-    throw relayError("conflict", "this submitId already names another write");
-  }
+  const same = row.payload_sha256 === payloadSha256 && (current.kind === "named"
+    ? row.author_kind === "named" && row.user_id === current.userId
+    : row.author_kind === "link" && current.enrollment.principal !== null &&
+      row.principal_id === current.enrollment.principal.principalId &&
+      Number(row.grant_generation) === input.grantGeneration);
+  if (!same) throw relayError("conflict", "this submitId already names another write");
   return JSON.parse(String(row.receipt_json)) as CollectionWriteReceipt;
+}
+
+// The bytes a link sent that the workspace does not hold yet.
+function newBlobBytes(storage: StorageContext, workspaceId: string, content: ReadonlyMap<string, Uint8Array>): number {
+  const missing = new Set(storage.missingBlobs(workspaceId, [...content.keys()]));
+  let bytes = 0;
+  for (const [sha256, body] of content) if (missing.has(sha256)) bytes += body.byteLength;
+  return bytes;
+}
+
+// Stores a link's content inside the write's transaction, so a refused or
+// rolled-back write leaves no blob behind. A blob the workspace holds under
+// that hash already is the same bytes: the relay computed the hash.
+function insertNewBlobs(
+  storage: StorageContext,
+  workspaceId: string,
+  content: ReadonlyMap<string, Uint8Array>,
+  nowMs: number,
+): void {
+  const insert = storage.db.prepare(
+    `INSERT INTO sync_relay_blobs (workspace_id, sha256, byte_length, content, created_at_ms)
+     VALUES (?, ?, ?, ?, ?) ON CONFLICT (workspace_id, sha256) DO NOTHING`,
+  );
+  for (const [sha256, body] of content) {
+    insert.run(workspaceId, sha256, body.byteLength, Buffer.from(body), Math.trunc(nowMs));
+  }
 }
 
 function currentFile(
@@ -317,7 +460,7 @@ function momentFor(
   workspaceId: string,
   change: ProposedChange,
   index: number,
-  author: NamedMomentAuthor,
+  author: DirectWriteMomentAuthor,
   input: CommitCollectionWriteInput,
 ): Record<string, unknown> {
   const stale = () => new CollectionWriteStaleError(change.afterPath!, currentFile(storage, workspaceId, change.afterPath!)?.blobSha256 ?? null);
@@ -347,25 +490,49 @@ function momentFor(
   return built.payload;
 }
 
-// Content checks with the shared parsers, before the write's transaction.
-// Blobs are named by their hash, so what is read here is what the moments
-// will name. Each blob is read and each record checked once, however many
-// files name it, so a write reads at most the bytes the decision allows.
-function validateContent(storage: StorageContext, workspaceId: string, write: CollectionWrite): void {
-  const changes = changesOf(write);
-  const missing = storage.missingBlobs(workspaceId, [...new Set(changes.map((change) => change.afterBlobSha256!))]);
+/** The bytes of one file a write names, of exactly its stated size, or null. */
+type ContentBytes = (sha256: string, byteLength: number) => Uint8Array | null;
+
+// A named recipient's content: blobs they uploaded before the write.
+function storedBytes(storage: StorageContext, workspaceId: string, write: CollectionWrite): ContentBytes {
+  const missing = storage.missingBlobs(workspaceId, [...new Set(changesOf(write).map((change) => change.afterBlobSha256!))]);
   if (missing.length > 0) {
     throw new SyncRelayBlobMissingError(
       `this write references ${missing.length} blob(s) not stored on the relay (first: ${missing[0]}); upload and retry`,
     );
   }
+  return (sha256, byteLength) => storedBlob(storage, workspaceId, sha256, byteLength);
+}
+
+// A link's content: the bytes it sent, hashed by the relay. A hash it did
+// not send is never read from the workspace, so a link cannot name, and so
+// publish, content it does not hold.
+function suppliedBytes(content: ReadonlyMap<string, Uint8Array>): ContentBytes {
+  return (sha256, byteLength) => {
+    const bytes = content.get(sha256);
+    return bytes !== undefined && bytes.byteLength === byteLength ? bytes : null;
+  };
+}
+
+// Content checks with the shared parsers, before the write's transaction.
+// Content is named by its hash, so what is read here is what the moments
+// will name. Each blob is read and each record checked once, however many
+// files name it, so a write reads at most the bytes the decision allows.
+/**
+ * Returns the automations files whose base was not the current file, so
+ * their personal steps could not be compared. The prior content is read
+ * only as the file is now, so a base hash names no other content.
+ */
+function validateContent(storage: StorageContext, workspaceId: string, write: CollectionWrite, bytesOf: ContentBytes): string[] {
+  const unchecked: string[] = [];
+  const changes = changesOf(write);
   const texts = new Map<string, { text: string; byteLength: number }>();
   const text = (change: ProposedChange, limit: number): string => {
     if (change.afterByteLength! > limit) throw refusal(`${change.afterPath} is larger than ${limit} bytes`);
     const sha256 = change.afterBlobSha256!;
     let read = texts.get(sha256);
     if (read === undefined) {
-      const bytes = storedBlob(storage, workspaceId, sha256, change.afterByteLength!);
+      const bytes = bytesOf(sha256, change.afterByteLength!);
       if (bytes === null) throw refusal(`${change.afterPath} does not match its stated size`);
       const decoded = utf8(bytes);
       if (decoded === null) throw refusal(`${change.afterPath} is not UTF-8 text`);
@@ -389,6 +556,13 @@ function validateContent(storage: StorageContext, workspaceId: string, write: Co
       if (after.status !== "read" || after.entries.some((entry) => entry.status !== "valid")) {
         throw refusal(`${change.afterPath} has an automation that is not valid`);
       }
+      if (
+        change.basedOnBlobSha256 !== null &&
+        currentFile(storage, workspaceId, change.afterPath!)?.blobSha256 !== change.basedOnBlobSha256
+      ) {
+        unchecked.push(change.afterPath!);
+        continue;
+      }
       const before = change.basedOnBlobSha256 === null
         ? null
         : texts.get(change.basedOnBlobSha256)?.text ?? priorText(storage, workspaceId, change.basedOnBlobSha256);
@@ -402,6 +576,7 @@ function validateContent(storage: StorageContext, workspaceId: string, write: Co
       records.add(change.afterBlobSha256!);
     }
   }
+  return unchecked;
 }
 
 // The direct lane will not take this write. The recipient can send it as
