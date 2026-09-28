@@ -18,7 +18,6 @@ import {
 } from "@dohc/cli/protocol";
 import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
-import { collectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
 import type {
   CollectionAutomationRun,
@@ -40,6 +39,7 @@ import type {
   CollectionQueryParams,
   CollectionQueryResult,
   CollectionRecord,
+  CollectionSummary,
 } from "@dohc/workspace-contracts/collection";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type {
@@ -223,7 +223,10 @@ export interface CliDocumentsPort {
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
 export interface CliAutomationsPort {
-  runs(automationId: string): Promise<CollectionAutomationRun[]>;
+  /** The engine id of an automation in the Collection at a path, or null when no Collection is there. */
+  automationIdAt(collectionPath: string, id: string): Promise<string | null>;
+  /** One page of runs, newest first, after `before`, and the `before` of the next page or null. */
+  runs(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null }>;
   run(automationId: string, claimId: string): Promise<CollectionAutomationRunDetail | null>;
   retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
 }
@@ -280,6 +283,9 @@ export interface CliServerOptions {
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
   localUserDisplayName(): string;
+  // The person this computer's agents work for: the account, or this
+  // installation's id when signed out.
+  localPersonId(): string;
   // The chain depth of the agent run in progress in the workspace, or 0. Every
   // write during a run an automation started is the agent's at this depth, so
   // an automation that woke the agent and the agent cannot start each other
@@ -519,6 +525,11 @@ function cliPathRejected(reason: string, path: string) {
 
 // Collection values enter and leave the CLI socket in the engine wire's JSON
 // encoding; the engine adapter speaks decoded CollectionValue on both sides.
+// A Collection as the CLI names it: by its path. Its object id stays in dohc.
+function cliCollection({ objectId: _objectId, ...collection }: CollectionSummary) {
+  return collection;
+}
+
 function encodedCollectionRecord(record: CollectionRecord) {
   return {
     id: record.id,
@@ -571,7 +582,7 @@ function writeActor(
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
 // traffic reaches this socket through the MCP server, whose declared identity
-// is agent `dohc-mcp` acting on behalf of the local owner, at the depth of the
+// is agent `dohc-mcp` acting for this computer's person, at the depth of the
 // agent run in progress; a human write is attributed as this device's local
 // author under the workspace display name.
 function collectionWriteAuthor(
@@ -583,7 +594,7 @@ function collectionWriteAuthor(
     return {
       kind: "agent",
       agentId: "dohc-mcp",
-      onBehalfOf: "local",
+      onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     };
   }
@@ -603,8 +614,8 @@ function datasetAgent(
 }
 
 // Provenance for a document edit, derived here. A person types in the
-// editor, so every edit through this socket is an agent's on behalf of the
-// local owner, recorded under the name the agent gave itself or under none,
+// editor, so every edit through this socket is an agent's for this
+// computer's person, recorded under the name the agent gave itself or under none,
 // at the depth of the agent run in progress. Any process holding the socket
 // token could otherwise claim the person's typing.
 function documentEditOrigin(
@@ -616,7 +627,7 @@ function documentEditOrigin(
     ...(agent === undefined ? {} : { actorOriginId: agent }),
     attribution: {
       actorKind: "agent",
-      onBehalfOf: "local",
+      onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     },
   };
@@ -626,11 +637,6 @@ function documentEditOrigin(
 const SHARED_VIEW_AUTOMATIONS =
   "A shared view has no automation runs. The owner's computer runs this workspace's automations.";
 
-const START_OVER = {
-  "definition-changed": "This automation changed since the run failed.",
-  "progress-gone": "dohc no longer has this run's progress.",
-} as const;
-
 // Try again as the panel answers it, in words for an agent: a run that
 // would start over needs startOver, as the panel's confirmation asks.
 function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["automationRetry"] {
@@ -638,13 +644,12 @@ function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["aut
     case "queued":
       return { ok: true, status: "queued" };
     case "definition-changed":
-    case "progress-gone":
       return {
         ok: false,
         status: result.status,
         repeatsMessages: result.repeatsMessages,
         reason: [
-          START_OVER[result.status],
+          "This automation changed since the run failed.",
           "Running it again starts from the first step and can repeat changes it already made.",
           ...(result.repeatsMessages ? ["Posts, direct messages, and notices it already sent may be sent again."] : []),
           "To do that, try again with --start-over, or startOver: true.",
@@ -2189,7 +2194,7 @@ async function dispatch(
         if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
-          collection: result.collection,
+          collection: cliCollection(result.collection),
           records: result.records.map(encodedCollectionRecord),
           groups:
             result.groups === null
@@ -2231,7 +2236,7 @@ async function dispatch(
         if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
-          collection: result.collection,
+          collection: cliCollection(result.collection),
           record: encodedCollectionRecord(result.record),
           history: result.history.map((entry) => ({
             historyId: entry.historyId,
@@ -2351,13 +2356,15 @@ async function dispatch(
       if (isSharedWithMePath(validated.normalized)) {
         return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
       }
-      const automationId = collectionAutomationId(validated.normalized, request.args.automation);
       try {
+        const automationId = await automations.automationIdAt(validated.normalized, request.args.automation);
+        if (automationId === null) return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
         if (request.verb === "automationRuns") {
-          const runs = await automations.runs(automationId);
+          const page = await automations.runs(automationId, request.args.page);
           const listed: CliResultByVerb["automationRuns"] = {
             ok: true,
-            runs: runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
+            runs: page.runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
+            next: page.next,
           };
           return listed;
         }
@@ -2386,7 +2393,7 @@ async function dispatch(
           startOver: request.args.startOver,
         }));
       } catch (error) {
-        return mcpFailure(error, `failed to reach the runs of ${automationId}`);
+        return mcpFailure(error, `failed to reach the runs of ${request.args.automation} in ${validated.normalized}`);
       }
     }
 

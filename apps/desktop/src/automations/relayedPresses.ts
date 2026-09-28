@@ -46,7 +46,7 @@ export function automationPressRelay(relay: SyncRelayConnection) {
       await call(`${ws(workspaceId)}/automation-presses/settle`, { method: "POST", headers: json, body: JSON.stringify(input) });
     },
     /** A recipient's press on a shared Collection's button. */
-    async press(shareId: string, input: { pressId: string; automationId: string; definitionHash: string; recordId: string }): Promise<RelayAutomationPressReceipt> {
+    async press(shareId: string, input: { pressId: string; automationId: string; collectionPath: string; definitionHash: string; recordId: string }): Promise<RelayAutomationPressReceipt> {
       const { ok: _ok, ...receipt } = await call(`/sync/shares/${encodeURIComponent(shareId)}/automation-presses`, {
         method: "POST", headers: json, body: JSON.stringify(input),
       }, "Button press", {
@@ -103,7 +103,7 @@ export interface RelayedPressHostOptions {
   /** The claim the engine already holds for this press, found without making one. */
   heldClaim(press: RelayAutomationPress): Promise<HeldClaim>;
   press(
-    input: { automationId: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string },
+    input: { automationId: string; collectionPath: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string },
     watch: (claimId: string) => void,
   ): Promise<{ pressed: CollectionAutomationPress; field: string | null }>;
   notifyFailure(failure: RelayedPressFailure): Promise<void>;
@@ -217,7 +217,7 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
       try {
         result = await options.press(
           {
-            automationId: press.automationId, definitionHash: press.definitionHash, recordId: press.recordId,
+            automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, recordId: press.recordId,
             pressId: press.hostPressId, pressedBy: press.pressedBy,
           },
           // Watched before its run can start, so a run that settles at once is still told.

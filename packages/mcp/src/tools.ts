@@ -2620,11 +2620,13 @@ export async function createRecord(
 // in that Collection's automations.yaml.
 export async function listAutomationRuns(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string },
+  args: { collectionPath: string; automation: string; page?: string },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "automationRuns", { collectionPath: resolved.normalized, automation: args.automation });
+  return requestCli(ctx, "automationRuns", {
+    collectionPath: resolved.normalized, automation: args.automation, ...(args.page === undefined ? {} : { page: args.page }),
+  });
 }
 
 export async function readAutomationRun(

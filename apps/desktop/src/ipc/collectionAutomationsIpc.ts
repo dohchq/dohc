@@ -6,12 +6,16 @@ import {
   AutomationShareImpactPayload,
   DismissAutomationStopsPayload,
   FindDatasetCollectionPayload,
+  FindAutomationCollectionPayload,
   CheckCollectionAutomationPayload,
   ConfirmCollectionAutomationStepPayload,
+  ListAutomationGroupsPayload,
+  ListAutomationPeoplePayload,
   ListAutomationTargetsPayload,
   ListAutomationHoldsPayload,
   ResetAutomationHoldsPayload,
   RevealAutomationHoldsPayload,
+  GetCollectionAutomationRunPayload,
   ListCollectionAutomationRunsPayload,
   ListCollectionAutomationsPayload,
   ListCollectionFieldMarksPayload,
@@ -21,12 +25,16 @@ import {
   type AutomationShareImpactResult,
   type CheckCollectionAutomationResult,
   type FindDatasetCollectionResult,
+  type FindAutomationCollectionResult,
   type ConfirmCollectionAutomationStepResult,
+  type ListAutomationGroupsResult,
+  type ListAutomationPeopleResult,
   type ListAutomationTargetsResult,
   type DeleteWorkspacePathPayload,
   type ListAutomationHoldsResult,
   type ResetAutomationHoldsResult,
   type CreateWorkspaceFilePayload,
+  type GetCollectionAutomationRunResult,
   type ListCollectionAutomationRunsResult,
   type ListCollectionAutomationsResult,
   type ListCollectionFieldMarksResult,
@@ -36,7 +44,7 @@ import {
   type WriteWorkspaceTextPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
-import { expressionProblem } from "@dohc/automation-executor/automation-plan";
+import { formulaProblems } from "@dohc/automation-executor/automation-plan";
 import { AUTOMATIONS_FILE_NAME, type CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 
 // The ⚡ panel's view of a Collection's automations. Main parses, checks,
@@ -96,7 +104,17 @@ export function registerCollectionAutomationsIpc<
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListCollectionAutomationRunsResult> =>
       dependencies.sharedViewOf(input.workspaceId)
         ? { status: "unavailable" }
-        : { status: "listed", runs: await operation.state.collectionAutomations.runs(input.automationId) });
+        : { status: "listed", ...await operation.state.collectionAutomations.runs(input.automationId, input.before) });
+  });
+
+  registerHandler(CHANNELS.getCollectionAutomationRun, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetCollectionAutomationRunPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<GetCollectionAutomationRunResult> => {
+      if (dependencies.sharedViewOf(input.workspaceId)) return { status: "unavailable" };
+      const run = await operation.state.collectionAutomations.listedRun(input.automationId, input.claimId);
+      return run === null ? { status: "missing" } : { status: "found", run };
+    });
   });
 
   // Try again. The executor wakes its drain and the failure notices after
@@ -109,8 +127,10 @@ export function registerCollectionAutomationsIpc<
       await operation.state.collectionAutomations.retry(input, (claimId) => dependencies.watchPress(input.workspaceId, claimId, event.sender)));
   });
 
-  // Undo for a finished run, as the person who clicked it. Records the run
-  // added go through the same delete as the Explorer's.
+  // Undo for a finished run, as the person who clicked it. Records a run
+  // added to a document Collection go through the same delete as the
+  // Explorer's; records added to a dataset, through an approved delete once
+  // the person confirms the preview.
   registerHandler(CHANNELS.undoCollectionAutomationRun, async (event, payload) => {
     assertTrustedSender(event);
     const input = UndoCollectionAutomationRunPayload.parse(payload);
@@ -118,6 +138,26 @@ export function registerCollectionAutomationsIpc<
       await operation.state.collectionAutomations.undo(input, async (relativePath) => {
         await dependencies.deletePath(event, { workspaceId: input.workspaceId, relativePath });
       }));
+  });
+
+  registerHandler(CHANNELS.listAutomationGroups, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListAutomationGroupsPayload.parse(payload);
+    assertCollectionPath(input.collectionPath);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationGroupsResult> =>
+      dependencies.sharedViewOf(input.workspaceId)
+        ? { status: "unavailable" }
+        : { groups: await operation.state.collectionAutomations.groupsFor(input.collectionPath) });
+  });
+
+  registerHandler(CHANNELS.listAutomationPeople, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListAutomationPeoplePayload.parse(payload);
+    assertCollectionPath(input.collectionPath);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationPeopleResult> =>
+      dependencies.sharedViewOf(input.workspaceId)
+        ? { status: "unavailable" }
+        : await operation.state.collectionAutomations.peopleFor(input.collectionPath));
   });
 
   registerHandler(CHANNELS.listAutomationTargets, async (event, payload) => {
@@ -131,21 +171,32 @@ export function registerCollectionAutomationsIpc<
   });
 
   // The builder's check, the same one a save makes: the writer reads the
-  // automation back through the file contract. It reads nothing in the
-  // workspace, but answers only the window that has the workspace open,
-  // like every other automations call.
+  // automation back through the file contract. It also says why the draft
+  // would not run, from what the executor has indexed for its Collection,
+  // and writes nothing. It answers only the window that has the workspace
+  // open, like every other automations call.
   registerHandler(CHANNELS.checkCollectionAutomation, async (event, payload) => {
     assertTrustedSender(event);
     const input = CheckCollectionAutomationPayload.parse(payload);
-    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<CheckCollectionAutomationResult> => {
+    assertCollectionPath(input.collectionPath);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<CheckCollectionAutomationResult> => {
       let diagnostics: CheckCollectionAutomationResult["diagnostics"];
       try {
         const written = writeAutomationsFile([{ status: "valid", automation: input.automation }]);
         diagnostics = written.status === "refused" ? written.diagnostics : [];
       } catch {
-        diagnostics = [{ code: "changed-on-reread", path: "/automations/0" }];
+        return { diagnostics: [{ code: "changed-on-reread", path: "/automations/0" }], formulaProblems: [], cannotRun: null, missingFiles: [] };
       }
-      return { diagnostics, formulaProblems: input.formulas.map(expressionProblem) };
+      // Whether it would run needs a readable automation, and says nothing in a shared view, whose automations run elsewhere.
+      // A status dohc cannot give, as before the executor opens, leaves the syntax and file checks standing.
+      const cannotRun = diagnostics.length > 0 || dependencies.sharedViewOf(input.workspaceId)
+        ? null
+        : await operation.state.collectionAutomations.draftCannotRun(input.collectionPath, input.automation).catch(() => null);
+      // A code file's path passed the file contract's relative-path check; main only looks for it, as a run would.
+      const missingFiles = dependencies.sharedViewOf(input.workspaceId)
+        ? []
+        : await operation.state.collectionAutomations.missingCodeFiles(input.collectionPath, input.automation).catch(() => []);
+      return { diagnostics, formulaProblems: formulaProblems(input.automation), cannotRun, missingFiles };
     });
   });
 
@@ -222,6 +273,16 @@ export function registerCollectionAutomationsIpc<
       dependencies.sharedViewOf(input.workspaceId)
         ? { status: "unavailable" }
         : await operation.state.collectionAutomations.datasetCollection(input.datasetId));
+  });
+
+  registerHandler(CHANNELS.findAutomationCollection, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = FindAutomationCollectionPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<FindAutomationCollectionResult> => {
+      if (dependencies.sharedViewOf(input.workspaceId)) return { status: "unavailable" };
+      const found = await operation.state.collectionAutomations.whereIs(input.automationId);
+      return found === null ? { status: "missing" } : { status: "found", collectionPath: found };
+    });
   });
 
   registerHandler(CHANNELS.confirmCollectionAutomationStep, async (event, payload) => {

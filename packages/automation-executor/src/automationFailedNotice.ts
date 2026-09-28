@@ -96,11 +96,9 @@ function sentence(text: string): string {
   return /[.!?]$/u.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
-// A Collection automation's engine id is "collection:<collection path>#<id>".
-// Open goes to its Collection's automations.yaml.
-function automationTarget(automationId: string, claimId: string | null): AutomationFailedNotice["target"] {
-  const collection = /^collection:(.+)#[^#]+$/u.exec(automationId)?.[1];
-  const path = collection === undefined ? undefined : `${collection}/automations.yaml`;
+// Open goes to its Collection's automations.yaml, where the Collection is now.
+function automationTarget(automationId: string, collectionPath: string | null, claimId: string | null): AutomationFailedNotice["target"] {
+  const path = collectionPath === null ? undefined : `${collectionPath}/automations.yaml`;
   return {
     automation: automationId,
     ...(path !== undefined && [...path].length <= NOTICE_TARGET_FIELD_MAX_CHARS ? { path } : {}),
@@ -137,6 +135,8 @@ export function automationFailedNotice(input: {
   failure: AutomationFailure;
   /** The automation's name in its automations.yaml, when dohc can read it. */
   name: string | null;
+  /** Where its Collection is now, or null when this computer no longer has it. */
+  collectionPath: string | null;
 }): AutomationFailedNotice {
   const { workspaceId, computer, failure } = input;
   const quoted = (room: number) => quotedName(failure, input.name, room);
@@ -162,7 +162,7 @@ export function automationFailedNotice(input: {
     kind: "automation-failed",
     title,
     body: `${count}${cutText(what, room)}${where}`,
-    target: automationTarget(failure.automationId, failure.neverStarted ? null : failure.claimId),
+    target: automationTarget(failure.automationId, input.collectionPath, failure.neverStarted ? null : failure.claimId),
   };
 }
 

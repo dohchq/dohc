@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 use crate::collections::{
     ChangeActorKind, CollectionFieldChangeFact, CollectionRecordApplyFacts,
-    CollectionRecordLifecycle, CollectionRecordLifecycleKind, field_fact_value,
+    CollectionRecordLifecycle, CollectionRecordLifecycleKind, SharedChangeAuthor, field_fact_value,
     indexed_record_fields, moment_author_attribution, parent_path,
 };
 use crate::error::DomainError;
@@ -43,7 +43,9 @@ pub const AUTOMATION_CHAIN_STOPPED: &str = "chain-stopped";
 pub const MAX_AUTOMATION_ERROR_BYTES: usize = 4096;
 
 /// The namespace every automation id lives in: Collection automations are
-/// `collection:<collection path>#<automation id>`. The Collection executor
+/// `collection:<collection id>#<automation id>`, where the Collection id is
+/// its schema file's object id or its dataset's id, so a Collection keeps
+/// its automations' ids when it moves. The Collection executor
 /// drains this namespace, so a subscription outside it would claim work
 /// nothing ever runs.
 pub const AUTOMATION_ID_NAMESPACE: &str = "collection:";
@@ -83,11 +85,22 @@ pub const MAX_AUTOMATION_GROUP_SUBSCRIPTIONS: usize = 256;
 /// handover named that this computer could not watch yet.
 pub const MAX_AUTOMATION_GROUP_HANDOVER_AUTOMATIONS: usize = 2 * MAX_AUTOMATION_GROUP_SUBSCRIPTIONS;
 
-/// How many of an automation's newest claims `automations.listClaims`
-/// returns. A settle prunes the automation's done claims older than these.
-/// A claim that ever failed stays: it is the evidence ADR 0008 keeps, and
-/// the failure generation counts it.
-pub const AUTOMATION_CLAIM_HISTORY_LIMIT: i64 = 100;
+/// How long run history keeps a settled claim after it last settled. Past
+/// it, `automations.pruneHistory` deletes the claim, or keeps only the key
+/// that stops its trigger from running twice. Pending and running claims
+/// stay, and so does each automation's newest failure, which its notice
+/// offers.
+pub const AUTOMATION_HISTORY_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// The most claims one page of `automations.listClaims` holds.
+pub const MAX_AUTOMATION_CLAIM_PAGE: i64 = 100;
+
+/// The most expired claims one `automations.pruneHistory` call removes, so
+/// one call holds the writer briefly. It answers whether more remain.
+pub const AUTOMATION_HISTORY_PRUNE_BATCH: i64 = 500;
+
+/// The most claims one `automations.pruneHistory` call keeps past their time.
+pub const MAX_AUTOMATION_HISTORY_KEEP: usize = 10_000;
 
 /// A kind of record change. A subscription names the kinds it wants; a
 /// claim names the kind it runs for.
@@ -172,7 +185,7 @@ pub struct AutomationSubscription {
 /// automations registers these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationGroupSubscription {
-    /// `collection:<collection path>#<automation id>`.
+    /// `collection:<collection id>#<automation id>`.
     pub automation_id: String,
     /// The Group's channel id on this computer.
     pub channel_id: String,
@@ -277,13 +290,23 @@ pub struct AutomationGroupMessage<'a> {
 
 /// The change a claim runs for and who made it, named as record history
 /// names them: the author origin, and the declared actor kind and the
-/// principal it acted for. Each is `None` when the write did not declare it.
+/// person it acted for. Each is `None` when the write did not declare it.
+/// `on_behalf_of` is that person: who pressed a button, who wrote a message,
+/// or who made a record change or had an agent or automation make it. A
+/// record change the relay accepted from a person the owner shared with
+/// names that person, and one from an Edit share link names no one.
+/// `shared_author` is the person the owner shared with, or the Edit share
+/// link, the relay accepted the change from. `live_cursor` is the relay's
+/// live journal cursor of the frame a live-shared record's change came in,
+/// so the relay can tell when a settlement has carried it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationChange {
     pub kind: AutomationChangeKind,
     pub author_origin_id: Option<String>,
     pub actor_kind: Option<ChangeActorKind>,
     pub on_behalf_of: Option<String>,
+    pub shared_author: Option<SharedChangeAuthor>,
+    pub live_cursor: Option<i64>,
 }
 
 /// One side of a changed field on a claim.
@@ -397,7 +420,10 @@ pub struct AutomationClaim {
     pub trigger: AutomationTrigger,
     /// The changed record. A message claim has none.
     pub record_id: Option<String>,
-    pub collection_path: String,
+    /// The Collection the changed record was in. A claim that names its
+    /// automation, a press, a due time, a Run now, or a Group message, has
+    /// none: the executor finds the Collection from the automation id.
+    pub collection_path: Option<String>,
     /// The triggering change's chain depth (0 for an unattributed or
     /// human-authored trigger). The handler's own writes declare depth + 1.
     pub depth: u32,
@@ -508,7 +534,7 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 const CLAIM_COLUMNS: &str = "claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
      trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
      created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of, run, \
-     trigger_moment_order, trigger_key";
+     trigger_moment_order, trigger_key, change_author_json, change_live_cursor";
 
 fn claim_from_row(
     row: &rusqlite::Row<'_>,
@@ -519,7 +545,9 @@ fn claim_from_row(
     let trigger_origin_seq: Option<i64> = row.get(3)?;
     let trigger_history_id: Option<i64> = row.get(4)?;
     let record_id: Option<String> = row.get(5)?;
+    // A claim with no Collection path stores an empty one.
     let collection_path: String = row.get(6)?;
+    let collection_path = (!collection_path.is_empty()).then_some(collection_path);
     let depth: i64 = row.get(7)?;
     let state: String = row.get(8)?;
     let attempts: i64 = row.get(9)?;
@@ -533,7 +561,19 @@ fn claim_from_row(
     let run: i64 = row.get(17)?;
     let trigger_moment_order: Option<i64> = row.get(18)?;
     let trigger_key: Option<String> = row.get(19)?;
+    let change_author_json: Option<String> = row.get(20)?;
+    let live_cursor: Option<i64> = row.get(21)?;
     let claim = (|| {
+        let shared_author = change_author_json
+            .map(|json| {
+                serde_json::from_str::<SharedChangeAuthor>(&json)
+                    .ok()
+                    .filter(SharedChangeAuthor::is_valid)
+                    .ok_or(DomainError::StateCorrupt {
+                        reason: "automation claim shared author is not a known author",
+                    })
+            })
+            .transpose()?;
         let actor_kind = actor_kind
             .map(|kind| {
                 ChangeActorKind::parse(&kind).ok_or(DomainError::StateCorrupt {
@@ -579,6 +619,8 @@ fn claim_from_row(
                 author_origin_id,
                 actor_kind,
                 on_behalf_of,
+                shared_author,
+                live_cursor,
             },
             state: AutomationClaimState::parse(&state)?,
             attempts,
@@ -706,27 +748,23 @@ pub fn subscribe_automation_in_tx(
     Ok(changed == 1)
 }
 
-/// The Collection path of a Collection automation id,
-/// `collection:<path>#<automation id>`. The path must name a folder inside
-/// the workspace, because the renderer opens files under it. The rule is the
-/// bridge's `isSafeRelativePath`: relative, with no drive letter, no empty,
-/// `.`, or `..` segment, and no backslash. A colon elsewhere is a folder
-/// name.
-pub fn collection_automation_path(automation_id: &str) -> Option<&str> {
-    let (path, local) = automation_id
-        .strip_prefix("collection:")?
-        .rsplit_once('#')?;
-    let canonical = !local.is_empty()
-        && !path.contains('\\')
-        && !matches!(path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
-        && path
-            .split('/')
-            .all(|segment| !matches!(segment, "" | "." | ".."));
-    (canonical
+/// Whether an id names a Collection automation,
+/// `collection:<collection id>#<automation id>`. A Collection id is an
+/// object id or a dataset id: letters, digits, `-`, and `_`, never a path.
+pub fn is_collection_automation_id(automation_id: &str) -> bool {
+    automation_id
+        .strip_prefix(AUTOMATION_ID_NAMESPACE)
+        .and_then(|rest| rest.split_once('#'))
+        .is_some_and(|(collection, local)| {
+            !collection.is_empty()
+                && collection
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                && !local.is_empty()
+        })
         && automation_id.len() <= MAX_IDENTIFIER_BYTES
         && automation_id.trim() == automation_id
-        && !automation_id.chars().any(char::is_control))
-    .then_some(path)
+        && !automation_id.chars().any(char::is_control)
 }
 
 /// A Group subscription's channel id, once it names a Collection automation,
@@ -737,9 +775,9 @@ fn group_subscription_channel(
     workspace_id: &str,
     subscription: &AutomationGroupSubscription,
 ) -> Result<String, DomainError> {
-    if collection_automation_path(&subscription.automation_id).is_none() {
+    if !is_collection_automation_id(&subscription.automation_id) {
         return Err(DomainError::InvalidInput {
-            reason: "A Group subscription belongs to a Collection automation, collection:<path>#<id>.",
+            reason: "A Group subscription belongs to a Collection automation, collection:<collection id>#<id>.",
         });
     }
     let channel_id =
@@ -991,22 +1029,20 @@ fn decide_group_message(
         _ => 0,
     };
     let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
-    let collection_path =
-        collection_automation_path(watch.automation_id).ok_or(DomainError::StateCorrupt {
-            reason: "Group subscription automation id has no Collection path",
-        })?;
     let claimed = ClaimedChange {
         trigger: AutomationTrigger::Key {
             key: format!("message:{}", message.message_id),
         },
         record_id: None,
-        collection_path,
+        collection_path: None,
         depth,
         change: AutomationChange {
             kind: AutomationChangeKind::Message,
             author_origin_id: message.automation_id.map(str::to_owned),
             actor_kind: ChangeActorKind::parse(message.author_kind),
             on_behalf_of: message.author_user_id.map(str::to_owned),
+            shared_author: None,
+            live_cursor: None,
         },
         // A stopped chain never runs, so its claim keeps no message.
         fields: AutomationFieldFacts {
@@ -1502,7 +1538,7 @@ fn validate_group_handover(handover: &AutomationGroupHandover) -> Result<(), Dom
         return Err(invalid());
     }
     for automation in &handover.automations {
-        if collection_automation_path(&automation.automation_id).is_none() {
+        if !is_collection_automation_id(&automation.automation_id) {
             return Err(invalid());
         }
         if automation.decided.iter().any(|(message_id, _)| {
@@ -1757,7 +1793,7 @@ fn subscriptions_wanting(
 struct ClaimedChange<'a> {
     trigger: AutomationTrigger,
     record_id: Option<&'a str>,
-    collection_path: &'a str,
+    collection_path: Option<&'a str>,
     depth: u32,
     change: AutomationChange,
     fields: AutomationFieldFacts,
@@ -1807,6 +1843,25 @@ fn insert_claims(
     } else {
         (AutomationClaimState::Pending, None)
     };
+    let shared_author_json =
+        match &claimed.change.shared_author {
+            Some(author) if author.is_valid() => Some(serde_json::to_string(author).map_err(
+                |_| DomainError::InvalidInput {
+                    reason: "automation claim shared author does not serialize",
+                },
+            )?),
+            Some(_) => {
+                return Err(DomainError::InvalidInput {
+                    reason: "automation claim shared author is not valid",
+                });
+            }
+            None => None,
+        };
+    if claimed.change.live_cursor.is_some_and(|cursor| cursor < 1) {
+        return Err(DomainError::InvalidInput {
+            reason: "automation claim live cursor is not positive",
+        });
+    }
     let mut inserted = Vec::new();
     for automation_id in automation_ids {
         let claim_id = mint_claim_id()?;
@@ -1817,9 +1872,10 @@ fn insert_claims(
                   trigger_history_id, trigger_moment_order, record_id, collection_path, depth, \
                   state, attempts, error, created_at_ms, updated_at_ms, change_kind, \
                   author_origin_id, actor_kind, on_behalf_of, change_fields_json, \
-                  change_fields_omitted, trigger_key, message_json) \
+                  change_fields_omitted, trigger_key, message_json, change_author_json, \
+                  change_live_cursor) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?13, ?14, \
-                         ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 params![
                     workspace_id,
                     claim_id,
@@ -1829,7 +1885,7 @@ fn insert_claims(
                     history_id,
                     moment_order,
                     claimed.record_id,
-                    claimed.collection_path,
+                    claimed.collection_path.unwrap_or_default(),
                     i64::from(claimed.depth),
                     state.as_str(),
                     error,
@@ -1842,6 +1898,8 @@ fn insert_claims(
                     claimed.fields.omitted,
                     key,
                     message_json,
+                    shared_author_json,
+                    claimed.change.live_cursor,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -1851,7 +1909,7 @@ fn insert_claims(
                 automation_id: (*automation_id).to_owned(),
                 trigger: claimed.trigger.clone(),
                 record_id: claimed.record_id.map(str::to_owned),
-                collection_path: claimed.collection_path.to_owned(),
+                collection_path: claimed.collection_path.map(str::to_owned),
                 depth: claimed.depth,
                 change: claimed.change.clone(),
                 state,
@@ -1935,7 +1993,7 @@ pub fn claim_automation_triggers_in_tx(
     let claimed = ClaimedChange {
         trigger,
         record_id: Some(&facts.record_id),
-        collection_path: &facts.collection_path,
+        collection_path: Some(&facts.collection_path),
         depth,
         change: AutomationChange {
             kind: AutomationChangeKind::Changed,
@@ -1944,10 +2002,16 @@ pub fn claim_automation_triggers_in_tx(
                 .attribution
                 .as_ref()
                 .map(|attribution| attribution.actor_kind),
-            on_behalf_of: facts
-                .attribution
-                .as_ref()
-                .and_then(|attribution| attribution.on_behalf_of.clone()),
+            on_behalf_of: match &facts.shared_author {
+                Some(SharedChangeAuthor::Named { user_id, .. }) => Some(user_id.clone()),
+                Some(SharedChangeAuthor::Link { .. }) => None,
+                None => facts
+                    .attribution
+                    .as_ref()
+                    .and_then(|attribution| attribution.on_behalf_of.clone()),
+            },
+            shared_author: facts.shared_author.clone(),
+            live_cursor: facts.live_cursor,
         },
         // A stopped chain never runs, so its claim keeps no facts.
         fields: if chain_stopped {
@@ -2174,6 +2238,9 @@ fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (Auto
         on_behalf_of: attribution
             .as_ref()
             .and_then(|attribution| attribution.on_behalf_of.clone()),
+        // A moment a claim is made from was committed on this computer.
+        shared_author: None,
+        live_cursor: None,
     };
     (
         change,
@@ -2328,7 +2395,7 @@ pub fn claim_record_lifecycle_in_tx(
                     moment_order: moment.moment_order,
                 },
                 record_id: Some(&record.record_id),
-                collection_path: &record.collection_path,
+                collection_path: Some(&record.collection_path),
                 depth,
                 change,
                 // A stopped chain never runs, so its claim keeps no facts.
@@ -2372,7 +2439,7 @@ pub struct AutomationPress {
     /// The pressing window's id for this press. A press sent again after a
     /// lost reply carries the same id.
     pub press_id: String,
-    /// The automation the button runs: `collection:<collection path>#<id>`.
+    /// The automation the button runs: `collection:<collection id>#<id>`.
     pub automation_id: String,
     pub record_id: String,
     /// The person who pressed. The run acts for them.
@@ -2409,9 +2476,12 @@ pub enum AutomationPressed {
 
 /// The Collection path of the Collection automation a button or schedule
 /// runs.
-fn button_or_schedule_collection(automation_id: &str) -> Result<&str, DomainError> {
-    collection_automation_path(automation_id).ok_or(DomainError::InvalidInput {
-        reason: "Buttons and schedules run Collection automations, collection:<path>#<id>.",
+fn button_or_schedule_automation(automation_id: &str) -> Result<(), DomainError> {
+    if is_collection_automation_id(automation_id) {
+        return Ok(());
+    }
+    Err(DomainError::InvalidInput {
+        reason: "Buttons and schedules run Collection automations, collection:<collection id>#<id>.",
     })
 }
 
@@ -2438,7 +2508,7 @@ pub fn press_automation_in_tx(
     press: &AutomationPress,
     now_ms: i64,
 ) -> Result<AutomationPressed, DomainError> {
-    let collection_path = button_or_schedule_collection(&press.automation_id)?;
+    button_or_schedule_automation(&press.automation_id)?;
     let press_id = normalize_automation_identifier(&press.press_id, "Button press id is invalid.")?;
     let record_id =
         normalize_automation_identifier(&press.record_id, "Button record id is invalid.")?;
@@ -2538,13 +2608,15 @@ pub fn press_automation_in_tx(
             let claimed = ClaimedChange {
                 trigger: AutomationTrigger::Key { key },
                 record_id: Some(record_id.as_str()),
-                collection_path,
+                collection_path: None,
                 depth,
                 change: AutomationChange {
                     kind: AutomationChangeKind::Button,
                     author_origin_id,
                     actor_kind: Some(actor_kind),
                     on_behalf_of: Some(pressed_by.clone()),
+                    shared_author: None,
+                    live_cursor: None,
                 },
                 fields: AutomationFieldFacts::default(),
                 chain_stopped: depth >= AUTOMATION_CHAIN_DEPTH_CAP,
@@ -2619,7 +2691,7 @@ pub struct AutomationScheduleClaimed {
 
 /// Claim a schedule's due times and move its mark, in one transaction. Each
 /// due time claims once, keyed `schedule:<due ms>`, with no record, at depth
-/// 0. A done schedule claim keeps its key when a settle prunes, so a due
+/// 0. A done schedule claim keeps its key when run history expires it, so a due
 /// time never claims twice. A time at or before the stored mark is refused,
 /// and the mark never moves back: a step that runs nothing and would move
 /// it back, as after this computer's clock was set back, changes nothing
@@ -2634,7 +2706,7 @@ pub fn claim_automation_schedule_in_tx(
     schedule: &AutomationScheduleClaim,
     now_ms: i64,
 ) -> Result<AutomationScheduleClaimed, DomainError> {
-    let collection_path = button_or_schedule_collection(&schedule.automation_id)?;
+    button_or_schedule_automation(&schedule.automation_id)?;
     let schedule_hash =
         normalize_automation_identifier(&schedule.schedule_hash, "Schedule hash is invalid.")?;
     if schedule.run.len() > MAX_AUTOMATION_SCHEDULE_RUNS {
@@ -2684,13 +2756,15 @@ pub fn claim_automation_schedule_in_tx(
                         key: format!("schedule:{due_ms}"),
                     },
                     record_id: None,
-                    collection_path,
+                    collection_path: None,
                     depth: 0,
                     change: AutomationChange {
                         kind: AutomationChangeKind::Schedule,
                         author_origin_id: None,
                         actor_kind: None,
                         on_behalf_of: None,
+                        shared_author: None,
+                        live_cursor: None,
                     },
                     fields: AutomationFieldFacts::default(),
                     chain_stopped: false,
@@ -2738,7 +2812,7 @@ pub fn claim_automation_schedule_in_tx(
 /// pending claim keyed `run-now:<notice id>`, with no record, at depth 0,
 /// like a schedule's due time. The notice's first dismissal on the relay
 /// picks the one computer that runs it; the key keeps a repeat on this
-/// computer from running it twice, so a run-now claim is never pruned.
+/// computer from running it twice, so a run-now claim keeps its key forever.
 /// Answers the claim, and whether this call inserted it.
 pub fn claim_automation_run_now_in_tx(
     conn: &Connection,
@@ -2747,7 +2821,7 @@ pub fn claim_automation_run_now_in_tx(
     notice_id: &str,
     now_ms: i64,
 ) -> Result<AutomationRunNow, DomainError> {
-    let collection_path = button_or_schedule_collection(automation_id)?;
+    button_or_schedule_automation(automation_id)?;
     let notice_id = normalize_automation_identifier(notice_id, "Notice id is invalid.")?;
     let key = format!("run-now:{notice_id}");
     let existing: Option<String> = conn
@@ -2772,13 +2846,15 @@ pub fn claim_automation_run_now_in_tx(
     let claimed = ClaimedChange {
         trigger: AutomationTrigger::Key { key },
         record_id: None,
-        collection_path,
+        collection_path: None,
         depth: 0,
         change: AutomationChange {
             kind: AutomationChangeKind::Schedule,
             author_origin_id: None,
             actor_kind: None,
             on_behalf_of: None,
+            shared_author: None,
+            live_cursor: None,
         },
         fields: AutomationFieldFacts::default(),
         chain_stopped: false,
@@ -2830,10 +2906,11 @@ pub(crate) fn list_automation_schedule_marks_in_tx(
 /// surface: the newest failed claim, its error and time, plus a generation.
 /// The generation counts every time one of the automation's claims failed:
 /// each earlier run of a claim failed once (a retry follows a failure), and
-/// a failed claim's current run once more. A claim that ever failed is never
-/// pruned (a dismiss acknowledges, it does not destroy evidence), so the
-/// generation only grows, even across a retry, and an acknowledgment at
-/// generation N hides the notice exactly until a newer failure raises it
+/// a failed claim's current run once more. An automation's newest failure
+/// is never pruned (a dismiss acknowledges, it does not destroy evidence),
+/// and a pruned claim's failures stay counted in
+/// `automation_retired_failures`, so the generation only grows, even across a retry, and an acknowledgment
+/// at generation N hides the notice exactly until a newer failure raises it
 /// past N.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationFailure {
@@ -2862,6 +2939,9 @@ pub(crate) fn list_automation_failures_in_tx(
                      FROM automation_claims every \
                      WHERE every.workspace_id = ?1 \
                        AND every.automation_id = newest.automation_id) \
+                    + COALESCE((SELECT retired.failures FROM automation_retired_failures retired \
+                                WHERE retired.workspace_id = ?1 \
+                                  AND retired.automation_id = newest.automation_id), 0) \
              FROM ( \
                  SELECT automation_id, claim_id, attempts, error, updated_at_ms, \
                         ROW_NUMBER() OVER ( \
@@ -2869,7 +2949,7 @@ pub(crate) fn list_automation_failures_in_tx(
                             ORDER BY updated_at_ms DESC, claim_id DESC \
                         ) AS rank \
                  FROM automation_claims \
-                 WHERE workspace_id = ?1 AND state = 'failed' \
+                 WHERE workspace_id = ?1 AND state = 'failed' AND expired = 0 \
              ) newest WHERE newest.rank = 1 ORDER BY newest.automation_id",
         )
         .map_err(DomainError::sql_corrupt)?;
@@ -2975,33 +3055,287 @@ pub(crate) fn claim_next_pending_automation_in_tx(
     Ok(Some((claim, facts)))
 }
 
-/// An automation's newest claims in every state, newest first, at most
-/// [`AUTOMATION_CLAIM_HISTORY_LIMIT`]: its run history.
+/// Where a page of run history ended: its last claim. The next page starts
+/// after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationClaimCursor {
+    pub created_at_ms: i64,
+    pub claim_id: String,
+}
+
+/// One page of an automation's run history, and where the next starts, or
+/// `None` after the oldest claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationClaimPage {
+    pub claims: Vec<AutomationClaim>,
+    pub next: Option<AutomationClaimCursor>,
+}
+
+/// One page of an automation's run history: its claims in every state,
+/// newest first, after `before` when given. An expired claim kept only as
+/// a key is not history.
 pub(crate) fn list_automation_claims_in_tx(
     conn: &Connection,
     workspace_id: &str,
     automation_id: &str,
-) -> Result<Vec<AutomationClaim>, DomainError> {
+    before: Option<&AutomationClaimCursor>,
+    limit: i64,
+) -> Result<AutomationClaimPage, DomainError> {
     let automation_id =
         normalize_automation_identifier(automation_id, "Automation id is invalid.")?;
+    if !(1..=MAX_AUTOMATION_CLAIM_PAGE).contains(&limit) {
+        return Err(DomainError::InvalidInput {
+            reason: "A page of automation claims holds 1 to 100 claims.",
+        });
+    }
+    let after = if before.is_some() {
+        "AND (created_at_ms, claim_id) < (?4, ?5)"
+    } else {
+        "AND ?4 IS NULL AND ?5 IS NULL"
+    };
     let mut statement = conn
         .prepare(&format!(
             "SELECT {CLAIM_COLUMNS} FROM automation_claims \
-             WHERE workspace_id = ?1 AND automation_id = ?2 \
+             WHERE workspace_id = ?1 AND automation_id = ?2 AND expired = 0 {after} \
              ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3"
         ))
         .map_err(DomainError::sql_corrupt)?;
-    statement
+    let mut claims = statement
         .query_map(
-            params![workspace_id, automation_id, AUTOMATION_CLAIM_HISTORY_LIMIT],
+            params![
+                workspace_id,
+                automation_id,
+                limit + 1,
+                before.map(|cursor| cursor.created_at_ms),
+                before.map(|cursor| cursor.claim_id.as_str()),
+            ],
             claim_from_row,
         )
         .map_err(DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(DomainError::sql_corrupt)?
         .into_iter()
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    let next = if claims.len() as i64 > limit {
+        claims.truncate(limit as usize);
+        claims.last().map(|last| AutomationClaimCursor {
+            created_at_ms: last.created_at_ms,
+            claim_id: last.claim_id.clone(),
+        })
+    } else {
+        None
+    };
+    Ok(AutomationClaimPage { claims, next })
 }
+
+/// How `automations.getClaim` names a claim: by its id, or by the trigger
+/// key it claimed under, such as `press:<press id>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationClaimLookup {
+    Id(String),
+    Key { automation_id: String, key: String },
+}
+
+/// One claim in run history, however old, or `None`.
+pub(crate) fn get_automation_claim_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    lookup: &AutomationClaimLookup,
+) -> Result<Option<AutomationClaim>, DomainError> {
+    let (sql, first, second) = match lookup {
+        AutomationClaimLookup::Id(claim_id) => (
+            "claim_id = ?2 AND ?3 IS NULL",
+            normalize_automation_identifier(claim_id, "Automation claim id is invalid.")?,
+            None,
+        ),
+        AutomationClaimLookup::Key { automation_id, key } => (
+            "automation_id = ?2 AND trigger_key = ?3",
+            normalize_automation_identifier(automation_id, "Automation id is invalid.")?,
+            Some(normalize_automation_identifier(
+                key,
+                "Automation trigger key is invalid.",
+            )?),
+        ),
+    };
+    conn.query_row(
+        &format!(
+            "SELECT {CLAIM_COLUMNS} FROM automation_claims \
+             WHERE workspace_id = ?1 AND {sql} AND expired = 0"
+        ),
+        params![workspace_id, first, second],
+        claim_from_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()
+}
+
+/// What one `automations.pruneHistory` call did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutomationHistoryPruned {
+    /// Claims that left run history: deleted, or kept only as keys.
+    pub pruned: u64,
+    /// Whether more claims are past their time: call again.
+    pub more: bool,
+}
+
+/// Expire the workspace's done and failed claims settled more than
+/// [`AUTOMATION_HISTORY_RETENTION_MS`] before `now_ms`, oldest first, at
+/// most [`AUTOMATION_HISTORY_PRUNE_BATCH`], except each automation's newest
+/// failure and the claims in `keep`: the runs an unfinished Undo still
+/// names. An expired claim leaves run history and can no longer run again.
+/// Its row goes unless its key must stay, under the rules below; a kept key
+/// drops its facts and message. A deleted claim's failures move to
+/// `automation_retired_failures`.
+///
+/// - A record claim made from a moment keeps its key: a later reconcile can
+///   derive the same moment again (a record whose frontmatter broke and
+///   healed).
+/// - A message claim keeps its key: a message stored again after its thread
+///   was removed must not run twice.
+/// - A schedule claim keeps its key until its due time is
+///   [`AUTOMATION_SCHEDULE_KEY_RETENTION_MS`] behind the schedule's mark, so
+///   a due time a reset mark reaches again does not run twice. A run-now
+///   claim keeps its key.
+/// - A button claim stays in history while a remembered press names it, so
+///   the press sent again finds it. Presses past their time are forgotten
+///   first.
+pub(crate) fn prune_automation_history_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    keep: &[String],
+    now_ms: i64,
+) -> Result<AutomationHistoryPruned, DomainError> {
+    if keep.len() > MAX_AUTOMATION_HISTORY_KEEP {
+        return Err(DomainError::InvalidInput {
+            reason: "A prune keeps at most 10,000 automation claims.",
+        });
+    }
+    let keep = keep
+        .iter()
+        .map(|claim_id| {
+            normalize_automation_identifier(claim_id, "Automation claim id is invalid.")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let keep = serde_json::to_string(&keep).map_err(|_| DomainError::StateCorrupt {
+        reason: "automation claim ids did not serialize",
+    })?;
+    let forgotten = conn
+        .execute(
+            "DELETE FROM automation_presses WHERE rowid IN ( \
+                 SELECT rowid FROM automation_presses \
+                 WHERE workspace_id = ?1 AND pressed_at_ms < ?2 LIMIT ?3)",
+            params![
+                workspace_id,
+                now_ms.saturating_sub(AUTOMATION_PRESS_RETENTION_MS),
+                AUTOMATION_HISTORY_PRUNE_BATCH
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+    let expiring: Vec<(String, String, i64, bool)> = conn
+        .prepare_cached(EXPIRING_CLAIMS_SQL)
+        .map_err(DomainError::sql_corrupt)?
+        .query_map(
+            params![
+                workspace_id,
+                now_ms.saturating_sub(AUTOMATION_HISTORY_RETENTION_MS),
+                keep,
+                AUTOMATION_HISTORY_PRUNE_BATCH
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    let mut retired = Vec::new();
+    for (claim_id, automation_id, failures, keeps_key) in &expiring {
+        if *keeps_key {
+            conn.execute(
+                "UPDATE automation_claims \
+                 SET expired = 1, change_fields_json = '[]', change_fields_omitted = 0, \
+                     message_json = NULL \
+                 WHERE workspace_id = ?1 AND claim_id = ?2",
+                params![workspace_id, claim_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+        } else {
+            conn.execute(
+                "DELETE FROM automation_claims WHERE workspace_id = ?1 AND claim_id = ?2",
+                params![workspace_id, claim_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            retired.push((automation_id.clone(), *failures));
+        }
+    }
+    let aged: Vec<(String, i64)> = conn
+        .prepare_cached(AGED_SCHEDULE_KEYS_SQL)
+        .map_err(DomainError::sql_corrupt)?
+        .query_map(
+            params![
+                workspace_id,
+                AUTOMATION_SCHEDULE_KEY_RETENTION_MS,
+                AUTOMATION_HISTORY_PRUNE_BATCH
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    for (automation_id, failures) in retired.iter().chain(&aged) {
+        if *failures > 0 {
+            conn.execute(
+                "INSERT INTO automation_retired_failures (workspace_id, automation_id, failures) \
+                 VALUES (?1, ?2, ?3) \
+                 ON CONFLICT (workspace_id, automation_id) \
+                 DO UPDATE SET failures = failures + excluded.failures",
+                params![workspace_id, automation_id, failures],
+            )
+            .map_err(DomainError::sql_persist)?;
+        }
+    }
+    Ok(AutomationHistoryPruned {
+        pruned: expiring.len() as u64,
+        more: [forgotten, expiring.len(), aged.len()]
+            .into_iter()
+            .any(|count| count as i64 == AUTOMATION_HISTORY_PRUNE_BATCH),
+    })
+}
+
+/// A workspace's done claims past `?2`, oldest first, except the claims in
+/// the JSON array `?3`, a button claim a remembered press names, and each
+/// automation's newest failure, with how many times each failed and whether
+/// it keeps its key. The terms before `updated_at_ms` match
+/// `idx_automation_claims_expiring`, which holds no expired claim, and the
+/// newest failure is read through `idx_automation_claims_failed`.
+pub(crate) const EXPIRING_CLAIMS_SQL: &str = "SELECT claim_id, automation_id, \
+            run - 1 + (state = 'failed'), \
+            trigger_moment_order IS NOT NULL OR change_kind IN ('message', 'schedule') \
+     FROM automation_claims \
+     WHERE workspace_id = ?1 AND state IN ('done', 'failed') AND expired = 0 \
+       AND updated_at_ms < ?2 \
+       AND claim_id NOT IN (SELECT value FROM json_each(?3)) \
+       AND NOT (change_kind = 'button' AND EXISTS (SELECT 1 FROM automation_presses p \
+         WHERE p.workspace_id = ?1 AND p.claim_id = automation_claims.claim_id)) \
+       AND NOT (state = 'failed' AND claim_id = ( \
+         SELECT newest.claim_id FROM automation_claims newest \
+         WHERE newest.workspace_id = ?1 AND newest.automation_id = automation_claims.automation_id \
+           AND newest.state = 'failed' AND newest.expired = 0 \
+         ORDER BY newest.updated_at_ms DESC, newest.claim_id DESC LIMIT 1)) \
+     ORDER BY updated_at_ms LIMIT ?4";
+
+/// Delete at most `?3` of a workspace's expired schedule keys whose due time
+/// is more than `?2` behind their schedule's mark, answering each one's
+/// automation and how many times it failed. The terms before `CAST` match
+/// `idx_automation_claims_expired_schedule_keys`, which holds no run-now key.
+pub(crate) const AGED_SCHEDULE_KEYS_SQL: &str = "DELETE FROM automation_claims WHERE rowid IN ( \
+         SELECT claim.rowid FROM automation_claims claim \
+         WHERE claim.workspace_id = ?1 AND claim.expired = 1 AND claim.change_kind = 'schedule' \
+           AND substr(claim.trigger_key, 1, 9) = 'schedule:' \
+           AND CAST(substr(claim.trigger_key, 10) AS INTEGER) < ( \
+               SELECT mark.through_ms - ?2 FROM automation_schedule_marks mark \
+               WHERE mark.workspace_id = ?1 AND mark.automation_id = claim.automation_id) \
+         LIMIT ?3) \
+     RETURNING automation_id, run - 1 + (state = 'failed')";
 
 /// What `automations.retry` did to a claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3022,10 +3356,15 @@ pub(crate) fn retry_automation_claim_in_tx(
     now_ms: i64,
 ) -> Result<AutomationRetry, DomainError> {
     let claim_id = normalize_automation_identifier(claim_id, "Automation claim id is invalid.")?;
-    let existing =
-        claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::InvalidInput {
-            reason: "Automation claim not found.",
-        })?;
+    // An expired claim is not in run history, so it cannot run again.
+    let existing = get_automation_claim_in_tx(
+        conn,
+        workspace_id,
+        &AutomationClaimLookup::Id(claim_id.clone()),
+    )?
+    .ok_or(DomainError::InvalidInput {
+        reason: "Automation claim not found.",
+    })?;
     if existing.chain_stopped() {
         return Err(DomainError::InvalidInput {
             reason: "A claim the chain depth cap stopped cannot run.",
@@ -3121,9 +3460,8 @@ pub(crate) fn release_automation_claim_in_tx(
 
 /// Close a running claim: done, or failed with the handler's error text.
 /// Refuses a claim that is not running — a settle is not idempotent, matching
-/// the chat ledger's exactly-one-transition rule. Then prunes the
-/// automation's done claims past its newest
-/// [`AUTOMATION_CLAIM_HISTORY_LIMIT`]; a claim that ever failed stays.
+/// the chat ledger's exactly-one-transition rule. Run history expires
+/// through [`prune_automation_history_in_tx`], never here.
 pub(crate) fn settle_automation_claim_in_tx(
     conn: &Connection,
     workspace_id: &str,
@@ -3169,84 +3507,8 @@ pub(crate) fn settle_automation_claim_in_tx(
     let settled = claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
         reason: "settled automation claim not found after update",
     })?;
-    // Past the history, a done field claim goes. A done added or removed
-    // claim keeps its row, without facts: a later reconcile can derive the
-    // same moment again (a record whose frontmatter broke and healed), and
-    // the row's key is what keeps it from claiming twice. A done message
-    // claim keeps its key without its message for the same reason: a message
-    // stored again after its thread was removed must not run twice. A done
-    // schedule claim keeps its key until its due time is
-    // AUTOMATION_SCHEDULE_KEY_RETENTION_MS behind the schedule's mark, so a
-    // due time a reset mark reaches again does not run twice. A done button
-    // claim stays while a remembered press names it, so the press sent
-    // again finds it.
-    let prune = params![
-        workspace_id,
-        settled.automation_id,
-        AUTOMATION_CLAIM_HISTORY_LIMIT
-    ];
-    conn.execute(PRUNE_SETTLED_RECORD_CLAIMS_SQL, prune)
-        .map_err(DomainError::sql_persist)?;
-    conn.execute(
-        PRUNE_AGED_SCHEDULE_KEYS_SQL,
-        params![
-            workspace_id,
-            settled.automation_id,
-            AUTOMATION_CLAIM_HISTORY_LIMIT,
-            AUTOMATION_SCHEDULE_KEY_RETENTION_MS
-        ],
-    )
-    .map_err(DomainError::sql_persist)?;
-    conn.execute(CLEAR_SETTLED_CLAIM_FACTS_SQL, prune)
-        .map_err(DomainError::sql_persist)?;
     Ok(settled)
 }
-
-/// Delete an automation's settled record and button claims past its
-/// history, except a button claim a kept press names. The terms
-/// before `claim_id` match `idx_automation_claims_prunable`, so the delete
-/// never reads the key rows message claims keep. It does read the schedule
-/// claims it keeps, whose key rows last about 30 days.
-pub(crate) const PRUNE_SETTLED_RECORD_CLAIMS_SQL: &str = "DELETE FROM automation_claims \
-     WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
-       AND trigger_moment_order IS NULL AND change_kind <> 'message' \
-       AND change_kind <> 'schedule' \
-       AND NOT EXISTS (SELECT 1 FROM automation_presses p \
-         WHERE p.workspace_id = automation_claims.workspace_id \
-           AND p.claim_id = automation_claims.claim_id) \
-       AND claim_id NOT IN ( \
-           SELECT claim_id FROM automation_claims \
-           WHERE workspace_id = ?1 AND automation_id = ?2 \
-           ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)";
-
-/// Delete an automation's settled schedule claims past its history whose due
-/// time is more than `?4` behind the schedule's mark. The `<> 'message'`
-/// term matches `idx_automation_claims_prunable`.
-pub(crate) const PRUNE_AGED_SCHEDULE_KEYS_SQL: &str = "DELETE FROM automation_claims \
-     WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
-       AND trigger_moment_order IS NULL AND change_kind <> 'message' \
-       AND change_kind = 'schedule' AND substr(trigger_key, 1, 9) = 'schedule:' \
-       AND CAST(substr(trigger_key, length('schedule:') + 1) AS INTEGER) < ( \
-           SELECT m.through_ms - ?4 FROM automation_schedule_marks m \
-           WHERE m.workspace_id = ?1 AND m.automation_id = ?2) \
-       AND claim_id NOT IN ( \
-           SELECT claim_id FROM automation_claims \
-           WHERE workspace_id = ?1 AND automation_id = ?2 \
-           ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)";
-
-/// Clear the facts of an automation's settled moment and message claims past
-/// its history. The terms before `claim_id` match
-/// `idx_automation_claims_settled_facts`, so the update reads only claims
-/// that still carry facts.
-pub(crate) const CLEAR_SETTLED_CLAIM_FACTS_SQL: &str = "UPDATE automation_claims \
-     SET change_fields_json = '[]', change_fields_omitted = 0, message_json = NULL \
-     WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
-       AND (trigger_moment_order IS NOT NULL OR change_kind = 'message') \
-       AND (change_fields_json <> '[]' OR message_json IS NOT NULL) \
-       AND claim_id NOT IN ( \
-           SELECT claim_id FROM automation_claims \
-           WHERE workspace_id = ?1 AND automation_id = ?2 \
-           ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)";
 
 /// The startup reaper. A running claim whose process died — running, and not
 /// touched since `stale_before_ms` — is requeued to pending while attempts
@@ -3447,8 +3709,32 @@ pub fn list_automation_claims(
     store: &EngineStore,
     workspace_id: &str,
     automation_id: &str,
-) -> Result<Vec<AutomationClaim>, DomainError> {
-    store.read_with(|conn| list_automation_claims_in_tx(conn, workspace_id, automation_id))
+    before: Option<&AutomationClaimCursor>,
+    limit: i64,
+) -> Result<AutomationClaimPage, DomainError> {
+    store.read_with(|conn| {
+        list_automation_claims_in_tx(conn, workspace_id, automation_id, before, limit)
+    })
+}
+
+pub fn get_automation_claim(
+    store: &EngineStore,
+    workspace_id: &str,
+    lookup: &AutomationClaimLookup,
+) -> Result<Option<AutomationClaim>, DomainError> {
+    store.read_with(|conn| get_automation_claim_in_tx(conn, workspace_id, lookup))
+}
+
+pub fn prune_automation_history(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    keep: &[String],
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<AutomationHistoryPruned, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        prune_automation_history_in_tx(tx, workspace_id, keep, now_ms)
+    })?)
 }
 
 pub fn press_automation(
@@ -3538,47 +3824,53 @@ pub fn reclaim_running_automations(
 
 #[cfg(test)]
 mod tests {
-    use super::{CLEAR_SETTLED_CLAIM_FACTS_SQL, PRUNE_SETTLED_RECORD_CLAIMS_SQL};
+    use super::{AGED_SCHEDULE_KEYS_SQL, EXPIRING_CLAIMS_SQL};
     use dohc_engine_storage::EngineStore;
     use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
-    /// Message claims keep their key rows forever, so settle's pruning must
-    /// read only the claims it can change, through the partial indexes.
+    fn plan(store: &EngineStore, sql: &str, params: impl rusqlite::Params) -> Vec<String> {
+        store
+            .read_with(|conn| {
+                let mut statement = conn
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                let rows = statement
+                    .query_map(params, |row| row.get::<_, String>(3))
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("query plan")
+    }
+
+    fn searches(plan: &[String], index: &str) -> bool {
+        plan.iter()
+            .any(|step| step.starts_with("SEARCH ") && step.contains(index))
+    }
+
+    /// Expired claims keep their key rows forever, so a prune must read only
+    /// the claims it can still change, through the partial indexes.
     #[test]
-    fn settle_pruning_reads_through_the_partial_indexes() {
+    fn pruning_reads_through_the_partial_indexes() {
         let scratch = ScratchDir::new().expect("scratch");
         let store = EngineStore::open(&engine_db_path(&scratch).expect("db"), 1).expect("store");
-        for (sql, index) in [
-            (
-                PRUNE_SETTLED_RECORD_CLAIMS_SQL,
-                "idx_automation_claims_prunable",
-            ),
-            (
-                CLEAR_SETTLED_CLAIM_FACTS_SQL,
-                "idx_automation_claims_settled_facts",
-            ),
-        ] {
-            let plan: Vec<String> = store
-                .read_with(|conn| {
-                    let mut statement = conn
-                        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-                        .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                    let rows = statement
-                        .query_map(rusqlite::params!["ws", "collection:Trip#all", 100], |row| {
-                            row.get::<_, String>(3)
-                        })
-                        .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                    rows.collect::<rusqlite::Result<Vec<_>>>()
-                        .map_err(dohc_engine_storage::StorageError::corrupt_public)
-                })
-                .expect("query plan");
-            assert!(
-                plan.iter().any(
-                    |step| step.starts_with("SEARCH automation_claims USING INDEX ")
-                        && step.contains(index)
-                ),
-                "{index}: {plan:?}"
-            );
-        }
+        let expiring = plan(
+            &store,
+            EXPIRING_CLAIMS_SQL,
+            rusqlite::params!["ws", 100, "[]", 500],
+        );
+        assert!(
+            searches(&expiring, "idx_automation_claims_expiring"),
+            "{expiring:?}"
+        );
+        let aged = plan(
+            &store,
+            AGED_SCHEDULE_KEYS_SQL,
+            rusqlite::params!["ws", 100, 500],
+        );
+        assert!(
+            searches(&aged, "idx_automation_claims_expired_schedule_keys"),
+            "{aged:?}"
+        );
     }
 }

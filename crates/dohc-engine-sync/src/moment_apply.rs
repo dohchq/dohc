@@ -123,6 +123,18 @@ enum MomentAuthor {
         #[serde(rename = "grantGeneration")]
         grant_generation: i64,
     },
+    /// An Edit share link's direct write to a Collection's own files, minted
+    /// by the relay under the same origin. The link's grant is the author;
+    /// the server-minted link principal is provenance, never a person.
+    #[serde(rename = "link")]
+    Link {
+        #[serde(rename = "grantId")]
+        grant_id: String,
+        #[serde(rename = "grantGeneration")]
+        grant_generation: i64,
+        #[serde(rename = "principalId")]
+        principal_id: String,
+    },
     #[serde(rename = "automation")]
     Automation {
         #[serde(rename = "automationId")]
@@ -151,8 +163,9 @@ fn optional_author_principal<'de, D: serde::Deserializer<'de>>(
     String::deserialize(deserializer).map(Some)
 }
 
-/// The relay-owned origin for a named recipient's direct writes. It carries
-/// only `moment.append`; the router refuses every other operation from it.
+/// The relay-owned origin for a grant's direct writes, a named recipient's or
+/// an Edit link's. It carries only `moment.append`; the router refuses every
+/// other operation from it.
 pub(crate) const COLLECTION_FILE_ORIGIN_PREFIX: &str = "relay:collection-file:";
 const AUTOMATIONS_FILENAME: &str = "automations.yaml";
 
@@ -311,7 +324,7 @@ pub fn apply_moment_envelope_detailed(
                 reason: "public moment author requires a relay collection origin",
             });
         }
-        verify_named_author(tx, envelope, &payload)?;
+        verify_direct_write_author(tx, envelope, &payload)?;
         if payload.conflict_id.is_some() || payload.conflict_effect_index.is_some() {
             return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
         }
@@ -1242,6 +1255,16 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                     .any(|v| v.is_empty() || v.len() > 500)
                     || *grant_generation < 1
             }
+            MomentAuthor::Link {
+                grant_id,
+                grant_generation,
+                principal_id,
+            } => {
+                [grant_id, principal_id]
+                    .iter()
+                    .any(|v| v.is_empty() || v.len() > 500)
+                    || *grant_generation < 1
+            }
             MomentAuthor::Automation {
                 automation_id,
                 on_behalf_of,
@@ -1273,10 +1296,10 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
     Ok(())
 }
 
-/// The owner's own check on the direct lane (ADR 0013). A named author and
-/// the relay's `relay:collection-file:<grantId>` origin travel only together,
-/// with the same grant, and write only a Collection's own files.
-fn verify_named_author(
+/// The owner's own check on the direct lane (ADR 0013). A named or link
+/// author and the relay's `relay:collection-file:<grantId>` origin travel only
+/// together, with the same grant, and write only a Collection's own files.
+fn verify_direct_write_author(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
@@ -1284,16 +1307,40 @@ fn verify_named_author(
     let lane_grant = envelope
         .origin_id
         .strip_prefix(COLLECTION_FILE_ORIGIN_PREFIX);
-    let author_grant = match &payload.author {
-        Some(MomentAuthor::Named { grant_id, .. }) => Some(grant_id.as_str()),
-        _ => None,
+    let (author_grant, author_keys): (Option<&str>, &[&str]) = match &payload.author {
+        Some(MomentAuthor::Named { grant_id, .. }) => (
+            Some(grant_id.as_str()),
+            &["kind", "userId", "grantId", "grantGeneration"],
+        ),
+        Some(MomentAuthor::Link { grant_id, .. }) => (
+            Some(grant_id.as_str()),
+            &["kind", "grantId", "grantGeneration", "principalId"],
+        ),
+        _ => (None, &[]),
     };
+    // Deserializing drops unknown fields, but the replication log keeps the
+    // payload as it arrived. So a claimed name, a user on a link author, or
+    // a credential never rides a direct write in.
+    if author_grant.is_some()
+        && !envelope
+            .payload
+            .get("author")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|author| {
+                author.len() == author_keys.len()
+                    && author_keys.iter().all(|key| author.contains_key(*key))
+            })
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "direct-write author carries only its own fields",
+        });
+    }
     match (lane_grant, author_grant) {
         (None, None) => return Ok(()),
         (Some(lane), Some(author)) if lane == author => {}
         _ => {
             return Err(SyncError::InvalidInput {
-                reason: "named moment author requires its grant's relay collection-file origin",
+                reason: "direct-write author requires its grant's relay collection-file origin",
             });
         }
     }
@@ -1301,7 +1348,7 @@ fn verify_named_author(
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
     if !writes_collection_own_file(tx, &envelope.workspace_id, payload)? {
         return Err(SyncError::InvalidInput {
-            reason: "named moment author may write only a Collection's own files",
+            reason: "direct-write author may write only a Collection's own files",
         });
     }
     Ok(())

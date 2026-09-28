@@ -17,7 +17,7 @@ import {
 const WORKSPACE = "ws-1";
 const HASH = "0123456789abcdef";
 const press = (id: string, state: "pending" | "accepted" = "pending"): RelayAutomationPress => ({
-  hostPressId: id, definitionHash: HASH, state, automationId: "collection:Invoices#paid", recordId: "rec-12", pressedBy: "user-ana", createdAtMs: 1,
+  hostPressId: id, definitionHash: HASH, state, automationId: "collection:Invoices#paid", collectionPath: "Invoices", recordId: "rec-12", pressedBy: "user-ana", createdAtMs: 1,
 });
 
 function fakeRelay(options: { lists?: RelayAutomationPress[][]; accept?: (ids: string[]) => string[]; failSettles?: number }) {
@@ -134,7 +134,7 @@ describe("relayed press host", () => {
     const { loop, presses, failures } = hostWith(relay, host);
     loop.start();
     await relay.until(() => presses.length === 1);
-    expect(presses).toEqual([{ automationId: "collection:Invoices#paid", definitionHash: HASH, recordId: "rec-12", pressId: "p1", pressedBy: "user-ana" }]);
+    expect(presses).toEqual([{ automationId: "collection:Invoices#paid", collectionPath: "Invoices", definitionHash: HASH, recordId: "rec-12", pressId: "p1", pressedBy: "user-ana" }]);
     expect(accepts(relay)[0]!.body).toEqual({ installId: "laptop", generation: 7, hostPressIds: ["p1"] });
     host.notifying(relay.changed);
     loop.runSettled({ claimId: "claim-p1", outcome: "done", error: null });

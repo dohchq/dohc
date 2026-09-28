@@ -691,7 +691,8 @@ export function registerDirectMessagesIpcHandlers<
         if (!dm) throw new Error("Could not start that direct message.");
         return StartDmResult.parse({
           dm: dmRecordForIpc(dm),
-          message: chatMessageForIpc(message),
+          // A person's own message names no automation.
+          message: chatMessageForIpc(message, () => null),
         });
       },
     );

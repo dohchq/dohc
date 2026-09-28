@@ -10,7 +10,7 @@ afterEach(() => {
 
 const hold = (workspace: string): AutomationHoldNotice => ({
   automationId: `collection:${workspace}#spend`, automationName: "Spend", definitionHash: "0123456789abcdef",
-  step: "0", seq: 1, collection: workspace, target: "Budget", action: "change", stoppedFor: "bob@dohc.test",
+  step: "0", seq: 1, collection: workspace, collectionPath: workspace, target: "Budget", action: "change", stoppedFor: "bob@dohc.test",
 });
 
 it("never lets an Allow that finishes after a workspace switch repaint the new workspace's holds", async () => {

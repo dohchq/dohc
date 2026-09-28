@@ -2558,6 +2558,7 @@ describe("owner link inventory and impact preconditions", () => {
       revokedAtMs: null,
       lastUsedAtMs: null,
       urlIssuedAtMs: 2_000,
+      automationsGeneration: null,
       dependents: [
         {
           grantId: "dependent-a-unresolved",
@@ -2588,6 +2589,7 @@ describe("owner link inventory and impact preconditions", () => {
       revokedAtMs: 2_000,
       lastUsedAtMs: null,
       urlIssuedAtMs: null,
+      automationsGeneration: null,
       dependents: [],
     });
     expect(links[2]).toEqual({
@@ -2604,6 +2606,7 @@ describe("owner link inventory and impact preconditions", () => {
       revokedAtMs: null,
       lastUsedAtMs: null,
       urlIssuedAtMs: 3_000,
+      automationsGeneration: null,
       dependents: [],
     });
     expect(serialized).not.toContain("workspace-links");
@@ -3615,6 +3618,45 @@ describe("durable link usage inventory", () => {
       ).toBe(true);
     }
     expect(await ownerLinkInventoryRow(h, grantId)).toMatchObject({ lastUsedAtMs: 5_000 });
+  });
+});
+
+// The owner's reach check keeps a link that wrote a Collection's automations
+// directly (ADR 0013) as a former editor once it ends, so the listing says
+// which links did, revoked ones too.
+describe("a link's direct writes in the owner's inventory", () => {
+  it("reports whether the link wrote an automations file directly, before and after it is revoked", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const wrote = String((await createLink(h)).grantId);
+    const schemaOnly = String((await createLink(h)).grantId);
+    const idle = String((await createLink(h)).grantId);
+    expect(await ownerLinkInventoryRow(h, wrote)).toMatchObject({ automationsGeneration: null });
+
+    const path = storagePath(storage);
+    const db = inspectDatabase(path);
+    const insert = db.prepare(`INSERT INTO sync_relay_collection_writes (
+        grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, principal_id,
+        payload_sha256, origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms,
+        storage_bytes
+      ) VALUES (?, ?, ?, 'share-existing', ?, 'link', NULL, 'principal', ?, ?, 0, ?, ?, '{}', 0, 1)`);
+    const ledger = (grantId: string, submitId: string, paths: string[], generation = 1) =>
+      insert.run(grantId, submitId, WORKSPACE, generation, "a".repeat(64), `relay:collection-file:${grantId}`, paths.length - 1, JSON.stringify(paths));
+    // The newest generation it wrote automations under, not its newest write.
+    ledger(wrote, "old", ["Trip/automations.yaml"]);
+    ledger(wrote, "new", ["Trip/Ideas/collection.yaml", "Trip/Ideas/automations.yaml", "Trip/Ideas/a.md"], 2);
+    ledger(wrote, "schema", ["Trip/collection.yaml"], 3);
+    // Neither is a Collection's automations file.
+    ledger(schemaOnly, "schema", ["Trip/collection.yaml"]);
+    ledger(schemaOnly, "odd", ["Trip/automations.yaml\"x/collection.yaml"]);
+    db.close();
+    expect(await ownerLinkInventoryRow(h, wrote)).toMatchObject({ status: "active", automationsGeneration: 2 });
+    expect(await ownerLinkInventoryRow(h, schemaOnly)).toMatchObject({ automationsGeneration: null });
+    expect(await ownerLinkInventoryRow(h, idle)).toMatchObject({ automationsGeneration: null });
+
+    expect(storage.revokeShareGrant({ shareId: "share-existing", grantId: wrote, revokedAtMs: 3_000 }).ok).toBe(true);
+    expect(await ownerLinkInventoryRow(h, wrote)).toMatchObject({ status: "revoked", automationsGeneration: 2 });
   });
 });
 

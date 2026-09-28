@@ -195,6 +195,31 @@ impl ServerDerivedLiveUpdateAuthority {
             ),
         }
     }
+    /// The person the owner shared with, or the Edit share link, this
+    /// authority names; none for the owner.
+    fn shared_author(&self) -> Option<dohc_engine_domain::SharedChangeAuthor> {
+        match self {
+            Self::Owner { .. } => None,
+            Self::Named {
+                principal_id,
+                grant_id,
+                grant_generation,
+            } => Some(dohc_engine_domain::SharedChangeAuthor::Named {
+                user_id: principal_id.clone(),
+                grant_id: grant_id.clone(),
+                grant_generation: *grant_generation,
+            }),
+            Self::Link {
+                principal_id,
+                grant_id,
+                grant_generation,
+            } => Some(dohc_engine_domain::SharedChangeAuthor::Link {
+                grant_id: grant_id.clone(),
+                grant_generation: *grant_generation,
+                principal_id: principal_id.clone(),
+            }),
+        }
+    }
     fn validate(&self) -> Result<(), ApplicationError> {
         let (_, principal, grant, generation) = self.fields();
         identifier(principal, 512)?;
@@ -827,17 +852,26 @@ pub fn apply_committed(
             // claims. The author is the attribution this engine recorded when
             // the frame is its own draft (an automation's write keeps its
             // chain depth), and otherwise the principal the relay accepted it
-            // from, at depth 0.
+            // from, at depth 0. A person the owner shared with, or an Edit
+            // share link, is also named as the claim's shared author, from
+            // the relay's authority and nothing the frame says.
             let mut automation_claims = Vec::new();
             if let Some(mut facts) = append.record_facts {
+                // The relay journals every frame it accepts at a cursor, and a
+                // settlement carries the frames through its terminal cursor to
+                // the relay's log. The claim keeps its history-row key, so it
+                // dedupes as before, and the cursor lets the relay place it.
+                facts.live_cursor = Some(event.metadata.accepted.receipt.journal_cursor);
                 match own_draft_attribution(tx, &key, &event.metadata.accepted.receipt)? {
                     Some((actor, attribution)) => {
                         facts.author_origin_id = actor;
                         facts.attribution = attribution;
                     }
                     None => {
-                        let (_, principal_id, _, _) = event.metadata.accepted.authority.fields();
+                        let authority = &event.metadata.accepted.authority;
+                        let (_, principal_id, _, _) = authority.fields();
                         facts.author_origin_id = Some(principal_id.to_owned());
+                        facts.shared_author = authority.shared_author();
                     }
                 }
                 automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
@@ -2793,6 +2827,23 @@ mod tests {
                 })
                 .unwrap()
         };
+        let shared_authors = |store: &EngineStore| -> Vec<Option<serde_json::Value>> {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT change_author_json FROM automation_claims \
+                         ORDER BY created_at_ms, claim_id",
+                    )?;
+                    let rows = statement
+                        .query_map([], |row| row.get::<_, Option<String>>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, rusqlite::Error>(rows)
+                })
+                .unwrap()
+                .into_iter()
+                .map(|json| json.map(|json| serde_json::from_str(&json).unwrap()))
+                .collect()
+        };
 
         let source = Ydoc::wire();
         let owner_edit = event(
@@ -2845,9 +2896,54 @@ mod tests {
             "a collaborator's accepted edit claims on the host too"
         );
 
-        let body_only = event("body-only", 3, source.plaintext_insert(0, "body"));
+        // An Edit link holder's edit names the link, from the relay's
+        // authority, and never a person.
+        let mut link_edit = event(
+            "link-edit",
+            3,
+            source.frontmatter_set("status", "linked").unwrap(),
+        );
+        link_edit.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Link {
+            principal_id: "holder-1".into(),
+            grant_id: "grant-link".into(),
+            grant_generation: 2,
+        };
+        link_edit.metadata.accepted.received_at_ms = 25;
+        ack(apply(&mut store, &mut cache, &handle, link_edit));
+        assert_eq!(claims(&store).len(), 3);
+        assert_eq!(
+            shared_authors(&store),
+            vec![
+                None,
+                Some(serde_json::json!({"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1})),
+                Some(serde_json::json!({"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"})),
+            ],
+            "a collaborator's or a link's edit names who the relay accepted it from; the owner's names nobody"
+        );
+        let persons = |store: &EngineStore| -> Vec<Option<String>> {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT on_behalf_of FROM automation_claims ORDER BY created_at_ms, claim_id",
+                    )?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, rusqlite::Error>(rows)
+                })
+                .unwrap()
+        };
+        // The person a run reads is the collaborator the relay accepted the
+        // edit from. A link names no person, and neither does the owner's
+        // authority, which an automation on the server also writes under.
+        assert_eq!(
+            persons(&store),
+            vec![None, Some("guest-1".to_owned()), None]
+        );
+
+        let body_only = event("body-only", 4, source.plaintext_insert(0, "body"));
         ack(apply(&mut store, &mut cache, &handle, body_only));
-        assert_eq!(claims(&store).len(), 2, "a body-only frame claims nothing");
+        assert_eq!(claims(&store).len(), 3, "a body-only frame claims nothing");
 
         // This engine's own drafts, which an automation wrote at depth 2.
         let own_draft = |store: &mut EngineStore, key: &str, update: &[u8]| {
@@ -2875,7 +2971,7 @@ mod tests {
                 origin: crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
                     actor_origin_id: Some("collection:notes#stamp".into()),
                     actor_kind: Some("automation".into()),
-                    on_behalf_of: Some("local".into()),
+                    on_behalf_of: Some("person-1".into()),
                     chain_depth: Some(2),
                     recorded_at_ms: 1,
                 },
@@ -2896,34 +2992,82 @@ mod tests {
                 .unwrap();
             appended.delivery_id
         };
-        let newest = |store: &EngineStore| -> (Option<String>, i64) {
+        let newest = |store: &EngineStore| -> (Option<String>, i64, Option<String>) {
             store
                 .read_with(|conn| {
                     conn.query_row(
-                        "SELECT author_origin_id, depth FROM automation_claims \
+                        "SELECT author_origin_id, depth, on_behalf_of FROM automation_claims \
                          ORDER BY created_at_ms DESC, claim_id DESC LIMIT 1",
                         [],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                 })
                 .unwrap()
         };
         let stamped = source.frontmatter_set("status", "stamped").unwrap();
         let delivery = own_draft(&mut store, "own-stamp", &stamped);
-        let mut accepted = event(&delivery, 4, stamped);
+        let mut accepted = event(&delivery, 5, stamped);
         accepted.metadata.accepted.received_at_ms = 30;
         ack(apply(&mut store, &mut cache, &handle, accepted));
         assert_eq!(
             newest(&store),
-            (Some("collection:notes#stamp".to_owned()), 2),
-            "the host's own draft keeps its automation author and depth"
+            (
+                Some("collection:notes#stamp".to_owned()),
+                2,
+                Some("person-1".to_owned())
+            ),
+            "the host's own draft keeps its automation author, depth and person"
         );
         // The same bytes under another delivery are not that draft.
         let restamped = source.frontmatter_set("status", "restamped").unwrap();
         own_draft(&mut store, "own-restamp", &restamped);
-        let mut elsewhere = event("elsewhere", 5, restamped);
+        let mut elsewhere = event("elsewhere", 6, restamped);
         elsewhere.metadata.accepted.received_at_ms = 40;
         ack(apply(&mut store, &mut cache, &handle, elsewhere));
-        assert_eq!(newest(&store), (Some("owner-1".to_owned()), 0));
+        assert_eq!(newest(&store), (Some("owner-1".to_owned()), 0, None));
+
+        // Each claim keeps the relay journal cursor of the frame it came in,
+        // the host's own drafts' too, so the relay can place it in the
+        // settlement that carried it. The body-only frame at 4 claimed nothing.
+        let cursors = |store: &EngineStore| -> Vec<Option<i64>> {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT change_live_cursor FROM automation_claims \
+                         ORDER BY created_at_ms, claim_id",
+                    )?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, rusqlite::Error>(rows)
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            cursors(&store),
+            vec![Some(1), Some(2), Some(3), Some(5), Some(6)]
+        );
+
+        // The claim still keys on its history row, so a frame retried after a
+        // restart claims nothing more, and the same change delivered again
+        // under another delivery id and cursor claims nothing either.
+        let final_edit = source.frontmatter_set("status", "final").unwrap();
+        let mut last = event("final-edit", 7, final_edit.clone());
+        last.metadata.accepted.received_at_ms = 50;
+        ack(apply(&mut store, &mut cache, &handle, last.clone()));
+        assert_eq!(cursors(&store).len(), 6);
+        assert_eq!(cursors(&store).last(), Some(&Some(7)));
+        store = reopen(store, &dir);
+        let mut cache = WriterDocCache::new();
+        let retried = ack(apply(&mut store, &mut cache, &handle, last));
+        assert!(retried.application_replayed);
+        let mut again = event("final-edit-again", 8, final_edit);
+        again.metadata.accepted.received_at_ms = 60;
+        ack(apply(&mut store, &mut cache, &handle, again));
+        assert_eq!(
+            cursors(&store).len(),
+            6,
+            "a retried or re-delivered frame claims once"
+        );
     }
 }

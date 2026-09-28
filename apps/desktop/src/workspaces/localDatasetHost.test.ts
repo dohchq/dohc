@@ -59,7 +59,7 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, ...extra});
+  const host = await createLocalDatasetHost({workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", ...extra});
   hosts.push(host); return {host, workspaceRoot};
 }
 async function activate(host: LocalDatasetHost, fixture = sources()) {
@@ -466,7 +466,7 @@ describe("local dataset owner adapter", () => {
     const [own, other] = ["collection:items#welcome", "collection:items#tally"];
     for (const automationId of [own, other]) host.automations.subscribe(id(1), {automationId, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: digest(automationId)});
     expect(host.automations.datasets()).toEqual({definitions: [approved.revision.definition], failures: []});
-    const context = host.automations.context({automationId: own, claimId: "claim", depth: 1});
+    const context = host.automations.context({automationId: own, claimId: "claim", depth: 1, person: null});
     const step = call(approved, id(6), "step", {name: "Pens"});
     expect(await host.automations.invoke(context, step)).toMatchObject({replayed: false});
     // The commit's claims are made and its wake has run by the time the step returns.
@@ -486,11 +486,11 @@ describe("local dataset owner adapter", () => {
     expect(await host.automations.invoke(context, step)).toMatchObject({replayed: true});
     expect(await host.action(step)).toMatchObject({replayed: false});
     // An object shaped like a context is not one, and a chain past depth 4 writes nothing.
-    await expect(host.automations.invoke({automationId: own, claimId: "claim", depth: 1}, {...step, idempotencyKey: "forged"})).rejects.toThrow(/not permitted/);
-    await expect(host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 5}), {...step, idempotencyKey: "deep"})).rejects.toThrow("You do not have access to this Collection.");
+    await expect(host.automations.invoke({automationId: own, claimId: "claim", depth: 1, person: null}, {...step, idempotencyKey: "forged"})).rejects.toThrow(/not permitted/);
+    await expect(host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 5, person: null}), {...step, idempotencyKey: "deep"})).rejects.toThrow("You do not have access to this Collection.");
     expect(host.history({datasetId: id(1)}).entries).toHaveLength(2);
     // A write at depth 4 commits, and its wake says the claims it made are failed chain stops.
-    await host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 4}), {...step, idempotencyKey: "stop"});
+    await host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 4, person: null}), {...step, idempotencyKey: "stop"});
     expect(wakes).toEqual([false, false, true]);
     expect(host.automations.failures()).toEqual([expect.objectContaining({automationId: other, neverStarted: true, chainStopped: true})]);
   });

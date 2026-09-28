@@ -202,6 +202,7 @@ function makeBridge(
     getCollection: vi.fn(
       async (): Promise<GetCollectionResult> => ({
         path: "tasks",
+        objectId: "object-test",
         status: "valid",
         reasons: [],
         schema: currentSchema,
@@ -209,7 +210,7 @@ function makeBridge(
       }),
     ),
     listCollections: vi.fn(async () => ({
-      collections: [{ path: "tasks", status: "valid", reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid", reasons: [] }],
     })),
     readWorkspaceText: vi.fn(async () => ({
       text: serializeCollectionSchema(currentSchema),
@@ -234,14 +235,14 @@ function makeBridge(
         const related = extra?.related?.[params.collectionPath];
         if (related) {
           return {
-            collection: { path: params.collectionPath, status: "valid", reasons: [] },
+            collection: { path: params.collectionPath, objectId: "object-test", status: "valid", reasons: [] },
             records: related,
             groups: null,
             nextCursor: null,
           };
         }
         return {
-          collection: { path: "tasks", status: "valid", reasons: [] },
+          collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
           records,
           groups: extra?.groups ?? null,
           nextCursor: null,
@@ -318,7 +319,7 @@ function renderPage(
 describe("CollectionPage", () => {
   it("names a newer Collection file and asks to update dohc", async () => {
     const bridge = makeBridge([]);
-    bridge.getCollection.mockResolvedValue({ path: "tasks", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }],
+    bridge.getCollection.mockResolvedValue({ path: "tasks", objectId: "object-test", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }],
       schema: { name: null, description: null, fields: [], views: [] }, recordCount: 0 });
     renderPage(bridge);
     expect(await screen.findByText("tasks/collection.yaml uses a newer version. Update dohc to read this file.")).toBeDefined();
@@ -436,16 +437,16 @@ describe("CollectionPage", () => {
       do: [{ kind: "set" as const, values: [{ field: "title", value: { kind: "literal" as const, value: "x" } }], records: null, operation: null }],
     };
     Object.assign(bridge, {
-      listCollectionAutomations: vi.fn(async () => ({ status: "read", contentHash: hashFor(0), automations: [{
+      listCollectionAutomations: vi.fn(async () => ({ status: "read", contentHash: hashFor(0), addsStay: [], automations: [{
         valid: true, automationId: "collection:tasks#stamp", automation: stamp, definitionHash: "0123456789abcdef",
         cannotRun: null, reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
       }] })),
-      listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [] })),
+      listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [], next: null })),
       onAutomationRunsChanged: () => () => undefined,
       onAutomationHoldsChanged: () => () => undefined,
     });
     vi.stubGlobal("dohcDesktop", bridge);
-    const page = (focus: { automationId: string; seq: number } | null) => (
+    const page = (focus: { automationId: string; run: string | null; seq: number } | null) => (
       <CollectionPage
         workspaceId="ws-1"
         collectionPath="tasks"
@@ -457,7 +458,7 @@ describe("CollectionPage", () => {
         automationFocus={focus}
       />
     );
-    const { rerender } = render(page({ automationId: "collection:tasks#stamp", seq: 1 }));
+    const { rerender } = render(page({ automationId: "collection:tasks#stamp", run: null, seq: 1 }));
     expect(await screen.findByText("This automation has not run on this computer yet.")).toBeDefined();
     // The shell clears its ask once the page took it.
     rerender(page(null));
@@ -752,7 +753,7 @@ describe("CollectionPage", () => {
     page.rerender(pageWithHost());
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     await act(async () => resolveQuery({
-      collection: { path: "tasks", status: "valid", reasons: [] },
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
       records,
       groups: null,
       nextCursor: null,
@@ -1615,7 +1616,7 @@ describe("pagination", () => {
       const page = pages[index];
       if (!page) throw new Error(`no page ${index}`);
       return {
-        collection: { path: "tasks", status: "valid", reasons: [] },
+        collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
         records: page.records,
         groups: page.groups,
         nextCursor: index + 1 < pages.length ? cursorFor(index) : null,
@@ -2155,9 +2156,12 @@ describe("Button fields", () => {
       onAutomationRunsChanged: () => () => undefined,
       onAutomationHoldsChanged: () => () => undefined,
       listAutomationTargets: async () => ({ collections: [] }),
-      checkCollectionAutomation: async () => ({ diagnostics: [], formulaProblems: [] }),
+      checkCollectionAutomation: async () => ({ diagnostics: [], formulaProblems: [], cannotRun: null, missingFiles: [] }),
+      listAutomationGroups: async () => ({ groups: [] }),
+      listAutomationPeople: async () => ({ status: "listed", people: [] }),
       readScheduleHost: async () => ({ kind: "this-computer" }),
       onScheduleHostChanged: () => () => undefined,
+      onCloudSessionChanged: () => () => undefined,
     });
     vi.stubGlobal("dohcDesktop", bridge);
     render(pageWithHost());
@@ -2170,6 +2174,7 @@ describe("Button fields", () => {
     await waitFor(() => expect(screen.queryByTestId("collection-fields-dialog")).toBeNull());
     const panel = await screen.findByTestId("collection-automations-panel");
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Archive");
-    expect(within(panel).getByRole("combobox", { name: "Trigger" }).textContent).toContain("When someone clicks Archive");
+    expect((within(panel).getByRole("combobox", { name: "Trigger" }) as HTMLSelectElement).value).toBe("button");
+    expect((within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value).toBe("Archive");
   });
 });
