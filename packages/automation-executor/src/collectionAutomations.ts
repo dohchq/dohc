@@ -62,7 +62,7 @@ import {
   type ReachShare,
   type ReachStep,
 } from "./automationReach";
-import type { AutomationRunStore, ClaimStanding, ExpiringClaim, ReportedFailure, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
+import type { AutomationRunStore, ClaimStanding, DatasetUndoCall, ExpiringClaim, ReportedFailure, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
@@ -84,11 +84,22 @@ import {
   datasetOperationsOf,
   datasetReachSteps,
   datasetTableNamed,
+  datasetUndoDeletes,
   pinDatasetOperations,
   type DatasetRecordId,
 } from "./datasetAutomationPlan";
 import { datasetPresser, datasetRecordExists, runDatasetAutomation, type DatasetRunClaim, type DatasetRunHost } from "./datasetAutomationRun";
-import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
+import {
+  datasetUndoDeletesRecorded,
+  datasetUndoLostRun,
+  datasetUndoRulesChanged,
+  DATASET_UNDO_RULES_CHANGED,
+  planDatasetUndo,
+  undoDatasetAutomationRuns,
+  type DatasetUndoConfirmed,
+  type DatasetUndoHost,
+  type DatasetUndoPreview,
+} from "./datasetAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, sameReachVerdict, type StoredReachVerdict } from "./reachVerdicts";
 import { createAutomationTargets } from "./automationTargets";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
@@ -389,7 +400,19 @@ export type CollectionAutomationSummary =
 export type CollectionAutomationsFile =
   | { status: "missing" }
   | { status: "unreadable"; diagnostic: AutomationDiagnostic }
-  | { status: "read"; contentHash: string | null; automations: CollectionAutomationSummary[] };
+  | {
+      status: "read";
+      contentHash: string | null;
+      automations: CollectionAutomationSummary[];
+      /**
+       * In a dataset, the tables where Undo would keep the records an Add
+       * record step adds, because no approved delete every editor can use
+       * qualifies (datasetUndoDeletes), for the builder to say beside the
+       * step. Empty in a document Collection, or while dohc cannot check who
+       * can edit.
+       */
+      addsStay: string[];
+    };
 
 /** One field that switched-on automations set, with their names in file order. */
 export interface CollectionFieldMark {
@@ -581,7 +604,18 @@ export type CollectionAutomationRetry =
 
 export type CollectionAutomationUndo =
   | ({ status: "undone" } & CollectionAutomationUndone)
+  // The run added dataset records: the person reads what Undo deletes and
+  // keeps, and chooses a delete where several qualify, before it runs.
+  | { status: "confirm"; preview: DatasetUndoPreview }
   | { status: "refused"; reason: string };
+
+/**
+ * A dataset Undo's checks passed, with the runs it planned and their
+ * reverses and deletes to save before it sends any; or what it answers instead.
+ */
+type DatasetUndoChecked =
+  | { collection: ReachCollection; covers: StoredRun[]; calls: DatasetUndoCall[] }
+  | Extract<CollectionAutomationUndo, { status: "confirm" | "refused" }>;
 
 const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a moment.";
 
@@ -691,6 +725,12 @@ function boundPress(claim: Pick<AutomationClaim, "trigger" | "change">): { defin
 
 function collectionNamed(path: string): ReachCollection {
   return { path, name: path.split("/").at(-1) ?? path };
+}
+
+/** Why dohc cannot check who can edit `collection`, from a roster it does not know. */
+function rosterProblem(roster: Extract<ReachRoster, { kind: "unknown" }>, collection: ReachCollection): string {
+  const [waiting] = checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection }] });
+  return waiting !== undefined && !waiting.allowed ? waiting.reason : `dohc could not check who can edit ${collection.name}.`;
 }
 
 type OwnedAutomation = { automationId: string; collectionPath: string; automation: Automation };
@@ -1390,7 +1430,11 @@ export class CollectionAutomations {
       });
       return { ...summary, reach: { kind: "checked", steps } };
     });
-    return { status: "read", contentHash: indexed.contentHash, automations };
+    const dataset = unapproved || roster.kind === "unknown" ? undefined : this.datasets.get(collectionPath);
+    const addsStay = dataset === undefined ? [] : dataset.definition.tables
+      .filter((table) => datasetUndoDeletes(roster, collection, dataset.definition, table.tableId, dataset.grants).length === 0)
+      .map((table) => table.name);
+    return { status: "read", contentHash: indexed.contentHash, automations, addsStay };
   }
 
   /**
@@ -2393,11 +2437,13 @@ export class CollectionAutomations {
    * Undo for a finished run: its fields go back where no one changed them
    * since. In a document Collection the records it added move to the trash
    * through `trash`; in a dataset each reversible edit goes back through its
-   * approved edit as the person on this computer, and added records stay,
-   * whichever ledger claimed the run.
+   * approved edit as the person on this computer, whichever ledger claimed
+   * the run. A dataset run that added records first answers what Undo will
+   * delete and keep; `deletes` then confirms exactly that preview, with the
+   * person's choice of delete where one is needed.
    */
   async undo(
-    input: { automationId: string; claimId: string },
+    input: { automationId: string; claimId: string; deletes: DatasetUndoConfirmed | null },
     trash: (path: string) => Promise<void>,
     // Stop and restore undoes only the runs under these definitions.
     definitionHashes?: ReadonlySet<string>,
@@ -2437,27 +2483,38 @@ export class CollectionAutomations {
       // under a newer definition too. One whose Undo stopped part way is
       // undone again: what is already back stays as it is.
       const pending = runs.filter((run) => run.undo !== "done");
-      // A dataset edit goes back only under the rules it ran under, so a
-      // rules change refuses before anything below is saved or sent. Dataset
-      // Undo reads every run of the claim, those saved undone too, so a retry
-      // after only some were saved done sends the same requests as before and
-      // replays their receipts instead of writing again.
-      if (dataset) {
-        const changed = await this.withLiveHost((host) => datasetUndoRulesChanged(host, runs), true);
-        if (changed === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
-        if (changed) return { status: "refused", reason: DATASET_UNDO_RULES_CHANGED };
-      }
+      // Kept with the claim's newest run, whichever runs are saved undone.
+      const newest = () => runs.reduce((latest, run) => (run.startedAtMs > latest.startedAtMs ? run : latest));
+      // Dataset Undo checks everything before anything below is saved or
+      // sent. It reads every run of the claim, those saved undone too, so a
+      // retry after only some were saved done sends the same requests as
+      // before and replays their receipts instead of writing again.
+      const checked = parsed !== null && dataset ? await this.datasetUndoCheck(input, collectionNamed(parsed.collectionPath), stored.runs, runs, pending) : null;
+      if (checked !== null && "status" in checked) return checked;
       // Saved before anything is reversed, so no run resumes over what this
       // puts back, even if it stops part way.
       for (const run of pending) {
-        if (run.undo === null) await this.options.store.save({ ...run, undo: "started" });
+        if (run.undo === null) await this.options.store.updateState(run, { undo: "started" });
       }
-      const undone = dataset
-        ? await this.withLiveHost((host) => undoDatasetAutomationRuns(host, input.claimId, runs, async (request) => {
-          // Kept with the claim's newest run, whichever runs are saved undone.
-          const newest = runs.reduce((latest, run) => (run.startedAtMs > latest.startedAtMs ? run : latest));
-          await this.options.store.recordUndoRequest(newest, request);
-          newest.undoRequests.push(request);
+      // Every reverse and delete is saved, in one line with the runs it
+      // covers, before the first is sent, so an Undo that stops part way
+      // never chooses again. They are kept with the newest of those runs.
+      if (checked !== null && checked.covers.length > 0) {
+        const holder = checked.covers.reduce((latest, run) => (run.startedAtMs > latest.startedAtMs ? run : latest));
+        const covers = checked.covers.map((run) => run.keySeed);
+        await this.options.store.recordUndoCalls(holder, covers, checked.calls);
+        holder.undoCovers.push(...covers);
+        holder.undoCalls.push(...checked.calls);
+      }
+      const undone = checked !== null
+        // Who can edit, as last read, before each delete, as a run reads it before each record effect.
+        ? await this.withLiveHost((host) => undoDatasetAutomationRuns(host, checked.collection, async () => {
+          const roster = await this.options.cachedRoster();
+          if (roster.kind === "unknown") throw new Error(rosterProblem(roster, checked.collection));
+          return roster;
+        }, input.claimId, runs, async (request) => {
+          await this.options.store.recordUndoRequest(newest(), request);
+          newest().undoRequests.push(request);
         }, this.runAbort.signal), true)
         : await undoCollectionAutomationRuns({
           withReads: (work) => this.withLiveEngine(work),
@@ -2469,11 +2526,53 @@ export class CollectionAutomations {
         // must find again.
         }, runs, this.runAbort.signal);
       if (undone === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
-      for (const run of pending) await this.options.store.save({ ...run, undo: "done" });
+      for (const run of pending) await this.options.store.updateState(run, { undo: "done" });
       return { status: "undone", ...undone };
     } finally {
       this.changing.delete(input.claimId);
     }
+  }
+
+  /**
+   * A dataset Undo's checks before it saves or sends anything: the rules
+   * every edit, added record, and action ran under still resolve, every
+   * saved reverse still has the run of its action, and who can edit is
+   * known wherever a delete may run. Then the reverses and
+   * deletes to send for the runs this Undo has not finished that no saved
+   * list covers yet, such as those a Stop and restore of one definition
+   * left out; runs a saved list covers send what it saved. A run that
+   * added records sends only those of the preview the person
+   * confirmed; without a confirmation, or when what Undo would do changed
+   * since the person read it, it answers the preview. Any other run sends
+   * its actions' reverses without one, since it deletes nothing.
+   */
+  private async datasetUndoCheck(
+    input: { claimId: string; deletes: DatasetUndoConfirmed | null },
+    collection: ReachCollection,
+    /** Every saved run of the claim, those this Undo leaves out too. */
+    claimRuns: readonly StoredRun[],
+    runs: readonly StoredRun[],
+    pending: readonly StoredRun[],
+  ): Promise<DatasetUndoChecked> {
+    // Reach (ADR 0012) as it is now, for the editors of the automation the runs' saved id names.
+    const roster = await this.options.roster();
+    if (roster.kind === "unknown" && datasetUndoDeletesRecorded(runs)) return { status: "refused", reason: rosterProblem(roster, collection) };
+    const covered = new Set(runs.flatMap((run) => run.undoCovers));
+    const unplanned = pending.filter((run) => !covered.has(run.keySeed));
+    const added = unplanned.some((run) => run.applied.some(({ writes }) => writes.some((write) => write.kind === "dataset-created")));
+    const checked = await this.withLiveHost(async (host): Promise<DatasetUndoChecked> => {
+      // A dataset change goes back only under the rules it ran under.
+      if (datasetUndoRulesChanged(host, runs)) return { status: "refused", reason: DATASET_UNDO_RULES_CHANGED };
+      const lost = datasetUndoLostRun(host, claimRuns);
+      if (lost !== null) return { status: "refused", reason: lost };
+      if (unplanned.length === 0) return { collection, covers: [], calls: [] };
+      const planned = await planDatasetUndo(host, { roster, collection }, input.claimId, runs, unplanned, this.runAbort.signal);
+      const confirmed = !added ? { token: planned.preview.token, chosen: [] } : input.deletes;
+      const calls = confirmed?.token === planned.preview.token ? planned.send(confirmed.chosen) : null;
+      return calls === null ? { status: "confirm", preview: planned.preview } : { collection, covers: unplanned, calls };
+    }, true);
+    if (checked === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
+    return checked;
   }
 
   /**
@@ -2520,13 +2619,19 @@ export class CollectionAutomations {
         const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs
           .filter((run) => wanted.has(run.definitionHash));
         if (runs.length === 0 || runs.every((run) => run.undo === "done")) continue;
-        const undone = await this.undo({ automationId, claimId: claim.claimId }, trash, wanted);
+        const target = { automationId, claimId: claim.claimId };
+        let undone = await this.undo({ ...target, deletes: null }, trash, wanted);
+        // Records a run added are deleted only after a person reads the
+        // preview in its run history, so a run that would delete any is left.
+        if (undone.status === "confirm" && undone.preview.deletes + undone.preview.unchecked === 0) {
+          undone = await this.undo({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted);
+        }
         if (undone.status !== "undone") {
           result.left += 1;
           continue;
         }
         result.undone += 1;
-        result.kept += undone.kept + undone.irreversible + undone.actions + undone.changedSince + undone.missing;
+        result.kept += undone.kept + undone.keptChanged + undone.irreversible + undone.actions + undone.changedSince + undone.missing;
       }
     }
   }
@@ -3554,9 +3659,7 @@ export class CollectionAutomations {
   private async markSettled(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation): Promise<void> {
     try {
       const runs = await runsForClaim(this.options.store, claim, automation);
-      if (!runs.unreadable && runs.done && !runs.done.settled) {
-        await this.options.store.save({ ...runs.done, settled: true });
-      }
+      if (!runs.unreadable && runs.done && !runs.done.settled) await this.options.store.updateState(runs.done, { settled: true });
     } catch (error) {
       this.options.onError(`record automation claim "${claim.claimId}" as done`, error);
     }

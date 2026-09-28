@@ -1,5 +1,5 @@
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, ArrowDown, ArrowUp, Clock, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Clock, Info, Plus, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
@@ -496,6 +496,8 @@ export function AutomationBuilder(props: {
   cannotRun: string | null;
   /** The saved version's reach, or null for a new automation. */
   reach: Reach | null;
+  /** Undo keeps the records an Add record step adds to this dataset table: no approved delete qualifies. */
+  addsStay: boolean;
   takenIds: ReadonlySet<string>;
   saving: boolean;
   /** The file has entries dohc cannot read, so nothing can be saved now. */
@@ -1022,6 +1024,11 @@ export function AutomationBuilder(props: {
                   <StatusLine tone="warning" icon={AlertTriangle} label="Out of reach">{targetStopped}</StatusLine>
                 ) : entry.verdict !== null ? (
                   <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">{entry.verdict}</StatusLine>
+                ) : null}
+                {table !== null && props.addsStay && editable?.kind === "add-record" ? (
+                  <StatusLine tone="muted" icon={Info} label="Undo keeps records">
+                    Undo keeps the records this step adds. This Collection has no delete action available to the automation.
+                  </StatusLine>
                 ) : null}
                 {action !== null ? (
                   <div className="flex flex-col gap-2">

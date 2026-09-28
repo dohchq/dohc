@@ -894,15 +894,18 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("created"), recordId: z.string(), path: z.string() }).strict(),
   z.object({ kind: z.literal("kept"), recordId: z.string(), path: z.string(), field: z.string(), planned: z.json(), current: z.json() }).strict(),
   z.object({ kind: z.literal("skipped"), recordId: z.string(), path: z.string(), reason: z.string() }).strict(),
+  // An edit that landed, with the record version it was sent at and the one it left.
   z.object({
     kind: z.literal("dataset-edit"),
     rules: automationDatasetRulesSchema,
     operationId: z.string(),
     tableId: z.string(),
     recordId: automationDatasetRecordIdSchema,
+    expectedVersion: z.number().int().positive(),
     version: z.number().int().positive(),
     fields: z.array(z.object({ fieldId: z.string(), field: z.string(), before: z.json(), after: z.json() }).strict()),
   }).strict(),
+  // A record the run added. `deletes` are the approved deletes Undo may use on it, as the run recorded them.
   z.object({
     kind: z.literal("dataset-created"),
     rules: automationDatasetRulesSchema,
@@ -910,6 +913,7 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
     tableId: z.string(),
     recordId: automationDatasetRecordIdSchema,
     version: z.number().int().positive(),
+    deletes: z.array(z.string()),
   }).strict(),
   // An action that ran, by its label then, and the dataset revision its commit made. When the
   // rules named a reverse action, `reverseOperationId` is it and `undo` is its input; Undo runs that or nothing.

@@ -22,8 +22,14 @@ export interface CollectionAutomationUndone {
   reverted: number;
   /** Records the run added, moved to the trash. */
   removed: number;
-  /** Records the run added to a dataset. They stay: the dataset's rules decide what can be deleted. */
+  /** Records the run added to a dataset, deleted through an approved delete. The dataset keeps no trash. */
+  deleted: number;
+  /** Records the run added to a dataset that stay, because no approved delete every editor can use qualifies. */
   kept: number;
+  /** Records the run added to a dataset that stay, because someone else changed them. */
+  keptChanged: number;
+  /** Records the run added to a dataset that were already gone. */
+  gone: number;
   /** Fields someone changed after the run, left as they are. */
   changedSince: number;
   /** Fields on records that are no longer in their Collection. */
@@ -153,7 +159,9 @@ export async function undoCollectionAutomationRuns(
     rebaseRun(moved, (collectionId) => dependencies.collectionPathOf(collectionId));
     return moved;
   }));
-  const undone: CollectionAutomationUndone = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0 };
+  const undone: CollectionAutomationUndone = {
+    reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0,
+  };
   for (const record of records.values()) {
     // A record the run added goes to the trash whole.
     if (added.has(record.recordId)) continue;

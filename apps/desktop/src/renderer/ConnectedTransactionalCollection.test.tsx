@@ -337,7 +337,7 @@ describe("a dataset table's ⚡ panel", () => {
     const donors = { tableId: id(9), name: "Donors", fields: dataset.tables[0]!.fields };
     backend.dataset.mockResolvedValue({ kind: "description", dataset: { ...dataset, tables: [...dataset.tables, donors] } });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [onTable("welcome", "Registrations"), onTable("thank", "Donors")] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [onTable("welcome", "Registrations"), onTable("thank", "Donors")] });
     renderPage();
     const button = await screen.findByTestId("collection-automations-button");
     await waitFor(() => expect(button.textContent).toBe("Automations1"));
@@ -368,7 +368,7 @@ describe("a dataset table's ⚡ panel", () => {
     const withButton: DatasetDescription = { ...dataset, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(6), name: "Confirm", type: "button" }] }] };
     backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
     renderPage();
@@ -389,7 +389,7 @@ describe("a dataset table's ⚡ panel", () => {
       throw new Error(`Unexpected ${input.action}`);
     });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [] });
     const onError = vi.fn();
@@ -415,7 +415,7 @@ describe("a dataset table's ⚡ panel", () => {
     const withButton: DatasetDescription = { ...before, tables: [{ ...before.tables[0]!, fields: [...before.tables[0]!.fields, { fieldId: id(8), name: "Confirm", type: "button" }] }] };
     backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
     renderPage();
@@ -435,7 +435,7 @@ describe("a dataset table's ⚡ panel", () => {
       tables: [{ ...before.tables[0]!, fields: [...before.tables[0]!.fields, { fieldId: id(8), name: "Confirm", type: "button" }] }] };
     backend.dataset.mockResolvedValue({ kind: "description", dataset: twice });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
     renderPage();
@@ -457,7 +457,7 @@ describe("a dataset table's ⚡ panel", () => {
       throw new Error(`Unexpected ${input.action}`);
     });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [] });
     const onError = vi.fn();

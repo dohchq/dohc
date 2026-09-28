@@ -6,6 +6,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 
@@ -13,10 +14,13 @@ import { useRequestSequence } from "../useRequestSequence";
 // so run history is too), a page at a time. A failed run offers Try again
 // unless it failed before it started, and a run that changed records offers
 // Undo. The run a notice opens shows first, marked, when no page shown holds it.
+// Undo of a run that added dataset records first says what it will delete and
+// keep, and asks which delete to use where several qualify.
 
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
 type RunWrite = Run["writes"][number];
 type Undone = Extract<UndoCollectionAutomationRunResult, { status: "undone" }>;
+type Preview = Extract<UndoCollectionAutomationRunResult, { status: "confirm" }>["preview"];
 
 function count(value: number, one: string, many: string): string {
   return `${value} ${value === 1 ? one : many}`;
@@ -33,8 +37,13 @@ export function undoSentence(undone: Undone): string {
   if (undone.reverted > 0) parts.push(`Undid ${count(undone.reverted, "change", "changes")}.`);
   if (undone.removed > 0) parts.push(`Moved ${count(undone.removed, "added record", "added records")} to the trash.`);
   if (undone.actionsReversed > 0) parts.push(`Undid ${count(undone.actionsReversed, "action", "actions")}.`);
+  if (undone.deleted > 0) parts.push(`Deleted ${count(undone.deleted, "added record", "added records")}.`);
   if (parts.length === 0) parts.push("Nothing was left to undo.");
   if (undone.kept > 0) parts.push(`${count(undone.kept, "added record stays", "added records stay")}.`);
+  if (undone.keptChanged > 0) {
+    parts.push(`${count(undone.keptChanged, "added record stays", "added records stay")} because someone changed ${undone.keptChanged === 1 ? "it" : "them"}.`);
+  }
+  if (undone.gone > 0) parts.push(`${count(undone.gone, "added record was", "added records were")} already gone.`);
   if (undone.changedSince > 0) parts.push(`${count(undone.changedSince, "field", "fields")} changed since then.`);
   if (undone.missing > 0) {
     parts.push(`${count(undone.missing, "field is", "fields are")} on records no longer in the Collection.`);
@@ -44,6 +53,30 @@ export function undoSentence(undone: Undone): string {
   }
   if (undone.actions > 0) parts.push(`${count(undone.actions, "action", "actions")} can't be undone.`);
   return parts.join(" ");
+}
+
+/** What Undo will do, before the person confirms it. */
+export function undoPreviewSentences(preview: Preview): string[] {
+  const lines: string[] = [];
+  const tried = preview.deletes + preview.unchecked;
+  if (preview.reverses > 0) lines.push(`Undo will reverse ${count(preview.reverses, "action", "actions")}.`);
+  if (preview.deletes > 0) lines.push(`Undo will delete ${count(preview.deletes, "added record", "added records")}.`);
+  if (preview.unchecked > 0) {
+    lines.push(`Undo will try to delete ${count(preview.unchecked, "added record", "added records")} that dohc could not check. Any that someone changed will stay.`);
+  }
+  if (preview.reverts > 0) lines.push(`Undo will put back ${count(preview.reverts, "change", "changes")}.`);
+  if (tried + preview.reverts > 0) lines.push("A record or field someone else changed stays as they left it.");
+  if (preview.kept > 0) {
+    lines.push(`${count(preview.kept, "added record", "added records")} will stay. This Collection has no delete action available to the automation.`);
+  }
+  if (preview.keptChanged > 0) {
+    lines.push(`${count(preview.keptChanged, "added record", "added records")} will stay because someone changed ${preview.keptChanged === 1 ? "it" : "them"}.`);
+  }
+  if (preview.gone > 0) lines.push(`${count(preview.gone, "added record is", "added records are")} already gone.`);
+  if (preview.irreversible > 0) lines.push(`The Collection's rules do not let dohc undo ${count(preview.irreversible, "change", "changes")}.`);
+  if (preview.actions > 0) lines.push(`${count(preview.actions, "action", "actions")} can't be undone.`);
+  if (tried > 0) lines.push(`You cannot undo ${tried === 1 ? "this deletion" : "these deletions"} in dohc.`);
+  return lines;
 }
 
 function recordName(path: string): string {
@@ -149,7 +182,8 @@ function RunRow(props: {
   const canRetry = run.state === "failed" && !run.neverStarted && !run.undone;
   const canUndo = (run.state === "done" || run.state === "failed") && !run.undone &&
     run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit" ||
-      (write.kind === "dataset-action" && write.undo !== undefined));
+      (write.kind === "dataset-action" && write.undo !== undefined) ||
+      (write.kind === "dataset-created" && write.deletes.length > 0));
   return (
     <li
       ref={row}
@@ -230,6 +264,8 @@ export function AutomationRuns(props: {
   // A caller may pass a new function each render; a read must not start again for that.
   const reportError = useRef(onError);
   reportError.current = onError;
+  // An Undo waiting for the person to read what it will do, and their choice of delete per table.
+  const [previewing, setPreviewing] = useState<{ claimId: string; epoch: number; preview: Preview; chosen: Record<string, string> } | null>(null);
   const request = useRequestSequence([workspaceId, automationId, opened]);
   // Rises only when the workspace or automation changes, or the view
   // closes, so an Undo that answers after that reports nothing here.
@@ -300,23 +336,25 @@ export function AutomationRuns(props: {
       });
   };
 
-  const undo = (claimId: string) => {
+  const undo = (claimId: string, deletes: { token: string; chosen: Array<{ key: string; operationId: string }> } | null) => {
     touched.current.add(claimId);
     const epoch = scope.current();
     setUndoing(claimId);
     void bridge()
-      .undoCollectionAutomationRun({ workspaceId, automationId, claimId })
+      .undoCollectionAutomationRun({ workspaceId, automationId, claimId, deletes })
       .then((result) => {
         if (!scope.isCurrent(epoch)) return;
         if (result.status === "refused") {
           onError(result.reason, new Error(result.reason));
+        } else if (result.status === "confirm") {
+          setPreviewing({ claimId, epoch, preview: result.preview, chosen: {} });
         } else {
           onNotice(undoSentence(result));
           props.onUndone?.();
         }
       })
       .catch((error: unknown) => {
-        if (scope.isCurrent(epoch)) onError("dohc could not undo this run.", error, () => undo(claimId));
+        if (scope.isCurrent(epoch)) onError("dohc could not undo this run.", error, () => undo(claimId, deletes));
       })
       .finally(() => {
         if (!scope.isCurrent(epoch)) return;
@@ -324,6 +362,50 @@ export function AutomationRuns(props: {
         void load();
       });
   };
+
+  const shownPreview = previewing !== null && scope.isCurrent(previewing.epoch) ? previewing : null;
+  const dialog = shownPreview === null ? null : (
+    <ConfirmDialog
+      title="Undo this run?"
+      confirmLabel={shownPreview.preview.deletes + shownPreview.preview.unchecked > 0
+        ? `Undo and delete ${count(shownPreview.preview.deletes + shownPreview.preview.unchecked, "record", "records")}`
+        : "Undo"}
+      testId="automation-undo-preview"
+      cancelTestId="automation-undo-preview-cancel"
+      confirmTestId="automation-undo-preview-confirm"
+      confirmDisabled={shownPreview.preview.choices.some((choice) => shownPreview.chosen[choice.key] === undefined)}
+      onCancel={() => setPreviewing(null)}
+      onConfirm={() => {
+        setPreviewing(null);
+        undo(shownPreview.claimId, {
+          token: shownPreview.preview.token,
+          chosen: Object.entries(shownPreview.chosen).map(([key, operationId]) => ({ key, operationId })),
+        });
+      }}
+    >
+      {undoPreviewSentences(shownPreview.preview).map((line) => (
+        <p key={line} className="m-0 mt-2 text-[13px] text-muted">{line}</p>
+      ))}
+      {shownPreview.preview.choices.map((choice, index) => (
+        <fieldset key={choice.key} className="m-0 mt-3 flex flex-col gap-1 border-0 p-0">
+          <legend className="mb-1 p-0 text-[12px] text-muted">
+            Delete {count(choice.records, "added record", "added records")} in {choice.table} with
+          </legend>
+          {choice.operations.map((operation) => (
+            <label key={operation.operationId} className="flex items-center gap-2 text-[13px] text-ink">
+              <input
+                type="radio"
+                name={`automation-undo-delete-${index}`}
+                checked={shownPreview.chosen[choice.key] === operation.operationId}
+                onChange={() => setPreviewing({ ...shownPreview, chosen: { ...shownPreview.chosen, [choice.key]: operation.operationId } })}
+              />
+              {operation.label}
+            </label>
+          ))}
+        </fieldset>
+      ))}
+    </ConfirmDialog>
+  );
 
   if (list === null) return null;
   if (list === "unavailable") {
@@ -347,7 +429,7 @@ export function AutomationRuns(props: {
               touched.current.add(run.claimId);
               props.onRetry({ automationId, claimId: run.claimId });
             }}
-            onUndo={() => undo(run.claimId)}
+            onUndo={() => undo(run.claimId, null)}
           />
         ))}
       </ul>
@@ -359,6 +441,7 @@ export function AutomationRuns(props: {
           </SecondaryButton>
         </div>
       ) : null}
+      {dialog}
     </>
   );
 }

@@ -123,8 +123,10 @@ export function registerCollectionAutomationsIpc<
       await operation.state.collectionAutomations.retry(input, (claimId) => dependencies.watchPress(input.workspaceId, claimId, event.sender)));
   });
 
-  // Undo for a finished run, as the person who clicked it. Records the run
-  // added go through the same delete as the Explorer's.
+  // Undo for a finished run, as the person who clicked it. Records a run
+  // added to a document Collection go through the same delete as the
+  // Explorer's; records added to a dataset, through an approved delete once
+  // the person confirms the preview.
   registerHandler(CHANNELS.undoCollectionAutomationRun, async (event, payload) => {
     assertTrustedSender(event);
     const input = UndoCollectionAutomationRunPayload.parse(payload);

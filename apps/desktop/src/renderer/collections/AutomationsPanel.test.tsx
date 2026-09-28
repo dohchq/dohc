@@ -57,8 +57,10 @@ function summary(automation: Automation, overrides: Partial<ValidAutomationSumma
   };
 }
 
+const NOTHING_UNDONE = { status: "undone" as const, reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0 };
+
 function read(automations: ValidAutomationSummary[]): ListCollectionAutomationsResult {
-  return { status: "read", contentHash: HASH, automations };
+  return { status: "read", contentHash: HASH, automations, addsStay: [] };
 }
 
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
@@ -105,7 +107,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     revealAutomationHolds: vi.fn(async () => undefined),
     retryCollectionAutomation: vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false })),
     undoCollectionAutomationRun: vi.fn(async (): Promise<UndoCollectionAutomationRunResult> =>
-      ({ status: "undone", reverted: 1, removed: 0, changedSince: 1, missing: 0, kept: 0, irreversible: 0, actions: 0, actionsReversed: 0 })),
+      ({ ...NOTHING_UNDONE, reverted: 1, changedSince: 1 })),
     confirmCollectionAutomationStep: vi.fn(async () => ({ status: "confirmed" as const })),
     listAutomationTargets: vi.fn(async (): Promise<ListAutomationTargetsResult> => ({ collections: [
       { path: "Tasks", name: "Tasks", stopped: null },
@@ -298,7 +300,7 @@ describe("the ⚡ panel", () => {
 
     rerender(<Panel workspaceId="ws-2" onError={onError} onNotice={onNotice} />);
     answerWrite({ status: "reformats" });
-    answerUndo({ status: "undone", reverted: 1, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0, actions: 0, actionsReversed: 0 });
+    answerUndo({ ...NOTHING_UNDONE, reverted: 1 });
     await waitFor(() => expect(bridge.listCollectionAutomations).toHaveBeenCalledWith({ workspaceId: "ws-2", collectionPath: "Tasks" }));
     expect(screen.queryByTestId("automations-reformat")).toBeNull();
     expect(onNotice).not.toHaveBeenCalled();
@@ -307,7 +309,7 @@ describe("the ⚡ panel", () => {
 
   it("turns editing off and offers the file when an automation cannot be read", async () => {
     const { bridge } = makeBridge({
-      status: "read", contentHash: HASH,
+      status: "read", contentHash: HASH, addsStay: [],
       automations: [summary(stamp), { valid: false, id: "Broken", name: "Broken", diagnostics: [{ code: "invalid-id", path: "/automations/1/id" }] }],
     });
     const onOpenFile = vi.fn();
@@ -544,6 +546,21 @@ describe("a dataset table's ⚡ panel", () => {
     expect(screen.queryByRole("button", { name: "Run an action" })).toBeNull();
   });
 
+  it("says beside an Add record step when Undo would keep the records it adds", async () => {
+    const addsLog: Automation = { ...onInvoices, do: [{ kind: "add-record", values: [{ field: "Title", value: { kind: "literal", value: "Log" } }], collection: null, as: null, operation: "invoices.create" }] };
+    const hint = "Undo keeps the records this step adds. This Collection has no delete action available to the automation.";
+    makeBridge({ status: "read", contentHash: HASH, automations: [summary(addsLog)], addsStay: ["Invoices"] });
+    const user = userEvent.setup();
+    const { unmount } = render(<Panel table={INVOICES} />);
+    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    expect(screen.getByTestId("builder-step-0").textContent).toContain(hint);
+    unmount();
+    makeBridge(read([summary(addsLog)]));
+    render(<Panel table={INVOICES} />);
+    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    expect(screen.getByTestId("builder-step-0").textContent).not.toContain(hint);
+  });
+
   it("leaves an Add record that adds to another table as the file wrote it", async () => {
     const addsRefund: Automation = { ...onInvoices, do: [{ kind: "add-record", values: [{ field: "Title", value: { kind: "literal", value: "Refund" } }], collection: null, as: null, operation: "refunds.create" }] };
     makeBridge(read([summary(addsRefund)]));
@@ -567,7 +584,7 @@ describe("a dataset table's ⚡ panel", () => {
 
   it("tells the page after an Undo, so it reads the records the run changed again", async () => {
     const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
-    makeBridge(read([summary(onInvoices)]), [run({ writes: [{ kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", version: 2,
+    makeBridge(read([summary(onInvoices)]), [run({ writes: [{ kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", expectedVersion: 1, version: 2,
       fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] }] })]);
     const onRunUndone = vi.fn();
     render(<Panel table={INVOICES} onRunUndone={onRunUndone} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
@@ -857,9 +874,9 @@ describe("an automation's runs", () => {
   it("shows dataset changes in run history", async () => {
     const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
     makeBridge(read([summary(stamp)]), [run({ writes: [
-      { kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", version: 2,
+      { kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", expectedVersion: 1, version: 2,
         fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] },
-      { kind: "dataset-created", rules, operationId: "create", tableId: "table-1", recordId: "invoice-2", version: 1 },
+      { kind: "dataset-created", rules, operationId: "create", tableId: "table-1", recordId: "invoice-2", version: 1, deletes: [] },
       { kind: "dataset-kept", recordId: "invoice-3", fieldId: "status", field: "Status", planned: "Closed", current: "Pending" },
       { kind: "dataset-skipped", recordId: "invoice-4", reason: "The record was removed" },
     ] })]);
@@ -876,16 +893,14 @@ describe("an automation's runs", () => {
   it("offers Undo for a dataset run's edits and says which added records stay", async () => {
     const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
     const { bridge } = makeBridge(read([summary(stamp)]), [
-      run({ writes: [{ kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", version: 2,
+      run({ writes: [{ kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", expectedVersion: 1, version: 2,
         fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] }] }),
-      run({ claimId: "atc_added", writes: [{ kind: "dataset-created", rules, operationId: "create", tableId: "table-1", recordId: "invoice-2", version: 1 }] }),
+      run({ claimId: "atc_added", writes: [{ kind: "dataset-created", rules, operationId: "create", tableId: "table-1", recordId: "invoice-2", version: 1, deletes: [] }] }),
     ]);
-    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({
-      status: "undone", reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 1, actions: 0, actionsReversed: 0,
-    });
+    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({ ...NOTHING_UNDONE, reverted: 1, kept: 1, irreversible: 1 });
     const onNotice = vi.fn();
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} onNotice={onNotice} />);
-    // A run that only added records has nothing Undo can put back.
+    // A run that only added records no delete reaches has nothing Undo can put back.
     expect(within(await screen.findByTestId("automation-run-atc_added")).queryByRole("button", { name: "Undo" })).toBeNull();
     await userEvent.click(within(screen.getByTestId("automation-run-atc_1")).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith(
@@ -898,13 +913,11 @@ describe("an automation's runs", () => {
     const { bridge } = makeBridge(read([summary(stamp)]), [
       run({ writes: [
         { kind: "dataset-action", rules, operationId: "settle", tableId: "table-1", name: "Settle", revision: 4 },
-        { kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", version: 2, fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] },
+        { kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", expectedVersion: 1, version: 2, fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] },
       ] }),
       run({ claimId: "atc_action", writes: [{ kind: "dataset-action", rules, operationId: "settle", tableId: "table-1", name: "Settle", revision: 5 }] }),
     ]);
-    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({
-      status: "undone", reverted: 1, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 1, actionsReversed: 0,
-    });
+    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({ ...NOTHING_UNDONE, reverted: 1, actions: 1 });
     const onNotice = vi.fn();
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} onNotice={onNotice} />);
     const row = await screen.findByTestId("automation-run-atc_1");
@@ -922,9 +935,7 @@ describe("an automation's runs", () => {
     const { bridge } = makeBridge(read([summary(stamp)]), [
       run({ writes: [{ kind: "dataset-action", rules, operationId: "hold", tableId: "table-1", name: "Hold", revision: 4, undo: { id: "invoice-1", status: "Open" } }] }),
     ]);
-    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({
-      status: "undone", reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 1,
-    });
+    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({ ...NOTHING_UNDONE, actionsReversed: 1 });
     const onNotice = vi.fn();
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} onNotice={onNotice} />);
     const row = await screen.findByTestId("automation-run-atc_1");
@@ -956,9 +967,47 @@ describe("an automation's runs", () => {
 
     await userEvent.click(within(row).getByRole("button", { name: "Undo" }));
     expect(bridge.undoCollectionAutomationRun).toHaveBeenCalledWith({
-      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_failed",
+      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_failed", deletes: null,
     });
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid 1 change. 1 field changed since then."));
+  });
+
+  it("says what Undo deletes and keeps before it runs, asks which delete to use, and sends that choice", async () => {
+    const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
+    const added = (recordId: string) => ({ kind: "dataset-created" as const, rules, operationId: "create", tableId: "table-1", recordId, version: 1, deletes: ["delete", "archive"] });
+    const { bridge } = makeBridge(read([summary(stamp)]), [run({ writes: [added("invoice-2"), added("invoice-3")] })]);
+    bridge.undoCollectionAutomationRun
+      .mockResolvedValueOnce({ status: "confirm", preview: {
+        deletes: 2, unchecked: 1, kept: 1, keptChanged: 1, gone: 1, reverts: 0, irreversible: 0, reverses: 1, actions: 0, token: "preview-1",
+        choices: [{ key: "invoices-deletes", table: "Invoices", records: 2, operations: [{ operationId: "delete", label: "Delete" }, { operationId: "archive", label: "Archive" }] }],
+      } })
+      .mockResolvedValueOnce({ ...NOTHING_UNDONE, deleted: 1, keptChanged: 1, gone: 1 });
+    const onNotice = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} onNotice={onNotice} />);
+    await user.click(within(await screen.findByTestId("automation-run-atc_1")).getByRole("button", { name: "Undo" }));
+    const dialog = await screen.findByRole("dialog", { name: "Undo this run?" });
+    expect([...dialog.querySelectorAll("p")].map((line) => line.textContent)).toEqual([
+      "Undo will reverse 1 action.",
+      "Undo will delete 2 added records.",
+      "Undo will try to delete 1 added record that dohc could not check. Any that someone changed will stay.",
+      "A record or field someone else changed stays as they left it.",
+      "1 added record will stay. This Collection has no delete action available to the automation.",
+      "1 added record will stay because someone changed it.",
+      "1 added record is already gone.",
+      "You cannot undo these deletions in dohc.",
+    ]);
+    const confirm = within(dialog).getByRole("button", { name: "Undo and delete 3 records" });
+    expect(confirm.matches(":disabled")).toBe(true);
+    await user.click(within(dialog).getByRole("radio", { name: "Archive" }));
+    await user.click(confirm);
+    expect(bridge.undoCollectionAutomationRun).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_1", deletes: { token: "preview-1", chosen: [{ key: "invoices-deletes", operationId: "archive" }] },
+    });
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith(
+      "Deleted 1 added record. 1 added record stays because someone changed it. 1 added record was already gone.",
+    ));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
 
@@ -1228,7 +1277,7 @@ describe("the builder", () => {
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(false));
 
     replaceFile({
-      status: "read", contentHash: HASH,
+      status: "read", contentHash: HASH, addsStay: [],
       automations: [summary(stamp), { valid: false, id: "Broken", name: "Broken", diagnostics: [{ code: "invalid-id", path: "/automations/1/id" }] }],
     });
     expect(await screen.findByText("dohc cannot read every automation in automations.yaml, so you cannot save this now.")).toBeTruthy();
