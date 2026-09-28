@@ -1,10 +1,14 @@
+import { resolveDatasetAddress } from "./datasetAddress";
+import { isPortableNamePath } from "@dohc/workspace-contracts/names";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_METADATA_BYTES, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { isShareablePath, isShareablePathList, isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import { parseDatasetBindingReference, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { parseAppDatasetReference, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { posix } from "node:path";
+import { fileVersionError } from "@dohc/workspace-contracts/file-version";
+import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { DaemonRefusalError, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";
 
@@ -14,12 +18,12 @@ const manifestLimit = 64 * 1024;
 // Without app.publish.json a folder publishes as a static page: index.html and the styles, scripts,
 // images, and fonts beside it. The compiler names a referenced file this leaves out and says why.
 // These are the types the compiler accepts. Build configuration and installed packages stay out.
-const staticAppFile = /^[A-Za-z0-9_@./-]+\.(?:css|js|jsx|ts|tsx|json|png|jpe?g|gif|webp|avif|woff2)$/i;
+const staticAppFile = /\.(?:css|js|jsx|ts|tsx|json|png|jpe?g|gif|webp|avif|woff2)$/i;
 const staticAppExcluded = (path: string) => /(?:^|\/)(?:package\.json|dohc\.json|tsconfig(?:\.[^/]*)?\.json)$/.test(path) ||
   path.split("/").some(part => part === "node_modules" || part.startsWith("."));
 export interface OwnerPublicationSelection { workspaceId: string; appRoot: string; shareId: string; grantId: string }
 export interface OwnerPublicationGrant { shareId: string; grantId: string; generation: number; status: "active" | "revoked"; revokedAtMs: number | null; selector: { paths: string[]; versionId: string | null } | null }
-type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata">;
+type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "workspace">;
 export interface AppPublicationPreparationDependencies {
   adapter: SourceAdapter;
   signal: AbortSignal;
@@ -30,22 +34,31 @@ export interface AppPublicationPreparationDependencies {
 }
 /**
  * Reads app.publish.json. Its paths are relative to the app folder, so the folder can move;
- * "../" reaches files beside it. Each refusal names the manifest, the path, and the reason.
+ * "../" reaches files beside it. Dataset references use workspace-relative dataset.json paths.
  */
 export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: string) {
   const manifestPath = `${appRoot}/app.publish.json`;
   if (bytes.byteLength > manifestLimit) throw new Error(`${manifestPath} is larger than 64 KB.`);
   const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  if (!value || typeof value !== "object" || Array.isArray(value) || !["entryPath,inputs,packageMap", "collection,entryPath,inputs,packageMap", "dataset,entryPath,inputs,packageMap"].includes(Object.keys(value).sort().join())) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${manifestPath} must hold entryPath, inputs, and packageMap, and at most one of collection or dataset.`);
   }
   const row = value as Record<string, unknown>;
+  const versionError = fileVersionError(row.version, manifestPath);
+  if (versionError) throw new Error(versionError);
+  const unknownKey = Object.keys(row).find(key => !["version", "entryPath", "inputs", "packageMap", "collection", "dataset"].includes(key));
+  if (unknownKey !== undefined) {
+    throw new Error(`${manifestPath} has an unknown key: ${unknownKey}. Remove it or correct its name.`);
+  }
+  if (Object.hasOwn(row, "collection") && Object.hasOwn(row, "dataset")) {
+    throw new Error(`${manifestPath} must hold at most one of collection or dataset.`);
+  }
   const resolve = (path: unknown, field: string): string => {
     if (typeof path !== "string" || path === "") throw new Error(`${manifestPath} names no file in ${field}.`);
     if (path.startsWith("/")) throw new Error(`${manifestPath} lists ${path}. Write the path relative to ${appRoot}, without a leading /.`);
     const resolved = posix.normalize(`${appRoot}/${path}`);
     if (resolved === ".." || resolved.startsWith("../")) throw new Error(`${manifestPath} lists ${path}, which is outside the workspace.`);
-    if (!isShareablePath(resolved)) throw new Error(`${manifestPath} lists ${path}, which dohc cannot publish.`);
+    if (!isShareablePath(resolved) || !isPortableNamePath(resolved)) throw new Error(`${manifestPath} lists ${path}, which dohc cannot publish.`);
     return resolved;
   };
   const entryPath = resolve(row.entryPath, "entryPath");
@@ -68,7 +81,7 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
     const declared = row.collection as Record<string, unknown>;
     collection = parseAppCollectionCapability({ ...declared, collectionPath: resolve(declared.collectionPath, "collectionPath"), schemaSha256: "0".repeat(64) });
   }
-  const dataset = Object.hasOwn(row, "dataset") ? parseDatasetBindingReference(row.dataset) : undefined;
+  const dataset = Object.hasOwn(row, "dataset") ? parseAppDatasetReference(row.dataset) : undefined;
   return { entryPath, inputs, packageMap: Object.fromEntries(entries) as Record<string, string>, collection, dataset };
 }
 
@@ -76,7 +89,7 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
 function staticDeclaration(appRoot: string, paths: readonly string[]): ReturnType<typeof parseAppPublicationDeclaration> {
   const entryPath = `${appRoot}/index.html`;
   if (!paths.includes(entryPath)) throw new Error(`dohc found no index.html or app.publish.json in ${appRoot}. Add one to publish this app.`);
-  const inputs = [entryPath, ...paths.filter(path => staticAppFile.test(path) && !staticAppExcluded(path))];
+  const inputs = [entryPath, ...paths.filter(path => isPortableNamePath(path) && staticAppFile.test(path) && !staticAppExcluded(path))];
   if (inputs.length >= inputBounds.maxInputFiles) throw new Error(`${appRoot} has more than ${inputBounds.maxInputFiles - 1} files to publish. List the files to publish in an app.publish.json.`);
   return { entryPath, inputs, packageMap: {}, collection: undefined, dataset: undefined };
 }
@@ -145,15 +158,21 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
   const capabilities: AppPublicationCandidate["capabilities"] = [];
   if (declared.dataset) {
     if (!dependencies.resolveDatasetRevision) throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
-    const approved = await dependencies.resolveDatasetRevision(declared.dataset);
+    const { datasetPath, ...reference } = declared.dataset;
+    const datasetId = await resolveDatasetAddress(adapter, input.workspaceId, datasetPath, signal, versionId);
     assertCurrent(); signal.throwIfAborted();
-    const { linkReads: _requestedReads, ...binding } = declared.dataset;
+    const resolved = { ...reference, datasetId };
+    const approved = await dependencies.resolveDatasetRevision(resolved);
+    assertCurrent(); signal.throwIfAborted();
+    const { linkReads: _requestedReads, ...binding } = resolved;
     capabilities.push(resolveAppDatasetCapability(binding, approved));
   }
   if (declared.collection && schemaPath) {
     const file = selected.files.find(file => file.path === schemaPath);
     if (!file || file.bytes.byteLength > 65_536) throw new Error("The collection schema is unavailable or too large.");
     const parsed = parseCollectionSchema(new TextDecoder("utf-8", { fatal: true }).decode(file.bytes));
+    const versionError = collectionVersionError(parsed.reasons, schemaPath);
+    if (versionError) throw new Error(versionError);
     if (parsed.status !== "valid" || [...declared.collection.allowedFields, ...declared.collection.readFields].some(name => !parsed.schema.fields.some(field => field.name === name))) throw new Error("Collection fields do not match its schema.");
     capabilities.push(parseAppCollectionCapability({ ...declared.collection, schemaSha256: file.sha256 }));
   }

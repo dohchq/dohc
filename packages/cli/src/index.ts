@@ -237,6 +237,21 @@ function buildCliRequest(
           startOver: command.startOver,
         },
       };
+    case "automationPress":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          collectionPath: command.collectionPath,
+          field: command.field,
+          record: command.record,
+          ...(command.table ? { table: command.table } : {}),
+          confirm: command.confirm,
+          ...(command.requestId ? { requestId: command.requestId } : {}),
+        },
+      };
   }
 }
 
@@ -249,7 +264,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["moment", "documentRead", "documentEdit", "documentCreate", "automationRuns", "automationRun", "automationRetry"]);
+const REFUSING_VERBS = new Set(["moment", "documentRead", "documentEdit", "documentCreate", "automationRuns", "automationRun", "automationRetry", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -292,7 +307,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
           momentSide: command.verb === "moment" ? command.side : "after",
         });
     return {
-      exitCode: 0,
+      exitCode: "kind" in result && result.kind === "partial" ? 1 : 0,
       // Markdown prints byte for byte so redirection preserves it.
       stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
         ? output

@@ -53,10 +53,14 @@ export const DATASET_AUTOMATION_HISTORY = 100;
 export const DATASET_AUTOMATION_PRESS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 /** History names the automation behind each of a dataset's newest revisions, this many back. */
 export const DATASET_AUTOMATION_ATTRIBUTED_REVISIONS = 10_000;
+// A chain stop's reason matches the engine's, so either ledger's reads the same.
 export const DATASET_AUTOMATION_CHAIN_STOPPED = "chain-stopped";
-export const DATASET_AUTOMATION_CLAIM_LIMIT = "claim-limit";
-export const DATASET_AUTOMATION_RECORD_ID_TOO_LONG = "record-id-too-long";
+// The claims a change could not make say why, as run history and failure notices show it.
+export const DATASET_AUTOMATION_CLAIM_LIMIT = "This change was too large for dohc to start automations for every record. Change fewer records at a time.";
+export const DATASET_AUTOMATION_RECORD_ID_TOO_LONG = "This record's ID is too long for dohc to start an automation for it. Use a shorter ID.";
 export const DATASET_AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
+/** Why Try again refuses a claim that failed before it started, in either ledger. */
+export const AUTOMATION_NEVER_STARTED_REFUSAL = "This automation run stopped before it started, so it cannot run again.";
 // A served claim, as JSON, fits one response, as the engine's claims do. A
 // value travels whole up to the engine's bound. A record id is JSON, so a
 // claim names its record whole or not at all.
@@ -73,14 +77,19 @@ export type DatasetChangeKind = DatasetChangeFact["kind"];
  * who pressed.
  */
 export type DatasetActor =
-  | { kind: "owner"; userId?: string; appId?: string }
-  | { kind: "named"; userId: string; appId?: string }
+  | { kind: "owner"; userId?: string; appId?: string; agent?: PressingAgent }
+  | { kind: "named"; userId: string; appId?: string; agent?: PressingAgent }
   | { kind: "link"; appId?: string }
   | { kind: "automation"; automationId: string; depth: number }
-  // The owner's agent, in a run an automation started, at the run's chain depth.
-  | { kind: "agent"; depth: number };
-/** The person who pressed a button: the owner or a named person, by account. */
-export type DatasetPresser = { kind: "owner" | "named"; userId: string };
+  // The owner's agent, at its run's chain depth, and the app it wrote through, if any.
+  | { kind: "agent"; depth: number; appId?: string };
+/**
+ * An agent that pressed a button for its person, from a run at `depth`. The
+ * press claims at that depth, and stops at once at the chain cap.
+ */
+export interface PressingAgent { depth: number }
+/** The person who pressed a button: the owner or a named person, by account, and the agent that pressed for them, if one did. */
+export type DatasetPresser = { kind: "owner" | "named"; userId: string; agent?: PressingAgent };
 export interface DatasetAutomationSubscription {
   automationId: string;
   tableId: string;
@@ -160,6 +169,8 @@ export interface DatasetAutomationFailure {
   datasetInstance: string;
   /** It failed before it started, as a chain stop or a change too large to claim, so Try again cannot run it. */
   neverStarted: boolean;
+  /** The chain depth cap stopped it before it started. */
+  chainStopped: boolean;
   error: string;
   updatedAtMs: number;
   /** How many times the automation's claims have failed. It only grows. */
@@ -295,8 +306,12 @@ export function createDatasetAutomationClaims(options: {
   /** Charge or refund (negative) the dataset's retained bytes, in the ledger's transaction. */
   account(scope: DatasetScope, bytes: number): void;
   nowMs?: () => number;
-  /** Called after a commit that made claims. A hint only: the executor also drains at open. */
-  wake?(scope: DatasetScope): void;
+  /**
+   * Called after a commit that made claims, with whether it made any failed,
+   * as a chain stop does. A hint only: the executor also drains and reports
+   * failures at open.
+   */
+  wake?(scope: DatasetScope, failed: boolean): void;
 }) {
   const { db } = options, now = options.nowMs ?? Date.now;
   const tx = <T>(run: () => T) => sync(() => options.transaction(() => sync(run)));
@@ -394,6 +409,7 @@ export function createDatasetAutomationClaims(options: {
         .all(cursor.workspaceId, cursor.datasetId).filter(row => row.automation_id !== self).map(row => ({ automationId: String(row.automation_id),
           tableId: String(row.table_id), kinds: JSON.parse(String(row.kinds)) as DatasetChangeKind[], fieldIds: row.field_ids === null ? null : JSON.parse(String(row.field_ids)) as string[] }));
       let delta = 0, made = 0;
+      const failed = new Set<string>();
       if (self !== undefined) {
         const row = [cursor.workspaceId, cursor.datasetId, cursor.revision, self, depth], storageBytes = bytes(row) + ROW_BYTES;
         db.prepare("INSERT INTO dohc_dataset_automation_revisions VALUES(?,?,?,?,?,?)").run(...row, storageBytes);
@@ -415,7 +431,7 @@ export function createDatasetAutomationClaims(options: {
           if (!(error instanceof DatasetChangeFactsError)) throw error;
           refusal = failure(error.message);
         }
-        const at = now(), stopped = depth >= DATASET_AUTOMATION_CHAIN_DEPTH, actorJson = JSON.stringify(actor), failed = new Set<string>();
+        const at = now(), stopped = depth >= DATASET_AUTOMATION_CHAIN_DEPTH, actorJson = JSON.stringify(actor);
         const statement = db.prepare("INSERT INTO dohc_dataset_automation_claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?,?,?)");
         const insert = (automationId: string, tableId: string, recordKey: string, error: string | null, change?: { fact: DatasetChangeFact; fieldIds: string[] | null }) => {
           const key = [cursor.workspaceId, cursor.datasetId, automationId, cursor.hostEpoch, cursor.revision, tableId, recordKey];
@@ -445,7 +461,7 @@ export function createDatasetAutomationClaims(options: {
       // The commit transaction is synchronous, so this runs after it commits,
       // or after a rollback, where the executor finds nothing new.
       if (made && options.wake) queueMicrotask(() => {
-        try { options.wake!(scope); } catch { /* A wake is a hint. */ }
+        try { options.wake!(scope, failed.size > 0); } catch { /* A wake is a hint. */ }
       });
       return made;
     },
@@ -499,7 +515,12 @@ export function createDatasetAutomationClaims(options: {
         recordId: input.recordId, fieldId: text(input.fieldId, "field", 256), definitionHash: input.definitionHash };
       if ((typeof fact.recordId !== "string" && !Number.isSafeInteger(fact.recordId)) || bytes(fact.recordId) > RECORD_ID_BYTES) throw new Error("Invalid automation record.");
       if (input.presser.kind !== "owner" && input.presser.kind !== "named") throw new Error("Invalid automation presser.");
-      const presser: DatasetPresser = { kind: input.presser.kind, userId: text(input.presser.userId, "presser") };
+      const agent = input.presser.agent;
+      if (agent !== undefined && (!Number.isSafeInteger(agent.depth) || agent.depth < 0)) throw new Error("Invalid automation presser.");
+      const presser: DatasetPresser = { kind: input.presser.kind, userId: text(input.presser.userId, "presser"),
+        ...(agent === undefined ? {} : { agent: { depth: Math.min(agent.depth, DATASET_AUTOMATION_CHAIN_DEPTH) } }) };
+      // A press claims at its agent's depth, as the agent's own commits do, and stops at once at the cap.
+      const depth = presser.agent?.depth ?? 0, stopped = depth >= DATASET_AUTOMATION_CHAIN_DEPTH;
       const samePresser = ({ actor }: DatasetAutomationClaim) =>
         (actor.kind === "owner" || actor.kind === "named") && actor.kind === presser.kind && actor.userId === presser.userId;
       const another = () => new Error("This press id already names another press.");
@@ -532,9 +553,11 @@ export function createDatasetAutomationClaims(options: {
           } else {
             const factJson = JSON.stringify(fact), actorJson = JSON.stringify(presser);
             const storageBytes = bytes([claimId, ...key, factJson, actorJson]) + ERROR_BYTES + ROW_BYTES;
-            db.prepare("INSERT INTO dohc_dataset_automation_claims VALUES(?,?,?,?,?,?,?,?,?,?,0,'pending',0,1,NULL,?,?,?)")
-              .run(claimId, ...key, factJson, actorJson, at, at, storageBytes);
+            db.prepare("INSERT INTO dohc_dataset_automation_claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?,?,?)")
+              .run(claimId, ...key, factJson, actorJson, depth, stopped ? "failed" : "pending", stopped ? DATASET_AUTOMATION_CHAIN_STOPPED : null, at, at, storageBytes);
             delta += storageBytes;
+            // A stop is a failure, counted and trimmed as a commit's stop is.
+            if (stopped) delta += countFailure(scope, cursor.hostEpoch, automationId) - trim(scope, automationId);
             pressed = claim(read(scope.workspaceId, claimId)!);
           }
         }
@@ -558,6 +581,7 @@ export function createDatasetAutomationClaims(options: {
         WHERE f.newest=1 ORDER BY f.automation_id`).all(workspaceId))
         .map(row => ({ automationId: String(row.automation_id), claimId: String(row.claim_id),
           datasetInstance: JSON.stringify([String(row.dataset_id), String(row.host_epoch)]), neverStarted: Number(row.attempts) === 0,
+          chainStopped: Number(row.attempts) === 0 && row.error === DATASET_AUTOMATION_CHAIN_STOPPED,
           error: String(row.error ?? ""), updatedAtMs: Number(row.updated_at_ms), generation: Number(row.generation) }));
     },
     /** Start the oldest pending claim in the workspace, or return null. */
@@ -601,7 +625,7 @@ export function createDatasetAutomationClaims(options: {
         if (!row) throw new Error("This automation run no longer exists.");
         const current = claim(row);
         if (current.state === "done") throw new Error("This automation run already finished.");
-        if (current.state === "failed" && current.attempts === 0) throw new Error("This automation run stopped before it started, so it cannot run again.");
+        if (current.state === "failed" && current.attempts === 0) throw new Error(AUTOMATION_NEVER_STARTED_REFUSAL);
         if (current.state !== "failed") return current;
         if (current.fact?.kind === "button" && activePress(current.workspaceId, current.fact, current.claimId) !== undefined) {
           throw new Error("This button is already running for this record.");

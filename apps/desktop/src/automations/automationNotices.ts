@@ -5,6 +5,7 @@ import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contract
 import { NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { cutText, NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
+  automationFailedElsewhereBody,
   automationFailedNotice,
   automationFailedNoticeId,
   type FailureComputer,
@@ -20,13 +21,9 @@ import type { NoticeStore } from "../notices/noticeStore";
 // Notices about automations that go to the people involved. A failed run
 // goes to this computer's person, who can try it again here, and to the
 // workspace's owner, the person who changed the automation last, and the
-// person whose Group message started it. Switching off an automation tells
-// the person who changed it last, unless they switched it off themselves.
-
-// The copy for everyone but this computer's person. It leaves out the
-// computer's name and the step's error, which can name what only this
-// person can see.
-export const FAILED_ELSEWHERE_BODY = "It ran on another person's computer, so only they can try it again.";
+// person whose Group message, button press or edit started it. Switching
+// off an automation tells the person who changed it last, unless they
+// switched it off themselves.
 
 /**
  * Sends a failure's notice, then takes back the one it replaces, then
@@ -54,7 +51,8 @@ export async function sendFailureNotices(
     await notices.withdraw(automationFailedNoticeId({ workspaceId, installId: computer.installId, failure: report.replaces }));
   }
   const { automation, path } = notice.target;
-  const copy = { ...notice, body: FAILED_ELSEWHERE_BODY, target: { automation, ...(path === undefined ? {} : { path }) } };
+  const body = automationFailedElsewhereBody(report.failure, report.name);
+  const copy = { ...notice, body, target: { automation, ...(path === undefined ? {} : { path }) } };
   const lastChangedBy = await dependencies.lastChangedBy(automation);
   // Your own id among these posts nothing more: your notice has the same id.
   const people = new Set([report.startedBy, lastChangedBy].filter((person): person is string => person !== null));

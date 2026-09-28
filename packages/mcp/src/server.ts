@@ -24,6 +24,7 @@ import {
   createWorkspaceDirectory,
   listAutomationRuns,
   listGroups,
+  pressButton,
   queryCollection,
   readAutomationRun,
   retryAutomationRun,
@@ -41,12 +42,14 @@ import {
   importData,
   listWorkspaceFiles,
   listChanges,
+  listKeptCopies,
   listWorkspaces,
   moveWorkspacePath,
   queryDatabase,
   readChange,
   readDocument,
   readWorkspaceFile,
+  saveKeptCopy,
   searchWorkspaceFiles,
   testApp,
   writeWorkspaceFile,
@@ -90,7 +93,7 @@ function text(structuredContent: Record<string, unknown>) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
     structuredContent,
-    ...(structuredContent.ok === false ? { isError: true } : {}),
+    ...(structuredContent.ok === false || structuredContent.kind === "partial" ? { isError: true } : {}),
   };
 }
 
@@ -124,7 +127,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const registerAutomation = registerWrite;
 
   registerWrite("dohc_dataset", {
-    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
+    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its workspace-relative dataset.json path. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
     inputSchema: {request: DatasetRequest},
   }, async ({request}) => text(await dataset(ctx, request)));
 
@@ -157,6 +160,26 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await listChanges(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_list_kept_copies",
+    {
+      description:
+        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them.",
+      inputSchema: {},
+    },
+    async () => text(await listKeptCopies(ctx)),
+  );
+
+  registerWrite(
+    "dohc_save_kept_copy",
+    {
+      description:
+        "Move one kept copy from dohc_list_kept_copies to a visible file beside its file, such as `notes (kept copy).md`. The original file does not change. `status` is `saved` with the copy's `path`: read both, keep what you need, and delete the copy when you are done. `gone` means nothing is kept under that id any more. `no-valid-name` means no name beside the file fits dohc's path limits, so the copy stays kept: rename the file or its folder to something shorter and try again.",
+      inputSchema: { id: z.number().int() },
+    },
+    async (args) => text(await saveKeptCopy(ctx, args)),
   );
 
   server.registerTool(
@@ -535,10 +558,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_record",
     {
       description:
-        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. A name already taken in the folder is refused.",
+        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. The kept map reports current values of seed fields preserved after someone edited them. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.",
       inputSchema: {
         collectionPath: z.string().min(1).max(4096),
         name: z.string().min(1).max(200),
+        recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
         fields: z.record(z.string().min(1).max(200), z.unknown()).optional(),
       },
     },
@@ -578,6 +602,23 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { ...automationInput, run: z.string().min(1).max(256), startOver: z.boolean().optional() },
     },
     async (args) => text(await retryAutomationRun(ctx, args)),
+  );
+
+  registerWrite(
+    "dohc_press_button",
+    {
+      description:
+        "Press a Button field on one record, as a person clicks it in dohc, and get the id of the run it started; follow it with dohc_read_automation_run. Name the record by its id, or a dataset record by its primary key as JSON. A press that would run actions dohc cannot undo is refused with each action's name; press again with those names in confirm to run them. Send the same requestId again, after a timeout for example, to get the same press instead of a second one. The press is recorded as the agent's, for the person; from an agent run that an automation started, it counts in that chain of automations, which stops after 4 steps.",
+      inputSchema: {
+        collectionPath: z.string().min(1).max(4096),
+        button: z.string().min(1).max(256),
+        recordId: z.string().min(1).max(1024),
+        table: z.string().min(1).max(256).optional(),
+        confirm: z.array(z.string().min(1).max(256)).max(64).optional(),
+        requestId: requestIdSchema.optional(),
+      },
+    },
+    async (args) => text(await pressButton(ctx, args)),
   );
 
   return server;

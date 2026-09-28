@@ -1,6 +1,7 @@
 import {afterEach, expect, it} from "vitest";
 import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/client";
 import {createShareWebApplication} from "./server";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {asRecord} from "@dohc/workspace-core/records";
 
 const origin = "https://share.example.test";
@@ -21,9 +22,33 @@ const logPage = {ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, ops
 ]};
 servedLog = logPage;
 
+it("returns identical opaque MCP refusals before and after evicting a revoked session", async () => {
+  const f = fixture();
+  const bearer = await f.exchange();
+  f.revoke();
+  const snapshot = async (token?: string) => {
+    const response = await f.send("/mcp", {method: "POST",
+      headers: {"content-type": "application/json", ...(token ? {authorization: `Bearer ${token}`} : {})},
+      body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
+    return {status: response.status, body: await response.text(), headers: [...response.headers]};
+  };
+  const missing = await snapshot();
+  const first = await snapshot(bearer);
+  const calls = f.calls.length;
+  const later = await snapshot(bearer);
+  expect(first).toEqual(missing);
+  expect(later).toEqual(first);
+  expect(first.status).toBe(404);
+  expect(first.body).toBe(JSON.stringify({ok: false, error: "not found"}));
+  expect(first.headers).toContainEqual(["cross-origin-resource-policy", "same-origin"]);
+  expect(f.calls).toHaveLength(calls);
+});
+
 function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text", paths: string[] = []) {
   const calls: Request[] = [];
   let revoked = false;
+  let rateLimited: string | undefined;
+  let refusalCode: "link_read_rate_limited" | "link_unavailable" = "link_read_rate_limited";
   const app = createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
     relayExchangeKey: "exchange-key-at-least-thirty-two-bytes", publicHosts: new Set(["share.example.test"]),
     ...(live ? {publicEditRelease: {version: 1 as const}, linkLive: {publicOrigin: origin,
@@ -36,8 +61,9 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       calls.push(request);
       const path = new URL(request.url).pathname;
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
-      if (revoked) return new Response(null, {status: 401});
-      if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
+      if (revoked) return new Response(null, {status: 404});
+      if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
+      if (path === "/sync/link/share") return Response.json({ok: true, subjectName: "Trip", access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
       if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
       if (path === "/sync/link/log") return Response.json(servedLog);
       if (path === `/sync/link/blobs/${withdrawn}`) return new Response(null, {status: 404});
@@ -68,8 +94,28 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
     }));
     return client;
   }
-  return {calls, send, exchange, connect, revoke() {revoked = true;}};
+  return {calls, send, exchange, connect, revoke() {revoked = true;}, limit(path: string, code: typeof refusalCode = "link_read_rate_limited") {rateLimited = path;refusalCode = code;}};
 }
+
+it("refuses an out-of-scope blob before requesting rate-limited inventory", async () => {
+  const f = fixture(); const client = await f.connect(await f.exchange());
+  f.limit("/sync/link/current");
+  const before = f.calls.length;
+  const result = await client.callTool({name: "dohc_read_file", arguments: {blobSha256: withdrawn}});
+  expect(result).toMatchObject({isError: true, content: [{type: "text", text: "not found"}]});
+  expect(f.calls.slice(before).map(call => new URL(call.url).pathname)).not.toContain("/sync/link/current");
+});
+
+it.each(["link_read_rate_limited", "link_unavailable"] as const)("returns the same %s metadata refusal for every MCP method", async code => {
+  const f = fixture(); const bearer = await f.exchange();
+  f.limit("/sync/link/share", code);
+  for (const method of ["initialize", "tools/list", "tools/call", "resources/list"]) {
+    const response = await f.send("/mcp", {method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
+      body: JSON.stringify({jsonrpc: "2.0", id: 1, method, ...(method === "tools/call" ? {params: {name: "dohc_read_file", arguments: {blobSha256: withdrawn}}} : {})})});
+    expect(response.status).toBe(code === "link_read_rate_limited" ? 429 : 503);
+    expect(await response.json()).toEqual(linkRefusalBody(code));
+  }
+});
 
 it.each(["legacy", "auto"] as const)("serves a real %s MCP client without transport sessions", async mode => {
   const f = fixture(); const client = await f.connect(await f.exchange(), mode);
@@ -90,7 +136,7 @@ it("assigns independent agent profiles and rejects revoked bearers", async () =>
 
 it("rejects browser cookies, foreign origins, and query credentials", async () => {
   const f = fixture(); const bearer = await f.exchange();
-  expect((await f.send("/mcp", {headers: {cookie: "dohc_share_any=token"}})).status).toBe(401);
+  expect((await f.send("/mcp", {headers: {cookie: "dohc_share_any=token"}})).status).toBe(404);
   expect((await f.send("/mcp?bearer=" + bearer, {headers: {authorization: `Bearer ${bearer}`}})).status).toBe(404);
   expect((await f.send("/mcp", {headers: {authorization: `Bearer ${bearer}`, origin: "https://evil.test"}})).status).toBe(404);
 });
@@ -120,7 +166,7 @@ it("does not turn a browser session token into an agent bearer", async () => {
   const {session} = await browser.json() as {session: string};
   const cookie = browser.headers.getSetCookie().find(value => value.startsWith(`dohc_share_${session}=`))!;
   const token = cookie.split(";", 1)[0]!.split("=")[1]!;
-  expect((await f.send("/mcp", {headers: {authorization: `Bearer ${session}.${token}`}})).status).toBe(401);
+  expect((await f.send("/mcp", {headers: {authorization: `Bearer ${session}.${token}`}})).status).toBe(404);
 });
 
 it("rejects oversized and malformed MCP bodies without tool side effects", async () => {
@@ -186,7 +232,7 @@ it("lists the link log as changes through the browser's log route", async () => 
   expect(await client.callTool({name: "dohc_list_changes", arguments: {limit: 501}})).toMatchObject({isError: true});
   expect(f.calls.filter(call => new URL(call.url).pathname === "/sync/link/log")).toHaveLength(1);
   expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: second}})).toMatchObject({structuredContent: {ok: true, encoding: "utf8", content: "hello"}});
-  expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: withdrawn}})).toMatchObject({isError: true, content: [{text: expect.stringContaining("withdraws its history")}]});
+  expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: withdrawn}})).toMatchObject({isError: true, content: [{text: "not found"}]});
   expect(f.calls.filter(call => new URL(call.url).pathname.startsWith("/sync/link/blobs/")).map(call => new URL(call.url).pathname)).toEqual([`/sync/link/blobs/${second}`, `/sync/link/blobs/${withdrawn}`]);
 });
 
@@ -229,6 +275,8 @@ it.each([
     effectiveSelector: {versionId, paths: ["docs", "plan.md"], access}, lastSettledKnown: true, lastSettledAtMs: 123});
   const summary = asRecord(result.structuredContent)?.summary;
   expect(summary).toEqual(expect.any(String));
+  expect(summary).toContain("Trip");
+  expect(asRecord(result.structuredContent)).not.toHaveProperty("sharerName");
   expect(summary).toContain(access === "view" ? "You can read files and comments." :
     access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
   expect(summary).toContain("Included paths: docs, plan.md.");

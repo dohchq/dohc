@@ -35,11 +35,19 @@ export function createNamedRecipientDocumentsClient(options: {relayUrl: string; 
           headers: {"content-type": "application/json", cookie, origin: options.publicOrigin, "x-dohc-relay-exchange-key": options.exchangeKey},
         }));
         controller.signal.throwIfAborted();
+        if (response.status === 404 && !response.redirected && !response.headers.has("location")) {
+          const error = await readBoundedJson(response, limits.maxResponseBytes, controller.signal);
+          if (error && typeof error === "object" && "code" in error && error.code === "share_access_removed") {
+            return Response.json({ok: false, code: "share_access_removed", error: "The owner removed your access."},
+              {status: 404, headers: {"cache-control": "private, no-store"}});
+          }
+          return refuse();
+        }
         if (response.status !== 200 || response.redirected || response.headers.has("location") ||
           response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") return refuse();
         const result = await readBoundedJson(response, limits.maxResponseBytes, controller.signal);
         if (!result || typeof result !== "object" || Array.isArray(result) ||
-          Object.keys(result).sort().join() !== "files,grantId,shareId,userId,workspaceId") return refuse();
+          Object.keys(result).sort().join() !== "access,files,grantId,shareId,sharerName,subjectName,userId,workspaceId") return refuse();
         const data = result as Record<string, unknown>;
         for (const key of ["grantId", "shareId", "userId", "workspaceId"]) parseLiveUpdateIdentifier(data[key]);
         if (data.grantId !== grantId || !Array.isArray(data.files)) return refuse();

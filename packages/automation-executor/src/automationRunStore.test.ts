@@ -11,7 +11,7 @@ function run(claimId: string, state: "done" | "failed" | null, updatedAtMs: numb
     version: 2, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: updatedAtMs, updatedAtMs, plan: null,
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    created: [], replans: [], undoRequests: [], readableFields: null, superseded: false, undo: null, settled, compacted: false,
+    created: [], replans: [], undoRequests: [], readableFields: null, datasetId: null, superseded: false, undo: null, settled, compacted: false,
     outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1 },
   };
 }
@@ -120,14 +120,14 @@ describe("the automation run store", () => {
     await store.save(saved);
     const effect = { ordinal: 0, writes: [{ kind: "field" as const, recordId: "rec_a", path: "Tasks/a.md", field: "A", before: null, after: 1 }] };
     await store.appendEffect(saved, effect);
-    await store.recordCreated(saved, { ordinal: 1, recordId: "rec_b", path: "Log/b.md" });
+    await store.recordCreated(saved, { ordinal: 1, planned: "rec_b", recordId: "rec_b", path: "Log/b.md" });
     const folder = join(root, ".dohc", "automations", "runs");
     const [automationFolder] = await readdir(folder);
     const progress = (await readdir(join(folder, automationFolder!))).find((file) => file.endsWith(".progress.jsonl"))!;
     await appendFile(join(folder, automationFolder!, progress), '{"kind":"effect","ordinal":2,"wri');
     const [read] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
     expect(read!.applied).toEqual([effect]);
-    expect(read!.created).toEqual([{ ordinal: 1, recordId: "rec_b", path: "Log/b.md" }]);
+    expect(read!.created).toEqual([{ ordinal: 1, planned: "rec_b", recordId: "rec_b", path: "Log/b.md" }]);
     // The next effect starts on a line of its own.
     await store.appendEffect(saved, { ...effect, ordinal: 2 });
     const [again] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
@@ -201,14 +201,18 @@ describe("the automation run store", () => {
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
   });
 
-  it("keeps the newest record a step created", async () => {
+  it("keeps the newest record each planned record became, apart from the others a step created", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
     const saved = { ...run("atc_one", null, 1), applied: [] };
     await store.save(saved);
-    await store.recordCreated(saved, { ordinal: 1, recordId: "rec_first", path: "Log/a.md" });
-    await store.recordCreated(saved, { ordinal: 1, recordId: "rec_second", path: "Log/a.md" });
+    await store.recordCreated(saved, { ordinal: 1, planned: "rec_a", recordId: "rec_first", path: "Log/a.md" });
+    await store.recordCreated(saved, { ordinal: 1, planned: "rec_b", recordId: "rec_b", path: "Log/b.md" });
+    await store.recordCreated(saved, { ordinal: 1, planned: "rec_a", recordId: "rec_second", path: "Log/a.md" });
     const [read] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
-    expect(read!.created).toEqual([{ ordinal: 1, recordId: "rec_second", path: "Log/a.md" }]);
+    expect(read!.created).toEqual([
+      { ordinal: 1, planned: "rec_b", recordId: "rec_b", path: "Log/b.md" },
+      { ordinal: 1, planned: "rec_a", recordId: "rec_second", path: "Log/a.md" },
+    ]);
   });
 });

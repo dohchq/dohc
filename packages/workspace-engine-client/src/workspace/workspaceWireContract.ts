@@ -31,6 +31,8 @@ export const WORKSPACE_METHOD = {
   searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
+  keptCopiesList: "keptCopies.list",
+  keptCopiesSave: "keptCopies.save",
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
   captureSetAuthor: "capture.setAuthor",
@@ -162,6 +164,22 @@ export type GranularChatMessageSearchResponse =
 export type WatcherStatusResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.watcherStatus];
 
+/**
+ * A file dohc moved aside while it saved, because another program changed
+ * it meanwhile. It waits in the engine's staging directory until
+ * `keptCopies.save` moves it to a visible copy.
+ */
+export type KeptCopy = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesList]["keptCopies"][number];
+export type KeptCopiesListResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesList];
+/**
+ * `saved` with the copy's workspace-relative path; `gone` when nothing is
+ * kept under that id any more; `no-valid-name` when no name beside the file
+ * fits the engine's path limits, so the copy stays kept.
+ */
+export type KeptCopySaveResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesSave];
+
 export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
 /** A kind of record change a subscription wants and a claim runs for. */
 export type AutomationChangeKind = "added" | "changed" | "removed";
@@ -272,8 +290,18 @@ export type AutomationPressParams = WorkspaceJsonObject & {
    * it from its own checked identity, never from a renderer.
    */
   pressedBy: string;
+  by: AutomationPressActor;
   nowMs?: number;
 };
+
+/**
+ * Who made a press for the person who pressed: the person, or an agent
+ * acting for them, by its origin id, from a run at `depth`. The press claims
+ * at that depth, and stops at once at the chain cap.
+ */
+export type AutomationPressActor =
+  | { kind: "human" }
+  | { kind: "agent"; originId: string; depth: number };
 
 /** Mirrors AutomationRunNowParams in crates/dohc-workspace-engine. */
 export type AutomationRunNowParams = WorkspaceJsonObject & {
@@ -378,6 +406,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
@@ -1141,6 +1171,23 @@ const WorkspaceResultSchemas = {
     recoveryUnavailable: Schema.Boolean,
     keptFiles: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
   }),
+  [WORKSPACE_METHOD.keptCopiesList]: mutableStruct({
+    keptCopies: Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          id: Schema.Int,
+          path: Schema.NonEmptyString,
+          keptAtMs: Schema.Int,
+        }),
+      ),
+    ),
+    more: Schema.Boolean,
+  }),
+  [WORKSPACE_METHOD.keptCopiesSave]: Schema.Union([
+    mutableStruct({ status: Schema.Literal("saved"), path: Schema.NonEmptyString }),
+    mutableStruct({ status: Schema.Literal("gone") }),
+    mutableStruct({ status: Schema.Literal("no-valid-name") }),
+  ]),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({

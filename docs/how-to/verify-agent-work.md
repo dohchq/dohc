@@ -70,16 +70,21 @@ Use the canonical runner below. Other agents reuse its evidence instead of recon
 
 Fetch the PR's target branch. Use its fetched ref as `<target-ref>` below, such as `origin/main`.
 Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
-The plan also lists selected JavaScript packages, integration proofs, and required services.
+The plan also lists selected JavaScript packages, test files, integration proofs, and required services.
 JavaScript selection follows workspace dependencies and declared external test inputs.
+Desktop-only changes run the Y.Doc compatibility files that import desktop code.
+Changes to Y.Doc projection or its other inputs run the complete Y.Doc suite, including the checkpoint boundary test.
 Shared configuration and unclassified code inputs select the full JavaScript suite.
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
 The JavaScript gate typechecks the whole workspace and runs repository checks before selected package tests.
+It installs Electron only when desktop preparation is selected.
+On headless Linux hosts, only the desktop proof runs under Xvfb.
 It starts a dedicated Postgres container when selected tests or proofs need one.
 Selected integration suites must run; unavailable prerequisites cause failure rather than a silent skip.
 The native self-host editing proof checks the prepared engine and its complete delivery evidence when selected.
 The Rust gate uses the repository build budget and checks its summary verdict.
+On the shared Windows host, one PR verification runs at a time. A later run waits for the first to finish.
 The runner removes its Postgres container by the recorded container ID.
 
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
@@ -99,7 +104,7 @@ After review fixes or integration changes, rerun affected checks and record why 
 Keep each receipt's tested commit and target unchanged; document reuse in the PR.
 Use the report's `steps[].seconds` when recording verification delays.
 Use its top-level `seconds` for the complete run, including preparation and cleanup.
-The `timings` rows record source checks, preparation, and database setup and cleanup, including failed phases.
+The `timings` rows record the queue wait, source checks, preparation, and database setup and cleanup, including failed phases.
 Rows can overlap during failed startup cleanup. Do not add them to estimate elapsed time.
 
 `pnpm test` builds the SDK and app runtime before testing packages.

@@ -74,6 +74,19 @@ describe("reach check", () => {
     expect(check(owner(grant(ana, { paths: ["Trip/collection.yaml"], access: "edit" })), personal(OWNER))).toEqual(allowed);
   });
 
+  it("stops every step that would run when someone who can change the automation or its code cannot view the Collection", () => {
+    const yamlOnly = owner(grant(ana, { paths: ["Trip/automations.yaml"], access: "edit" }), grant(ana, { paths: ["Budget"], access: "edit" }));
+    // The step itself reaches Budget, but its formulas read Trip's records.
+    expect(check(yamlOnly, change(budget))).toEqual(stopped("ana@dohc.test cannot view Trip."));
+    expect(check(yamlOnly, notify(OWNER))).toEqual(stopped("ana@dohc.test cannot view Trip."));
+    const codeOnly = owner(grant(ana, { paths: ["Trip/scripts/copy.js"], access: "edit" }), grant(ana, { paths: ["Budget"], access: "edit" }));
+    expect(check(codeOnly, change(budget), trip, ["Trip/scripts/copy.js"])).toEqual(stopped("ana@dohc.test cannot view Trip."));
+    expect(check(codeOnly, change(budget), trip, [])).toEqual(allowed);
+    // View on the Collection is enough to read its records.
+    const withView = owner(grant(ana, { paths: ["Trip/automations.yaml", "Budget"], access: "edit" }), grant(ana, { paths: ["Trip"], access: "view" }));
+    expect(check(withView, change(budget))).toEqual(allowed);
+  });
+
   it("counts Edit on a code file the automation runs as an editor", () => {
     const roster = owner(grant(ana, { paths: ["Trip/scripts/stamp.js"], access: "edit" }));
     expect(check(roster, change(trip), trip, ["Trip/scripts/stamp.js"])).toEqual(stopped("ana@dohc.test cannot edit Trip."));
@@ -202,7 +215,7 @@ describe("reach check", () => {
   it("notifies only people who can view the Collection", () => {
     const roster = owner(
       grant(ana, { paths: ["Trip"], access: "view" }),
-      grant(ben, { paths: ["Trip"], access: "edit", versionId: "v-1" }),
+      grant(ben, { paths: ["Trip"], access: "view", versionId: "v-1" }),
     );
     expect(check(roster, notify(OWNER))).toEqual(allowed);
     expect(check(roster, notify("u-ana"))).toEqual(allowed);

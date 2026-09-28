@@ -41,7 +41,7 @@ export function resolveAppDatasetCapability(value: unknown, approvedRevision: Da
   const approved = parseDatasetRevision(approvedRevision);
   const binding = parseDatasetBinding(value, approved, lookup);
   const selected = new Set(binding.operationIds);
-  return parseAppDatasetCapability({ ...binding, operations: approved.definition.operations.filter(operation => selected.has(operation.operationId))
+  return parseAppDatasetCapability({ ...binding, name: approved.definition.name, operations: approved.definition.operations.filter(operation => selected.has(operation.operationId))
     .map(({ operationId, name, access, readOnly, kind, fieldIds, tableId }) => ({ operationId, name, access, readOnly,
       ...(kind === "read" && binding.linkReads?.some(read => read.operationId === operationId) ? { fields: approved.definition.tables.find(table => table.tableId === tableId)!.fields
         .filter(field => fieldIds.includes(field.fieldId)).map(({ fieldId, name }) => ({ fieldId, name })) } : {}) })) });
@@ -49,7 +49,7 @@ export function resolveAppDatasetCapability(value: unknown, approvedRevision: Da
 
 export function verifyAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetCapability {
   const parsed = parseAppDatasetCapability(value);
-  const { operations: _, ...binding } = parsed;
+  const { operations: _, name: _name, ...binding } = parsed;
   const expected = resolveAppDatasetCapability(binding, approvedRevision, lookup);
   if (JSON.stringify(parsed) !== JSON.stringify(expected)) fail();
   return expected;

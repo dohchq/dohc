@@ -13,7 +13,13 @@ test("workspace manager creates another window and forgets a workspace without d
     await expect(desktop.page.getByRole("button", { name: "Create workspace", exact: true })).toBeVisible();
     await desktop.page.screenshot({ path: testInfo.outputPath("first-run.png") });
     const first = await openWorkspaceFromFirstRun(desktop.page, workspace);
-    await desktop.page.getByTestId("workspace-switcher").click();
+    const switcher = desktop.page.getByTestId("workspace-switcher");
+    await switcher.focus();
+    await desktop.page.keyboard.press("Enter");
+    await desktop.page.getByTestId("workspace-switcher-manage").focus();
+    await desktop.page.keyboard.press("Escape");
+    await expect(switcher).toBeFocused();
+    await switcher.click();
     const managerOpened = desktop.app.waitForEvent("window");
     await desktop.page.getByTestId("workspace-switcher-manage").click();
     const manager = await managerOpened;

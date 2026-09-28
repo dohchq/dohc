@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { useRef, useState } from "react";
+import { useFocusSurface } from "../ui/focusReturn";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cornerRadius, EditorTabs } from "./EditorTabs";
 import {
@@ -69,8 +72,8 @@ describe("EditorTabs strip scrolling", () => {
     ["tab://versions/compare/a%2fb", "tab-dohc://versions/compare/a%2fb"],
     ["tab://moment-diff/%E0", "tab-dohc://moment-diff/%E0"],
     [
-      transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"),
-      "tab-dohc://data-collection/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002",
+      transactionalCollectionTabPath("data/dataset.json", "00000000-0000-4000-8000-000000000002"),
+      "tab-dohc://data-collection/data%2Fdataset.json/00000000-0000-4000-8000-000000000002",
     ],
   ])("keeps the pinned selector for %s", (path, testId) => {
     const onActivate = vi.fn();
@@ -96,12 +99,12 @@ describe("EditorTabs strip scrolling", () => {
   });
 
   it("names data Collection tabs from discovery without changing their stable identity",()=>{
-    const path=transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001","00000000-0000-4000-8000-000000000002");
+    const path=transactionalCollectionTabPath("data/dataset.json","00000000-0000-4000-8000-000000000002");
     const props={groupId:"left",groupNumber:1,tabs:[{path}],activeTab:path,activeTabDirty:false,recoveryPaths:new Set<string>(),onActivate:noop,onClose:noop,onContextMenu:noop,onMove:noop,onMoveToGroup:noop,onCreateGroupRight:noop};
     const mounted=render(<EditorTabs {...props}/>);
-    expect(screen.getByTestId("tab-dohc://data-collection/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002").textContent).toContain("Collection");
+    expect(screen.getByTestId("tab-dohc://data-collection/data%2Fdataset.json/00000000-0000-4000-8000-000000000002").textContent).toContain("Collection");
     mounted.rerender(<EditorTabs {...props} tabLabels={new Map([[path,"Registrations"]])}/>);
-    const tab=screen.getByTestId("tab-dohc://data-collection/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002");expect(tab.textContent).toContain("Registrations");expect(tab.title).toBe("Collection: Registrations");expect(tab.textContent).not.toContain("00000000");
+    const tab=screen.getByTestId("tab-dohc://data-collection/data%2Fdataset.json/00000000-0000-4000-8000-000000000002");expect(tab.textContent).toContain("Registrations");expect(tab.title).toBe("Collection: Registrations");expect(tab.textContent).not.toContain("00000000");
   });
   it("names current history changes after their file, never the internal moment id", () => {
     const path = momentDiffTabPath("moment-ydoc-internal-hash");
@@ -862,4 +865,80 @@ describe("EditorTabs overlay scrollbar", () => {
     fireEvent.click(split);
     expect(onCreateGroupRight).not.toHaveBeenCalled();
   });
+});
+
+function KeyboardTabs({ focusableSurface = true }: { focusableSurface?: boolean } = {}) {
+  const [paths, setPaths] = useState(tabs);
+  const [active, setActive] = useState("a.md");
+  const surface = useRef<HTMLElement>(null);
+  useFocusSurface(surface, () => surface.current);
+  return <section ref={surface} tabIndex={focusableSurface ? -1 : undefined} data-focus-surface="editor" data-active="true" data-testid="editor-surface">
+    <EditorTabs groupId="left" groupNumber={1} tabs={paths} activeTab={active}
+      activeTabDirty={false} recoveryPaths={new Set<string>()}
+      onActivate={(_group, path) => setActive(path)}
+      onClose={(_group, path) => {
+        const next = paths.filter((tab) => tab.path !== path);
+        setPaths(next);
+        if (path === active) setActive(next[0]?.path ?? "");
+      }}
+      onContextMenu={noop} onMove={noop} onMoveToGroup={noop} onCreateGroupRight={noop} />
+  </section>;
+}
+it("uses one tab stop and arrow, Home and End activation", () => {
+  render(<KeyboardTabs />);
+  screen.getByTestId("tab-a.md").focus();
+  expect(screen.getAllByRole("tab").map((tab) => tab.tabIndex)).toEqual([0, -1, -1]);
+  expect(screen.getByRole("button", { name: "Close a.md" }).tabIndex).toBe(-1);
+  for (const [key, path] of [["ArrowRight", "b.md"], ["End", "c.md"], ["Home", "a.md"], ["ArrowLeft", "c.md"]]) {
+    fireEvent.keyDown(document.activeElement!, { key });
+    expect(document.activeElement).toBe(screen.getByTestId(`tab-${path}`));
+    expect(document.activeElement?.getAttribute("aria-selected")).toBe("true");
+  }
+});
+it("keeps focus on the surviving tab, then the editor when closing the last tab", async () => {
+  render(<KeyboardTabs />);
+  screen.getByTestId("tab-a.md").focus();
+  for (const path of ["b.md", "c.md"]) {
+    fireEvent.keyDown(document.activeElement!, { key: "Delete" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId(`tab-${path}`)));
+  }
+  fireEvent.keyDown(document.activeElement!, { key: "Delete" });
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("editor-surface")));
+});
+it("returns from a removed close button to the surviving tab", async () => {
+  render(<KeyboardTabs />);
+  const close = screen.getByRole("button", { name: "Close a.md" });
+  close.focus();
+  fireEvent.click(close);
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("tab-b.md")));
+});
+
+it("returns from the tab overflow menu on selection and Escape", async () => {
+  render(<KeyboardTabs />);
+  const trigger = screen.getByTestId("tabs-overflow");
+  trigger.focus();
+  fireEvent.click(trigger);
+  const item = screen.getByRole("menuitem", { name: "b.md" });
+  item.focus();
+  fireEvent.click(item);
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+  fireEvent.click(trigger);
+  const next = screen.getByRole("menuitem", { name: "a.md" });
+  next.focus();
+  fireEvent.keyDown(next, { key: "Escape" });
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+});
+
+it("returns from the tab overflow menu after a pointer click on its backdrop", async () => {
+  const user = userEvent.setup();
+  render(<KeyboardTabs focusableSurface={false} />);
+  const trigger = screen.getByTestId("tabs-overflow");
+  await user.click(trigger);
+  screen.getByRole("menuitem", { name: "b.md" }).focus();
+  const backdrop = screen.getByTestId("tabs-overflow-menu").previousElementSibling!;
+  await user.pointer({ target: backdrop, keys: "[MouseLeft>]" });
+  expect(document.activeElement).toBe(document.body);
+  await user.pointer({ keys: "[/MouseLeft]" });
+  expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
 });

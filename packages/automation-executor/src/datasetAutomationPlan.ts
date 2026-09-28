@@ -13,14 +13,18 @@ import type { ReachCollection, ReachDatasetGrants, ReachStep } from "./automatio
 // and Find a read with equality filters. Each is called with the automation
 // caller, which operation code sees as the automation, not the owner.
 //
-// Set fields, Add record, and Find run only through operations dohc
-// generated, whose reads and edits dohc knows. On a dataset whose operations
+// Set fields, Add record, Find, and a code step's record changes run only
+// through operations dohc generated, whose reads and edits dohc knows. On a dataset whose operations
 // someone wrote, an automation runs its actions (invoke steps) and the steps
 // that touch no record. It calls no other operation for its own purposes: it
 // skips the trigger record's read, so formulas see the record's id and the
 // change's facts, which the host decodes from the commit. A formula that
 // reads another of the record's fields stops with an error (the evaluator's
 // recordKeys). An action runs in its own transaction and reads what it needs.
+//
+// A code step names no operation, because its changes are known only once it
+// runs. The run picks one for each change the way the panel pins a step's,
+// in the table the automation watches, and checks its reach then.
 //
 // The ⚡ panel pins the operation each step uses when it saves. It prefers a
 // reversible edit, then the operation with the fewest fields beyond the
@@ -51,12 +55,13 @@ export interface DatasetRules {
 
 /** Each step's operation and table, and the read that finds the trigger record. */
 export interface DatasetSteps {
-  table: DatasetTable;
   /**
-   * The read the trigger record comes from. Null for a record-removed
-   * trigger, and on a dataset whose operations someone wrote.
+   * The table the trigger watches, and the read its record comes from. The
+   * read is null for a record-removed trigger, and on a dataset whose
+   * operations someone wrote. A schedule or a Group message has no trigger
+   * record, so no trigger table either.
    */
-  triggerRead: DatasetOperation | null;
+  trigger: { table: DatasetTable; read: DatasetOperation | null } | null;
   steps: ReadonlyMap<number, { operation: DatasetOperation; table: DatasetTable }>;
   finds: ReadonlyMap<number, DatasetFindFilter[]>;
   /** For each Set step, the read that shows its record again after someone changed it. */
@@ -121,6 +126,31 @@ function candidates(definition: DatasetDefinition, tables: readonly DatasetTable
 }
 
 /**
+ * The table a code step changes records in: the one the automation's
+ * trigger watches, or for a schedule or a Group message, which watch none,
+ * the dataset's only table, as the panel's Add record takes it. Undefined
+ * when a trigger with no table meets a dataset with several.
+ */
+export function datasetCodeTable(automation: Automation, definition: DatasetDefinition): DatasetTable | undefined {
+  const trigger = automation.when;
+  return datasetTableNamed(definition, "table" in trigger ? trigger.table : null);
+}
+
+/**
+ * The approved operation the run uses for a change a code step asked for,
+ * as the panel would pin it for a step, in the table the automation
+ * watches; or why none fits.
+ */
+export function datasetCodeOperation(
+  definition: DatasetDefinition,
+  table: DatasetTable,
+  kind: Kind,
+  names: readonly string[],
+): DatasetOperation | { problem: string } {
+  return candidates(definition, [table], kind, names)[0] ?? { problem: `${definition.name} has no approved ${fits(kind, names)}.` };
+}
+
+/**
  * Resolves every step's operation against the approved rules. With `pin`,
  * a step whose operation is missing or does not fit gets the best one that
  * does, unless `pin` says to keep it as it is, and the result says which
@@ -133,12 +163,17 @@ function resolve(
   pin: false | ((step: RecordStep) => boolean),
 ): { steps: DatasetSteps; pinned: Map<number, string> } | { problem: string } {
   const trigger = automation.when;
-  if (!("table" in trigger)) return { problem: "Automations on dataset Collections start only from a record change or a button." };
-  const table = datasetTableNamed(definition, trigger.table);
-  if (table === undefined) {
-    return { problem: trigger.table === null
-      ? `${definition.name} has several tables. Name the one this automation watches.`
-      : `${definition.name} has no table named ${trigger.table}.` };
+  // A schedule or a Group message has no trigger record, so its steps take
+  // their tables from their operations.
+  let table: DatasetTable | null = null;
+  if ("table" in trigger) {
+    const named = datasetTableNamed(definition, trigger.table);
+    if (named === undefined) {
+      return { problem: trigger.table === null
+        ? `${definition.name} has several tables. Name the one this automation watches.`
+        : `${definition.name} has no table named ${trigger.table}.` };
+    }
+    table = named;
   }
   const ordered = stepsInOrder(automation);
   const bindings = new Map<string, number>();
@@ -179,7 +214,7 @@ function resolve(
       names = step.values.map((entry) => entry.field);
       const bound = step.records === null ? null : bindings.get(step.records);
       const target = bound === undefined || bound === null ? table : steps.get(bound)?.table;
-      if (target === undefined) return `Step ${ordinal + 1} changes records that no earlier step found or added.`;
+      if (target === undefined || target === null) return `Step ${ordinal + 1} changes records that no earlier step found or added.`;
       tables = [target];
     }
     const fitting = candidates(definition, tables, kind, names);
@@ -187,9 +222,12 @@ function resolve(
     let chosen = named !== undefined && fitting.includes(named) ? named : undefined;
     // Pinning never moves an Add record to another table: it stays in its
     // operation's table, or the trigger's when it names none, which is the
-    // table the ⚡ panel built it in. With no fit there, a person names one.
-    const home = step.kind === "add-record" ? (named?.tableId ?? table.tableId) : null;
-    if (chosen === undefined && pin && pin(step)) chosen = fitting.find((operation) => home === null || operation.tableId === home);
+    // table the ⚡ panel built it in. A trigger with no table leaves the
+    // dataset's only table. With no fit there, a person names one.
+    const home = step.kind === "add-record" ? (named ?? table ?? datasetTableNamed(definition, null))?.tableId : null;
+    if (chosen === undefined && pin && pin(step) && home !== undefined) {
+      chosen = fitting.find((operation) => home === null || operation.tableId === home);
+    }
     if (chosen === undefined) {
       if (tables.length === 1) {
         const missing = fieldIds(tables[0]!, names);
@@ -228,7 +266,7 @@ function resolve(
   // The trigger record is read through the widest read that shows the
   // fields its Set steps change, so formulas see as much of it as they can.
   let triggerRead: DatasetOperation | null = null;
-  if (trigger.kind !== "record-removed" && generated) {
+  if (table !== null && trigger.kind !== "record-removed" && generated) {
     const names = setOn.get("trigger") ?? [];
     const reads = candidates(definition, [table], "read", names);
     triggerRead = reads.sort((left, right) => right.fieldIds.length - left.fieldIds.length || left.name.localeCompare(right.name))[0] ?? null;
@@ -243,7 +281,7 @@ function resolve(
     const reader = source ?? candidates(definition, [own.table], "read", step.values.map((entry) => entry.field))[0];
     if (reader) rereads.set(ordinal, reader);
   }
-  return { steps: { table, triggerRead, steps, finds, rereads }, pinned };
+  return { steps: { trigger: table === null ? null : { table, read: triggerRead }, steps, finds, rereads }, pinned };
 }
 
 const GENERATED_ONLY = (name: string) =>
@@ -262,14 +300,17 @@ function authoredProblem(automation: Automation, name: string): string | null {
 }
 
 export const DATASET_WAKE_NEEDS_BUTTON =
-  "In this Collection, only a button can wake your agent, because dohc cannot tell a person's change from an agent's. Choose a button as the trigger.";
+  "In this Collection, a record change cannot wake your agent, because dohc cannot tell a person's change from an agent's. Choose another trigger.";
 
 /** Why dohc cannot run an automation on this dataset, or null. */
 export function datasetAutomationProblem(automation: Automation, dataset: DatasetRules): string | null {
   // Only a person's change wakes an agent. A dataset commit does not say
   // whether a person or an agent made it, and an agent's writes through the
-  // CLI commit as the owner, so only a press, which a person makes, can.
-  if (automation.when.kind !== "button" && stepsInOrder(automation).some(({ step }) => step.kind === "wake-agent")) {
+  // CLI commit as the owner, so a record change cannot. A press, which a
+  // person makes, a due time, which no one makes, and a Group message,
+  // which names its author's kind, can.
+  const recordChange = "table" in automation.when && automation.when.kind !== "button";
+  if (recordChange && stepsInOrder(automation).some(({ step }) => step.kind === "wake-agent")) {
     return DATASET_WAKE_NEEDS_BUTTON;
   }
   if (!dataset.generated) {
@@ -278,7 +319,7 @@ export function datasetAutomationProblem(automation: Automation, dataset: Datase
   }
   const shape = shapeProblem(automation, (condition) => {
     const filters = datasetFindOf(condition);
-    return "problem" in filters ? filters.problem : null;
+    return "problem" in filters ? filters : filters.map((filter) => filter.value);
   });
   if (shape !== null) return shape;
   const resolved = resolve(automation, dataset, false);
@@ -300,10 +341,19 @@ export function datasetStepsOf(automation: Automation, rules: DatasetRules): Dat
 }
 
 // Each operation a run can call, once each: the trigger record's read, each
-// step's operation, and each read that checks a record again.
-function invokedOperations({ triggerRead, steps, rereads }: DatasetSteps): DatasetOperation[] {
+// step's operation, and each read that checks a record again. A code step's
+// changes are known only once it runs, so it can call every edit, create,
+// and read on the table it changes records in. On a dataset whose
+// operations someone wrote, it changes no record, so it calls none.
+function invokedOperations(automation: Automation, { definition, generated }: DatasetRules, { trigger, steps, rereads }: DatasetSteps): DatasetOperation[] {
+  const codeTable = generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+    ? datasetCodeTable(automation, definition)
+    : undefined;
+  const code = codeTable === undefined
+    ? []
+    : definition.operations.filter((operation) => operation.tableId === codeTable.tableId && (operation.kind === "edit" || operation.kind === "create" || operation.kind === "read"));
   const operations = new Map<string, DatasetOperation>();
-  for (const operation of [triggerRead, ...[...steps.values()].map((step) => step.operation), ...rereads.values()]) {
+  for (const operation of [trigger?.read ?? null, ...[...steps.values()].map((step) => step.operation), ...rereads.values(), ...code]) {
     if (operation !== null) operations.set(operation.operationId, operation);
   }
   return [...operations.values()];
@@ -311,14 +361,14 @@ function invokedOperations({ triggerRead, steps, rereads }: DatasetSteps): Datas
 
 /**
  * Every approved operation a run of the automation can call, by name, once
- * each: the operations its steps name, and the reads that find its trigger
- * record and check a record again. A person who presses its button must be
- * able to use each of them. A name the rules do not approve is not one: the
+ * each: the operations its steps name, the reads that find its trigger
+ * record and check a record again, and those a code step can pick. A person
+ * who presses its button must be able to use each of them. A name the rules do not approve is not one: the
  * automation cannot run, and says why.
  */
 export function datasetOperationsOf(automation: Automation, rules: DatasetRules): string[] {
   const resolved = resolve(automation, rules, false);
-  const reads = "problem" in resolved ? [] : invokedOperations(resolved.steps).map((operation) => operation.name);
+  const reads = "problem" in resolved ? [] : invokedOperations(automation, rules, resolved.steps).map((operation) => operation.name);
   const approved = new Set(rules.definition.operations.map((operation) => operation.name));
   return [...new Set([...operationsOf(automation), ...reads])].filter((name) => approved.has(name));
 }
@@ -369,13 +419,15 @@ export function datasetButtonOf(automation: Automation, definition: DatasetDefin
  * The reach check's view of a dataset automation. First the chats it
  * reaches, as a document Collection's automation reaches them. Then each
  * operation it can call, once each: the trigger record's read, each step's
- * operation, and each read that checks a record again after someone changed
- * it. Then each field of the tables it uses, which its formulas see only
+ * operation, each read that checks a record again after someone changed
+ * it, and each operation a code step can pick. Then each field of the tables it uses, which its formulas see only
  * while every editor can read it; a field that becomes readable because an
  * editor left waits for a current editor's confirmation, like a step. A
  * button holds no value, so formulas never see one. The chats come first so
- * a schema change cannot move their places. An automation whose operations
- * do not resolve runs nothing, so it has no steps to check.
+ * a schema change cannot move their places. Null for an automation whose
+ * operations do not resolve, since it runs nothing reach could vouch for.
+ * One that uses no table, such as a schedule that only notifies, reaches
+ * only its chats.
  */
 export function datasetReachSteps(
   automation: Automation,
@@ -383,17 +435,22 @@ export function datasetReachSteps(
   rules: DatasetRules,
   grants: ReachDatasetGrants,
   chat: ChatDirectory | null,
-): ReachStep[] {
+): ReachStep[] | null {
   const { definition } = rules;
   const resolved = resolve(automation, rules, false);
-  if ("problem" in resolved) return [];
-  const { table, steps } = resolved.steps;
+  if ("problem" in resolved) return null;
+  const { trigger, steps } = resolved.steps;
   const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, access: operation.access });
-  const tables = new Map([[table.tableId, table], ...[...steps.values()].map((step) => [step.table.tableId, step.table] as const)]);
+  // A code step on a generated dataset reads and changes its table's records, so their fields count too.
+  const code = rules.generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+    ? datasetCodeTable(automation, definition)
+    : undefined;
+  const tables = new Map([...(trigger === null ? [] : [trigger.table]), ...[...steps.values()].map((step) => step.table), ...(code === undefined ? [] : [code])]
+    .map((table) => [table.tableId, table] as const));
   const reads = definition.operations.filter((operation) => operation.kind === "read");
   return [
     ...chatReachStepsOf(automation, chat),
-    ...invokedOperations(resolved.steps).map((operation): ReachStep => ({ kind: "dataset-operation", collection, grants, operation: reach(operation) })),
+    ...invokedOperations(automation, rules, resolved.steps).map((operation): ReachStep => ({ kind: "dataset-operation", collection, grants, operation: reach(operation) })),
     ...[...tables.values()].flatMap((own) => own.fields.flatMap((field): ReachStep[] => field.type === "button" ? [] : [{
       kind: "dataset-field", collection, grants, field: { fieldId: field.fieldId, name: field.name },
       reads: reads.filter((read) => read.fieldIds.includes(field.fieldId)).map(reach),
@@ -460,9 +517,10 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
  * The idempotency key of one dataset effect: "a." and the hex SHA-256 of its
  * identity, 66 characters. A replan after a stale record sends different
  * content, so it raises `replan` and never reuses a key. An added record has
- * no id yet, so its identity ends with an empty one.
+ * no id yet, so its identity has an empty one, and `part`, the effect's place
+ * among its step's effects, tells a code step's added records apart.
  */
-export function datasetEffectKey(claimId: string, keySeed: string, ordinal: number, recordId: DatasetRecordId | null, replan: number): string {
-  const identity = `${claimId}/${keySeed}/${ordinal}/${recordId ?? ""}/${replan}`;
+export function datasetEffectKey(claimId: string, keySeed: string, ordinal: number, part: number, recordId: DatasetRecordId | null, replan: number): string {
+  const identity = `${claimId}/${keySeed}/${ordinal}/${part}/${recordId ?? ""}/${replan}`;
   return `a.${createHash("sha256").update(identity).digest("hex")}`;
 }

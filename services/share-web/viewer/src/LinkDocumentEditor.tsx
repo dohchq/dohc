@@ -2,6 +2,7 @@ import {useCallback, useEffect, useRef, useState} from "react";
 import {NamedDocumentEditor, type NamedDocumentSession} from "./NamedDocumentEditor";
 import {DiscardDraft} from "./DiscardDraft";
 import {openLinkDocument} from "./linkLive";
+import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
 
 /** Keep this mounted after access changes so the local draft remains recoverable. */
 export function LinkDocumentEditor({discriminator, path, available, onClose}: {
@@ -10,7 +11,7 @@ export function LinkDocumentEditor({discriminator, path, available, onClose}: {
   const current = useRef<NamedDocumentSession | null>(null), request = useRef<AbortController | null>(null);
   const retainedDraft = useRef(false);
   const [session, setSession] = useState<NamedDocumentSession | null>(null);
-  const [busy, setBusy] = useState(false), [error, setError] = useState(false);
+  const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false), [leaving, setLeaving] = useState<(() => void) | null>(null);
   const receive = useCallback(() => {
     const state = current.current?.state(); setPending(retainedDraft.current || !!state && (state.pendingUpdates > 0 || state.status === "quarantined"));
@@ -18,11 +19,13 @@ export function LinkDocumentEditor({discriminator, path, available, onClose}: {
   const open = () => {
     if (!available) return;
     request.current?.abort(); current.current?.close(); current.current = null; retainedDraft.current = false; setSession(null); setPending(false);
-    const controller = new AbortController(); request.current = controller; setBusy(true); setError(false);
+    const controller = new AbortController(); request.current = controller; setBusy(true); setError(null);
     void openLinkDocument(discriminator, path, controller.signal).then(value => {
       if (controller.signal.aborted || request.current !== controller) {value.close(); return;}
       current.current = value; setSession(value); void value.reconnect();
-    }).catch(() => {if (!controller.signal.aborted) setError(true);})
+    }).catch((error: unknown) => {if (!controller.signal.aborted && request.current === controller) setError(
+      error instanceof Error && Object.values(LINK_REFUSALS).some(value => value.error === error.message)
+        ? error.message : "dohc could not open this file for editing. Retry or ask the owner for access.");})
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});
   };
   useEffect(() => {
@@ -50,11 +53,11 @@ export function LinkDocumentEditor({discriminator, path, available, onClose}: {
     else action();
   };
   return <div className="viewer">
-    <header><div><p className="eyebrow">Shared by a dohc user</p><h1>{path}</h1></div>
+    <header><div><p className="eyebrow">Shared with you</p><h1>{path}</h1></div>
       <button className="handoff-button secondary" onClick={() => leave(onClose)}>Back to shared files</button></header>
     {!available && <p role="alert">Editing is no longer available. Copy any unsynced changes before closing this file.</p>}
     {busy && <p role="status">Opening the file…</p>}
-    {error && <div className="download-card"><p>dohc could not open this file for editing. Retry or ask the owner for access.</p>
+    {error && <div className="download-card"><p>{error}</p>
       {available && <button className="handoff-button secondary" onClick={open}>Retry</button>}</div>}
     {session && <NamedDocumentEditor key={session.doc.guid} session={session} path={path} link onState={receive}/>}
     {pending && <aside className="comments-panel" aria-label="Draft recovery"><h2>Review your draft</h2>

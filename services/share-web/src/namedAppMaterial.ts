@@ -28,6 +28,8 @@ export function createNamedAppMaterialResolver(options: {
         let path: string;
         if (request.method === "GET" && url.pathname === prefix && !url.search) {
           path = target + "/descriptor";
+        } else if (request.method === "GET" && url.pathname === prefix + "/summary" && !url.search) {
+          path = target + "/summary";
         } else if (request.method === "GET" && url.pathname.startsWith(prefix + "/blobs/") && /^[a-f0-9]{64}$/.test(url.pathname.slice((prefix + "/blobs/").length))) {
           const revision = url.searchParams.get("authorityRevision");
           if ([...url.searchParams.keys()].join() !== "authorityRevision" || !revision || !/^[1-9][0-9]*$/.test(revision) || !Number.isSafeInteger(Number(revision))) return refuse();

@@ -1,6 +1,7 @@
+import { invalidateDatasetAddresses } from "./datasetAddress";
 import { describe, expect, it, vi } from "vitest";
 import { compileClosedApp } from "./closedAppCompiler";
-import { prepareOwnerAppPublication } from "./ownerAppPublication";
+import { parseAppPublicationDeclaration, prepareOwnerAppPublication } from "./ownerAppPublication";
 import { type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 
@@ -28,16 +29,32 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
     { shareId: "s", grantId: "g", generation: 1, status: "active", revokedAtMs: null, selector: { paths: shared, versionId: null } },
     { adapter, compile, signal: controller.signal, assertCurrent() {}, resolveDatasetRevision });
   return { declaration, sources, compile, capturePaths, listCalls, hooks, prepare, controller,
-    setDeclaration(value: unknown) { sources.set("app/app.publish.json", JSON.stringify(value)); } };
+    setDeclaration(value: unknown) { invalidateDatasetAddresses({ workspaceId: "w" }); sources.set("app/app.publish.json", JSON.stringify(value)); } };
 }
 
 it("refuses retired app-owned backend declarations before compilation", async () => {
   const h = harness();
-  await expect(h.prepare()).rejects.toThrow("app/app.publish.json must hold entryPath, inputs, and packageMap, and at most one of collection or dataset.");
+  await expect(h.prepare()).rejects.toThrow("app/app.publish.json has an unknown key: backend. Remove it or correct its name.");
   expect(h.compile).not.toHaveBeenCalled();
 });
 
 describe("app.publish.json paths", () => {
+  it.each([undefined, 1])("reads version %s", (version) => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {} }));
+    expect(parseAppPublicationDeclaration(bytes, "app").entryPath).toBe("app/main.ts");
+  });
+
+  it.each([[undefined, "colection"], [1, "colection"], [1, ""]] as const)("rejects unknown keys before publishing version %s: %s", async (version, key) => {
+    const h = harness();
+    h.setDeclaration({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, [key]: {} });
+    await expect(h.prepare()).rejects.toThrow(`app/app.publish.json has an unknown key: ${key}.`);
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("refuses a newer version before interpreting fields", () => {
+    expect(() => parseAppPublicationDeclaration(new TextEncoder().encode('{"version":2}'), "app"))
+      .toThrow("app/app.publish.json uses a newer version. Update dohc to read this file.");
+  });
   const manifest = { entryPath: "main.ts", inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"], packageMap: { greeting: "deps/greeting.js" } };
   const place = (h: ReturnType<typeof harness>, root: string, parent: string, value: unknown = manifest) => {
     h.sources.clear();
@@ -127,7 +144,7 @@ describe("app without app.publish.json", () => {
   it("names a file the page links but the folder cannot publish", async () => {
     const h = harness();
     page(h, { "app/index.html": '<!doctype html><img alt="Map" src="my%20map.png">', "app/my map.png": "png" });
-    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it using only letters, digits, and _ @ . / -, then publish again.");
+    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it without spaces or symbols, then publish again.");
   });
 
   it("includes every type the compiler accepts, and leaves out build configuration and installed packages", async () => {
@@ -161,43 +178,60 @@ describe("owner dataset publication", () => {
     } };
   const binding: AppDatasetBinding = { kind: "dataset", datasetId: approved.datasetId, revision: approved.revision,
     revisionSha256: approved.revisionSha256, operationIds: [id(4)] };
-  const declaration = { entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset: binding };
+  const { datasetId: _, ...fields } = binding;
+  const reference = { ...fields, datasetPath: "private/dataset.json" };
+  const declaration = { entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset: reference };
 
   it("captures and compiles only frontend sources and derives dispatch metadata from the catalog", async () => {
     const resolve = vi.fn(async () => approved);
-    const h = harness(resolve); h.setDeclaration(declaration);
+    const h = harness(resolve); h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+    h.setDeclaration(declaration);
     const { candidate, files } = await h.prepare();
     expect(resolve).toHaveBeenCalledWith(binding);
     expect(h.compile).toHaveBeenCalledTimes(1);
-    expect(h.capturePaths).toEqual([["app/app.publish.json"], ["app/app.publish.json", "app/main.ts"]]);
+    expect(h.capturePaths).toEqual([["app/app.publish.json"], ["app/app.publish.json", "app/main.ts"], ["private/dataset.json"]]);
     expect(files.map(file => file.path)).toEqual(["bundle.js"]);
-    expect(candidate.capabilities).toEqual([{ ...binding, operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }] }]);
+    expect(candidate.capabilities).toEqual([{ ...binding, name: approved.definition.name, operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }] }]);
   });
 
   it("does not accept link read approval from app source", async () => {
     const revision = structuredClone(approved);
     revision.definition.operations[1]!.access = "helper";
     const h = harness(async () => revision);
-    h.setDeclaration({ ...declaration, dataset: { ...binding, operationIds: [id(5)], linkReads: [{ operationId: id(5), fieldIds: [id(3)] }] } });
+    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+    h.setDeclaration({ ...declaration, dataset: { ...reference, operationIds: [id(5)], linkReads: [{ operationId: id(5), fieldIds: [id(3)] }] } });
     const { candidate } = await h.prepare();
     expect(candidate.capabilities[0]).not.toHaveProperty("linkReads");
   });
 
   it("does not treat a source declaration as dataset approval", async () => {
-    const h = harness(); h.setDeclaration(declaration);
+    const h = harness(); h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+    h.setDeclaration(declaration);
     await expect(h.prepare()).rejects.toThrow(/Collection is unavailable/);
     expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("reports a moved manifest binding until its dataset.json address is updated", async () => {
+    const resolve = vi.fn(async () => approved);
+    const h = harness(resolve);
+    h.sources.set("moved/dataset.json", JSON.stringify(approved.definition));
+    h.setDeclaration(declaration);
+    await expect(h.prepare()).rejects.toThrow("Collection reference broken: private/dataset.json");
+    expect(resolve).not.toHaveBeenCalled();
+    h.setDeclaration({ ...declaration, dataset: { ...reference, datasetPath: "moved/dataset.json" } });
+    expect((await h.prepare()).candidate.capabilities[0]).toMatchObject({ datasetId: approved.datasetId });
   });
 
   it.each(["stale", "unknown", "source", "operations", "backend"])("refuses %s dataset bindings before compilation", async kind => {
     const resolve = vi.fn(async () => approved);
     const h = harness(resolve);
     let value: unknown = declaration;
-    if (kind === "stale") value = { ...declaration, dataset: { ...binding, revision: 2 } };
-    if (kind === "unknown") value = { ...declaration, dataset: { ...binding, operationIds: [id(99)] } };
-    if (kind === "source") value = { ...declaration, dataset: { ...binding, source: "replace rules" } };
-    if (kind === "operations") value = { ...declaration, dataset: { ...binding, operations: [{ name: "submit", access: "link", readOnly: true }] } };
+    if (kind === "stale") value = { ...declaration, dataset: { ...reference, revision: 2 } };
+    if (kind === "unknown") value = { ...declaration, dataset: { ...reference, operationIds: [id(99)] } };
+    if (kind === "source") value = { ...declaration, dataset: { ...reference, source: "replace rules" } };
+    if (kind === "operations") value = { ...declaration, dataset: { ...reference, operations: [{ name: "submit", access: "link", readOnly: true }] } };
     if (kind === "backend") value = { ...declaration, backend };
+    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
     h.setDeclaration(value);
     await expect(h.prepare()).rejects.toThrow();
     expect(h.compile).not.toHaveBeenCalled();
@@ -206,8 +240,16 @@ describe("owner dataset publication", () => {
 
   it("honors cancellation after catalog resolution", async () => {
     const h = harness(async () => { h.controller.abort(); return approved; });
+    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
     h.setDeclaration(declaration);
     await expect(h.prepare()).rejects.toMatchObject({ name: "AbortError" });
     expect(h.compile).not.toHaveBeenCalled();
   });
+});
+
+it.each(["会议", "Cafe\u0301"])("publishes Unicode source names from disk without renaming %s", root => {
+  const h = harness(); h.sources.clear();
+  h.sources.set(root + "/index.html", '<!doctype html><script src="' + encodeURIComponent("скрипт.js") + '"></script>');
+  h.sources.set(root + "/скрипт.js", 'document.title = "Ready";');
+  return expect(h.prepare(root)).resolves.toMatchObject({ candidate: { appRoot: root, entryPath: root + "/index.html" } });
 });

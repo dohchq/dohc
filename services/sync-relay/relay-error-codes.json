@@ -38,6 +38,7 @@
   { "code": "self_share", "status": 400 },
   { "code": "share_op_rejected", "status": 403 },
   { "code": "share_read_only", "status": 403 },
+  { "code": "share_access_removed", "status": 404 },
   { "code": "stale", "status": 409 },
   { "code": "stream_identity_mismatch", "status": 409 },
   { "code": "too_many_paths", "status": 400 },

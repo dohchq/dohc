@@ -4,6 +4,8 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { DATASET_MAX_FIELDS, datasetColumnFields, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { generateDatasetFormSources, type DatasetFormInput } from "./datasetFormGenerator";
 import { compileClosedApp } from "./closedAppCompiler";
+import { parseAppPublicationDeclaration } from "./ownerAppPublication";
+import { parseDohcSiteConfig } from "@dohc/workspace-core";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Registrations", schemaPath: "private/schema.sql", operationsPath: "private/operations.js",
@@ -14,7 +16,7 @@ const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name
     { fieldId: id(6), name: "Private note", sqlColumn: "note", type: "text", required: false, unique: false },
   ] }], operations: [{ operationId: id(7), name: "register", label: "Register", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4), id(5)] }] };
 const approvedRevision = describeDatasetRevision({ definition, revision: 1, schemaSql: "PRIVATE_SQL", operationSource: "PRIVATE_RULES" });
-const generate = (input: Partial<DatasetFormInput> = {}) => generateDatasetFormSources({ approvedRevision, tableId: id(2), createOperationId: id(7),
+const generate = (input: Partial<DatasetFormInput> = {}) => generateDatasetFormSources({ datasetPath: "data/dataset.json", approvedRevision, tableId: id(2), createOperationId: id(7),
   appRoot: "apps/register", fieldIds: [id(4), id(5)], ...input });
 
 describe("dataset form generation", () => {
@@ -23,7 +25,11 @@ describe("dataset form generation", () => {
     expect(generate().files).toEqual(files);
     expect(Object.keys(files).sort()).toEqual(["app.publish.json", "dohc.json", "frontend.css", "frontend.js"]);
     const manifest = JSON.parse(files["app.publish.json"]!);
-    expect(manifest.dataset).toEqual({ kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: approvedRevision.revisionSha256, operationIds: [id(7)], createFields: [{ operationId: id(7), fieldIds: [id(4), id(5)] }] });
+    expect(manifest.version).toBe(1);
+    expect(JSON.parse(files["dohc.json"]!).version).toBe(1);
+    expect(parseDohcSiteConfig(files["dohc.json"]!).diagnostics).toEqual([]);
+    expect(parseAppPublicationDeclaration(new TextEncoder().encode(files["app.publish.json"]!), "apps/register").entryPath).toBe("apps/register/frontend.js");
+    expect(manifest.dataset).toEqual({ kind: "dataset", datasetPath: "data/dataset.json", revision: 1, revisionSha256: approvedRevision.revisionSha256, operationIds: [id(7)], createFields: [{ operationId: id(7), fieldIds: [id(4), id(5)] }] });
     expect(manifest.inputs).toEqual(["frontend.js", "frontend.css"]);
     const built = await compileClosedApp({ entryPath: manifest.entryPath, packageMap: {}, inputs: manifest.inputs.map((path: string) => {
       const bytes = new TextEncoder().encode(files[path]!);
@@ -94,4 +100,11 @@ describe("dataset form generation", () => {
     value.definition.operations[1]!.fieldIds.push(id(6));
     expect(() => generate({ approvedRevision: value, relationChoices })).toThrow(/key and label/);
   });
+});
+
+it.each(["apps/会议", "приложения/форма", "फॉर्म"])("generates form sources under %s", appRoot => {
+  expect(Object.keys(generate({ appRoot }).files)).toContain("app.publish.json");
+});
+it.each(["apps/CON", "apps/aux.txt", "apps/" + "界".repeat(86)])("rejects nonportable form folder %s", appRoot => {
+  expect(() => generate({ appRoot })).toThrow();
 });

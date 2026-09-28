@@ -60,6 +60,16 @@ async fn open_workspace(
     workspace_id: &str,
     id: u64,
 ) -> WorkspaceHandle {
+    open_workspace_with_capture_mode(transport, scratch, workspace_id, id, None).await
+}
+
+async fn open_workspace_with_capture_mode(
+    transport: &InProcessTransport<EngineService>,
+    scratch: &ScratchDir,
+    workspace_id: &str,
+    id: u64,
+    capture_mode: Option<&str>,
+) -> WorkspaceHandle {
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -70,6 +80,7 @@ async fn open_workspace(
                 json!({
                     "rootDir": scratch.path().to_string_lossy(),
                     "workspaceId": workspace_id,
+                    "captureMode": capture_mode,
                 }),
             ),
         )
@@ -77,6 +88,10 @@ async fn open_workspace(
         .expect("workspace open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    if capture_mode == Some("none") {
+        // workspace.open awaits startup replay even when capture is disabled.
+        return handle;
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut status_id = id.saturating_add(1_000_000);
     loop {
@@ -4519,18 +4534,20 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     use std::os::windows::fs::OpenOptionsExt;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let workspace_id = "ws-rpc-ydoc-rename-pair-not-stranded";
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
-    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+    // Capture could re-import old.bin while its paired delete is pending.
+    let handle =
+        open_workspace_with_capture_mode(&transport, &scratch, workspace_id, 1, Some("none")).await;
+    call(&transport, &handle, 2, "versions.ensureMain", json!({})).await;
 
     let bytes: &[u8] = &[4, 8, 15, 16, 23, 42];
     call(
         &transport,
         &handle,
-        2,
+        3,
         "versionedBinary.write",
         json!({ "versionId": "main", "path": "old.bin", "bytes": bytes, "origin": "api" }),
     )
@@ -4556,7 +4573,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     let renamed = call(
         &transport,
         &handle,
-        3,
+        4,
         "versionedText.rename",
         json!({
             "versionId": "main",
@@ -4577,7 +4594,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     call(
         &transport,
         &handle,
-        4,
+        5,
         "versionedText.delete",
         json!({
             "versionId": "main",
@@ -4589,12 +4606,19 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     .await;
     drop(lock);
 
-    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
     drop(transport);
 
     let restarted_service = Arc::new(EngineService::new());
     let restarted_transport = InProcessTransport::new(restarted_service);
-    let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
+    let restarted_handle = open_workspace_with_capture_mode(
+        &restarted_transport,
+        &scratch,
+        workspace_id,
+        1,
+        Some("none"),
+    )
+    .await;
 
     // RED (bug): the replay's rename-pair check treats the write's cancelled
     // status like Conflict — it marks the paired old.bin delete conflict too
@@ -5145,6 +5169,15 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn close_materializes_a_deferred_winning_lineage_before_returning() {
+    assert_close_drains_deferred_winning_lineage("loser from B", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_preserves_divergent_deferred_lineages_for_review_before_returning() {
+    assert_close_drains_deferred_winning_lineage("winner from A", true).await;
+}
+
+async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_conflict: bool) {
     const WORKSPACE_ID: &str = "ws-rpc-ydoc-close-winner";
     const PATH: &str = "notes/shared.md";
 
@@ -5229,7 +5262,7 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
     ));
 
     let winner = Ydoc::wire();
-    winner.plaintext_insert(0, "winner from A");
+    winner.plaintext_insert(0, winner_seed);
     let winner_base = winner.encode_full_state();
     let winner_claim = store.put_binary_blob(&winner_base).expect("winner blob");
     let foreign = ReplicationEnvelope {
@@ -5244,7 +5277,7 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
             "path": PATH,
             "contentKind": "plaintext",
             "updateBlobSha256": winner_claim.clone(),
-            "lineageClaimId": winner_claim,
+            "lineageClaimId": winner_claim.clone(),
             "isBaseState": true,
         }),
         recorded_at_ms: 30,
@@ -5261,6 +5294,31 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
         matches!(applied, dohc_engine_sync::ApplyOutcome { primary: dohc_engine_sync::ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)),
         "the winning base must start deferred behind the live session"
     );
+    // Equal seeds can replace a lineage without a conflict. Its queued edit
+    // must still change the file before close returns.
+    let delta = winner.plaintext_insert(winner_seed.len() as u32, " plus remote edit");
+    let delta_sha = store.put_binary_blob(&delta).expect("winner delta blob");
+    let mut update = foreign.clone();
+    update.origin_seq = 1;
+    update.relay_seq = Some(11);
+    update.payload["updateBlobSha256"] = json!(delta_sha);
+    update.payload["isBaseState"] = json!(false);
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &update,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue winning delta behind live session");
+    assert!(matches!(
+        applied,
+        dohc_engine_sync::ApplyOutcome {
+            primary: dohc_engine_sync::ApplyDisposition::Applied(result),
+            ref refusals,
+            ref sharing_declined,
+        } if result.deferred && refusals.is_empty() && sharing_declined.is_empty()
+    ));
     drop(store);
 
     call(
@@ -5272,12 +5330,62 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
     )
     .await;
 
+    let visible_at_close =
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("text at close");
+    let expected_winner = winner.plaintext_string();
+    let store = EngineStore::open_read_only(&db_path).expect("inspect closed lineage");
+    let persisted = dohc_engine_collab::load_persisted(&store, &key)
+        .expect("load closed lineage")
+        .expect("winning lineage remains durable");
     assert_eq!(
-        std::fs::read_to_string(scratch.path().join(PATH)).expect("winner on disk"),
-        "winner from A",
-        "close must materialize the winning lineage before it returns"
+        persisted.marker.lineage_claim_id.as_deref(),
+        Some(winner_claim.as_str())
     );
-    call(&transport, &handle, 6, "workspace.close", json!({})).await;
+    assert_eq!(persisted.doc.plaintext_string(), expected_winner);
+    let queued: i64 = connection
+        .query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+            row.get(0)
+        })
+        .expect("deferred row count");
+    assert_eq!(queued, 0, "close must drain both the base and its edit");
+
+    let listed = call(
+        &transport,
+        &handle,
+        6,
+        "conflicts.list",
+        json!({ "status": "open" }),
+    )
+    .await;
+    let conflicts = listed["conflicts"].as_array().expect("conflict list");
+    if expect_conflict {
+        assert_eq!(conflicts.len(), 1, "divergent seeds require review");
+        let sides: (String, String) = connection
+            .query_row(
+                "SELECT current.text, incoming.text FROM conflicts c \
+             JOIN blobs current ON current.sha256=c.current_blob_sha256 \
+             JOIN blobs incoming ON incoming.sha256=c.incoming_blob_sha256 \
+             WHERE c.workspace_id=?1 AND c.conflict_id=?2",
+                rusqlite::params![
+                    WORKSPACE_ID,
+                    conflicts[0]["id"].as_str().expect("conflict id")
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("both conflict sides are durable");
+        assert_eq!(sides, ("loser from B".to_owned(), expected_winner));
+        assert_eq!(
+            visible_at_close, "loser from B",
+            "close must preserve the visible local side until review"
+        );
+    } else {
+        assert!(conflicts.is_empty(), "equal seeds need no review");
+        assert_eq!(
+            visible_at_close, expected_winner,
+            "close must materialize the winning lineage and its edit before it returns"
+        );
+    }
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
 
 fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {

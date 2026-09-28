@@ -24,6 +24,7 @@ export function createLinkReadRoutes(
   storage: Pick<
     SyncRelayStorage,
     | "getShare"
+    | "getShareLabels"
     | "getEpochLogFloor"
     | "readCurrentFileState"
     | "currentFileBlobByteLength"
@@ -87,6 +88,7 @@ export function createLinkReadRoutes(
         ok: true,
         effectiveSelector: presentation.selector,
         access: fresh.access,
+        subjectName: storage.getShareLabels(fresh.shareId).subjectName,
         ...freshness,
       });
     }
@@ -121,6 +123,7 @@ export function createLinkReadRoutes(
         ok: true,
         effectiveSelector: presentation.selector,
         access: fresh.access,
+        subjectName: storage.getShareLabels(fresh.shareId).subjectName,
         files,
         nextCursor: snapshot.nextCursor,
         epochLogFloor: snapshot.epochLogFloor,
@@ -269,6 +272,7 @@ export function createLinkReadRoutes(
     ) {
       throw notFound();
     }
+
     const releaseBytes = admitLinkBlobBytes(
       capability.grantId,
       byteLength,

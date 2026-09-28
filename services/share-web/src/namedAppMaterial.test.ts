@@ -19,7 +19,7 @@ async function fixture() {
 it("maps only the bound publication routes and forwards filtered account authority", async () => {
   const f = await fixture();
   for (const [method, suffix, mapped] of [
-    ["GET", "", "/descriptor"], ["GET", `/blobs/${"b".repeat(64)}?authorityRevision=3`, `/blobs/${"b".repeat(64)}?authorityRevision=3`],
+    ["GET", "/summary", "/summary"], ["GET", "", "/descriptor"], ["GET", `/blobs/${"b".repeat(64)}?authorityRevision=3`, `/blobs/${"b".repeat(64)}?authorityRevision=3`],
     ["POST", "/backend/attempt", "/attempt"], ["POST", "/backend/invoke", "/invoke"], ["POST", "/backend/upload", "/upload"], ["POST", "/backend/file", "/file"],
   ] as const) {
     const request = new Request(prefix + suffix, { method, body: method === "POST" ? '{"authorityRevision":3}' : undefined, headers: {

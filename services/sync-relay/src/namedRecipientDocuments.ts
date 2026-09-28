@@ -1,3 +1,4 @@
+import { RelayError, relayError } from "./errors";
 import {readBoundedJson} from "@dohc/service-http";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import type {ResolveActor} from "@dohc/workspace-auth/session";
@@ -9,11 +10,11 @@ import type {SyncRelayStorage} from "./storage";
 
 /** Named invitation navigation. Coordinates identify a selection; only the account cookie authorizes it. */
 export function createNamedRecipientDocuments(options: {storage: SyncRelayStorage; resolveActor: ResolveActor;
-  publicOrigin: string; exchangeKey: string; limits: NamedLiveBrowserHttpLimits; maxFiles: number}) {
+  publicOrigin: string; exchangeKey: string; limits: NamedLiveBrowserHttpLimits; maxFiles: number; shareSenderLabel?: (userId: string) => Promise<string>}) {
   const {storage, publicOrigin} = options, limits = parseNamedLiveBrowserHttpLimits(options.limits);
   if (new URL(publicOrigin).origin !== publicOrigin || !publicOrigin.startsWith("https://") ||
     options.exchangeKey.length < 32 || !Number.isSafeInteger(options.maxFiles) || options.maxFiles < 1) throw new TypeError("Invalid named navigation configuration.");
-  const exchangeHash = hashRelayExchangeKey(options.exchangeKey), resolveBrowser = createNamedLiveBrowserResolver(options);
+  const exchangeHash = hashRelayExchangeKey(options.exchangeKey), resolveBrowser = createNamedLiveBrowserResolver({...options, explainRemoval: true});
   const refuse = () => Response.json({ok: false, error: "not found"}, {status: 404, headers: {"cache-control": "private, no-store"}});
   let pending = 0;
   return async (request: Request): Promise<Response> => {
@@ -50,15 +51,24 @@ export function createNamedRecipientDocuments(options: {storage: SyncRelayStorag
           if (!objectId) return refuse();
           files.push({objectId, path: file.path});
         }
+        const sharerName = await options.shareSenderLabel?.(share.granterUserId).catch(() => null) ?? null;
         const current = authorizeNamedLiveEditShareGrant({storage, actorUserId: context.userId, grantId});
         if (!current.ok || current.grant.access !== "edit" || current.share.shareId !== context.shareId || current.share.workspaceId !== context.workspaceId ||
-          current.grant.generation !== authority.grant.generation) return refuse();
+          current.grant.generation !== authority.grant.generation) {
+          const removed = storage.getShareGrant(grantId);
+          if (removed?.status === "revoked" && removed.principalKind === "user" && removed.principalUserId === context.userId &&
+              removed.shareId === context.shareId && storage.workspaceIsOwnedBy(context.workspaceId, share.granterUserId)) throw relayError("share_access_removed");
+          return refuse();
+        }
         controller.signal.throwIfAborted();
         const body = JSON.stringify({ userId: context.userId, workspaceId: context.workspaceId,
-          shareId: context.shareId, grantId: context.grantId, files });
+          shareId: context.shareId, grantId: context.grantId, files, access: current.grant.access,
+          ...storage.getShareLabels(context.shareId), sharerName });
         if (Buffer.byteLength(body) > limits.maxResponseBytes) return refuse();
         return new Response(body, {headers: {"content-type": "application/json", "cache-control": "private, no-store"}});
-      } catch {return refuse();}
+      } catch (error) { if (error instanceof RelayError && error.code === "share_access_removed") {
+        return Response.json({ok: false, code: error.code, error: error.message}, {status: error.statusCode, headers: {"cache-control": "private, no-store"}});
+      } return refuse(); }
       finally {pending--; clearTimeout(timer); request.signal.removeEventListener("abort", abort);}
     })();
     return Promise.race([work, cancelled]);

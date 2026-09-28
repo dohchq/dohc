@@ -1,9 +1,10 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import type { LinkBrowserMaterial } from "./server";
+import {linkRefusalBody, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 
 const headers = {"content-type": "application/json", "cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
-const refuse = (status = 404) => Response.json({ok: false, error: "not found"}, {status, headers});
+const refuse = () => Response.json({ok: false, error: "not found"}, {status: 404, headers});
 const hash = /^[a-f0-9]{64}$/;
 
 export function createAppDiscovery(options: {viewerOrigin?: string; relayUrl: string;
@@ -20,14 +21,14 @@ export function createAppDiscovery(options: {viewerOrigin?: string; relayUrl: st
         [...query.keys()].some(key => key !== "session" && key !== "cursor") || query.getAll("session").length !== 1 || query.getAll("cursor").length > 1) return refuse();
     const session = query.get("session")!, cursor = query.get("cursor");
     if (!isSessionDiscriminator(session) || (cursor !== null && !hash.test(cursor))) return refuse();
-    if (pending >= 16) return refuse(429);
+    if (pending >= 16) return refuse();
     pending++;
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]);
     let relay: Response | undefined;
     try {
       signal.throwIfAborted();
       const material = await options.resolveMaterial(session, request.headers.get("cookie"), signal);
-      signal.throwIfAborted();if (!material.ok) return refuse(material.status);
+      signal.throwIfAborted();if (!material.ok) return refuse();
       if (!options.viewerOrigin) return Response.json({publications: [], nextCursor: null}, {
         headers: {...headers, ...(material.setCookie ? {"set-cookie": material.setCookie} : {})},
       });
@@ -35,7 +36,11 @@ export function createAppDiscovery(options: {viewerOrigin?: string; relayUrl: st
       relay = await options.fetchRelay(new Request(new URL(path, options.relayUrl), {redirect: "manual", signal,
         headers: {authorization: `LinkCapability ${material.capabilityToken}`, "x-dohc-link-profile-secret": material.profileSecret}}));
       signal.throwIfAborted();
-      if (relay.status !== 200 || relay.redirected || relay.headers.has("location")) return refuse(relay.status === 429 ? 429 : relay.status >= 500 ? 503 : 404);
+      if (relay.redirected || relay.headers.has("location")) return refuse();
+      if (relay.status !== 200) {
+        const code = parseLinkRefusal(await readBoundedJson(relay, 4096, signal), relay.status);
+        return code ? Response.json(linkRefusalBody(code), {status: relay.status, headers}) : refuse();
+      }
       const value = await readBoundedJson(relay, 32_768, signal);
       if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "nextCursor,publications") return refuse();
       const page = value as {publications: unknown; nextCursor: unknown};
@@ -52,7 +57,7 @@ export function createAppDiscovery(options: {viewerOrigin?: string; relayUrl: st
       signal.throwIfAborted();
       if (!fresh.ok || fresh.capabilityToken !== material.capabilityToken || fresh.profileSecret !== material.profileSecret) return refuse();
       return Response.json(page, {headers: {...headers, ...(fresh.setCookie ?? material.setCookie ? {"set-cookie": fresh.setCookie ?? material.setCookie!} : {})}});
-    } catch {return refuse(503);}
+    } catch {return refuse();}
     finally {await relay?.body?.cancel().catch(() => {});pending--;}
   };
 }

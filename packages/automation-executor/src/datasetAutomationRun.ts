@@ -1,21 +1,33 @@
 import { isDeepStrictEqual } from "node:util";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
+import type { AutomationTimeSpent, JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
-import type { DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
+import type { DatasetColumnFieldType, DatasetDefinition, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
+import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import {
+  codeChangesOf,
+  codeFilesOf,
+  codeRecordKey,
+  codeStepOrdinals,
   definitionDigest,
   definitionHash,
+  evaluateRequest,
   evaluationRequest,
+  filterValue,
+  FIND_OVERFLOW_ERROR,
+  findValueKey,
   formulaPeople,
   MAX_FOUND_RECORDS,
   planRun,
+  scheduleDueAt,
   triggerMatches,
+  type CodeChange,
   type PlannedEffect,
   type PlannedStep,
+  type RunClaim,
   type RunInputs,
   type RunRecord,
 } from "./automationPlan";
@@ -27,14 +39,20 @@ import {
   applyChatEffect,
   checkPlannedMessages,
   DEADLINE_ERROR,
+  evaluateFindValues,
+  groupChangedOutcome,
+  groupMessage,
   newRun,
+  readCodeFiles,
+  readsChats,
   savedRunOf,
-  sendsMessages,
   type CollectionAutomationRunDependencies,
   type CollectionAutomationRunOutcome,
 } from "./collectionAutomationRun";
 import {
   datasetButtonOf,
+  datasetCodeOperation,
+  datasetCodeTable,
   datasetEffectKey,
   datasetReachSteps,
   datasetRecordKey,
@@ -59,6 +77,26 @@ import {
 // before value is sent again under a new key at the new version, and a
 // field someone changed to anything else keeps their change.
 //
+// A code step's changes land in the table the automation watches, or for a
+// schedule or a Group message, which watch none, the dataset's only table,
+// each
+// through the approved edit or create the panel would pin for a step with
+// its fields; code never runs an action. The run picks them once the code
+// has run. Reach, and a presser's access, already counted every edit,
+// create, and read on that table, and reach is checked again before each
+// record effect lands. A record the code changes by id is read through an
+// approved read that shows the fields it changes, which also reads it again
+// when it is stale. Undo treats the code's changes as a Set fields or Add
+// record step's: a field goes back only through a reversible edit, and an
+// added record stays. On a dataset whose operations someone wrote, a code
+// step reads only the record's id and changes no record; an action it feeds
+// through an invoke step undoes as any action does.
+//
+// A due time or a Group message has no record: the engine claims it, as
+// for a document Collection, and the run reads only what its Finds find.
+// Formulas read `now` as the due time, and a Group message and its author
+// as a document Collection's run does.
+//
 // A button press's run reads its record as it is now, and formulas see the
 // person who pressed. It runs only the automation the press was checked
 // against, from the button that was pressed, in the table it was pressed
@@ -71,6 +109,7 @@ export const RULES_CHANGED_ERROR = "Collection rules changed after this run star
 export const ACCESS_NARROWED_ERROR = "Someone who edits this automation can no longer read a field it used, so dohc stopped the rest of this run.";
 // A record that keeps changing under the run stops it rather than loop.
 const MAX_REPLANS = 5;
+const KEPT_CHANGING_ERROR = "The record kept changing while this automation ran. Try again.";
 // Reads keep no receipt, so they share one key.
 const READ_KEY = "automation-read";
 
@@ -100,7 +139,7 @@ export interface DatasetRunHost {
 
 export interface DatasetAutomationRunDependencies extends Pick<
   CollectionAutomationRunDependencies,
-  "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts"
+  "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
 > {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
@@ -114,8 +153,18 @@ export function datasetPresser(claim: Pick<DatasetAutomationClaim, "fact" | "act
   return claim.fact?.kind === "button" && (actor.kind === "owner" || actor.kind === "named") ? actor.userId ?? null : null;
 }
 
+/**
+ * The claim a dataset run runs: a record change or a press the dataset's
+ * ledger claimed, or a due time or a Group message the engine claimed. An
+ * engine claim names only its Collection, so it comes with the dataset the
+ * Collection keeps.
+ */
+export type DatasetRunClaim =
+  | { source: "dataset"; claim: DatasetAutomationClaim }
+  | { source: "engine"; claim: AutomationClaim; datasetId: string };
+
 export interface DatasetAutomationRunInput {
-  claim: DatasetAutomationClaim;
+  held: DatasetRunClaim;
   automation: Automation;
   /** The Collection whose folder holds the dataset. */
   collection: ReachCollection;
@@ -127,6 +176,7 @@ export interface DatasetAutomationRunInput {
 }
 
 const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
+const listFormat = new Intl.ListFormat("en", { type: "conjunction" });
 const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped" };
 
 function errorText(error: unknown): string {
@@ -165,6 +215,43 @@ function runRecordOf(row: Row, datasetId: string, table: DatasetTable, readable:
     if (Object.hasOwn(row.values, field.fieldId) && readable.has(field.fieldId)) values[field.name] = row.values[field.fieldId] ?? null;
   }
   return { id: String(row.id), key: row.id, path: datasetRecordKey(datasetId, table.tableId, row.id), values };
+}
+
+// What a field holds, as a Find's refusal names it, and the values its read
+// compares it with. The read checks the rest, such as a select's options.
+const FIELD_HOLDS: Partial<Record<DatasetColumnFieldType, { holds: string; accepts: (value: JsonValue) => boolean }>> = {
+  number: { holds: "a number", accepts: (value) => typeof value === "number" && Number.isFinite(value) },
+  checkbox: { holds: "true or false", accepts: (value) => typeof value === "boolean" },
+  text: { holds: "text", accepts: (value) => typeof value === "string" },
+  date: { holds: "a date", accepts: (value) => typeof value === "string" },
+  url: { holds: "a link", accepts: (value) => typeof value === "string" },
+  select: { holds: "a choice", accepts: (value) => typeof value === "string" },
+};
+
+function kindOfValue(value: JsonValue): string {
+  if (value === null) return "nothing";
+  if (Array.isArray(value)) return "a list";
+  switch (typeof value) {
+    case "number": return "a number";
+    case "boolean": return "true or false";
+    case "string": return "text";
+    default: return "an object";
+  }
+}
+
+/**
+ * Why a Find's read would refuse the value a formula gave one of its
+ * fields, or null. The Find then reads nothing, and the run fails only if
+ * its branch runs.
+ */
+function findValueProblem(ordinal: number, field: DatasetTable["fields"][number], value: JsonValue): string | null {
+  if (field.type === "button") return null;
+  const step = `The Find in step ${ordinal + 1}`;
+  if (value === null) return field.required ? `${step} compares ${field.name}, which every record fills in, with nothing.` : null;
+  const expected = FIELD_HOLDS[field.type];
+  if (expected === undefined || expected.accepts(value)) return null;
+  const hint = field.type === "number" && typeof value === "string" ? " Wrap the value in Number()." : "";
+  return `${step} compares ${field.name}, ${expected.holds}, with ${kindOfValue(value)}.${hint}`;
 }
 
 /** One invocation as this run's automation, with the automation caller. */
@@ -227,26 +314,39 @@ export async function datasetRecordExists(
   recordId: DatasetRecordId,
 ): Promise<boolean> {
   const approved = host.revision(datasetId);
-  const { triggerRead, table } = datasetStepsOf(automation, { definition: approved.definition, generated: true });
-  if (triggerRead === null) return false;
+  const { trigger } = datasetStepsOf(automation, { definition: approved.definition, generated: true });
+  if (trigger?.read == null) return false;
   const rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
-  return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), triggerRead, table, recordId)) !== null;
+  return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), trigger.read, trigger.table, recordId)) !== null;
 }
+
+const datasetIdOf = (held: DatasetRunClaim) => (held.source === "dataset" ? held.claim.datasetId : held.datasetId);
 
 export async function runDatasetAutomation(
   dependencies: DatasetAutomationRunDependencies,
   input: DatasetAutomationRunInput,
 ): Promise<CollectionAutomationRunOutcome> {
-  const { claim, automation, collection, roster } = input;
+  const { held, automation, collection, roster } = input;
+  const { claim } = held;
+  const datasetId = datasetIdOf(held);
   const saved = await savedRunOf(dependencies.store, claim, automation);
   if ("outcome" in saved) return saved.outcome;
+  // A plan reads and writes the dataset it was made for. When the
+  // Collection now keeps another one, reach would check that one while the
+  // saved effects write the first, or send what was read from it, so the
+  // run stops before either.
+  if (saved.current?.plan && saved.current.datasetId !== datasetId) return failed(RULES_CHANGED_ERROR);
 
   // Where the automation's messages go, found once for the reach check and
   // the plan.
   let chat: ChatDirectory | null = null;
-  if (sendsMessages(automation)) {
+  if (readsChats(automation)) {
     chat = await dependencies.chat.directory(roster, chatNeedsOf([automation]));
     if (chat === null) return { kind: "wait", reason: "engine" };
+  }
+  if (held.source === "engine") {
+    const groupChanged = groupChangedOutcome(automation, held.claim, chat, Boolean(saved.current?.plan));
+    if (groupChanged !== null) return groupChanged;
   }
   // Reach (ADR 0012) against the rules and data grants now, before anything
   // is read: each chat and operation the automation can reach stops the run
@@ -255,18 +355,17 @@ export async function runDatasetAutomation(
   // rules this checked, so an approval landing meanwhile cannot bring in a
   // read reach never saw.
   const checked = await dependencies.withHost((host) => {
-    const approved = host.revision(claim.datasetId);
-    const datasetRules: DatasetRules = { definition: approved.definition, generated: host.generated(claim.datasetId) };
-    return { approved, datasetRules, steps: datasetReachSteps(automation, collection, datasetRules, host.dataGrants(claim.datasetId), chat) };
+    const approved = host.revision(datasetId);
+    const datasetRules: DatasetRules = { definition: approved.definition, generated: host.generated(datasetId) };
+    return { approved, datasetRules, steps: datasetReachSteps(automation, collection, datasetRules, host.dataGrants(datasetId), chat) };
   });
   if (checked === null) return { kind: "wait", reason: "engine" };
   const { approved, datasetRules, steps } = checked;
-  // An automation that resolves under these rules has a field to check at
-  // least, since every table has its primary key. None means it no longer
-  // resolves, so reach cannot vouch for a saved step such as a wake.
-  if (steps.length === 0) return failed(RULES_CHANGED_ERROR);
+  // An automation that no longer resolves under these rules runs nothing,
+  // so reach cannot vouch for a saved step such as a wake.
+  if (steps === null) return failed(RULES_CHANGED_ERROR);
   const readable = new Set<string>();
-  const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps });
+  const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps });
   for (const [index, verdict] of verdicts.entries()) {
     const step = steps[index]!;
     if (step.kind === "dataset-field") {
@@ -277,6 +376,11 @@ export async function runDatasetAutomation(
   }
 
   let run = saved.current?.plan ? saved.current : null;
+  // A saved plan's code steps still need their operations, in the table reach
+  // counts, under these rules. That comes first: rules that moved the table
+  // also change which fields reach lists.
+  const codeProblem = run === null ? null : codeStepProblem(automation, approved.definition, run.plan ?? []);
+  if (codeProblem !== null) return failed(codeProblem);
   // A plan's formulas saw only the fields readable when it was made. Once an
   // editor can no longer read one of them, its effects not yet sent stop;
   // what already landed stays.
@@ -284,14 +388,23 @@ export async function runDatasetAutomation(
   const keySeed = `${definitionHash(automation)}-${claim.run}`;
   if (run === null) {
     let planned: Awaited<ReturnType<typeof plan>>;
-    try {
-      planned = await plan(dependencies, input, keySeed, readable, approved, datasetRules, chat);
-    } catch (error) {
-      return input.stopped.aborted ? stopped : failed(errorText(error));
+    // A record that changed between two of the plan's reads of it makes the
+    // run plan again from fresh reads, since nothing has landed yet. Every
+    // plan counts against one evaluator budget for the run.
+    const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
+    for (let replans = 0; ; replans += 1) {
+      try {
+        planned = await plan(dependencies, input, keySeed, readable, approved, datasetRules, chat, spent);
+      } catch (error) {
+        return input.stopped.aborted ? stopped : input.signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
+      }
+      if (input.stopped.aborted) return stopped;
+      if (input.signal.aborted) return failed(DEADLINE_ERROR, true);
+      if (planned.kind !== "changed") break;
+      if (replans >= MAX_REPLANS) return failed(KEPT_CHANGING_ERROR);
     }
-    if (input.stopped.aborted) return stopped;
     if (planned.kind === "stop") return planned.outcome;
-    run = { ...newRun(claim, automation, keySeed, planned.steps, dependencies.nowMs()), readableFields: [...readable].sort() };
+    run = { ...newRun(claim, automation, keySeed, planned.steps, dependencies.nowMs()), readableFields: [...readable].sort(), datasetId };
     // Every effect's record, with every field planned, must fit what the
     // store reads back.
     if (Buffer.byteLength(JSON.stringify(run)) * 2 > RUN_PLAN_BUDGET_BYTES) {
@@ -322,12 +435,16 @@ async function plan(
   approved: DatasetRevision,
   datasetRules: DatasetRules,
   chat: ChatDirectory | null,
-): Promise<{ kind: "plan"; steps: StoredStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
-  const { claim, automation, collection, signal } = input;
+  /** The run's evaluator time: its Finds' values, then its formulas and code. */
+  spent: AutomationTimeSpent,
+): Promise<{ kind: "plan"; steps: StoredStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome } | { kind: "changed" }> {
+  const { held, automation, collection, signal } = input;
+  const { claim } = held;
+  const datasetId = datasetIdOf(held);
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
   // A press names its table and button by id, since its record id means
   // nothing in any other table, and the automation its presser was checked against.
-  const pressed = claim.fact?.kind === "button" ? claim.fact : null;
+  const pressed = held.source === "dataset" && held.claim.fact?.kind === "button" ? held.claim.fact : null;
   if (pressed !== null) {
     const button = datasetButtonOf(automation, approved.definition);
     if (button?.tableId !== pressed.tableId || button.fieldId !== pressed.fieldId || definitionDigest(automation) !== pressed.definitionHash) {
@@ -335,68 +452,144 @@ async function plan(
       return stop(failed(changedSincePressed(name ?? "This button")));
     }
   }
+  let message: RunInputs["message"] = null;
+  if (held.source === "engine" && held.claim.change.kind === "message") {
+    const got = await groupMessage(dependencies, held.claim, automation, chat);
+    if ("outcome" in got) return stop(got.outcome);
+    message = got.message;
+  }
+  const pressedBy = held.source === "dataset" ? datasetPresser(held.claim) : null;
+  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
   const read = await dependencies.withHost(async (host) => {
-    const steps = datasetStepsOf(automation, datasetRules);
-    const rules: Rules = { datasetId: claim.datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
-    const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth: claim.depth + 1 });
-    // Each record the plan read, by identity, with the version it read.
-    const versions = new Map<string, { id: DatasetRecordId; version: number }>();
-    const remember = (row: Row, table: DatasetTable) => {
-      versions.set(datasetRecordKey(rules.datasetId, table.tableId, row.id), { id: row.id, version: row.version });
-      return runRecordOf(row, rules.datasetId, table, readable);
-    };
-    let record: RunRecord | null = null;
-    if (steps.triggerRead !== null && claim.fact !== null && claim.fact.kind !== "removed") {
-      const row = await readRecord(host, context, rules, steps.triggerRead, steps.table, claim.fact.recordId, signal);
-      // The record was removed before its automation ran.
-      if (row === null) return { removed: true } as const;
-      record = remember(row, steps.table);
-    } else if (!datasetRules.generated && claim.fact !== null && claim.fact.kind !== "removed") {
-      // Operations someone wrote are not read for the run's own purposes, so
-      // the record is its id alone.
-      const { recordId } = claim.fact;
-      record = { id: String(recordId), key: recordId, path: datasetRecordKey(rules.datasetId, steps.table.tableId, recordId), values: {} };
-    }
-    const found = new Map<number, RunRecord[]>();
-    const truncatedFinds = new Set<number>();
-    for (const [ordinal, filters] of steps.finds) {
-      const { operation, table } = steps.steps.get(ordinal)!;
-      const fieldId = (name: string) => table.fields.find((field) => field.name === name)!.fieldId;
-      const query = {
-        limit: MAX_FOUND_RECORDS,
-        filters: filters.map(({ field, value }) => ({
-          fieldId: fieldId(field),
-          value: value.kind === "literal" ? value.value : (record?.values[value.field] ?? null),
-        })),
+    try {
+      const steps = datasetStepsOf(automation, datasetRules);
+      const rules: Rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
+      const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth: claim.depth + 1 });
+      // Each record the plan read, by identity, with the version it read. A
+      // record read twice, as the trigger record and by a Find, is one
+      // snapshot, so its values and version agree.
+      const versions = new Map<string, { id: DatasetRecordId; version: number }>();
+      const snapshots = new Map<string, RunRecord>();
+      const remember = (row: Row, table: DatasetTable) => {
+        const fresh = runRecordOf(row, rules.datasetId, table, readable);
+        const earlier = snapshots.get(fresh.path);
+        if (earlier === undefined) {
+          versions.set(fresh.path, { id: row.id, version: row.version });
+          snapshots.set(fresh.path, fresh);
+          return fresh;
+        }
+        if (versions.get(fresh.path)?.version !== row.version) throw new RecordChanged();
+        for (const [field, value] of Object.entries(fresh.values)) if (!Object.hasOwn(earlier.values, field)) earlier.values[field] = value;
+        return earlier;
       };
-      const result = await invoke(host, context, rules, operation.operationId, query, READ_KEY, signal);
-      const rows = rowsOf(result);
-      const page = result.result;
-      if (page !== null && typeof page === "object" && !Array.isArray(page) && page.nextCursor != null) {
-        // The planner refuses this Find only if its branch runs. Never bind a partial page.
-        truncatedFinds.add(ordinal);
+      // What changed, as planning reads it. A due time or a message is not a
+      // record change, and the reverse, so a claim whose automation changed
+      // trigger since starts nothing.
+      let runClaim: RunClaim;
+      let record: RunRecord | null = null;
+      if (held.source === "engine") {
+        if (steps.trigger !== null) return { skipped: true } as const;
+        runClaim = held.claim;
       } else {
-        found.set(ordinal, rows.map((row) => remember(row, table)));
+        if (steps.trigger === null) return { skipped: true } as const;
+        runClaim = datasetRunClaim(held.claim, collection.path, steps.trigger.table, readable);
+        const { fact } = held.claim;
+        if (steps.trigger.read !== null && fact !== null && fact.kind !== "removed") {
+          const row = await readRecord(host, context, rules, steps.trigger.read, steps.trigger.table, fact.recordId, signal);
+          // The record was removed before its automation ran.
+          if (row === null) return { skipped: true } as const;
+          record = remember(row, steps.trigger.table);
+        } else if (!datasetRules.generated && fact !== null && fact.kind !== "removed") {
+          // Operations someone wrote are not read for the run's own purposes, so
+          // the record is its id alone.
+          const { recordId } = fact;
+          record = { id: String(recordId), key: recordId, path: datasetRecordKey(rules.datasetId, steps.trigger.table.tableId, recordId), values: {} };
+        }
       }
+      const computed = await evaluateFindValues(dependencies.evaluator, { automation, claim: runClaim, record, message, person },
+        [...steps.finds].map(([ordinal, filters]) => ({ ordinal, values: filters.map((filter) => filter.value) })),
+        scheduleDueAt(runClaim) ?? claim.createdAtMs, spent);
+      if ("outcome" in computed) return { skipped: false, stopped: computed.outcome } as const;
+      const found = new Map<number, RunRecord[]>();
+      const unreadFinds = new Map(computed.failed);
+      for (const [ordinal, filters] of steps.finds) {
+        if (unreadFinds.has(ordinal)) continue;
+        const { operation, table } = steps.steps.get(ordinal)!;
+        const compared = filters.map(({ field, value }, index) => ({
+          field: table.fields.find((candidate) => candidate.name === field)!,
+          formula: value.kind === "formula",
+          value: filterValue(value, record, computed.values, findValueKey(ordinal, index)),
+        }));
+        // A value a formula gave that the read would refuse fails this Find
+        // alone, as a formula that failed does.
+        const problem = compared.map(({ field, formula, value }) => (formula ? findValueProblem(ordinal, field, value) : null))
+          .find((found): found is string => found !== null);
+        if (problem !== undefined) {
+          unreadFinds.set(ordinal, { error: problem, timedOut: false });
+          continue;
+        }
+        const query = { limit: MAX_FOUND_RECORDS, filters: compared.map(({ field, value }) => ({ fieldId: field.fieldId, value })) };
+        let result: DatasetInvocationResult;
+        try {
+          result = await invoke(host, context, rules, operation.operationId, query, READ_KEY, signal);
+        } catch (error) {
+          // The read checks more than the type, such as a select's options.
+          if (!isAppBackendRuntimeError(error) || error.refusal.code !== "invalid_input" || !compared.some(({ formula }) => formula)) throw error;
+          const names = listFormat.format(compared.filter(({ formula }) => formula).map(({ field }) => field.name));
+          unreadFinds.set(ordinal, { error: `The Find in step ${ordinal + 1} compares ${names} with a value this Collection does not accept.`, timedOut: false });
+          continue;
+        }
+        const rows = rowsOf(result);
+        const page = result.result;
+        if (page !== null && typeof page === "object" && !Array.isArray(page) && page.nextCursor != null) {
+          // The planner refuses this Find only if its branch runs. Never bind a partial page.
+          unreadFinds.set(ordinal, { error: FIND_OVERFLOW_ERROR, timedOut: false });
+        } else {
+          found.set(ordinal, rows.map((row) => remember(row, table)));
+        }
+      }
+      return { skipped: false, stopped: null, runClaim, record, found, unreadFinds, steps, rules, versions } as const;
+    } catch (error) {
+      if (error instanceof RecordChanged) return { changed: true } as const;
+      throw error;
     }
-    return { removed: false, record, found, truncatedFinds, steps, rules, versions } as const;
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
-  if (read.removed) return stop({ kind: "skipped" });
-  const pressedBy = datasetPresser(claim);
-  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
-  const runClaim = datasetRunClaim(claim, collection.path, read.steps.table, readable);
-  const inputs: RunInputs = { person, message: null, chat, automation, claim: runClaim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds,
+  if ("changed" in read) return { kind: "changed" };
+  if (read.skipped) return stop({ kind: "skipped" });
+  if (read.stopped !== null) return stop(read.stopped);
+  const inputs: RunInputs = { person, message, chat, automation, claim: read.runClaim, record: read.record, found: read.found, unreadFinds: read.unreadFinds,
     // Without a read, the record is its id: a formula that reads a field stops instead of reading nothing.
     ...(datasetRules.generated ? {} : { recordKeys: ["id"] }) };
   if (!datasetRules.generated) {
-    const problem = unreadComparison(automation, runClaim);
+    const problem = unreadComparison(automation, read.runClaim);
     if (problem !== null) return stop(failed(problem));
   }
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
-  const request = evaluationRequest(inputs, claim.createdAtMs);
-  const results = request.formulas.length === 0 ? [] : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
+  const codeFiles = await readCodeFiles(dependencies, automation, collection.path);
+  if (typeof codeFiles === "string") return stop(failed(codeFiles));
+  inputs.codeFiles = codeFiles;
+  // Formulas read `now` as the time of the change, or a schedule's due
+  // time, so every attempt plans the same values.
+  const request = evaluationRequest(inputs, scheduleDueAt(read.runClaim) ?? claim.createdAtMs);
+  const results = await evaluateRequest(dependencies.evaluator, claim.automationId, request, spent);
   if (results === "busy") return stop({ kind: "wait", reason: "busy" });
+  const changes = codeChangesOf(request, results, collection.path);
+  if (!("problem" in changes) && changes.length > 0 && !datasetRules.generated) {
+    // Only an action changes records on a dataset whose operations someone wrote.
+    return stop(failed(`The code in step ${changes[0]!.ordinal + 1} changes records in ${approved.definition.name}. Its operations were written or changed outside dohc, so only an action can change its records. Run one with an invoke step.`));
+  }
+  if (!("problem" in changes) && changes.length > 0) {
+    const table = datasetCodeTable(automation, approved.definition);
+    if (table === undefined) {
+      return stop(failed(`The code in step ${changes[0]!.ordinal + 1} changes records, and ${approved.definition.name} has several tables, so dohc cannot tell which one. Start the automation from a change in one table.`));
+    }
+    const records = await codeRecords(dependencies, input, read.rules, approved.definition, table, readable, changes, read);
+    if ("changed" in records) return { kind: "changed" };
+    if ("outcome" in records) return stop(records.outcome);
+    inputs.codeRecords = records.records;
+    for (const [key, version] of records.versions) read.versions.set(key, version);
+  }
   // Only the conversations of the people the formulas named are read.
   const named = formulaPeople(request, results);
   if (named.length > 0) {
@@ -408,7 +601,137 @@ async function plan(
   const planned = planRun(inputs, request, results, { claimId: claim.claimId, hash: keySeed });
   if (planned.kind === "skip") return stop({ kind: "skipped" });
   if (planned.kind === "failed") return stop(failed(planned.error, planned.timedOut));
-  return { kind: "plan", steps: datasetEffects(planned.steps, read.steps, read.rules, read.versions, collection.path) };
+  const effects = datasetEffects(automation, planned.steps, read.steps, approved.definition, codeStepOrdinals(automation), read.rules, read.versions, collection.path);
+  if ("problem" in effects) return stop(failed(effects.problem));
+  const codeProblem = codeStepProblem(automation, approved.definition, effects);
+  return codeProblem === null ? { kind: "plan", steps: effects } : stop(failed(codeProblem));
+}
+
+/**
+ * Why the approved rules cannot finish a plan's code steps, or null: an
+ * operation a change goes through is gone, or no approved read could show
+ * an edited record again when it is stale. Reach already checked every
+ * operation a code step can pick.
+ */
+function codeStepProblem(automation: Automation, definition: DatasetDefinition, plan: readonly StoredStep[]): string | null {
+  const code = codeStepOrdinals(automation);
+  for (const { ordinal, effects } of plan) {
+    if (!code.has(ordinal)) continue;
+    for (const effect of effects) {
+      if (effect.kind !== "dataset-edit" && effect.kind !== "dataset-create") continue;
+      const table = definition.tables.find((candidate) => candidate.tableId === effect.tableId);
+      if (table === undefined || !definition.operations.some((candidate) => candidate.operationId === effect.operationId)) return RULES_CHANGED_ERROR;
+      // Reach and presses count only the operations of the table code uses
+      // under these rules. A saved change to another table, such as the only
+      // one before a second was added, would land unchecked.
+      if (datasetCodeTable(automation, definition)?.tableId !== effect.tableId) return RULES_CHANGED_ERROR;
+      if (effect.kind !== "dataset-edit") continue;
+      // A stale edit reads its record again, so the read must exist before anything lands.
+      const reader = datasetCodeOperation(definition, table, "read", effect.fields.map(({ field }) => field));
+      if ("problem" in reader) return `The code in step ${ordinal + 1} changes records in ${table.name}. ${reader.problem}`;
+    }
+  }
+  return null;
+}
+
+// A record changed between two of the plan's reads of it.
+class RecordChanged extends Error {}
+
+/** A record id the code wrote as text, as `table`'s primary key holds it, or null when it cannot be one. */
+function datasetRecordIdOf(table: DatasetTable, text: string): DatasetRecordId | null {
+  const key = table.fields.find((field) => field.type !== "button" && field.sqlColumn === table.primaryKey);
+  if (key?.type !== "number") return text;
+  const id = /^-?\d+$/u.test(text) ? Number(text) : NaN;
+  return Number.isSafeInteger(id) ? id : null;
+}
+
+/**
+ * Checks each change the code steps asked for against the table the
+ * automation watches, then reads each record they change, once, through a
+ * read that shows every field the steps change on it. A record the run
+ * already read keeps that snapshot and its version: the new read only adds
+ * the fields it shows, and a record that changed in between makes the run
+ * plan again. A record that is not in the table is left out, and the plan
+ * says so.
+ */
+async function codeRecords(
+  dependencies: DatasetAutomationRunDependencies,
+  input: DatasetAutomationRunInput,
+  rules: Rules,
+  definition: DatasetDefinition,
+  table: DatasetTable,
+  readable: ReadonlySet<string>,
+  changes: readonly CodeChange[],
+  known: { record: RunRecord | null; found: ReadonlyMap<number, readonly RunRecord[]>; versions: ReadonlyMap<string, { id: DatasetRecordId; version: number }> },
+): Promise<{ records: Map<string, RunRecord>; versions: Map<string, { id: DatasetRecordId; version: number }> } | { outcome: CollectionAutomationRunOutcome } | { changed: true }> {
+  const { held: { claim }, collection, signal } = input;
+  const snapshots = new Map([known.record, ...[...known.found.values()].flat()].flatMap((record) => record === null ? [] : [[record.path, record] as const]));
+  // Each record the code changes, with every field any step changes there,
+  // and each text the code named it by. The trigger record's `set` counts.
+  const changed = new Map<string, { ordinal: number; texts: Set<string>; id: DatasetRecordId; fields: Set<string> }>();
+  const add = (ordinal: number, id: DatasetRecordId, text: string | null, fields: JsonObject) => {
+    const key = datasetRecordKey(rules.datasetId, table.tableId, id);
+    const entry = changed.get(key) ?? { ordinal, texts: new Set<string>(), id, fields: new Set<string>() };
+    if (text !== null) entry.texts.add(text);
+    for (const field of Object.keys(fields)) entry.fields.add(field);
+    changed.set(key, entry);
+  };
+  const triggerId = known.record === null ? undefined : known.versions.get(known.record.path)?.id;
+  for (const change of changes) {
+    const step = `The code in step ${change.ordinal + 1}`;
+    if (change.collection !== collection.path) {
+      return { outcome: failed(`${step} changes records in ${change.collection}. Automations on ${definition.name} can use only its own records for now.`) };
+    }
+    const missing = Object.keys(change.fields).find((name) => !table.fields.some((field) => field.name === name && field.type !== "button"));
+    if (missing !== undefined) return { outcome: failed(`${step} sets ${missing}, which is not a field in ${table.name}.`) };
+    if (change.action === "add") continue;
+    if (change.id === null) {
+      // `set` without a trigger record fails when the run is planned.
+      if (triggerId !== undefined) add(change.ordinal, triggerId, null, change.fields);
+      continue;
+    }
+    const id = datasetRecordIdOf(table, change.id);
+    if (id === null) return { outcome: failed(`${step} changes record ${change.id}, which is not in ${table.name}.`) };
+    add(change.ordinal, id, change.id, change.fields);
+  }
+  const records = new Map<string, RunRecord>();
+  const reads: Array<{ ordinal: number; texts: Set<string>; id: DatasetRecordId; operation: DatasetOperation }> = [];
+  for (const [key, { ordinal, texts, id, fields }] of changed) {
+    // A snapshot that already shows every field the code may see needs no second read.
+    const earlier = snapshots.get(key);
+    const unseen = [...fields].some((name) => readable.has(table.fields.find((field) => field.name === name)!.fieldId) && !Object.hasOwn(earlier?.values ?? {}, name));
+    if (earlier !== undefined && !unseen) {
+      for (const text of texts) records.set(codeRecordKey(collection.path, text), earlier);
+      continue;
+    }
+    const operation = datasetCodeOperation(definition, table, "read", [...fields]);
+    if ("problem" in operation) return { outcome: failed(`The code in step ${ordinal + 1} changes records in ${table.name}. ${operation.problem}`) };
+    reads.push({ ordinal, texts, id, operation });
+  }
+  const versions = new Map<string, { id: DatasetRecordId; version: number }>();
+  const read = await dependencies.withHost(async (host) => {
+    const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth: claim.depth + 1 });
+    for (const { texts, id, operation } of reads) {
+      const row = await readRecord(host, context, rules, operation, table, id, signal);
+      if (row === null) continue;
+      const fresh = runRecordOf(row, rules.datasetId, table, readable);
+      const earlier = snapshots.get(fresh.path);
+      let snapshot = fresh;
+      if (earlier === undefined) {
+        versions.set(fresh.path, { id: row.id, version: row.version });
+      } else {
+        // One record has one snapshot in a plan, so its values and version agree.
+        if (known.versions.get(fresh.path)?.version !== row.version) return { changed: true };
+        for (const [field, value] of Object.entries(fresh.values)) if (!Object.hasOwn(earlier.values, field)) earlier.values[field] = value;
+        snapshot = earlier;
+      }
+      for (const text of texts) records.set(codeRecordKey(collection.path, text), snapshot);
+    }
+    return { changed: null };
+  });
+  if (read === null) return { outcome: { kind: "wait", reason: "engine" } };
+  if (read.changed !== null) return { changed: true };
+  return { records, versions };
 }
 
 /**
@@ -435,42 +758,71 @@ function datasetNotice(effect: Extract<PlannedEffect, { kind: "notice" }>, colle
   return { ...effect, notice: { ...effect.notice, target: { ...target, path: collectionPath, ...named } } };
 }
 
-/** The document-shaped plan as effects through the steps' operations, and the messages and notices as planned. */
+/**
+ * The document-shaped plan as effects through the steps' operations, and the
+ * messages and notices as planned. A code step's change goes through the
+ * operation the panel would pin for it; or the run cannot go on.
+ */
 function datasetEffects(
+  automation: Automation,
   planned: readonly PlannedStep[],
   steps: DatasetSteps,
+  definition: DatasetDefinition,
+  codeSteps: ReadonlySet<number>,
   rules: Rules,
   versions: ReadonlyMap<string, { id: DatasetRecordId; version: number }>,
   collectionPath: string,
-): StoredStep[] {
-  return planned.map(({ ordinal, effects }) => ({
-    ordinal,
-    effects: effects.map((effect): StoredStep["effects"][number] => {
-      if (effect.kind === "message" || effect.kind === "wake") return effect;
-      if (effect.kind === "notice") return datasetNotice(effect, collectionPath);
+): StoredStep[] | { problem: string } {
+  const stored: StoredStep[] = [];
+  for (const { ordinal, effects } of planned) {
+    const own: StoredStep["effects"] = [];
+    for (const effect of effects) {
+      const mapped = datasetEffect(ordinal, effect);
+      if ("problem" in mapped) return mapped;
+      own.push(mapped);
+    }
+    stored.push({ ordinal, effects: own });
+  }
+  return stored;
+
+  function datasetEffect(ordinal: number, effect: PlannedEffect): StoredStep["effects"][number] | { problem: string } {
+    if (effect.kind === "message" || effect.kind === "wake") return effect;
+    if (effect.kind === "notice") return datasetNotice(effect, collectionPath);
+    if (effect.kind === "invoke") {
       const { operation, table } = steps.steps.get(ordinal)!;
-      if (effect.kind === "invoke") return { kind: "dataset-action", rules, operationId: operation.operationId, tableId: table.tableId, input: effect.input };
-      const fieldId = (name: string) => table.fields.find((field) => field.name === name)!.fieldId;
-      if (effect.kind === "add") {
-        return {
-          kind: "dataset-create", rules, operationId: operation.operationId, tableId: table.tableId,
-          values: effect.fields.map(({ field, value }) => ({ fieldId: fieldId(field), field, value })),
-        };
-      }
-      let target: Extract<DatasetEffect, { kind: "dataset-edit" }>["target"];
-      if ("addedBy" in effect.target) {
-        target = { addedBy: effect.target.addedBy };
-      } else {
-        const known = versions.get(effect.target.path);
-        if (known === undefined) throw new Error("dohc lost track of a record this run read.");
-        target = { recordId: known.id, version: known.version };
-      }
+      return { kind: "dataset-action", rules, operationId: operation.operationId, tableId: table.tableId, input: effect.input };
+    }
+    let operation: DatasetOperation, table: DatasetTable;
+    if (codeSteps.has(ordinal)) {
+      const own = datasetCodeTable(automation, definition);
+      if (own === undefined) return { problem: RULES_CHANGED_ERROR };
+      table = own;
+      const chosen = datasetCodeOperation(definition, table, effect.kind === "add" ? "create" : "edit", effect.fields.map(({ field }) => field));
+      if ("problem" in chosen) return { problem: `The code in step ${ordinal + 1} changes records in ${table.name}. ${chosen.problem}` };
+      operation = chosen;
+    } else {
+      ({ operation, table } = steps.steps.get(ordinal)!);
+    }
+    const fieldId = (name: string) => table.fields.find((field) => field.name === name)!.fieldId;
+    if (effect.kind === "add") {
       return {
-        kind: "dataset-edit", rules, operationId: operation.operationId, tableId: table.tableId, target,
-        fields: effect.fields.map(({ field, before, after }) => ({ fieldId: fieldId(field), field, before, after })),
+        kind: "dataset-create", rules, operationId: operation.operationId, tableId: table.tableId,
+        values: effect.fields.map(({ field, value }) => ({ fieldId: fieldId(field), field, value })),
       };
-    }),
-  }));
+    }
+    let target: Extract<DatasetEffect, { kind: "dataset-edit" }>["target"];
+    if ("addedBy" in effect.target) {
+      target = { addedBy: effect.target.addedBy };
+    } else {
+      const known = versions.get(effect.target.path);
+      if (known === undefined) throw new Error("dohc lost track of a record this run read.");
+      target = { recordId: known.id, version: known.version };
+    }
+    return {
+      kind: "dataset-edit", rules, operationId: operation.operationId, tableId: table.tableId, target,
+      fields: effect.fields.map(({ field, before, after }) => ({ fieldId: fieldId(field), field, before, after })),
+    };
+  }
 }
 
 /**
@@ -487,9 +839,11 @@ async function reachNow(
 ): Promise<CollectionAutomationRunOutcome | null> {
   const roster = await dependencies.cachedRoster();
   if (roster.kind === "unknown") return { kind: "wait", reason: "roster" };
-  const { automation, collection, claim } = input;
-  const steps = datasetReachSteps(automation, collection, datasetRules, host.dataGrants(claim.datasetId), chat);
-  const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps });
+  const { automation, collection, held } = input;
+  const steps = datasetReachSteps(automation, collection, datasetRules, host.dataGrants(datasetIdOf(held)), chat);
+  // The rules reach checked at the start no longer resolve the automation.
+  if (steps === null) return failed(RULES_CHANGED_ERROR);
+  const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps });
   for (const [index, verdict] of verdicts.entries()) {
     // A field an editor can no longer read stops the plan through readableFields; it is checked at resume.
     if (!verdict.allowed && steps[index]!.kind !== "dataset-field") return failed(verdict.reason);
@@ -504,8 +858,8 @@ async function applyPlan(
   datasetRules: DatasetRules,
   chat: ChatDirectory | null,
 ): Promise<CollectionAutomationRunOutcome> {
-  const { claim, signal, automation } = input;
-  const effects = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
+  const { held: { claim }, signal, automation } = input;
+  const effects = (run.plan ?? []).flatMap((step) => step.effects.map((effect, part) => ({ ordinal: step.ordinal, part, effect })));
   const firstUnrecorded = run.applied.length;
   const outcome = await dependencies.withHost(async (host): Promise<CollectionAutomationRunOutcome> => {
     // Records and messages the run writes declare the next depth of the chain.
@@ -514,7 +868,7 @@ async function applyPlan(
     for (let index = firstUnrecorded; index < effects.length; index += 1) {
       if (input.stopped.aborted) return stopped;
       if (signal.aborted) return failed(DEADLINE_ERROR, true);
-      const { ordinal, effect } = effects[index]!;
+      const { ordinal, part, effect } = effects[index]!;
       if (effect.kind === "set" || effect.kind === "add" || effect.kind === "invoke") return failed("This automation's saved steps do not match this Collection. Ask the owner to check the automation.");
       if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") {
         // Reach (ADR 0012) again, just before each record effect, so an
@@ -527,7 +881,7 @@ async function applyPlan(
       let writes: RunWrite[];
       try {
         writes = effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action"
-          ? await applyEffect({ dependencies, host, context, run, index, ordinal, signal, datasetRules }, effect, automation)
+          ? await applyEffect({ dependencies, host, context, run, index, ordinal, part, signal, datasetRules }, effect, automation)
           : await applyChatEffect(dependencies, { run, signal, automationName: automation.name, depth, chat }, effect);
       } catch (error) {
         if (input.stopped.aborted) return stopped;
@@ -570,6 +924,8 @@ async function applyEffect(
     run: StoredRun;
     index: number;
     ordinal: number;
+    /** The effect's place among its step's effects. */
+    part: number;
     signal: AbortSignal;
     /** The rules reach checked for this run. */
     datasetRules: DatasetRules;
@@ -577,8 +933,8 @@ async function applyEffect(
   effect: DatasetEffect,
   automation: Automation,
 ): Promise<RunWrite[]> {
-  const { dependencies, host, run, index, ordinal, signal } = context;
-  const keyOf = (recordId: DatasetRecordId | null, replan: number) => datasetEffectKey(run.claimId, run.keySeed, ordinal, recordId, replan);
+  const { dependencies, host, run, index, ordinal, part, signal } = context;
+  const keyOf = (recordId: DatasetRecordId | null, replan: number) => datasetEffectKey(run.claimId, run.keySeed, ordinal, part, recordId, replan);
   if (effect.kind === "dataset-action") {
     // One invocation per step. Its key and input are saved in the plan, so a
     // resumed run sends the same request, and a commit that landed before a
@@ -634,9 +990,12 @@ async function applyEffect(
     }
     if (result.refused.code !== "stale_record") throw new Error(result.refused.message);
     // Someone changed the record since the plan read it. Read it again.
-    const steps = datasetStepsOf(automation, context.datasetRules);
-    const reader = steps.rereads.get(ordinal);
-    const table = steps.steps.get(ordinal)!.table;
+    const table = context.datasetRules.definition.tables.find((candidate) => candidate.tableId === effect.tableId);
+    if (table === undefined) throw new Error(RULES_CHANGED_ERROR);
+    const code = codeStepOrdinals(automation).has(ordinal)
+      ? datasetCodeOperation(context.datasetRules.definition, table, "read", effect.fields.map(({ field }) => field))
+      : null;
+    const reader = code === null ? datasetStepsOf(automation, context.datasetRules).rereads.get(ordinal) : "problem" in code ? undefined : code;
     if (reader === undefined) throw new Error(`${table.name} changed, and dohc has no approved read of it to check the record again.`);
     const row = await readRecord(host, context.context, effect.rules, reader, table, recordId, signal);
     if (row === null) return [...kept, { kind: "dataset-skipped", recordId, reason: "The record is no longer in the Collection." }];
@@ -651,7 +1010,7 @@ async function applyEffect(
     }
     kept = [...kept, ...found];
     if (remaining.length === 0) return kept;
-    if (replan >= MAX_REPLANS) throw new Error("The record kept changing while this automation ran. Try again.");
+    if (replan >= MAX_REPLANS) throw new Error(KEPT_CHANGING_ERROR);
     replan += 1;
     version = row.version;
     fields = remaining;

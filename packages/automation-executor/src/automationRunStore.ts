@@ -178,6 +178,9 @@ const WriteSchema = z.union([
   // A notice the automation sent, and to whom.
   z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string() }),
 ]);
+// A record the run created: the id its plan gave it, which finds it again on
+// a retry, and the id and path the engine gave it.
+const CreatedSchema = z.object({ ordinal: z.number().int().nonnegative(), planned: z.string(), recordId: z.string(), path: z.string() });
 // A dataset edit refused because its record changed, sent again: the record's
 // new version, the fields still to write, and what the re-read kept.
 const ReplanSchema = z.object({
@@ -209,10 +212,11 @@ const StoredRunSchema = z.object({
   updatedAtMs: z.number(),
   plan: z.array(z.object({ ordinal: z.number().int().nonnegative(), effects: z.array(EffectSchema) })).nullable(),
   applied: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
-  created: z.array(z.object({ ordinal: z.number().int().nonnegative(), recordId: z.string(), path: z.string() })),
+  created: z.array(CreatedSchema),
   replans: z.array(ReplanSchema),
   undoRequests: z.array(UndoRequestSchema),
   readableFields: z.array(z.string()).nullable(),
+  datasetId: z.string().min(1).nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
   settled: z.boolean(),
@@ -258,10 +262,10 @@ export interface StoredRun {
   /** What each effect that landed did, in plan order, one entry per effect. */
   applied: Array<{ ordinal: number; writes: RunWrite[] }>;
   /**
-   * Records add-record steps created, with the id the engine gave each,
-   * saved before their fields are written.
+   * Records the run created, each under the id its plan gave it and the id
+   * the engine gave it, saved before their fields are written.
    */
-  created: Array<{ ordinal: number; recordId: string; path: string }>;
+  created: Array<{ ordinal: number; planned: string; recordId: string; path: string }>;
   /** Dataset edits sent again after their record changed, saved before each is sent. */
   replans: DatasetReplan[];
   /** Dataset Undo requests sent again after their record changed, saved before each is sent. */
@@ -271,6 +275,12 @@ export interface StoredRun {
    * Collection. A run resumes only while every one of them is still readable.
    */
   readableFields: string[] | null;
+  /**
+   * The dataset a dataset Collection's plan read and writes, or null for a
+   * document Collection. A plan resumes only while its Collection keeps
+   * that dataset.
+   */
+  datasetId: string | null;
   /** A person chose to run the claim again from the start under a newer definition. */
   superseded: boolean;
   /**
@@ -318,7 +328,7 @@ const ReachVerdictsSchema = z.object({
     stoppedFor: z.string().nullable(),
     narrowed: z.literal(true).optional(),
     seq: z.number().int().nonnegative(),
-    recipient: z.object({ userId: z.string(), name: z.string(), action: z.enum(["post", "notify"]) }).optional(),
+    recipient: z.object({ id: z.string(), name: z.string(), action: z.enum(["post", "notify", "change"]) }).optional(),
   })),
 });
 
@@ -508,7 +518,7 @@ type ProgressLine =
 
 const ProgressLineSchema = z.union([
   z.object({ kind: z.literal("effect"), ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) }),
-  z.object({ kind: z.literal("created"), ordinal: z.number().int().nonnegative(), recordId: z.string(), path: z.string() }),
+  CreatedSchema.extend({ kind: z.literal("created") }),
   ReplanSchema.extend({ kind: z.literal("replan") }),
   UndoRequestSchema.extend({ kind: z.literal("undo-request") }),
 ]);
@@ -583,9 +593,9 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         run.undoRequests.push(request);
       }
       else {
-        // The newest line for a step is the record it created.
-        const { ordinal, recordId, path } = entry.data;
-        run.created = [...run.created.filter((created) => created.ordinal !== ordinal), { ordinal, recordId, path }];
+        // The newest line for a planned record is the record it created.
+        const { ordinal, planned, recordId, path } = entry.data;
+        run.created = [...run.created.filter((created) => created.planned !== planned), { ordinal, planned, recordId, path }];
       }
     }
     return run;

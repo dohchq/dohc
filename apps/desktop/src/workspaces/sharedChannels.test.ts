@@ -1002,8 +1002,10 @@ describe("endJoinedChannel", () => {
 
     const ended = endJoinedChannel(existing, "share-leave");
 
+    // `left` is what tells the reconcile that an active grant must not resume
+    // this row: the person chose to leave.
     expect(ended).toEqual([
-      joined({ shareId: "share-leave", channelWireId: "wire-leave", ended: true }),
+      joined({ shareId: "share-leave", channelWireId: "wire-leave", ended: true, left: true }),
       joined({ shareId: "share-other", channelWireId: "wire-other" }),
     ]);
   });

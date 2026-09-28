@@ -1,3 +1,4 @@
+import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
 import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
@@ -164,6 +165,7 @@ export interface KeyEnvelopeRow {
 }
 
 export interface SyncRelayShareRow {
+  labels?: ShareLabels;
   shareId: string;
   workspaceId: string;
   granterUserId: string;
@@ -576,7 +578,7 @@ export interface SyncRelayStorage {
   markNotices(input: import("./notices").MarkNoticesInput): string[];
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
   pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
-  readAutomationHost(input: {workspaceId: string; ownerUserId: string}): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  readAutomationHost(input: import("./automationHosts").AutomationHostReadInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   checkInAutomationComputer(input: import("./automationHosts").AutomationHostCheckInInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   chooseAutomationHost(input: import("./automationHosts").AutomationHostChooseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   releaseAutomationHost(input: import("./automationHosts").AutomationHostReleaseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
@@ -914,6 +916,9 @@ export interface SyncRelayStorage {
   // match is exact on the normalized (lowercased) address. Returns the number
   // of grants claimed.
   claimPendingSharesForEmail(email: string, userId: string): number;
+  shareHasActiveGrants(shareId: string): boolean;
+  getShareLabels(shareId: string): ShareLabels;
+  setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
   getShare(shareId: string): SyncRelayShareRow | null;
   listActiveShareGrantsForRecipient(
     shareId: string,
@@ -929,11 +934,13 @@ export interface SyncRelayStorage {
     shareIds: readonly string[];
     cursor?: SyncRelayIndependentGrantInventoryCursor;
   }): SyncRelayIndependentGrantInventoryPage;
-  // Received listings exclude revoked shares entirely: after revocation the
-  // recipient must not be able to read even the share's metadata (paths,
-  // version names) — a revoked share is indistinguishable from one that
-  // never existed.
+  // Active listings never disclose revoked selectors. Removed named recipients
+  // receive only their grant ID, share ID, removal time, and an explanation.
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
+  removeShareAccess(input: import("./shareRemoval").ShareRemovalInput): ReturnType<typeof import("./shareRemoval").removeShareAccess>;
+  undoShareRemoval(input: Parameters<typeof import("./shareRemoval").undoShareRemoval>[1]): void;
+  purgeExpiredShareRemovals(nowMs: number): void;
+  listRemovedSharesForRecipient(userId: string, shareId?: string): ReturnType<typeof import("./shareRemoval").listRemovedSharesForRecipient>;
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
   // Candidate moment rows for the shared-blob allowlist. Both semantics start

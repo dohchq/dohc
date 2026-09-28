@@ -215,6 +215,8 @@ type RelayChatShareLanes =
       state: "answered";
       granted: ChatChannelShareGrantRow[];
       received: ChatChannelShareReceivedRow[];
+      // Share ids the relay lists as removed by their owner.
+      removed: string[];
     }
   | { state: "unreachable" }
   // The relay answered, and the answer is one dohc cannot list. Separate from
@@ -232,6 +234,7 @@ export async function readRelayChatShareLanes(input: {
   fetchListing: () => Promise<{
     granted?: Array<Record<string, unknown>>;
     received?: Array<Record<string, unknown>>;
+    removed?: unknown;
   }>;
   workspaceId: string | null;
   // Received shares that belong to another local workspace: already joined
@@ -313,10 +316,25 @@ export async function readRelayChatShareLanes(input: {
       received: mapped.received.map((row) =>
         ChatChannelShareReceivedRow.parse(row),
       ),
+      removed: removedShareIds(listing.removed),
     };
   } catch {
     return { state: "unreachable" };
   }
+}
+
+// The removed lane's share ids. An absent lane is an older relay with none
+// to report; a present lane that is not an array is a malformed listing, and
+// throws into the unreachable guard like the other lanes.
+function removedShareIds(lane: unknown): string[] {
+  if (lane === undefined) return [];
+  if (!Array.isArray(lane)) throw new Error("relay share listing lanes must be arrays");
+  return lane.flatMap((row: unknown) =>
+    typeof row === "object" && row !== null && !Array.isArray(row) &&
+    typeof (row as { shareId?: unknown }).shareId === "string"
+      ? [(row as { shareId: string }).shareId]
+      : [],
+  );
 }
 
 function mapRelayShareListing(
@@ -399,6 +417,8 @@ function mapRelayShareListing(
       shareId: row.shareId,
       ...selector,
       granterEmail: row.granterEmail ?? null,
+      subjectName: row.subjectName,
+      sharerName: row.sharerName,
     });
   }
   return { granted, received };

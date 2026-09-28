@@ -49,7 +49,7 @@ Prepare and approve that source:
 ```sh
 dohc dataset prepare '{"workspaceId":"WORKSPACE_ID","descriptorPath":"fundraiser/dataset.json"}'
 dohc dataset approve '{"workspaceId":"WORKSPACE_ID","preparationId":"PREPARATION_ID","revisionSha256":"REVISION_SHA256"}'
-dohc dataset describe '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID"}'
+dohc dataset describe '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json"}'
 ```
 
 Review the captured source before approving its exact revision hash.
@@ -58,8 +58,16 @@ Keep app code and Collection views on the same dataset. They do not need separat
 ## Connect the app
 
 Put `app.publish.json` in the app folder. Declare the frontend entry, source inputs, and a `dataset` binding.
-Write each path relative to the app folder, so the folder can move. Start a path with `../` to include a file beside the folder.
-The binding names `datasetId`, the approved `revision` and `revisionSha256`, and permitted `operationIds`.
+Include `"version": 1`. See [workspace file versions](../reference/workspace-file-versions.md) for parsing and update rules.
+Write entryPath, inputs, and packageMap paths relative to the app folder. Start a path with `../` to include a file beside it.
+After moving or renaming a dataset folder, update its path in commands and app manifests.
+An old path reports a broken reference. dohc does not rewrite app source when files move.
+Already approved apps keep their ID-based grants until you withdraw or replace their publication.
+The engine resolves the path to the internal dataset ID; the path grants no access.
+For direct Collection access in a shared workspace, the owner must include dataset.json in the share.
+Published apps keep their approved grants and do not need their audience to read dataset.json.
+
+The binding names the workspace-relative `datasetPath` ending in `dataset.json`, the approved `revision` and `revisionSha256`, and permitted `operationIds`.
 Use the [fundraiser declaration](../../examples/fundraiser/app.publish.json) as an example.
 No private app database path or backend capability is declared.
 
@@ -148,9 +156,9 @@ If a custom action refuses a view, update its source and review the change befor
 Use the Collection controls for permitted reads and edits, or invoke an approved operation:
 
 ```sh
-dohc dataset invoke '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","revision":1,"revisionSha256":"REVISION_SHA256","operationId":"OPERATION_ID","idempotencyKey":"REQUEST_ID","input":{}}'
-dohc dataset history '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","limit":50}'
-dohc dataset permissions '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID"}'
+dohc dataset invoke '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json","revision":1,"revisionSha256":"REVISION_SHA256","operationId":"OPERATION_ID","idempotencyKey":"REQUEST_ID","input":{}}'
+dohc dataset history '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json","limit":50}'
+dohc dataset permissions '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json"}'
 ```
 
 Generate a fresh retry key for each intended change. Keep the same key and exact input after a lost response.
@@ -179,7 +187,7 @@ Choose **Review source change** to review the corresponding rule and schema edit
 For custom schema or rule changes, prepare the new dataset descriptor and a migration SQL file:
 
 ```sh
-dohc dataset prepareMigration '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","descriptorPath":"fundraiser/dataset.json","migrationPath":"fundraiser/migration.sql"}'
+dohc dataset prepareMigration '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json","migrationPath":"fundraiser/migration.sql"}'
 ```
 
 Preparation runs the migration against a saved copy and validates its schema and constraints.
@@ -225,8 +233,8 @@ If records changed after preparation, prepare a new review. Accepted registratio
 Agents use the same immutable source and review path:
 
 ```sh
-dohc dataset historyRevision '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","revisionSha256":"SAVED_REVISION_SHA256"}'
-dohc dataset prepareHistoryRestore '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","revision":3,"revisionSha256":"CURRENT_REVISION_SHA256","targetRevisionSha256":"BEFORE_REVISION_SHA256","changedRevisionSha256":"AFTER_REVISION_SHA256"}'
+dohc dataset historyRevision '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json","revisionSha256":"SAVED_REVISION_SHA256"}'
+dohc dataset prepareHistoryRestore '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json","revision":3,"revisionSha256":"CURRENT_REVISION_SHA256","targetRevisionSha256":"BEFORE_REVISION_SHA256","changedRevisionSha256":"AFTER_REVISION_SHA256"}'
 ```
 
 Take the before and after hashes from the selected history entry. Approve through `dataset approveMigration` as above.
@@ -266,7 +274,7 @@ Spreadsheet-safe CSV export escapes formula-like text and includes only the read
 Use a private recovery archive to retain data, files, source, history, and retry credentials:
 
 ```sh
-dohc dataset export '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","savePath":"C:/Backups/fundraiser.dohc-recovery"}'
+dohc dataset export '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json","savePath":"C:/Backups/fundraiser.dohc-recovery"}'
 ```
 
 The destination directory must exist. Existing files require explicit `overwrite:true`.
@@ -293,10 +301,12 @@ Do not restart that old host after recovery.
 Submit the returned identity fields without changing them:
 
 ```sh
-dohc dataset claimRecovery '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","transferId":"TRANSFER_ID","manifestSha256":"MANIFEST_SHA256","sourceCursor":{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","hostEpoch":"SOURCE_EPOCH","approvedRevisionHash":"REVISION_SHA256","revision":42,"digest":"SOURCE_DIGEST"},"oldHostStopped":true}'
+dohc dataset claimRecovery '{"workspaceId":"WORKSPACE_ID","transferId":"TRANSFER_ID","manifestSha256":"MANIFEST_SHA256","sourceCursor":{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","hostEpoch":"SOURCE_EPOCH","approvedRevisionHash":"REVISION_SHA256","revision":42,"digest":"SOURCE_DIGEST"},"oldHostStopped":true}'
 ```
 
 The restored Collection retains records, attachments, approved rules, history, and retry receipts.
+Recovery restores missing source files without replacing existing files. The result includes its datasetPath.
+If source restoration fails, the data stays restored. The result reports sourceError and a null datasetPath.
 It receives a new host epoch. Saved sharing grants remain inactive; review and approve access again.
 A failed claim can retry with the same identity fields, including after restarting dohc.
 Before claiming, cancel with `dataset discardRecovery` and the returned `transferId`.

@@ -1,16 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
+import { createAutomationEvaluator, type AutomationFormula, type AutomationOutcome, type JsonValue } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
+import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import { derivedRecordId } from "./recordIds";
 import {
+  codeFilesOf,
+  codeRecordKey,
   collectionAutomationId,
   definitionHash,
+  evaluateRequest,
   evaluationRequest,
   fieldWritesOf,
   expressionProblem,
+  FIND_OVERFLOW_ERROR,
   findQueryOf,
+  findValuesRequest,
   localIsoTime,
+  MAX_CODE_RECORD_CHANGES,
   runNowSkippedFrom,
   operationsOf,
   parseCollectionAutomationId,
@@ -20,6 +27,7 @@ import {
   subscriptionFor,
   triggerMatches,
   unsupportedReason,
+  type EvaluationRequest,
   type RunInputs,
 } from "./automationPlan";
 import { chatDirectoryOf } from "./automationChat";
@@ -35,6 +43,9 @@ function automation(yaml: string): Automation {
   }
   return parsed.entries[0].automation;
 }
+
+/** A request's formulas, for a run without code steps. */
+const formulasOf = (request: EvaluationRequest) => request.items.filter((item): item is AutomationFormula => item.kind !== "code");
 
 function claim(change: Partial<RecordChange> = {}): AutomationClaim {
   return {
@@ -89,12 +100,36 @@ describe("find conditions", () => {
     expect(findQueryOf("(true)")).toEqual({ match: "all" });
   });
 
+  it("compares with a formula that does not read the record it checks, such as a number a message names", () => {
+    expect(findQueryOf("record.ID == message.body.slice(6)")).toEqual({
+      match: "field", field: "ID", operator: "equals", value: { kind: "formula", expression: "message.body.slice(6)" },
+    });
+    expect(findQueryOf("contains(record.Tags, lower(person.name))")).toMatchObject({ operator: "contains", value: { kind: "formula", expression: "lower(person.name)" } });
+    expect(findQueryOf("record.Status == today()")).toMatchObject({ value: { kind: "formula", expression: "today()" } });
+    // The record a Find checks is no value to compare with, even as a property name's neighbor.
+    for (const condition of ["record.Status == record.Other", "record.Status == ({ record }).record.Other", "record.Due == dateAdd(record.Start, 3)"]) {
+      expect(findQueryOf(condition), condition).toEqual({ problem: expect.stringContaining("A Find can check one field") });
+    }
+    expect(findQueryOf("record.Owner == message.record")).toMatchObject({ value: { kind: "formula", expression: "message.record" } });
+  });
+
+  it("works out a Find's formulas in one request before it reads, where the trigger record is only trigger.record", () => {
+    const definition = automation("id: a\nname: A\nwhen: record-added\ndo: [{find: 'true', as: all}]");
+    const request = findValuesRequest(inputs(definition), [
+      { ordinal: 0, values: [{ kind: "trigger-field", field: "Status" }] },
+      { ordinal: 2, values: [{ kind: "literal", value: 1 }, { kind: "formula", expression: "trigger.record.Count + 1" }] },
+    ], 0);
+    expect(request.formulas).toEqual([{ kind: "expression", source: "trigger.record.Count + 1" }]);
+    expect(request.slots).toEqual([{ ordinal: 2, index: 1 }]);
+    expect(request.scope).not.toHaveProperty("record");
+    expect(request.scope).toMatchObject({ trigger: { record: { Status: "Done", Count: 2 } }, bindings: {} });
+  });
+
   it("refuses a condition the query cannot run, instead of scanning the Collection", () => {
     for (const condition of [
       'record.Status == "Doing" && record.Points > 3',
       "record.Points > 3",
       'record?.Status == "Doing"',
-      "record.Status == today()",
       'record.Status == "a"), ("b"',
     ]) {
       expect(findQueryOf(condition)).toEqual({ problem: expect.stringContaining("A Find can check one field") });
@@ -126,14 +161,15 @@ describe("what the executor can run", () => {
     expect(operationsOf(steps)).toEqual(["invoices.markPaid", "log.add", "invoices.send"]);
   });
 
-  it("names why it cannot run code or a Find the query cannot express", () => {
+  it("runs code steps, and names why it cannot run a Find the query cannot express", () => {
     const withStep = (step: string) => automation(`id: a\nname: A\nwhen: record-added\ndo: [${step}]`);
     expect(unsupportedReason(withStep("{set: {Done: true}}"))).toBeNull();
     expect(unsupportedReason(withStep("{notify: Hi, to: [user-1]}"))).toBeNull();
     expect(unsupportedReason(withStep("{wake-agent: Hi, person: user-1}"))).toBeNull();
     expect(unsupportedReason(withStep("{post: Hi, group: Trip}"))).toBeNull();
     expect(unsupportedReason(withStep("{direct-message: Hi, to: [user-1, '=trigger.record.Owner']}"))).toBeNull();
-    expect(unsupportedReason(withStep("{run: 'return 1'}"))).toMatch(/code steps/);
+    expect(unsupportedReason(withStep("{run: 'return {}'}"))).toBeNull();
+    expect(unsupportedReason(withStep("{run-file: scripts/total.js, as: total}"))).toBeNull();
     // A Group message starts an automation dohc can run.
     const fromGroup = (step: string) => automation(`id: a\nname: A\nwhen: {group-message: Trip}\ndo: [${step}]`);
     expect(unsupportedReason(fromGroup("{add-record: {Title: x}}"))).toBeNull();
@@ -143,9 +179,22 @@ describe("what the executor can run", () => {
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/table/);
     const scheduled = (step: string) => automation(`id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [${step}]`);
     expect(unsupportedReason(scheduled("{find: 'true', as: all}"))).toBeNull();
-    expect(unsupportedReason(scheduled("{find: 'record.Owner == trigger.record.Owner', as: mine}"))).toMatch(/no trigger record/);
+    expect(unsupportedReason(scheduled("{find: 'record.Owner == trigger.record.Owner', as: mine}"))).toMatch(/cannot compare with trigger\.record/);
+    // A formula built on the trigger record has none to read either.
+    for (const find of ["{find: 'record.Owner == trigger.record.Owner + \"\"', as: mine}", "{find: 'record.Owner == lower(trigger[\"record\"].Owner)', as: mine}", "{find: 'record.Owner == trigger[`record`].Owner', as: mine}"]) {
+      expect(unsupportedReason(scheduled(find)), find).toMatch(/cannot compare with trigger\.record/);
+      expect(unsupportedReason(fromGroup(find)), find).toMatch(/cannot compare with trigger\.record/);
+      expect(unsupportedReason(withStep(find)), find).toBeNull();
+    }
+    expect(unsupportedReason(fromGroup("{find: 'record.Owner == \"ana\"', as: hers}"))).toBeNull();
+    expect(unsupportedReason(fromGroup("{find: 'contains(record.Tags, trigger.record.Tag)', as: tagged}")))
+      .toBe("A Group message starts this automation, so a Find cannot compare with trigger.record. Compare with a value instead.");
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {group-message: Team}\ndo: [{post: Hi, group: Team}]")))
       .toBeNull();
+    // A Find's formula runs before the Find reads, so no step's result exists yet.
+    expect(unsupportedReason(fromGroup("{find: 'record.ID == message.body.slice(6)', as: done}"))).toBeNull();
+    expect(unsupportedReason(withStep("{find: 'true', as: all}, {find: 'record.Owner == all[0].Owner', as: same}")))
+      .toBe("A Find cannot compare with all, another step's result. Compare with a value, the message, or a formula.");
     const finds = Array.from({ length: 6 }, (_, index) => `{find: 'true', as: f${index}}`).join(", ");
     expect(unsupportedReason(withStep(finds))).toMatch(/at most 5 Find steps/);
   });
@@ -271,7 +320,7 @@ describe("plans", () => {
     const request = evaluationRequest(run, 0);
     const evaluator = createAutomationEvaluator();
     try {
-      const results = await evaluator.evaluate(request.scope, request.formulas);
+      const results = await evaluator.evaluate(request.scope, formulasOf(request));
       expect(results).toEqual([value, ...Array.from({ length: 12 }, (_, index) => index)].map(value => ({ ok: true, value })));
       expect(planRun(run, request, results, key).kind).toBe("plan");
     } finally { await evaluator.close(); }
@@ -284,10 +333,10 @@ describe("plans", () => {
       "    otherwise: [{set: {Note: '=\"fallback\"'}}]",
       "  - set: {Seen: '=true'}",
     ].join("\n"));
-    const run = inputs(definition, { found: new Map([[1, [task]]]), truncatedFinds: new Set([1]) });
+    const run = inputs(definition, { found: new Map([[1, [task]]]), unreadFinds: new Map([[1, { error: FIND_OVERFLOW_ERROR, timedOut: false }]]) });
     const request = evaluationRequest(run, 0);
     expect(request.scope.bindings).not.toHaveProperty("items");
-    expect(request.formulas.map(formula => formula.when ?? [])).toEqual([
+    expect(formulasOf(request).map(formula => formula.when ?? [])).toEqual([
       [], [{ index: 0, truthy: true }],
       [{ index: 0, truthy: false }, { index: 1, truthy: false }], [{ index: 1, truthy: false }],
     ]);
@@ -305,11 +354,11 @@ describe("plans", () => {
       "id: find", "name: Find", "when: record-added", "if: items.length > 50", "do:",
       "  - find: 'true'", "    as: items", "  - set: {Seen: true}",
     ].join("\n"));
-    const run = inputs(definition, { found: new Map([[0, [task]]]), truncatedFinds: new Set([0]) });
+    const run = inputs(definition, { found: new Map([[0, [task]]]), unreadFinds: new Map([[0, { error: FIND_OVERFLOW_ERROR, timedOut: false }]]) });
     const request = evaluationRequest(run, 0);
     const evaluator = createAutomationEvaluator();
     try {
-      const results = await evaluator.evaluate(request.scope, request.formulas);
+      const results = await evaluator.evaluate(request.scope, formulasOf(request));
       expect(results[0]).toMatchObject({ ok: false, error: { code: "runtime" } });
       expect(planRun(run, request, results, key)).toMatchObject({
         kind: "failed", error: expect.stringContaining('The "Only if" condition failed.'),
@@ -331,7 +380,7 @@ describe("plans", () => {
     const request = evaluationRequest(run, 0);
     const evaluator = createAutomationEvaluator();
     try {
-      const results = await evaluator.evaluate(request.scope, request.formulas);
+      const results = await evaluator.evaluate(request.scope, formulasOf(request));
       expect(planRun(run, request, results, key)).toEqual({ kind: "skip" });
       expect(results.slice(-2)).toEqual([{ ok: true, value: null }, { ok: true, value: null }]);
     } finally { await evaluator.close(); }
@@ -351,7 +400,7 @@ describe("plans", () => {
     const request = evaluationRequest(run, 0);
     const evaluator = createAutomationEvaluator();
     try {
-      const results = await evaluator.evaluate(request.scope, request.formulas);
+      const results = await evaluator.evaluate(request.scope, formulasOf(request));
       expect(planRun(run, request, results, key).kind).toBe(kind);
       expect(results[1]).toEqual({ ok: true, value: kind === "plan" ? "matched" : null });
     } finally { await evaluator.close(); }
@@ -365,7 +414,7 @@ describe("plans", () => {
     const request = evaluationRequest(run, 0);
     const evaluator = createAutomationEvaluator();
     try {
-      const results = await evaluator.evaluate(request.scope, request.formulas);
+      const results = await evaluator.evaluate(request.scope, formulasOf(request));
       expect(planRun(run, request, results, key)).toMatchObject({ kind: "failed" });
       expect(results.slice(1)).toEqual([{ ok: true, value: null }, { ok: true, value: null }]);
     } finally { await evaluator.close(); }
@@ -383,7 +432,7 @@ describe("plans", () => {
     const request = evaluationRequest(inputs(definition), 0);
     const yes = (index: number) => ({ index, truthy: true });
     const no = (index: number) => ({ index, truthy: false });
-    expect(request.formulas.map(formula => formula.when ?? [])).toEqual([
+    expect(formulasOf(request).map(formula => formula.when ?? [])).toEqual([
       [], [yes(0)], [yes(0), yes(1)], [yes(0), yes(1), yes(2)],
       [yes(0), yes(1), no(2)], [yes(0), no(1)], [yes(0)],
     ]);
@@ -416,7 +465,7 @@ describe("plans", () => {
       "do:", "  - set: {Finished on: '=today()', Note: literal}",
     ].join("\n"));
     const request = evaluationRequest(inputs(definition), Date.UTC(2026, 8, 25, 1, 30));
-    expect(request.formulas).toEqual([
+    expect(formulasOf(request)).toEqual([
       { kind: "expression", source: "record.Count > 1" },
       { kind: "expression", source: "today()", when: [{ index: 0, truthy: true }] },
     ]);
@@ -457,7 +506,7 @@ describe("plans", () => {
       "        records: follow",
     ].join("\n"));
     const request = evaluationRequest(inputs(definition), 0);
-    expect(request.formulas.map((formula) => formula.kind === "expression" && formula.source)).toEqual([
+    expect(formulasOf(request).map((formula) => formula.kind === "expression" && formula.source)).toEqual([
       "record.Count > 5",
       '"Follow up " + record.Status',
     ]);
@@ -490,7 +539,7 @@ describe("plans", () => {
     ];
     const run = inputs(definition, { found: new Map([[0, siblings]]) });
     const request = evaluationRequest(run, 0);
-    expect(request.formulas).toEqual([{ kind: "expression", source: "(siblings).map((record) => (record.Count + 1\n))" }]);
+    expect(formulasOf(request)).toEqual([{ kind: "expression", source: "(siblings).map((record) => (record.Count + 1\n))" }]);
     expect(request.scope.bindings).toEqual({ siblings: [{ Count: 1, id: "rec_a" }, { Count: 4, id: "rec_b" }] });
     const planned = planRun(run, request, [{ ok: true, value: [2, 5] }], key);
     expect(planned).toMatchObject({ kind: "plan", steps: [{ ordinal: 1, effects: [
@@ -545,7 +594,7 @@ describe("plans", () => {
   it("runs a starts-matching automation only when the record did not match before the change", () => {
     const definition = automation("id: a\nname: A\nwhen: {starts-matching: record.Status == \"Done\"}\ndo: [{set: {X: 1}}]");
     const request = evaluationRequest(inputs(definition), 0);
-    expect(request.formulas[0]).toEqual({ kind: "expression", source: '((record) => (record.Status == "Done"\n))(__dohc_before)' });
+    expect(formulasOf(request)[0]).toEqual({ kind: "expression", source: '((record) => (record.Status == "Done"\n))(__dohc_before)' });
     expect(request.scope.bindings).toEqual({ __dohc_before: { Status: "Doing", Count: 2, id: "rec_task" } });
     expect(planRun(inputs(definition), request, [{ ok: true, value: false }, { ok: true, value: true }], key).kind).toBe("plan");
     expect(planRun(inputs(definition), request, [{ ok: true, value: true }, { ok: true, value: true }], key)).toEqual({ kind: "skip" });
@@ -572,7 +621,7 @@ describe("messages", () => {
   it("posts the text the evaluator rendered, and refuses a message with no text", () => {
     const run = inputs(tell, { chat: directory });
     const request = evaluationRequest(run, 0);
-    expect(request.formulas).toEqual([{
+    expect(formulasOf(request)).toEqual([{
       kind: "text", parts: [{ kind: "text", text: "Hi " }, { kind: "expression", expression: "record.Status" }],
     }]);
     expect(planRun(run, request, [{ ok: true, value: "Hi Done  \r\n" }], key)).toMatchObject({
@@ -585,5 +634,127 @@ describe("messages", () => {
       .toEqual({ kind: "failed", error: "The message in step 1 is empty.", timedOut: false });
     expect(planRun(run, request, [{ ok: true, value: 5 }], key))
       .toEqual({ kind: "failed", error: "The message in step 1 is not text.", timedOut: false });
+  });
+});
+
+describe("code steps", () => {
+  const key = { claimId: "atc_1", hash: "h" };
+
+  it("runs code after the formulas before it, and gives the formulas after it the value it returned", async () => {
+    const definition = automation([
+      "id: total", "name: Total", "when: record-added", "if: record.Count > 1", "do:",
+      "  - run: 'return { output: ctx.record.Count * 10 }'", "    as: total",
+      "  - if: total > 5",
+      "    do: [{set: {Note: '=\"big \" + total'}}]",
+      "    otherwise: [{run: 'while (true) {}'}]",
+    ].join("\n"));
+    const run = inputs(definition);
+    const request = evaluationRequest(run, 0);
+    expect(request.slots.map((slot) => slot.kind)).toEqual(["only-if", "code", "if", "value", "code"]);
+    const shared = createAutomationFormulaEvaluator();
+    const asked: string[] = [];
+    const base = shared.forWorkspace("trip");
+    const budgets = new Set<unknown>();
+    const evaluator: AutomationFormulaEvaluator = {
+      evaluate: async (id, scope, formulas, spent) => {
+        budgets.add(spent);
+        asked.push(`formulas ${formulas.length}, total ${JSON.stringify(scope.bindings?.total)}`);
+        return await base.evaluate(id, scope, formulas, spent);
+      },
+      runCode: async (id, scope, source, spent) => {
+        budgets.add(spent);
+        asked.push(`code ${source}`);
+        return await base.runCode(id, scope, source, spent);
+      },
+    };
+    try {
+      const results = await evaluateRequest(evaluator, "collection:Tasks#total", request, { prepareMs: 0, runMs: 0 });
+      // The otherwise branch's code never runs.
+      expect(asked).toEqual(["formulas 1, total null", "code return { output: ctx.record.Count * 10 }", "formulas 2, total 20"]);
+      // Every request counts against one time budget for the run.
+      expect(budgets.size).toBe(1);
+      expect([...budgets][0]).toMatchObject({ runMs: expect.any(Number) });
+      expect(results).toEqual([true, { output: 20 }, true, "big 20", null].map((value) => ({ ok: true, value })));
+      expect(planRun(run, request, results as AutomationOutcome<JsonValue>[], key)).toMatchObject({
+        kind: "plan", steps: [{ ordinal: 0, effects: [] }, { ordinal: 2, effects: [{ kind: "set", fields: [{ field: "Note", after: "big 20" }] }] }],
+      });
+    } finally { await shared.close(); }
+  });
+
+  it("runs no code once the run's condition fails, and stops at code that fails", async () => {
+    const guarded = automation("id: c\nname: C\nwhen: record-added\nif: record.Count > 5\ndo: [{run: 'return {}'}]");
+    const never: AutomationFormulaEvaluator = {
+      evaluate: async () => [{ ok: true, value: false }],
+      runCode: async () => { throw new Error("The code ran."); },
+    };
+    await expect(evaluateRequest(never, "a", evaluationRequest(inputs(guarded), 0), { prepareMs: 0, runMs: 0 }))
+      .resolves.toEqual([{ ok: true, value: false }, { ok: true, value: null }]);
+    const failing: AutomationFormulaEvaluator = {
+      evaluate: async () => { throw new Error("Nothing runs after the failed code."); },
+      runCode: async () => ({ ok: false, error: { code: "timeout", message: "The code ran longer than 1000 ms, so it stopped." } }),
+    };
+    const run = inputs(automation("id: c\nname: C\nwhen: record-added\ndo: [{run: 'return {}'}, {set: {Note: '=1'}}]"));
+    const request = evaluationRequest(run, 0);
+    const results = await evaluateRequest(failing, "a", request, { prepareMs: 0, runMs: 0 });
+    expect(results).toHaveLength(1);
+    expect(planRun(run, request, results as AutomationOutcome<JsonValue>[], key))
+      .toEqual({ kind: "failed", error: "The code in step 1 failed. The code ran longer than 1000 ms, so it stopped.", timedOut: true });
+  });
+
+  it("turns the changes code returns into Set fields and Add record effects, one write per record", () => {
+    const definition = automation("id: c\nname: C\nwhen: record-added\ndo: [{run: 'return {}'}]");
+    const other = { id: "rec_other", path: "Tasks/other.md", values: { Count: 7 } };
+    const answer: JsonValue = {
+      set: { Count: 3 },
+      records: [
+        { action: "add", collection: "Log", fields: { Title: "One" } },
+        { action: "change", collection: "Tasks", id: "rec_other", fields: { Count: 8 } },
+        { action: "change", collection: "Tasks", id: "rec_task", fields: { Note: "same record" } },
+        { action: "add", collection: "Log", fields: { Title: "Two" } },
+      ],
+    };
+    const run = inputs(definition, { codeRecords: new Map([
+      [codeRecordKey("Tasks", "rec_other"), other],
+      [codeRecordKey("Tasks", "rec_task"), task],
+    ]) });
+    const planned = planRun(run, evaluationRequest(run, 0), [{ ok: true, value: answer }], key);
+    const added = (index: number) => {
+      const recordId = derivedRecordId(`atc_1/h/0/${index}`);
+      return { recordId, name: `c-${recordId.slice(4, 12)}` };
+    };
+    expect(planned).toEqual({ kind: "plan", steps: [{ ordinal: 0, effects: [
+      { kind: "set", target: { recordId: "rec_task", collectionPath: "Tasks", path: "Tasks/one.md" }, fields: [
+        { field: "Count", before: 2, after: 3 }, { field: "Note", before: null, after: "same record" },
+      ] },
+      { kind: "add", collectionPath: "Log", ...added(1), fields: [{ field: "Title", value: "One" }] },
+      { kind: "set", target: { recordId: "rec_other", collectionPath: "Tasks", path: "Tasks/other.md" }, fields: [{ field: "Count", before: 7, after: 8 }] },
+      { kind: "add", collectionPath: "Log", ...added(4), fields: [{ field: "Title", value: "Two" }] },
+    ] }] });
+  });
+
+  it("fails a run whose code changes a record it cannot find, sets fields with no record, or breaks the contract", () => {
+    const definition = automation("id: c\nname: C\nwhen: record-added\ndo: [{set: {Seen: true}}, {run: 'return {}'}]");
+    const plan = (answer: JsonValue) => {
+      const run = inputs(definition);
+      return planRun(run, evaluationRequest(run, 0), [{ ok: true, value: answer }], key);
+    };
+    expect(plan({ records: [{ action: "change", collection: "Tasks", id: "rec_gone", fields: { Count: 1 } }] }))
+      .toMatchObject({ kind: "failed", error: "The code in step 2 changes record rec_gone, which is not in Tasks." });
+    const scheduled = automation("id: c\nname: C\nwhen: {schedule: day, timezone: UTC}\ndo: [{run: 'return {}'}]");
+    const nightly = inputs(scheduled, { record: null });
+    expect(planRun(nightly, evaluationRequest(nightly, 0), [{ ok: true, value: { set: { Count: 1 } } }], key))
+      .toMatchObject({ kind: "failed", error: 'The code in step 1 returned "set", but a schedule starts this automation, so it has no record to set fields on. Change records by id in "records" instead.' });
+    expect(plan({ set: { id: "rec_new" } })).toMatchObject({ kind: "failed", error: "The code in step 2 sets id. A record's id cannot change." });
+    const many = Array.from({ length: MAX_CODE_RECORD_CHANGES + 1 }, () => ({ action: "add", collection: "Log", fields: {} }));
+    expect(plan({ records: many })).toMatchObject({ kind: "failed", error: expect.stringMatching(/^The code in step 2 changes more than 50 records/) });
+  });
+
+  it("reads each code file a step runs once, and counts it among the automation's sources", () => {
+    const definition = automation("id: c\nname: C\nwhen: record-added\ndo: [{run-file: scripts/a.js}, {run-file: scripts/a.js, as: again}, {run: 'return {}'}]");
+    expect(codeFilesOf(definition, "Trip/Tasks")).toEqual(["Trip/Tasks/scripts/a.js"]);
+    const run = inputs(definition, { codeFiles: new Map([["scripts/a.js", "return { output: 1 }"]]) });
+    expect(evaluationRequest(run, 0).items).toEqual([
+      { kind: "code", source: "return { output: 1 }" }, { kind: "code", source: "return { output: 1 }" }, { kind: "code", source: "return {}" },
+    ]);
   });
 });

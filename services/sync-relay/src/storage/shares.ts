@@ -363,6 +363,12 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
         }
       }
       const revokedAtMs = Math.trunc(input.revokedAtMs);
+      storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
+        WHERE share_id = ? AND EXISTS (
+          SELECT 1 FROM json_each(grants_json) receipt_grant
+          JOIN sync_relay_share_grants g ON g.grant_id = json_extract(receipt_grant.value, '$.grantId')
+          WHERE g.grant_id = ? OR g.parent_grant_id = ?
+        )`).run(input.shareId, grant.grantId, grant.grantId);
       storage.db
         .prepare(
           `UPDATE sync_relay_share_grants
@@ -380,6 +386,10 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
           )
           .run(revokedAtMs, grant.grantId);
       }
+      storage.db.prepare(`DELETE FROM sync_relay_share_labels WHERE share_id = ?
+        AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
+          WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
+        .run(grant.shareId, grant.shareId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   }
 
@@ -575,6 +585,7 @@ export function insertShare(storage: StorageContext, share: SyncRelayShareRow): 
         share.selectorJson,
         Math.trunc(share.createdAtMs),
       );
+    if (share.labels) storage.setShareLabels(share.shareId, share.labels, share.createdAtMs);
   }
 
 export function insertLinkCredential(storage: StorageContext, credential: SyncRelayLinkCredentialRow): void {
@@ -940,11 +951,15 @@ export function listSharesReceivedBy(storage: StorageContext, recipientUserId: s
   }
 
 export function revokeShare(storage: StorageContext, shareId: string, revokedAtMs: number): boolean {
-    return storage.tx(() => {
+  return storage.tx(() => revokeShareInTransaction(storage, shareId, revokedAtMs));
+}
+
+export function revokeShareInTransaction(storage: StorageContext, shareId: string, revokedAtMs: number): boolean {
       const existing = storage.db
         .prepare("SELECT 1 AS present FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
       if (existing === undefined) return false;
+      storage.db.prepare("DELETE FROM sync_relay_share_labels WHERE share_id = ?").run(shareId);
       const revoked = storage.db
         .prepare(
           `UPDATE sync_relay_share_grants
@@ -962,21 +977,16 @@ export function revokeShare(storage: StorageContext, shareId: string, revokedAtM
              )`,
         )
         .run(Math.trunc(revokedAtMs), shareId);
-      if (Number(revoked.changes ?? 0) > 0) {
-        // Ending a share settles what it was still carrying. An
-        // open proposal outlives the grant it came through — the recipient
-        // can no longer withdraw it, and its content stays pinned out of the
-        // blob sweep for as long as it stays open. Declining is the honest
-        // state: the granter ended the share instead of answering, and the
-        // recipient's own copy still has the changes.
-        storage.db
-          .prepare(
-            `UPDATE sync_relay_share_proposals
-             SET state = 'declined', settled_at_ms = ?
-             WHERE share_id = ? AND state = 'open'`,
-          )
-          .run(Math.trunc(revokedAtMs), shareId);
-      }
+      storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
+        WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)
+        .run(shareId, Number(revoked.changes ?? 0));
+      // Open proposals can outlive their grants and still pin their blobs.
+      storage.db
+        .prepare(
+          `UPDATE sync_relay_share_proposals
+           SET state = 'declined', settled_at_ms = ?
+           WHERE share_id = ? AND state = 'open'`,
+        )
+        .run(Math.trunc(revokedAtMs), shareId);
       return true;
-    });
   }

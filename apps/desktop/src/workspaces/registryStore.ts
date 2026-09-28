@@ -12,6 +12,7 @@ import { dirname } from "node:path";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import type { RosterListing, ShareRoster } from "../automations/shareRoster";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import type { ConfirmedShareRemoval } from "./recipientShareReconciliation";
 import type { ShareViewSelector } from "./shareViewInfo";
 
 // Pure registry persistence: a JSON file of known local workspaces. The
@@ -216,6 +217,8 @@ export function acknowledgeShareSkips(
 // refreshed from the share, never pushed. `ended` marks a revoked share —
 // the local copy stays readable but stops refreshing.
 export interface ShareViewIdentity {
+  subjectName?: string | null;
+  sharerName?: string | null;
   shareId: string;
   granterEmail: string | null;
   genericChatWritable: boolean;
@@ -258,6 +261,10 @@ export interface JoinedSharedChannel {
   relayUrl: string;
   recipientUserId: string;
   ended?: boolean;
+  // The person left this channel themselves. Its grant may still be active
+  // on the relay, so an active listing must not resume it; Join is the way
+  // back. Absent on a row the relay ended.
+  left?: true;
 }
 
 // A share MOUNTED into a host workspace: the received share materializes
@@ -303,6 +310,11 @@ export interface RegistryEntry extends CreatedWorkspace {
   sharedChannels?: JoinedSharedChannel[];
   // Share mounts materialized into this workspace's shared-with-me/.
   shareMounts?: ShareMountRecord[];
+  // Shares held by this entry whose owner removed this account, as the
+  // relay's authenticated `removed` listing confirmed. Kept while the record
+  // is still ended and the share is not active again; see
+  // recipientShareReconciliation.ts for how a listing updates it.
+  confirmedRemovedShares?: ConfirmedShareRemoval[];
   // The grants the owner gave on this workspace, as the relay last listed
   // them. Absent until the first listing. See automations/shareRoster.ts.
   shareRoster?: ShareRoster;
@@ -601,6 +613,25 @@ export function createRegistryStore(registryFile: string) {
      * those ops. So the read-and-merge lives here, where a caller cannot pass
      * a stale copy at all.
      */
+    /**
+     * Apply a relay listing to the workspace's received-share records. The
+     * same read-and-merge as markShareViewEnded: the reconcile runs on the
+     * record as it stands, so a pull that wrote between the caller's read and
+     * this write is not undone. Returns whether anything changed.
+     */
+    reconcileRecipientShares(
+      workspaceId: string,
+      reconcile: (entry: Readonly<RegistryEntry>) => RegistryEntry | null,
+    ): boolean {
+      let changed = false;
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        const next = reconcile(entry);
+        changed = next !== null;
+        return next ?? undefined;
+      });
+      return changed;
+    },
+
     markShareViewEnded(workspaceId: string): void {
       updateWorkspaceEntry(
         workspaceId,

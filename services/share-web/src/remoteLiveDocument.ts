@@ -4,6 +4,16 @@ import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-brow
 import type {createLinkLiveClient} from "./linkLiveClient";
 import {replaceLiveText} from "./liveTextEdit";
 import {LIVE_UPDATE_REFUSAL_VALUES} from "@dohc/live-session-contract/live-update-admission";
+import {readBoundedJson} from "@dohc/service-http";
+import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
+
+async function refusalError(response: Response, signal: AbortSignal): Promise<Error> {
+  try {
+    const code = parseLinkRefusal(await readBoundedJson(response, 4096, signal), response.status);
+    return new Error(code ? LINK_REFUSALS[code].error : "not found");
+  } catch {return new Error("not found");}
+  finally {await response.body?.cancel().catch(() => {});}
+}
 
 type Provider = ReturnType<typeof createNamedLiveProvider>;
 function waitFor(provider: Provider, predicate: (state: NamedLiveProviderState) => boolean, signal: AbortSignal): Promise<void> {
@@ -37,10 +47,10 @@ export async function remoteLiveDocument(options: {
   let changed = false;
   try {
     const document = await options.request("/api/live/link-document", {method: "POST", body: JSON.stringify({discriminator: options.discriminator, path}), signal});
-    if (!document.ok) throw new Error("The live document is unavailable or this link cannot edit it.");
+    if (!document.ok) throw await refusalError(document, signal);
     const {objectId} = await document.json() as {objectId: string};
     const ticket = await options.request("/api/live/link-ticket", {method: "POST", body: JSON.stringify({discriminator: options.discriminator, objectId}), signal});
-    if (!ticket.ok) throw new Error("The live document is unavailable or this link cannot edit it.");
+    if (!ticket.ok) throw await refusalError(ticket, signal);
     const {token} = await ticket.json() as {token: string};
     const frames = options.limits.provider.frames;
     const host = await options.client.openMaterialRoute(options.discriminator, options.cookie, token, signal, {

@@ -14,7 +14,7 @@ const prepared: Extract<OwnerAppPublicationResult, { kind: "prepared" }> = {
 };
 const published: Extract<OwnerAppPublicationResult, { kind: "published" }> = { kind: "published", publicationId: "c".repeat(64), authorityRevision: 1 };
 const approvedCollection = {kind:"collection-create" as const,collectionPath:"trip/responses",schemaSha256:"a".repeat(64),allowedFields:["destination"],requiredFields:["destination"],readFields:["destination"]};
-const datasetCapability = { kind: "dataset" as const, datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64), operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link" as const, readOnly: false }] };
+const datasetCapability = { kind: "dataset" as const, name: "Orders", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64), operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link" as const, readOnly: false }] };
 const datasetRow = { publicationId: published.publicationId, authorityRevision: 1, shareId: "share-trip", grantId: "grant-trip", active: true, linkCurrent: true, datasetCapability, collectionCapability: null, manifestUnavailable: false as const, appRoot: "trip", sourceRevision: "b".repeat(64) };
 const row: ListRelayShareLinksResult["links"][number] = {
   shareId: "share-trip", grantId: "grant-trip", generation: 1, status: "active", createdAtMs: 1,
@@ -32,6 +32,7 @@ async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPubl
   return { kind: "cancelled" };
 }
 const api = {
+  dataset: vi.fn(async () => ({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json" as string | null, datasetAddressStatus: "available" as "available" | "missing" | "ambiguous" }], nextCursor: null })),
   listRelayShareLinks: vi.fn(async (): Promise<ListRelayShareLinksResult> => page),
   publishOwnerApp: vi.fn(answer),
   openExternalUrl: vi.fn(async () => undefined),
@@ -54,6 +55,35 @@ describe("owner app publication", () => {
   beforeEach(() => { vi.stubGlobal("dohcDesktop", api); });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.listRelayShareLinks.mockResolvedValue(page);
     api.publishOwnerApp.mockImplementation(answer);
+    api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null });
+  });
+
+
+  it.each(["missing", "ambiguous"] as const)("distinguishes %s Collection source and keeps the approved name", async status => {
+    api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: null, datasetAddressStatus: status }], nextCursor: null });
+    api.publishOwnerApp.mockImplementation(async request => request.action === "prepareLocal" ? { ...prepared, local: true, capabilities: [datasetCapability] } : answer(request));
+    const reportError = vi.fn();
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
+    await open();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare for this device" }));
+    await screen.findByText(status === "ambiguous" ? "Multiple dataset.json files name this Collection. Remove the duplicate file." : "Collection source missing. Restore its dataset.json file.");
+    expect(screen.getByTestId("app-publication-capability").textContent).toContain("Orders");
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("reports lookup failure to the shell and retries without claiming source is missing", async () => {
+    const failure = new Error("Engine connection lost");
+    api.dataset.mockRejectedValueOnce(failure);
+    api.publishOwnerApp.mockImplementation(async request => request.action === "prepareLocal" ? { ...prepared, local: true, capabilities: [datasetCapability] } : answer(request));
+    const reportError = vi.fn();
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
+    await open();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare for this device" }));
+    await waitFor(() => expect(reportError).toHaveBeenCalledWith("dohc could not find this Collection.", failure, expect.any(Function)));
+    expect(screen.queryByText("Collection source missing. Restore its dataset.json file.")).toBeNull();
+    act(() => reportError.mock.calls[0]![2]());
+    await screen.findByText("data/dataset.json");
+    expect(screen.getByTestId("app-publication-capability").textContent).toContain("Orders");
   });
 
   it("opens approval from the form empty state and restores focus after closing", async () => {
@@ -66,7 +96,7 @@ describe("owner app publication", () => {
   });
 
   it("reviews a bound Collection app without presenting another response database", async () => {
-    const datasetCapability = { kind: "dataset" as const, datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
+    const datasetCapability = { kind: "dataset" as const, name: "Orders", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
       operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link" as const, readOnly: false }] };
     api.publishOwnerApp.mockImplementation(async request => request.action === "prepareLocal" ? { ...prepared, local: true, capabilities: [datasetCapability] } : answer(request));
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />); await open();
@@ -112,7 +142,7 @@ describe("owner app publication", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.publishOwnerApp).toHaveBeenLastCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish app" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish app" })));
   });
   it.each([approvedCollection, "unavailable" as const])("confirms revocation of %s, sends the displayed revision, and keeps the app published", async currentCapability => {
     let revision = 7;
@@ -396,7 +426,7 @@ describe("owner app publication", () => {
   });
 
   it("shows the shared Collection binding and directs the owner to its records", async () => {
-    const datasetCapability = { kind: "dataset" as const, datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
+    const datasetCapability = { kind: "dataset" as const, name: "Orders", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
       operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link" as const, readOnly: false }] };
     api.publishOwnerApp.mockImplementation(async request => request.action === "list"
       ? { kind: "listed", publications: [{ ...datasetRow, datasetCapability }], nextCursor: null } : answer(request));
@@ -569,5 +599,6 @@ it("reviews a chosen read and its fields, with approval off by default", async (
   fireEvent.click(choice);
   await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
   expect(api.publishOwnerApp).toHaveBeenCalledWith(expect.objectContaining({ action: "approve", linkReads: [{ operationId: read.operationId, fieldIds: read.fields.map(field => field.fieldId) }] }));
-  cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.publishOwnerApp.mockImplementation(answer); api.listRelayShareLinks.mockResolvedValue(page);
+  cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.publishOwnerApp.mockImplementation(answer);
+    api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null }); api.listRelayShareLinks.mockResolvedValue(page);
 });

@@ -14,6 +14,7 @@ import type { JsonValue } from "./protocol.ts";
 import {
   createDatasetAutomationClaims,
   DATASET_AUTOMATION_ATTRIBUTED_REVISIONS,
+  DATASET_AUTOMATION_CHAIN_DEPTH,
   DATASET_AUTOMATION_CHAIN_STOPPED,
   DATASET_AUTOMATION_CLAIM_LIMIT,
   DATASET_AUTOMATION_CLAIMS_PER_COMMIT,
@@ -99,11 +100,11 @@ function ledger() {
   // The ledger reads through this, so a test can count its statements.
   const statements: string[] = [];
   const counted: JournalDb = { exec: sql => db.exec(sql), prepare: sql => { statements.push(sql); return db.prepare(sql); } };
-  const wakes: Array<{ scope: DatasetScope; inTransaction: boolean }> = [];
+  const wakes: Array<{ scope: DatasetScope; failed: boolean; inTransaction: boolean }> = [];
   let clock = 1_000, charged = 0;
   const open = () => createDatasetAutomationClaims({ db: counted, transaction, nowMs: () => clock,
     account(key, bytes) { expect(key).toEqual(scope); expect(db.isTransaction).toBe(true); charged += bytes; },
-    wake: woken => wakes.push({ scope: woken, inTransaction: db.isTransaction }) });
+    wake: (woken, failed) => wakes.push({ scope: woken, failed, inTransaction: db.isTransaction }) });
   let claims = open();
   const journal = createDatasetJournal({ db, transaction });
   let cursor = journal.initialize({ scope, hostEpoch: "host-1", approvedRevisionHash: ledgerRevision.revisionSha256, source: "globalThis.operations={};",
@@ -149,7 +150,7 @@ it("claims each changed record once per subscribed automation, by table, change 
   expect(f.claims.next(scope.workspaceId)).toBeNull();
   // Each wake comes after its commit, and only a commit that claimed wakes.
   await Promise.resolve();
-  expect(f.wakes).toEqual([1, 2, 4].map(() => ({ scope, inTransaction: false })));
+  expect(f.wakes).toEqual([1, 2, 4].map(() => ({ scope, failed: false, inTransaction: false })));
 });
 
 it("costs one indexed read for a commit no automation watches", () => {
@@ -170,7 +171,7 @@ it("claims nothing for a receipt replay", () => {
   expect(drain(f.claims)).toHaveLength(1);
 });
 
-it("stops at the claim limit, with one failed claim that says so", () => {
+it("stops at the claim limit, with one failed claim that says so", async () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
   f.claims.subscribe(scope, subscription("collection:tasks#b", ["added"]));
@@ -179,6 +180,10 @@ it("stops at the claim limit, with one failed claim that says so", () => {
   expect(drain(f.claims)).toHaveLength(DATASET_AUTOMATION_CLAIMS_PER_COMMIT);
   expect(f.db.prepare("SELECT automation_id,state,attempts,error FROM dohc_dataset_automation_claims WHERE state!='running'").all())
     .toEqual([{ automation_id: "collection:tasks#a", state: "failed", attempts: 0, error: DATASET_AUTOMATION_CLAIM_LIMIT }]);
+  // It never started, but the chain cap did not stop it, and its wake says it made a failure.
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ neverStarted: true, chainStopped: false, error: DATASET_AUTOMATION_CLAIM_LIMIT }]);
+  await Promise.resolve();
+  expect(f.wakes).toEqual([{ scope, failed: true, inTransaction: false }]);
 });
 
 it("commits a change it cannot read, failing only the automations that watch what it holds, wherever the refusal falls", () => {
@@ -228,7 +233,7 @@ it("names a record whose id is too long in one failed claim, never a cut id", ()
   expect(Number(row.storage_bytes)).toBeLessThan(4096);
 });
 
-it("never claims an automation's own commit, records it for History, and stops the chain at depth 4", () => {
+it("never claims an automation's own commit, records it for History, and stops the chain at depth 4", async () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
   f.claims.subscribe(scope, subscription("collection:tasks#b", ["added"]));
@@ -244,6 +249,10 @@ it("never claims an automation's own commit, records it for History, and stops t
   expect(f.db.prepare("SELECT revision,automation_id,depth FROM dohc_dataset_automation_revisions ORDER BY revision").all()).toEqual([
     { revision: 1, automation_id: "collection:tasks#a", depth: 1 }, { revision: 2, automation_id: "collection:tasks#b", depth: 4 },
   ]);
+  // The stop's wake says it made a failure, so its notice goes out without waiting for another change.
+  await Promise.resolve();
+  expect(f.wakes.map(wake => wake.failed)).toEqual([false, true]);
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ automationId: "collection:tasks#a", neverStarted: true, chainStopped: true, error: DATASET_AUTOMATION_CHAIN_STOPPED }]);
 });
 
 it("claims an agent's commit at its run's depth, and records nothing for History", () => {
@@ -377,7 +386,7 @@ it("lists an automation's runs newest first, and offers the failure it settled l
   f.claims.settle(first!, { state: "failed", error: "First." });
   expect(f.claims.claims(scope.workspaceId, "collection:tasks#a").map(claim => claim.claimId)).toEqual([second!.claimId, first!.claimId]);
   expect(f.claims.failures(scope.workspaceId)).toEqual([{ automationId: "collection:tasks#a", claimId: first!.claimId,
-    datasetInstance: JSON.stringify([scope.datasetId, "host-1"]), neverStarted: false, error: "First.", updatedAtMs: 1_001, generation: 2 }]);
+    datasetInstance: JSON.stringify([scope.datasetId, "host-1"]), neverStarted: false, chainStopped: false, error: "First.", updatedAtMs: 1_001, generation: 2 }]);
   expect(f.claims.claims(scope.workspaceId, "collection:tasks#b")).toEqual([]);
 });
 
@@ -395,7 +404,7 @@ it("counts each automation's failures in a generation that trimming and Try agai
   expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 2, error: "Still no." }]);
   // A chain stop fails before it starts, and counts too.
   f.commit("INSERT INTO tasks VALUES('b','Open','')", { kind: "automation", automationId: "collection:tasks#other", depth: 4 });
-  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 3, neverStarted: true }]);
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 3, neverStarted: true, chainStopped: true }]);
   // The count's row is charged to the dataset like its claims.
   expect(f.charged).toBe(retained(f.db));
   expect(Number(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_automation_failure_generations").get()!.count)).toBe(1);
@@ -516,6 +525,25 @@ it("claims a press for the person who pressed, answers the same press sent again
   const again = press("press-7", "a", BEN);
   expect(again).toMatchObject({ kind: "claimed", claim: { actor: BEN, state: "pending" } });
   expect(again.kind !== "busy" && again.claim.claimId).not.toBe(first.claim.claimId);
+  expect(f.charged).toBe(retained(f.db));
+});
+
+it("claims an agent's press for its person at the agent run's depth, and stops it at once at depth 4", () => {
+  const f = ledger();
+  const press = presses(f);
+  f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  f.commit("INSERT INTO tasks VALUES('b','Open','')");
+  const agent = { ...ANA, agent: { depth: 2 } };
+  const pressed = press("press-1", "a", agent);
+  expect(pressed).toMatchObject({ kind: "claimed", claim: { state: "pending", depth: 2, actor: agent } });
+  // The run acts for Ana, so her own press joins it.
+  expect(press("press-2", "a", ANA)).toMatchObject({ kind: "joined" });
+  const stopped = press("press-3", "b", { ...ANA, agent: { depth: DATASET_AUTOMATION_CHAIN_DEPTH + 2 } });
+  expect(stopped).toMatchObject({ kind: "claimed", claim: { state: "failed", attempts: 0, depth: DATASET_AUTOMATION_CHAIN_DEPTH,
+    error: DATASET_AUTOMATION_CHAIN_STOPPED } });
+  // A stop counts as a failure, as a commit's stop does.
+  expect(f.claims.failures(scope.workspaceId)).toEqual([expect.objectContaining({ claimId: stopped.kind === "busy" ? "" : stopped.claim.claimId, neverStarted: true })]);
+  expect(() => press("press-4", "b", { ...ANA, agent: { depth: -1 } })).toThrow("Invalid automation presser");
   expect(f.charged).toBe(retained(f.db));
 });
 

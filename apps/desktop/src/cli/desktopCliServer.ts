@@ -15,6 +15,7 @@ import type {
 import {
   CLI_REQUEST_DEADLINE_MS,
   type CliAutomationsPort,
+  type CliButtonsPort,
   type CliRegistryWorkspace,
   type CliRunMessageLink,
   type CliServerHandle,
@@ -25,10 +26,11 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import { requirePublishedWrite, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
+import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import {
-  createCollectionRecord,
+  runCollectionRecordCreation,
   setCollectionRecordFields,
   type CollectionRecordEditContext,
 } from "../workspaces/collectionRecordEdits";
@@ -54,18 +56,22 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
-  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   /** The executor calls the Automations panel makes, for one workspace. */
   automations(workspace: RegistryEntry): CliAutomationsPort;
+  /** A window's press path, for one workspace. */
+  buttons(workspace: RegistryEntry): CliButtonsPort;
   findWorkspace(workspaceId: string): RegistryEntry | null;
   listWorkspaces(): RegistryEntry[];
   openWorkspaceActivity(workspace: RegistryEntry): Promise<unknown>;
   activity: {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
-      "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment" | "listVersions" | "writeAuthoredFile"
+      | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
+      | "listKeptCopies" | "saveKeptCopy"
+      | "listVersions" | "writeAuthoredFile"
     > | null;
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
@@ -172,11 +178,11 @@ export function createDesktopCliServer<State>(
       });
     return {
       workspaceId: workspace.workspaceId,
-      ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest) =>
+      ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
           if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The Collection workspace attachment changed.");
           if (request.action === "prepareRecovery" && !request.sourcePath) throw new Error("Collection recovery requires an explicit sourcePath.");
-          return dependencies.dataset!(request);
+          return dependencies.dataset!(request, agent);
         }) } : {}),
       ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
@@ -190,6 +196,7 @@ export function createDesktopCliServer<State>(
         }) } : {}),
       rootPath: workspace.rootPath,
       automations: dependencies.automations(workspace),
+      buttons: dependencies.buttons(workspace),
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
@@ -232,7 +239,7 @@ export function createDesktopCliServer<State>(
           setFields: (input) =>
             cliCollectionEdit((context) => setCollectionRecordFields(context, input)),
           createRecord: (input) =>
-            cliCollectionEdit((context) => createCollectionRecord(context, input)),
+            runCollectionRecordCreation(cliCollectionEdit, input),
         },
         query: async (params) => {
           const result = await withEngineAdapter(
@@ -331,6 +338,14 @@ export function createDesktopCliServer<State>(
           return { path };
         },
       },
+      ...(sharedViewOf(workspace.workspaceId)
+        ? {}
+        : {
+            keptCopies: {
+              list: () => capture.listKeptCopies(),
+              save: (id: number) => capture.saveKeptCopy(id),
+            },
+          }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit, objectId }) => {
         const page = await capture.listMoments({ limit, ...(objectId ? { objectId } : {}) });

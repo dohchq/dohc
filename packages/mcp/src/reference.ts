@@ -64,7 +64,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   discardRecovery: ["recovery-discarded"],
   upload: ["uploaded"],
   file: ["file"],
-  createForm: ["form-created"],
+  createForm: ["form-created", "partial"],
   prepareRelationChoices: ["migration-prepared"],
   create: ["approved"],
   prepare: ["prepared"],
@@ -116,6 +116,7 @@ export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
   runs: "automationRuns",
   run: "automationRun",
   retry: "automationRetry",
+  press: "automationPress",
 };
 
 // Command lines for every `dohc chat` verb. reference.test.ts parses each one
@@ -149,6 +150,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_read_change: { cli: "moment" },
   dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
   dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`",
+  dohc_list_kept_copies: { cli: "keptCopies" },
+  dohc_save_kept_copy: { cli: "saveKeptCopy" },
   dohc_read_document: { cli: "documentRead" },
   dohc_edit_document: { cli: "documentEdit" },
   dohc_create_document: { cli: "documentCreate" },
@@ -175,6 +178,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_automation_runs: { cli: "automationRuns" },
   dohc_read_automation_run: { cli: "automationRun" },
   dohc_retry_automation_run: { cli: "automationRetry" },
+  dohc_press_button: { cli: "automationPress" },
 };
 
 // One request per operation an app page can send over its app channel. The
@@ -490,6 +494,8 @@ Agent prompts and scripts depend on these names. Before launch, a rename replace
 - The CLI and the app must be the same build. Otherwise the CLI stops with \`CLI/app version mismatch — restart the app\`.
 
 A tool or command that cannot do what was asked returns \`{ ok: false, reason }\`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
+
+Partial form creation returns \`{ kind: "partial", created, failedStage, reason, retry }\`. The CLI exits with status 1 and keeps the structured output. MCP marks the result as an error and keeps its structured content.
 
 ## Desktop MCP tools
 

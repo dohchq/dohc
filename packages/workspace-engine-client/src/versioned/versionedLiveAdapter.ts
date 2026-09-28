@@ -56,6 +56,8 @@ import {
   type ConflictRecord,
   type ConflictResolveParams,
   type ConflictResolveResult,
+  type KeptCopiesListResult,
+  type KeptCopySaveResult,
   type WatcherStatusResult,
   type WorkspaceMethod,
   type WorkspaceMethodParamsMap,
@@ -1542,6 +1544,14 @@ export class VersionedLiveAdapter {
 
   async watcherStatus(): Promise<WatcherStatusResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
+  }
+
+  async listKeptCopies(): Promise<KeptCopiesListResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.keptCopiesList, {});
+  }
+
+  async saveKeptCopy(id: number): Promise<KeptCopySaveResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.keptCopiesSave, { id });
   }
 
   async flushCapture(): Promise<CaptureFlushResult> {

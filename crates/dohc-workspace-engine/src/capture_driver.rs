@@ -1392,10 +1392,7 @@ const NARROWED_SEED_SENTINEL_SHA: &str = "policy-narrowed-reoffer";
 /// An unavailable policy holds the run dirty for recovery.
 fn read_capture_policy(root: &Path) -> PolicyState {
     let snapshot = dohc_engine_runtime::search::read_engine_search_policy(root);
-    if snapshot.diagnostics.iter().any(|diagnostic| {
-        diagnostic.file == "files.toml"
-            && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
-    }) {
+    if snapshot.holds_file_capture() {
         return PolicyState::Unavailable;
     }
     PolicyState::Known(snapshot.files_policy)

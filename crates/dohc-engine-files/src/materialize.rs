@@ -95,6 +95,10 @@
 use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
 use crate::floor::is_excluded_file;
 use crate::media::{is_text_media_type, media_type_for_path};
+use crate::policy::{
+    MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification, classify_engine_file_path,
+    classify_engine_file_path_normalized,
+};
 use dohc_engine_storage::{
     Displacement, DisplacementResolution, DisplacementSpec, DisplacementState, EngineStore,
     FaultInjector, FaultPoint, JobStatus, MaterializationJob, MaterializationOperation, Preimage,
@@ -2587,6 +2591,228 @@ pub fn recover_path_displacements(
     Ok(())
 }
 
+/// What [`save_kept_displacement`] did with a kept file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeptCopySave {
+    /// The kept file is now this visible workspace-relative path.
+    Saved(String),
+    /// The workspace has no kept row under that id, or its file was already
+    /// gone. A row whose file is gone is ended too.
+    Gone,
+    /// No free sibling name fits the engine's name and path limits and keeps
+    /// the original's classification, so capture could not record a copy.
+    /// The file stays at its hidden name, and its row stays.
+    NoValidName,
+}
+
+/// Move a kept file from staging to a visible copy beside
+/// its path, `name (kept copy).ext`, and end its row. Capture then records
+/// the copy like any new file, and the person or an agent can open, compare
+/// or delete it.
+///
+/// The move never replaces a file, and the row ends only once the hidden
+/// name is gone, so kept bytes are never left under two names unreported.
+/// Where no sibling name would be recorded by capture, the file and its row
+/// stay.
+pub fn save_kept_displacement(
+    store: &EngineStore,
+    root: &Path,
+    workspace_id: &str,
+    displacement_id: i64,
+    options: &MaterializeOptions<'_>,
+) -> Result<KeptCopySave, MaterializeError> {
+    let Some(row) = store
+        .list_kept_displacements(workspace_id)?
+        .into_iter()
+        .find(|row| row.displacement_id == displacement_id)
+    else {
+        return Ok(KeptCopySave::Gone);
+    };
+    if !is_staged_name(&row.displaced_name) {
+        return Err(MaterializeError::UnsafeTargetPath);
+    }
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let staging = staging_dir(&canonical_root, false)?;
+    let kept = staging.join(&row.displaced_name);
+    if !entry_exists(&kept)? {
+        store.resolve_displacement(
+            displacement_id,
+            DisplacementResolution::Discard,
+            None,
+            options.now_ms,
+        )?;
+        return Ok(KeptCopySave::Gone);
+    }
+    // Orphan staging files have no original path. Keep them available through
+    // the recovery folder rather than guessing a name or file classification.
+    if row.target_path.is_empty() {
+        return Ok(KeptCopySave::NoValidName);
+    }
+    let target = resolve_target(&canonical_root, &row.target_path)?;
+    ensure_target_symlink_free(&canonical_root, &target)?;
+    let (parent, file_name) = match row.target_path.rsplit_once('/') {
+        Some((parent, name)) => (Some(parent), name),
+        None => (None, row.target_path.as_str()),
+    };
+    let original_class = classify_engine_file_path(&row.target_path);
+    let name_budget = MAX_KEPT_COPY_NAME_BYTES.min(
+        MAX_CANONICAL_WORKSPACE_PATH_BYTES
+            .saturating_sub(parent.map_or(0, |parent| parent.len() + 1)),
+    );
+    for n in 1..=MAX_DISPLACED_NAMES {
+        let Some(name) = kept_copy_name(file_name, n, name_budget) else {
+            return Ok(KeptCopySave::NoValidName);
+        };
+        let copy_path = match parent {
+            Some(parent) => format!("{parent}/{name}"),
+            None => name.clone(),
+        };
+        // The copy must be a path capture records, under the same rule as the
+        // original: never ignored, and never a secret turned plain or back.
+        let (class, normalized) = classify_engine_file_path_normalized(&copy_path);
+        if class == PathClassification::Ignored
+            || class != original_class
+            || normalized.as_deref() != Some(copy_path.as_str())
+        {
+            return Ok(KeptCopySave::NoValidName);
+        }
+        let copy = sibling_with_name(&target, &name);
+        // A copy that is the kept file itself, linked before a crash or a
+        // failed unlink, is this save's own: finish it. Anything else at the
+        // name, even with the same bytes, is another file.
+        if entry_exists(&copy)? {
+            if !is_same_file(&kept, &copy).map_err(|err| MaterializeError::io(&copy, &err))? {
+                continue;
+            }
+            #[cfg(windows)]
+            remove_placement_link(&kept, &copy).map_err(|err| MaterializeError::io(&kept, &err))?;
+            #[cfg(not(windows))]
+            std::fs::remove_file(&kept).map_err(|err| MaterializeError::io(&kept, &err))?;
+        } else {
+            match move_kept_copy(&kept, &copy, options) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(MaterializeError::Io {
+                    kind: ErrorKind::InvalidFilename,
+                    ..
+                }) => return Ok(KeptCopySave::NoValidName),
+                Err(err) => return Err(err),
+            }
+        }
+        sync_parent_dir(copy.parent(), options.policy)?;
+        sync_staged(&staging, options.policy)?;
+        store.resolve_displacement(
+            displacement_id,
+            DisplacementResolution::Discard,
+            None,
+            options.now_ms,
+        )?;
+        return Ok(KeptCopySave::Saved(copy_path));
+    }
+    Ok(KeptCopySave::NoValidName)
+}
+
+/// Move the kept file to `copy` without replacing anything there. `false`
+/// when something is already at `copy`.
+///
+/// Linux and macOS try one exclusive rename first. A Unix filesystem without
+/// it links the copy and then unlinks the hidden name; unlike
+/// [`rename_no_replace`], a failed unlink is an error, so the row stays and
+/// the next save finishes it. Windows and Unix filesystems with neither
+/// use [`place_attempt`], so a
+/// check-then-rename is recorded like any other placement's.
+fn move_kept_copy(
+    kept: &Path,
+    copy: &Path,
+    options: &MaterializeOptions<'_>,
+) -> Result<bool, MaterializeError> {
+    #[cfg(not(windows))]
+    {
+        #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+        {
+            use rustix::fs::{CWD, RenameFlags, renameat_with};
+            use rustix::io::Errno;
+            match renameat_with(CWD, kept, CWD, copy, RenameFlags::NOREPLACE) {
+                Ok(()) => return Ok(true),
+                Err(err) if err == Errno::EXIST => return Ok(false),
+                Err(err)
+                    if err == Errno::INVAL
+                        || err == Errno::NOSYS
+                        || err == Errno::NOTSUP
+                        || err == Errno::OPNOTSUPP => {}
+                Err(err) => return Err(MaterializeError::io(copy, &std::io::Error::from(err))),
+            }
+        }
+        match std::fs::hard_link(kept, copy) {
+            Ok(()) => {
+                std::fs::remove_file(kept).map_err(|err| MaterializeError::io(kept, &err))?;
+                return Ok(true);
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(false),
+            Err(err) if hard_links_unsupported(&err) => {}
+            Err(err) => return Err(MaterializeError::io(copy, &err)),
+        }
+    }
+    match place_attempt(options.replacer, kept, copy)? {
+        Attempt::Done(placed) => Ok(placed),
+        Attempt::Locked(err) => Err(MaterializeError::io(copy, &err)),
+    }
+}
+
+/// Whether the visible copy is the same regular file as the staged copy,
+/// left under both names by an interrupted hard-link placement.
+fn is_same_file(kept: &Path, copy: &Path) -> std::io::Result<bool> {
+    for path in [kept, copy] {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_file() || metadata_is_reparse_point(&metadata) {
+            return Ok(false);
+        }
+    }
+    same_file::is_same_file(kept, copy)
+}
+
+fn has_multiple_links(path: &Path) -> std::io::Result<bool> {
+    let file = open_displaced(path)?;
+    #[cfg(windows)]
+    let count = winapi_util::file::information(&file)?.number_of_links();
+    #[cfg(unix)]
+    let count = {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata()?.nlink()
+    };
+    Ok(count > 1)
+}
+
+/// `notes (kept copy).md`, then `notes (kept copy 2).md`, within `budget`
+/// bytes. A name with no extension, or only a leading dot, takes the suffix
+/// at its end. The stem gives up bytes, never splitting a character; the
+/// suffix and the extension stay whole. `None` when not one stem byte fits.
+fn kept_copy_name(file_name: &str, n: u32, budget: usize) -> Option<String> {
+    let suffix = match n {
+        1 => " (kept copy)".to_owned(),
+        n => format!(" (kept copy {n})"),
+    };
+    let (stem, extension) = match file_name.rfind('.') {
+        Some(dot) if dot > 0 && file_name.len() - dot + suffix.len() < budget => {
+            file_name.split_at(dot)
+        }
+        _ => (file_name, ""),
+    };
+    let mut keep = budget
+        .checked_sub(suffix.len() + extension.len())?
+        .min(stem.len());
+    while !stem.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    (keep > 0).then(|| format!("{}{suffix}{extension}", &stem[..keep]))
+}
+
+/// The longest file name, in UTF-8 bytes, a kept copy takes. Most file
+/// systems allow 255 bytes or 255 UTF-16 units per name, and 255 bytes of
+/// UTF-8 never needs more than 255 UTF-16 units.
+const MAX_KEPT_COPY_NAME_BYTES: usize = 255;
+
 /// Whether a replace left `path`'s file staged where it may still go back:
 /// an open row names it, or a pending job that targets it staged a file no
 /// row names yet. Capture must not record such a path as deleted.
@@ -2791,6 +3017,14 @@ fn recover_displacement(
             options.now_ms,
         )?;
         return Ok(false);
+    }
+    // Save may have linked the visible copy but stopped before unlinking
+    // staging. Leave both names and the row for the next Save to finish. A
+    // kept file that cannot be opened is also left staged.
+    if displacement.state == DisplacementState::Kept
+        && has_multiple_links(&moved.path).unwrap_or(true)
+    {
+        return Ok(true);
     }
     if displacement.target_path.is_empty() {
         let inspected = moved.inspect(store)?;
@@ -4348,6 +4582,124 @@ mod tests {
         assert!(reads.check(&target, &expected).expect("check") == TargetHolds::Other);
         std::fs::remove_file(&target).expect("remove");
         assert!(reads.check(&target, &expected).expect("check") == TargetHolds::Nothing);
+    }
+
+    #[test]
+    fn kept_copy_names_keep_the_extension() {
+        let name = |file: &str, n| kept_copy_name(file, n, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert_eq!(name("notes.md", 1), "notes (kept copy).md");
+        assert_eq!(name("notes.md", 2), "notes (kept copy 2).md");
+        assert_eq!(name("a.tar.gz", 1), "a.tar (kept copy).gz");
+        assert_eq!(name(".env", 1), ".env (kept copy)");
+        assert_eq!(name("Makefile", 3), "Makefile (kept copy 3)");
+    }
+
+    #[test]
+    fn recovery_leaves_interrupted_kept_copy_link_for_next_save() {
+        for target_exists in [false, true] {
+            for known_bytes in [false, true] {
+                let scratch = Scratch::new("kept-copy-interrupted-link");
+                let root = std::fs::canonicalize(&scratch.root).unwrap();
+                let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+                enqueue_write_job(&mut store, "kept-link", "notes.md", b"job content", 1);
+                let expected = store.put_binary_blob(b"preimage").unwrap();
+                let staging = staging_dir(&root, true).unwrap();
+                let name = staged_name("kept-link", 0);
+                let kept = staging.join(&name);
+                let bytes: &[u8] = if known_bytes {
+                    b"preimage"
+                } else {
+                    b"outside edit"
+                };
+                std::fs::write(&kept, bytes).unwrap();
+                let id = store
+                    .open_displacement(&DisplacementSpec {
+                        job_id: "kept-link".into(),
+                        workspace_id: "ws".into(),
+                        target_path: "notes.md".into(),
+                        displaced_name: name,
+                        expected_sha256: expected,
+                        content_sha256: Some(hex_sha256(b"job content")),
+                        now_ms: 1,
+                    })
+                    .unwrap();
+                // The earlier inspection could not read the staged bytes.
+                store
+                    .resolve_displacement(
+                        id,
+                        DisplacementResolution::Keep {
+                            displaced_sha256: None,
+                        },
+                        None,
+                        1,
+                    )
+                    .unwrap();
+                let target = root.join("notes.md");
+                if target_exists {
+                    std::fs::write(&target, b"job content").unwrap();
+                }
+                let copy = root.join("notes (kept copy).md");
+                // Save claimed the visible name but stopped before unlinking staging.
+                std::fs::hard_link(&kept, &copy).unwrap();
+                let rows = store.list_kept_displacements("ws").unwrap();
+                let options = options_with(&StdReplacer);
+                for _ in 0..2 {
+                    recover_displacements(&store, &root, Some("ws"), &options).unwrap();
+                    assert!(kept.exists(), "recovery must leave Save's staging link");
+                    assert!(is_same_file(&kept, &copy).unwrap());
+                    assert_eq!(store.list_kept_displacements("ws").unwrap(), rows);
+                    assert_eq!(target.exists(), target_exists);
+                    if target_exists {
+                        assert_eq!(std::fs::read(&target).unwrap(), b"job content");
+                    }
+                }
+                assert_eq!(
+                    save_kept_displacement(&store, &root, "ws", id, &options).unwrap(),
+                    KeptCopySave::Saved("notes (kept copy).md".into())
+                );
+                assert!(!kept.exists());
+                assert!(store.list_kept_displacements("ws").unwrap().is_empty());
+                assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+                std::fs::write(&target, b"later original edit").unwrap();
+                assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+                std::fs::write(&copy, b"later copy edit").unwrap();
+                assert_eq!(std::fs::read(&target).unwrap(), b"later original edit");
+            }
+        }
+    }
+
+    /// A name near its budget gives up stem bytes, never its extension or
+    /// suffix, and never splits a character. With no stem byte left, there is
+    /// no name.
+    #[test]
+    fn kept_copy_names_fit_their_budget() {
+        let long = format!("{}.md", "a".repeat(252));
+        let copy = kept_copy_name(&long, 12, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert_eq!(copy.len(), MAX_KEPT_COPY_NAME_BYTES);
+        assert!(copy.ends_with("a (kept copy 12).md"), "{copy}");
+
+        let wide = format!("{}.md", "é".repeat(126));
+        let copy = kept_copy_name(&wide, 1, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert!(copy.len() <= MAX_KEPT_COPY_NAME_BYTES, "{}", copy.len());
+        assert!(copy.ends_with("é (kept copy).md"), "{copy}");
+
+        let dotted = format!("a.{}", "b".repeat(253));
+        let copy = kept_copy_name(&dotted, 1, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert_eq!(copy.len(), MAX_KEPT_COPY_NAME_BYTES);
+        assert!(
+            copy.starts_with("a.b") && copy.ends_with("b (kept copy)"),
+            "{copy}"
+        );
+
+        assert_eq!(
+            kept_copy_name("notes.md", 1, 17).as_deref(),
+            Some("no (kept copy).md")
+        );
+        assert_eq!(
+            kept_copy_name("notes.md", 1, 15).as_deref(),
+            Some("not (kept copy)")
+        );
+        assert_eq!(kept_copy_name("notes.md", 1, 12), None);
     }
 
     /// The no-replace rename claims an empty name and refuses an occupied

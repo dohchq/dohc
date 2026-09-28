@@ -1,3 +1,4 @@
+import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { jsonResponse } from "@dohc/service-http";
 import type {PublicEditRelease} from "@dohc/security-contract";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
@@ -17,6 +18,7 @@ export type ShareGrantTransitionRoute =
   | { route: "share-link-retune"; shareId: string; grantId: string }
   | { route: "share-grant-promote"; shareId: string; grantId: string }
   | { route: "share-grant-revoke"; shareId: string; grantId: string }
+  | { route: "share-undo"; shareId: string }
   | { route: "share-revoke"; shareId: string };
 
 export type WorkspaceShareCreationRoute =
@@ -51,6 +53,8 @@ export function createShareGrantRoutes(
     | "promoteShareGrant"
     | "revokeShareGrant"
     | "revokeShare"
+    | "removeShareAccess"
+    | "undoShareRemoval"
     | "createFileLinkShare"
     | "createLinkGrant"
     | "createShare"
@@ -91,6 +95,7 @@ export function createShareGrantRoutes(
     shareId: string,
     grantId: string,
     actor: { userId: string },
+    allowRevoked = false,
   ): SyncRelayShareWithGrantRow {
     const share = storage.getShare(shareId);
     const grant = storage.getShareGrant(grantId);
@@ -102,8 +107,7 @@ export function createShareGrantRoutes(
       grant.shareId !== share.shareId ||
       grant.principalKind !== kind ||
       (kind === "user" && !grant.principalUserId) ||
-      grant.status !== "active" ||
-      grant.revokedAtMs !== null
+      (!allowRevoked && (grant.status !== "active" || grant.revokedAtMs !== null))
     ) {
       throw notFound();
     }
@@ -133,6 +137,16 @@ export function createShareGrantRoutes(
     route: ShareGrantTransitionRoute,
     actor: { userId: string },
   ): Promise<Response> {
+    if (route.route === "share-undo") {
+      if (request.method !== "POST") throw relayError("method_not_allowed");
+      const input = await readJsonObject(request);
+      if (Object.keys(input).some(key => key !== "undoId")) throw badRequest("request body contains an unknown field");
+      storage.undoShareRemoval({ shareId: route.shareId, actorUserId: actor.userId,
+        undoId: parseString(input.undoId, "undoId", 100), nowMs: nowMs() });
+      discussionActivity.wake(route.shareId);
+      discussionActivity.wakeLog(storage.getShare(route.shareId)!.workspaceId);
+      return jsonResponse({ ok: true, shareId: route.shareId });
+    }
     if (route.route === "share-link-rotate" && request.method === "POST") {
       const input = await readJsonObject(request);
       const workspaceId = parseWorkspaceId(input.workspaceId);
@@ -307,28 +321,20 @@ export function createShareGrantRoutes(
         route.shareId,
         route.grantId,
         actor,
+        true,
       );
       requireShareWorkspace(share, workspaceId);
-      const result = storage.revokeShareGrant({
-        shareId: route.shareId,
-        grantId: route.grantId,
-        revokedAtMs: nowMs(),
-        guard: () => {
-          const current = requireOwnedGrant(
-            "user",
-            route.shareId,
-            route.grantId,
-            actor,
-          );
-          requireShareWorkspace(current.share, workspaceId);
-        },
+      const result = storage.removeShareAccess({
+        shareId: route.shareId, grantId: route.grantId, actorUserId: actor.userId, nowMs: nowMs(),
+        guard: () => { requireShareWorkspace(requireOwnedGrant("user", route.shareId, route.grantId, actor, true).share, workspaceId); },
       });
       if (!result.ok) throw notFound();
       discussionActivity.wake(route.shareId);
       discussionActivity.wakeLog(share.workspaceId);
       return jsonResponse({
         ok: true,
-        ...namedGrantTransitionBody(result.grant),
+        ...namedGrantTransitionBody(result.grant!),
+        undo: result.undo,
       });
     }
     if (route.route === "share-grant-revoke") throw relayError("method_not_allowed");
@@ -361,10 +367,12 @@ export function createShareGrantRoutes(
           "workspaceId",
           "expectedDependentGrantIds",
         ]);
-        const result = storage.revokeShareGrant({
+        const result = storage.removeShareAccess({
           shareId: share.shareId,
           grantId,
-          revokedAtMs: nowMs(),
+          actorUserId: actor.userId,
+          nowMs: nowMs(),
+          guard: () => { requireShareWorkspace(requireOwnedGrant("link", share.shareId, grantId, actor, true).share, workspaceId); },
           expectedDependentGrantIds,
         });
         if (!result.ok) {
@@ -373,17 +381,19 @@ export function createShareGrantRoutes(
           }
           throw notFound();
         }
-        terminateLinkStreamsForGrant(result.grant.grantId);
+        terminateLinkStreamsForGrant(result.grant!.grantId);
         discussionActivity.wake(share.shareId);
         discussionActivity.wakeLog(share.workspaceId);
-        return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
+        return jsonResponse({ ok: true, ...linkGrantBody(result.grant!), undo: result.undo });
       }
-      if (storage.revokeShare(route.shareId, nowMs())) {
+      const result = storage.removeShareAccess({ shareId: route.shareId, actorUserId: actor.userId, nowMs: nowMs() });
+      if (result.ok) {
         terminateLinkStreamsForShare(route.shareId);
         discussionActivity.wake(route.shareId);
         discussionActivity.wakeLog(share.workspaceId);
       }
-      return jsonResponse({ ok: true, shareId: route.shareId });
+      if (!result.ok) throw notFound();
+      return jsonResponse({ ok: true, shareId: route.shareId, undo: result.undo });
     }
     throw relayError("method_not_allowed");
   }
@@ -397,10 +407,10 @@ export function createShareGrantRoutes(
       const input = await readJsonObject(request);
       if (
         Object.keys(input).some(
-          (key) => key !== "paths" && key !== "versionId" && key !== "access",
+          (key) => key !== "paths" && key !== "versionId" && key !== "access" && key !== "subjectName",
         )
       ) {
-        throw badRequest("A link accepts only access, paths, and versionId.");
+        throw badRequest("A link accepts only access, paths, versionId, and subjectName.");
       }
       const access = validatePublicLinkAccess(input.access, publicEditRelease);
       const validation = validateShareSelector({
@@ -421,6 +431,7 @@ export function createShareGrantRoutes(
         workspaceId: route.workspaceId,
         granterUserId: actor.userId,
         selectorJson: JSON.stringify(selector),
+        labels: {subjectName: normalizeShareLabel(input.subjectName)},
         createdAtMs,
       };
       const grant = {
@@ -521,6 +532,7 @@ export function createShareGrantRoutes(
 
     if (route.route === "shares-create" && request.method === "POST") {
       const input = await readJsonObject(request);
+      if ("sharerName" in input) throw badRequest("The relay supplies the sender.");
       // Two grant kinds share one create surface: a chat grant
       // (MU-C4, addressed by channelWireId + optional access) or the PR-18
       // path/version grant. The recipient addressing, pending-invite, and
@@ -611,6 +623,7 @@ export function createShareGrantRoutes(
             workspaceId: route.workspaceId,
             granterUserId: actor.userId,
             selectorJson: JSON.stringify(selector),
+        labels: {subjectName: normalizeShareLabel(input.subjectName)},
             createdAtMs,
           },
           grant: {
@@ -667,6 +680,7 @@ export function createShareGrantRoutes(
           workspaceId: route.workspaceId,
           granterUserId: actor.userId,
           selectorJson: JSON.stringify(selector),
+        labels: {subjectName: normalizeShareLabel(input.subjectName)},
           createdAtMs,
         },
         grant: {

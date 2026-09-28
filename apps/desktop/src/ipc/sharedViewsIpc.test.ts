@@ -234,10 +234,11 @@ describe("registered received-view handlers", () => {
 
   it("does not widen the pinned grant while updating the relay-derived chat fact", async () => {
     const h = await harness(); const pinned = h.workspace.shareView!.grantedSelector;
-    h.fetchInfo.mockResolvedValue({ ...info, selector: { paths: ["everything"], versionId: null, access: "edit" } });
+    h.fetchInfo.mockResolvedValue({ ...info, subjectName: "Renamed", sharerName: "Ana", selector: { paths: ["everything"], versionId: null, access: "edit" } });
     await h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
     expect(h.workspace.shareView!.grantedSelector).toBe(pinned);
     expect(h.workspace.shareView!.genericChatWritable).toBe(true);
+    expect(h.workspace.shareView).toMatchObject({subjectName: "Renamed", sharerName: "Ana"});
     expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: pinned });
   });
 

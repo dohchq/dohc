@@ -1406,6 +1406,30 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it.each([undefined, 1, 2, "1", 0, null])("dohc_detect_apps checks dohc.json version %s", async (version) => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "versioned"));
+      await writeFile(join(ctx.root, "versioned/index.html"), "<p>App</p>");
+      await writeFile(join(ctx.root, "versioned/dohc.json"), JSON.stringify({ version, type: "site", title: "Declared title" }));
+      const result = await detectApps(ctx);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const app = result.apps.find(app => app.root === "versioned")!;
+      if (version === 2) {
+        expect(app.diagnostics).toContainEqual({ severity: "error", code: "unsupported-version", path: "versioned/dohc.json",
+          message: "versioned/dohc.json uses a newer version. Update dohc to read this file." });
+        expect(app.title).not.toBe("Declared title");
+      } else if (version !== undefined && version !== 1) {
+        expect(app.diagnostics).toContainEqual({ severity: "error", code: "invalid-version", path: "versioned/dohc.json",
+          message: "versioned/dohc.json has an invalid version. Set version to 1." });
+        expect(app.title).not.toBe("Declared title");
+      } else {
+        expect(app.title).toBe("Declared title");
+        expect(app.diagnostics).toEqual([]);
+      }
+    });
+  });
+
   it("dohc_create_app scaffolds a normal website (engine-recorded)", async () => {
     await withWorkspace(async (ctx) => {
       const result = await createApp(ctx, { appRoot: "finance/ledger", title: "Ledger" });
@@ -1440,7 +1464,7 @@ describe("mcp tools operate on allowed paths", () => {
           serve: "14.2.6",
         },
       });
-      expect(config).toMatchObject({ type: "site", title: "Ledger", build: { output: "dist" } });
+      expect(config).toMatchObject({ version: 1, type: "site", title: "Ledger", build: { output: "dist" } });
       // The scaffold reports the engine as recorder; no change set.
       await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
         count: 0,
@@ -2808,4 +2832,44 @@ it.each([null, "budget"] as const)("returns structured chat dispatch state: %s",
   const request = vi.fn(async () => response);
   expect(await readChat({ root: "/workspace", home: "/home", request }, { threadId: "thread-1" })).toEqual(response);
   expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "chat", args: { cwd: "/workspace", actor: "agent", threadId: "thread-1" } }));
+});
+
+it("workspace status names a received share without using its labels as authority", async () => {
+  await withWorkspace(async ctx => {
+    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({workspaces: [{workspaceId: "received", rootPath: ctx.root, kind: "personal", shareView: {subjectName: "Trip", sharerName: "Ana", granterEmail: "ana@example.test"}}]}));
+    expect(await workspaceStatus({...ctx, shareAccess: "view"})).toMatchObject({receivedShare: {subjectName: "Trip", sharerName: "Ana (ana@example.test)", access: "view"}});
+    expect(await workspaceStatus(ctx)).toMatchObject({receivedShare: {access: null}});
+  });
+});
+
+it("uses the received selector for a legacy MCP subject fallback", async () => {
+  await withWorkspace(async ctx => {
+    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({workspaces: [{workspaceId: "received", rootPath: ctx.root, kind: "personal", shareView: {grantedSelector: {paths: ["docs"], access: "view"}}}]}));
+    expect(await workspaceStatus({...ctx, shareAccess: "view"})).toMatchObject({receivedShare: {subjectName: "a folder or file", access: "view"}});
+  });
+});
+
+it("tells agents when the owner removed access to a shared view or mounted share", async () => {
+  await withWorkspace(async ctx => {
+    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({version: 1, workspaces: [
+      {workspaceId: "ws-a", rootPath: ctx.root, kind: "personal", shareView: {shareId: "view", ended: true},
+        shareMounts: [{shareId: "mounted", ended: true}, {shareId: "live", ended: false}],
+        confirmedRemovedShares: [{shareId: "view", removedAtMs: 100}, {shareId: "mounted", removedAtMs: 100}]}
+    ]}));
+    const expected = ["view", "mounted"].map(shareId => ({shareId, message: "The owner removed your access. Your local copy stays readable."}));
+    expect(await workspaceStatus(ctx)).toMatchObject({removedShares: expected});
+    expect((await listWorkspaces(ctx)).workspaces[0]).toMatchObject({removedShares: expected});
+  });
+});
+
+it("does not blame the owner for an unconfirmed ended share or a group the recipient left", async () => {
+  await withWorkspace(async ctx => {
+    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({version: 1, workspaces: [
+      {workspaceId: "ws-a", rootPath: ctx.root, kind: "personal",
+        shareView: {shareId: "unknown", ended: true},
+        sharedChannels: [{shareId: "left", ended: true, left: true}]}
+    ]}));
+    expect(await workspaceStatus(ctx)).not.toHaveProperty("removedShares");
+    expect((await listWorkspaces(ctx)).workspaces[0]).not.toHaveProperty("removedShares");
+  });
 });

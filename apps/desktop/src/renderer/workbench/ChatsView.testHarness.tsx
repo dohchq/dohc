@@ -203,6 +203,7 @@ export function shareListing(
   rows: {
     granted?: unknown[];
     received?: unknown[];
+    removed?: string[];
     joined?: unknown[];
     // Answer for exactly these wire ids, whatever the caller named. It models
     // main and the renderer disagreeing about the scope, which is the only
@@ -220,6 +221,7 @@ export function shareListing(
       state: "answered" as const,
       granted: rows.granted ?? [],
       received: rows.received ?? [],
+      removed: rows.removed ?? [],
     },
   };
 }

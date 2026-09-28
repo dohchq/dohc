@@ -426,3 +426,8 @@ describe("workspace summary projection", () => {
     ).toThrow();
   });
 });
+
+it("carries sanitized share labels independently of pinned access", () => {
+  const summary = workspaceSummaryFor(entry({shareView: {...shareView({...goodSelector, access: "view"}), subjectName: "Trip\n", sharerName: "Ana\u202e"}}));
+  expect(summary.shareView).toMatchObject({subjectName: "Trip", sharerName: "Ana", access: "view"});
+});

@@ -1,3 +1,4 @@
+import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
@@ -125,6 +126,7 @@ import {
 // The renderer never sees raw Electron APIs.
 
 const OPAQUE_ID = z.string().min(1).max(200);
+const CHAT_CHANNEL_SLUG = z.string().min(1).refine(value => nameByteLength(value) <= 200);
 
 // Length caps: IPC payloads are untrusted; bound every renderer-supplied
 // string so a hostile/buggy caller cannot cause memory/latency pressure.
@@ -277,6 +279,8 @@ export const WorkspaceSummary = z.object({
       // live-share action (refresh, dismiss) is addressed by share id, so a
       // marker that cannot name itself cannot be presented as a live share.
       shareId: OPAQUE_ID.optional(),
+      subjectName: z.string().max(320).nullable().optional(),
+      sharerName: z.string().max(320).nullable().optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
       // The pinned level. Absent only when `damaged` says the stored
       // grant could not be read. The banner states the level; it never
@@ -657,6 +661,14 @@ export const QueryCollectionRecordsResult: z.ZodType<CollectionQueryResultContra
   });
 export type QueryCollectionRecordsResult = CollectionQueryResultContract;
 
+export const CreateCollectionRecordPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  name: z.string().min(1).max(200),
+  recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
+}).strict();
+export type CreateCollectionRecordPayload = z.infer<typeof CreateCollectionRecordPayload>;
+
 export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
@@ -1019,7 +1031,7 @@ const WorkspaceGraphChatThreadNode = WorkspaceGraphNodeBase.extend({
   channelId: OPAQUE_ID.optional(),
   channelWireId: z.string().min(1).max(256).optional(),
   channelName: z.string().min(1).max(100).optional(),
-  channelSlug: z.string().min(1).max(100).optional(),
+  channelSlug: CHAT_CHANNEL_SLUG.optional(),
   channelKind: z.enum(["channel", "dm", "agent"]).optional(),
   filePath: z.never().optional(),
   headingAnchor: z.never().optional(),
@@ -1616,7 +1628,7 @@ export const ChatFileMentionRecord = z.object({
   channelId: OPAQUE_ID.optional(),
   channelWireId: z.string().min(1).max(256).optional(),
   channelName: z.string().min(1).max(100).optional(),
-  channelSlug: z.string().min(1).max(100).optional(),
+  channelSlug: CHAT_CHANNEL_SLUG.optional(),
   channelKind: z.enum(["channel", "dm", "agent"]).optional(),
 });
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
@@ -1924,7 +1936,7 @@ const CHAT_CHANNEL_NAME_MAX = 80;
 export const ChatChannelRecord = z.object({
   id: OPAQUE_ID,
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
   // What the group holds and why it exists. Older fixtures omit them.
   type: z.enum(["posts", "chat", "both"]).optional(),
@@ -2029,7 +2041,7 @@ const ChatFeedChannelRecord = z.object({
   id: OPAQUE_ID,
   wireId: z.string().min(1).max(256).optional(),
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
 });
 
@@ -2696,6 +2708,33 @@ export const TryInVersionStateResult = z.object({
 });
 export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile. Each waits in the engine's staging directory until
+// saveKeptCopy moves it to a visible copy. That answer is `saved` with the
+// copy's path, `gone` when nothing is kept under the id any more, or
+// `no-valid-name` when no name beside the file fits, so the copy stays kept.
+export const KeptCopy = z.object({
+  id: z.number().int(),
+  path: z.string().min(1),
+  keptAtMs: z.number().int().nonnegative(),
+});
+export type KeptCopy = z.infer<typeof KeptCopy>;
+export const ListKeptCopiesResult = z.object({
+  keptCopies: z.array(KeptCopy),
+  more: z.boolean(),
+});
+export type ListKeptCopiesResult = z.infer<typeof ListKeptCopiesResult>;
+export const SaveKeptCopyPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  id: z.number().int(),
+});
+export const SaveKeptCopyResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("saved"), path: z.string().min(1) }),
+  z.object({ status: z.literal("gone") }),
+  z.object({ status: z.literal("no-valid-name") }),
+]);
+export type SaveKeptCopyResult = z.infer<typeof SaveKeptCopyResult>;
+
 // A window works only on the versions of the workspace open in it.
 const versionGuard = {
   guard: "active-workspace",
@@ -2731,6 +2770,14 @@ export const workspaceVersionOperations = {
   resolveWorkspaceVersionConflict: {
     channel: "desktop:resolve-workspace-version-conflict",
     payload: ResolveWorkspaceVersionConflictPayload, result: ResolveWorkspaceVersionConflictResult, ...versionGuard,
+  },
+  listKeptCopies: {
+    channel: "desktop:list-kept-copies",
+    payload: WorkspaceIdPayload, result: ListKeptCopiesResult, ...versionGuard,
+  },
+  saveKeptCopy: {
+    channel: "desktop:save-kept-copy",
+    payload: SaveKeptCopyPayload, result: SaveKeptCopyResult, ...versionGuard,
   },
   tryInWorkspaceVersion: {
     channel: "desktop:try-in-workspace-version",
@@ -3241,6 +3288,8 @@ const RelayShareDamagedState = z.object({
 });
 
 const RelayShareGrantedRowBase = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   // The workspace coordinate. This device need not have that workspace in
   // its local registry.
@@ -3267,6 +3316,8 @@ export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 // relay deliberately omits the granter's workspace id; the selector and
 // granter identity are all a recipient ever sees.
 const RelayShareReceivedRowBase = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   granterEmail: EMAIL_STRING.nullable(),
   genericChatWritable: z.boolean(),
@@ -3292,7 +3343,19 @@ export type GetRelayReceivedSharePayload = z.infer<
 >;
 
 export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
-  z.object({ found: z.literal(false) }).strict(),
+  z
+    .object({
+      found: z.literal(false),
+      // Present when the authenticated exact lookup confirms owner removal.
+      removed: z
+        .object({
+          message: z.string().min(1).max(500),
+          removedAtMs: z.number().int().nonnegative().optional(),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
   z
     .object({
       found: z.literal(true),
@@ -3304,11 +3367,22 @@ export type GetRelayReceivedShareResult = z.infer<
   typeof GetRelayReceivedShareResult
 >;
 
+// A grant the owner removed from this account. The relay keeps the row apart
+// from `received`, which stays active-only, and words the reason itself.
+export const RelayShareRemovedRow = z.object({
+  shareId: OPAQUE_ID,
+  grantId: OPAQUE_ID,
+  message: z.string().min(1).max(500),
+  removedAtMs: z.number().int().nonnegative(),
+});
+export type RelayShareRemovedRow = z.infer<typeof RelayShareRemovedRow>;
+
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
   // Path/version shares addressed to this account (chat grants are
   // listed through listChatChannelShares).
   received: z.array(RelayShareReceivedRow).max(1000).default([]),
+  removed: z.array(RelayShareRemovedRow).max(1000).default([]),
 });
 export type ListRelaySharesResult = z.infer<typeof ListRelaySharesResult>;
 
@@ -3338,6 +3412,43 @@ export const RevokeRelaySharePayload = z.object({
   shareId: OPAQUE_ID,
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
+
+// The relay's receipt for a removal it can put back. It restores the grants
+// the removal ended, as they were; it never makes a new grant or link. The
+// relay forgets the receipt at `expiresAtMs`, 10 minutes after the removal.
+export const RelayShareUndoReceipt = z
+  .object({
+    undoId: z.string().min(1).max(256),
+    expiresAtMs: z.number().int().nonnegative(),
+  })
+  .strict();
+export type RelayShareUndoReceipt = z.infer<typeof RelayShareUndoReceipt>;
+
+export const RevokeRelayShareResult = z
+  .object({ undo: RelayShareUndoReceipt.optional() })
+  .strict();
+export type RevokeRelayShareResult = z.infer<typeof RevokeRelayShareResult>;
+
+export const RelayShareRevokeResponse = z.object({
+  ok: z.literal(true),
+  undo: RelayShareUndoReceipt.optional(),
+});
+
+export const UndoRelaySharePayload = z
+  .object({
+    shareId: OPAQUE_ID,
+    undoId: RelayShareUndoReceipt.shape.undoId,
+  })
+  .strict();
+export type UndoRelaySharePayload = z.infer<typeof UndoRelaySharePayload>;
+
+export const UndoRelayShareResult = z.object({ shareId: OPAQUE_ID }).strict();
+export type UndoRelayShareResult = z.infer<typeof UndoRelayShareResult>;
+
+export const RelayShareUndoResponse = z.object({
+  ok: z.literal(true),
+  shareId: OPAQUE_ID,
+});
 
 const RELAY_SHARE_LINK_ACCESS = z.enum(["view", "comment", "edit"]);
 
@@ -3529,6 +3640,7 @@ export const RelayShareLinkRetuneNarrowResponse = z.object({
 
 export const RelayShareLinkEndResponse = z.object({
   ok: z.literal(true),
+  undo: RelayShareUndoReceipt,
 });
 
 const RelayShareLinkDependentsChangedOutcome = z
@@ -3566,7 +3678,7 @@ export type RetuneRelayShareLinkResult = z.infer<
 >;
 
 export const RevokeRelayShareLinkResult = z.discriminatedUnion("outcome", [
-  z.object({ outcome: z.literal("ended") }).strict(),
+  z.object({ outcome: z.literal("ended"), undo: RelayShareUndoReceipt }).strict(),
   RelayShareLinkDependentsChangedOutcome,
 ]);
 export type RevokeRelayShareLinkResult = z.infer<
@@ -3915,6 +4027,7 @@ export const RevokeRelayShareGrantResult = z
     ...RelayShareNamedGrantTransitionBase,
     status: z.literal("revoked"),
     revokedAtMs: z.number().int().nonnegative(),
+    undo: RelayShareUndoReceipt,
   })
   .strict();
 export type RevokeRelayShareGrantResult = z.infer<
@@ -4271,6 +4384,8 @@ export const ChatChannelShareGrantRow = z.object({
 export type ChatChannelShareGrantRow = z.infer<typeof ChatChannelShareGrantRow>;
 
 export const ChatChannelShareReceivedRow = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   channelWireId: CHANNEL_WIRE_ID,
   access: ChatShareAccess,
@@ -4351,6 +4466,9 @@ export const ListChatChannelSharesResult = z.object({
       state: z.literal("answered"),
       granted: z.array(ChatChannelShareGrantRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
       received: z.array(ChatChannelShareReceivedRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
+      // Share ids whose owner removed this account, as the relay confirms.
+      // Only this lane may say "the owner removed your access".
+      removed: z.array(OPAQUE_ID).max(1000).default([]),
     }),
     z.object({ state: z.literal("unreachable") }),
     // Over the per-lane cap. Not "unreachable": that word means dohc could not
@@ -4559,7 +4677,7 @@ export const ConfirmCollectionAutomationStepPayload = z.object({
   definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
   step: z.string().min(1).max(512),
   seq: z.number().int().nonnegative(),
-  // A person a formula named, whose hold this is.
+  // A person a formula named, or a Collection a code step named, whose hold this is.
   recipient: z.string().min(1).max(1_024).optional(),
 });
 export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
@@ -5342,8 +5460,11 @@ export const NoticeTargetShape = z.object({
   automation: NOTICE_TARGET_FIELD,
   run: NOTICE_TARGET_FIELD,
 });
+export const RefusalCoordinate = z.object({ originId: z.string(), originSeq: z.number().int() });
+export type RefusalCoordinate = z.infer<typeof RefusalCoordinate>;
 export const NoticeRow = z.object({
   store: NoticeStoreName,
+  refusalCoordinates: z.array(RefusalCoordinate).optional(),
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
   kind: z.string().min(1).max(64),
   // A local row names this computer's workspace. An account row names the
@@ -5354,6 +5475,7 @@ export const NoticeRow = z.object({
   senderLabel: codePoints(1, NOTICE_SENDER_LABEL_MAX_CHARS).nullable(),
   title: codePoints(1, NOTICE_TITLE_MAX_CHARS),
   body: codePoints(0, NOTICE_BODY_MAX_CHARS),
+  detail: z.string().max(262_144).optional(),
   // Null once the person can no longer open what the notice pointed at.
   target: NoticeTargetShape.nullable(),
   createdAtMs: z.number().int().nonnegative(),
@@ -5365,6 +5487,7 @@ export const NoticeRow = z.object({
 export type NoticeRow = z.infer<typeof NoticeRow>;
 export const NoticeRef = z.object({
   store: NoticeStoreName,
+  refusalCoordinates: NoticeRow.shape.refusalCoordinates,
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
 });
 export type NoticeRef = z.infer<typeof NoticeRef>;
@@ -5410,6 +5533,8 @@ export const RetryAutomationNoticeResult = z.union([
 const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
 const ScheduleHostComputer = z.object({
   installId: z.string().min(1).max(256),
+  // "server" for the dohc server, listed first while it runs automations.
+  kind: z.enum(["computer", "server"]),
   label: z.string().min(1).max(64),
   lastSeenMs: z.number().int().nonnegative(),
   thisComputer: z.boolean(),
@@ -5795,6 +5920,7 @@ export interface DohcDesktopBridge
   listWorkspaceFiles(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListWorkspaceFilesResult>;
+  createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
   createWorkspaceFile(
     payload: CreateWorkspaceFilePayload,
   ): Promise<CreateWorkspaceFileResult>;
@@ -5908,7 +6034,9 @@ export interface DohcDesktopBridge
   getRelayReceivedShare(
     payload: GetRelayReceivedSharePayload,
   ): Promise<GetRelayReceivedShareResult>;
-  revokeRelayShare(payload: RevokeRelaySharePayload): Promise<void>;
+  revokeRelayShare(payload: RevokeRelaySharePayload): Promise<RevokeRelayShareResult>;
+  // Puts back what a removal ended, using its receipt. Owner only.
+  undoRelayShare(payload: UndoRelaySharePayload): Promise<UndoRelayShareResult>;
   createRelayShareLink(
     payload: CreateRelayShareLinkPayload,
   ): Promise<CreateRelayShareLinkResult>;

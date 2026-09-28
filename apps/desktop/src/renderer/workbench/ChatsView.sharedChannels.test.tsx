@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatChannelRecord } from "../../ipc/bridgeContract";
 import {
   ChatsView,
@@ -21,6 +21,21 @@ import {
 describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
     channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
+
+  it("keeps the account email visible beside long invitation labels", async () => {
+    const subject = "Long group subject ".repeat(8), name = "Long sender name ".repeat(8), email = "account@example.test";
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({received: [{
+      shareId: "share-invite", subjectName: subject, sharerName: name,
+      channelWireId: "wire-invite", access: "read-write", granterEmail: email,
+    }]}));
+    renderView();
+    const address = await screen.findByText(`(${email})`);
+    expect(address.classList.contains("shrink-0")).toBe(true);
+    expect(address.classList.contains("break-all")).toBe(true);
+    expect(address.closest(".truncate")).toBeNull();
+    expect(address.parentElement?.title).toBe(`${name.trim()} (${email})`);
+    expect(address.parentElement?.parentElement?.title).toBe(`${subject} · ${name.trim()} (${email})`);
+  });
 
   it("fails closed when sharing metadata is unavailable", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -62,6 +77,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
         received: [
           {
             shareId: "share-invite",
+            subjectName: "Trip group", sharerName: "Ana",
             channelWireId: "wire-invite",
             access: "read-write",
             granterEmail: "owner@example.com",
@@ -71,7 +87,9 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [] });
     renderView();
-    await screen.findByTestId("chats-join-shared");
+    const invite = await screen.findByTestId("chats-join-shared");
+    expect(invite.closest("li")?.textContent).toContain("Trip group · Ana (owner@example.com)");
+    expect(invite.closest("li")?.textContent).toContain("Read-write");
 
     // The first read cannot name an invitation it has not been told about
     // yet, so it names the channels it shows and main adds the invitations to
@@ -596,7 +614,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
-  it("marks a granted channel as shared and manages members through the share panel", async () => {
+  it.each([false, true])("manages members through the share panel (already ended: %s)", async alreadyEnded => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [teamChannel()],
       fileThreads: [],
@@ -615,8 +633,10 @@ describe("ChatsView shared channels (MU-C4)", () => {
       }),
     );
     bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
-    bridgeMock.revokeRelayShare.mockResolvedValue(undefined);
-    renderView();
+    const undo = alreadyEnded ? undefined : { undoId: "undo-1", expiresAtMs: 600_000 };
+    bridgeMock.revokeRelayShare.mockResolvedValue({ undo });
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    renderView(vi.fn(), vi.fn(), { shareRemovals });
     expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
       "Shared with 1",
     );
@@ -626,13 +646,22 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(shareButton.textContent).toContain("Members · 1");
     await userEvent.click(shareButton);
 
-    // The member list shows who has it, and Remove revokes their grant.
+    // The member list shows who has it, and Remove revokes their grant. The
+    // shell gets the receipt and the words for the notice that holds Undo.
     const member = await screen.findByTestId("chats-share-member");
     expect(member.textContent).toContain("ana@example.com");
     await userEvent.click(screen.getByTestId("chats-share-revoke"));
     await waitFor(() =>
       expect(bridgeMock.revokeRelayShare).toHaveBeenCalledWith({ shareId: "share-1" }),
     );
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
+    expect(shareRemovals.removed.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+      undo,
+      message: alreadyEnded ? "ana@example.com no longer has access to team." : "Removed ana@example.com from team.",
+      restoredMessage: "Restored ana@example.com to team.",
+    });
 
     // Sharing to a new address, read-only via the checkbox.
     await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
@@ -682,7 +711,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
         relay: { state: "unreachable" as const },
       });
     });
-    bridgeMock.revokeRelayShare.mockResolvedValue(undefined);
+    bridgeMock.revokeRelayShare.mockResolvedValue({ undo: { undoId: "undo-1", expiresAtMs: 600_000 } });
     renderView();
 
     await userEvent.click(await screen.findByTestId("chats-channel"));
@@ -856,7 +885,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
         answers.push(resolve);
       });
     });
-    let finishRevoke!: (value: undefined) => void;
+    let finishRevoke!: (value: { undo: { undoId: string; expiresAtMs: number } }) => void;
     bridgeMock.revokeRelayShare.mockReturnValue(
       new Promise((resolve) => {
         finishRevoke = resolve;
@@ -881,7 +910,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     // The revoke finishes late; its confirming refresh cannot reach the
     // relay.
     await act(async () => {
-      finishRevoke(undefined);
+      finishRevoke({ undo: { undoId: "undo-1", expiresAtMs: 600_000 } });
       await Promise.resolve();
     });
     await waitFor(() => expect(shareReads).toBe(3));
@@ -1184,9 +1213,54 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
     cleanup();
 
-    // The same channel after revocation (ended): still readable, no posting.
+    // The same channel after the share ended: still readable, no posting.
+    // Nothing in the listing says why, so the note says only that.
+    const endedRow = {
+      shareId: "share-in",
+      channelWireId: "wire-team",
+      access: "read-write" as const,
+      granterEmail: "owner@example.com",
+      ended: true,
+    };
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ joined: [endedRow] }));
+    renderView();
+    expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
+      "no longer shared",
+    );
+    await userEvent.click(screen.getByTestId("chats-channel"));
+    const note = await screen.findByTestId("chats-readonly-note");
+    expect(note.textContent).toBe(
+      "This group is no longer shared with you. You can still read it.",
+    );
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    cleanup();
+
+    // Only the relay's removed lane may name the owner.
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({ joined: [endedRow], removed: ["share-in"] }),
+    );
+    renderView();
+    expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
+      "the owner removed your access",
+    );
+    await userEvent.click(screen.getByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
+      "The owner removed your access to this group. You can still read it.",
+    );
+    cleanup();
+
+    // An ended row whose invitation is still listed is one this workspace
+    // left: the owner did nothing, and Join is the way back.
     bridgeMock.listChatChannelShares.mockResolvedValue(
       shareListing({
+        received: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+          },
+        ],
         joined: [
           {
             shareId: "share-in",
@@ -1200,8 +1274,8 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
     renderView();
     await userEvent.click(await screen.findByTestId("chats-channel"));
-    const note = await screen.findByTestId("chats-readonly-note");
-    expect(note.textContent).toContain("no longer shared");
-    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
+      "You left this group. You can still read it.",
+    );
   });
 });

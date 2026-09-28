@@ -172,7 +172,7 @@ function triggerText(trigger: AutomationRunLine["trigger"]): string {
 
 function runStateText(run: Omit<AutomationRunLine, "changes">): string {
   return [
-    run.chainStopped ? "chain stopped" : run.state,
+    run.chainStopped ? "chain stopped" : run.neverStarted ? "never started" : run.state,
     ...(run.undone ? ["undone"] : []),
     ...(run.definitionChanged ? ["automation changed since"] : []),
   ].join(", ");
@@ -235,6 +235,15 @@ function renderAutomationRun({ run }: AutomationRunResult): string {
   ].join("\n");
 }
 
+function renderAutomationPress(result: Extract<CliResultByVerb["automationPress"], { ok: true }>): string {
+  if ("relayed" in result) return "sent to the owner's computer, which runs it";
+  const ran = result.outcome === null ? `started run ${result.run}` : `run ${result.run} ${result.outcome}`;
+  return [
+    result.error === null ? ran : `${ran}: ${lineSafe(result.error)}`,
+    ...(result.waiting === null ? [] : [result.waiting]),
+  ].join("\n");
+}
+
 export function renderCliResult<Verb extends keyof CliResultByVerb>(
   verb: Verb,
   result: CliResultByVerb[Verb],
@@ -284,6 +293,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderAutomationRun(result as AutomationRunResult);
     case "automationRetry":
       return "queued";
+    case "automationPress":
+      return renderAutomationPress(result as Extract<CliResultByVerb["automationPress"], { ok: true }>);
     default:
       return JSON.stringify(result, null, 2);
   }

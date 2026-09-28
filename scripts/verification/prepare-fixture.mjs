@@ -14,7 +14,7 @@ export function createPrepareFixture(root, buildSource) {
   put("node_modules/installed.txt", "old-lock");
   put("scripts/verification/build.mjs", readFileSync(buildSource));
   put("scripts/verification/cancellation.mjs", readFileSync(new URL("./cancellation.mjs", import.meta.url)));
-  put("tools/rust-engine-program/build-slot.mjs", "export const resolveBuildBudget=()=>null; export const freeDiskGb=()=>100; export const acquireBuildSlot=()=>{throw Error('not expected')};");
+  put("tools/rust-engine-program/build-slot.mjs", "export const resolveBuildBudget=()=>null; export const freeDiskGb=()=>100; export const acquireBuildSlot=()=>{throw Error('not expected')};  export const acquireVerificationSlot=()=>null;");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/process.mjs", `
     import assert from 'node:assert/strict';

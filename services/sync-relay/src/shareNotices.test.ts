@@ -77,9 +77,9 @@ describe("a notice when a share reaches a person", () => {
       kind: "share-received",
       senderKind: "person",
       senderUserId: "owner",
-      senderLabel: "Name owner",
-      title: "Name owner shared trip with you",
-      body: "",
+      senderLabel: "Name owner (owner@dohc.test)",
+      title: "Name owner (owner@dohc.test) shared a folder or file with you",
+      body: "View access · From Name owner (owner@dohc.test)",
       target: { share: shareId },
       workspaceId: null,
       recipientShareId: shareId,
@@ -92,7 +92,7 @@ describe("a notice when a share reaches a person", () => {
   it("reaches an account shared with by email", async () => {
     const { h } = await relay();
     await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientEmail: "ana@dohc.test" });
-    expect(await titles(h, "ana")).toEqual(["Name owner shared trip with you"]);
+    expect(await titles(h, "ana")).toEqual(["Name owner (owner@dohc.test) shared a folder or file with you"]);
   });
 
   it("reaches an address with no account once its account claims the share, once", async () => {
@@ -105,8 +105,8 @@ describe("a notice when a share reaches a person", () => {
     // A pull does not claim the share, and listing shares does.
     expect(await titles(h, "newbie")).toEqual([]);
     expect((await h(request("newbie", "/sync/shares"))).status).toBe(200);
-    expect(await titles(h, "newbie")).toEqual(["Name owner shared trip with you"]);
-    expect(await titles(h, "newbie")).toEqual(["Name owner shared trip with you"]);
+    expect(await titles(h, "newbie")).toEqual(["Name owner (owner@dohc.test) shared a folder or file with you"]);
+    expect(await titles(h, "newbie")).toEqual(["Name owner (owner@dohc.test) shared a folder or file with you"]);
   });
 
   it("names several paths, a version, a folder with a chat, a channel, and a message request", async () => {
@@ -119,20 +119,20 @@ describe("a notice when a share reaches a person", () => {
     await createShare(h, "owner", WORKSPACE, { channelWireId: "wire-dm", access: "read-write", recipientUserId: "cy" });
 
     expect(await titles(h, "ana")).toEqual([
-      "Name owner shared 3 items with you",
-      "Name owner shared a version with you",
-      "Name owner shared team with you",
+      "Name owner (owner@dohc.test) shared several items with you",
+      "Name owner (owner@dohc.test) shared a workspace with you",
+      "Name owner (owner@dohc.test) shared a Group with you",
     ]);
-    expect(await titles(h, "ben")).toEqual(["Name owner shared a channel with you"]);
-    expect(await titles(h, "cy")).toEqual(["Name owner sent you a message request"]);
+    expect(await titles(h, "ben")).toEqual(["Name owner (owner@dohc.test) shared a Group with you"]);
+    expect(await titles(h, "cy")).toEqual(["Name owner (owner@dohc.test) sent you a message request"]);
   });
 
   it("shortens a long name to fit the title", async () => {
     const { h } = await relay();
-    await createShare(h, "owner", WORKSPACE, { paths: [`trip/${"a".repeat(200)}`], recipientUserId: "ana" });
+    await createShare(h, "owner", WORKSPACE, { subjectName: "a".repeat(200), paths: [`trip/${"a".repeat(200)}`], recipientUserId: "ana" });
     const [title] = await titles(h, "ana");
     expect([...title!]).toHaveLength(120);
-    expect(title).toMatch(/^Name owner shared a+… with you$/u);
+    expect(title).toMatch(/^Name owner \(owner@dohc\.test\) shared a+… with you$/u);
   });
 
   it("names a granter with no display name by the email the recipient already sees", async () => {
@@ -140,12 +140,12 @@ describe("a notice when a share reaches a person", () => {
     await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
     expect(await notices(h, "ana")).toEqual([expect.objectContaining({
       senderLabel: "owner@dohc.test",
-      title: "owner@dohc.test shared trip with you",
+      title: "owner@dohc.test shared a folder or file with you",
     })]);
 
     const long = await relay({ lookupUserDisplayName: () => null, lookupUserEmail: (userId) => `${userId}${"x".repeat(40)}@dohc.test` });
     await createShare(long.h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
-    expect(await titles(long.h, "ana")).toEqual(["Someone shared trip with you"]);
+    expect((await notices(long.h, "ana"))[0]?.body).toBe("View access · From owner" + "x".repeat(40) + "@dohc.test");
   });
 
   it("sends nothing for a grant opened from a public link", async () => {
@@ -153,8 +153,8 @@ describe("a notice when a share reaches a person", () => {
     const shareId = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
     seedLinkGrant(storage, { grantId: "link-1", shareId, secretHash: sha256("secret") });
     seedDependentGrant(storage, { shareId, parentGrantId: "link-1", grantId: "from-link-lee", principalUserId: "lee", createdAtMs: CLOCK });
-    storage.noticeShareReceived({ grantId: "from-link-lee", senderLabel: "Owner", nowMs: CLOCK });
-    storage.noticeShareReceived({ grantId: "link-1", senderLabel: "Owner", nowMs: CLOCK });
+    storage.noticeShareReceived({ grantId: "from-link-lee", senderLabel: "Owner", senderEmail: null, nowMs: CLOCK });
+    storage.noticeShareReceived({ grantId: "link-1", senderLabel: "Owner", senderEmail: null, nowMs: CLOCK });
     expect(await notices(h, "lee")).toEqual([]);
   });
 
@@ -164,7 +164,7 @@ describe("a notice when a share reaches a person", () => {
     expect((await notices(h, "ana"))[0]?.target).toEqual({ share: shareId });
     expect(storage.revokeShare(shareId, CLOCK)).toBe(true);
     expect(await notices(h, "ana")).toEqual([expect.objectContaining({
-      title: "Name owner shared trip with you", target: null,
+      title: "Name owner (owner@dohc.test) shared a folder or file with you", target: null,
     })]);
   });
 
@@ -188,7 +188,7 @@ describe("a notice when a share reaches a person", () => {
     const { h } = await relay();
     const response = await h(request("ana", "/sync/notices", jsonBody({
       noticeId: "share-received:x", recipientUserId: "ana", workspaceId: "ana-work", kind: "share-received",
-      title: "Someone shared trip with you", body: "", target: {}, originInstallId: "install-a",
+      title: "Someone shared a folder or file with you", body: "", target: {}, originInstallId: "install-a",
     })));
     expect(response.status).toBe(400);
     expect(await json(response)).toMatchObject({ code: "bad_request" });
@@ -206,7 +206,7 @@ describe("a notice when a share reaches a person", () => {
     expect(waiting(storage)).toHaveLength(3);
 
     // The recipient's pull delivers both of theirs, naming the granter once.
-    expect(await titles(h, "ana")).toEqual(["Name owner shared trip with you", "Name owner shared budget with you"]);
+    expect(await titles(h, "ana")).toEqual(["Name owner (owner@dohc.test) shared a folder or file with you", "Name owner (owner@dohc.test) shared a folder or file with you"]);
     expect(names.mock.calls).toEqual([["owner"]]);
     expect(waiting(storage)).toHaveLength(1);
   });
@@ -219,7 +219,7 @@ describe("a notice when a share reaches a person", () => {
     closeTestStorage(storage);
     const reopened = reopenTestStorage(path);
     const h = testHandler(reopened, { nowMs: () => CLOCK, lookupUserDisplayName: (userId) => `Name ${userId}` });
-    expect(await titles(h, "ana")).toEqual(["Name owner shared trip with you"]);
+    expect(await titles(h, "ana")).toEqual(["Name owner (owner@dohc.test) shared a folder or file with you"]);
     expect(waiting(reopened)).toEqual([]);
   });
 
@@ -271,7 +271,7 @@ describe("a notice when a share reaches a person", () => {
     expect(waiting(storage)).toHaveLength(1);
 
     await appendLog(h, "owner", WORKSPACE, [channel("wire-later", "ana-dm", "dm")]);
-    expect(await titles(h, "ana")).toEqual(["Name owner sent you a message request"]);
+    expect(await titles(h, "ana")).toEqual(["Name owner (owner@dohc.test) sent you a message request"]);
     expect(waiting(storage)).toEqual([]);
   });
 
@@ -351,3 +351,34 @@ function waiting(storage: SyncRelayStorage): string[] {
     db.close();
   }
 }
+
+it("uses the account sender and states the shared subject and access in Notices", async () => {
+  const {h} = await relay();
+  await createShare(h, "owner", WORKSPACE, {paths: ["trip"], recipientUserId: "ana", subjectName: "Summer trip", access: "edit"});
+  expect(await notices(h, "ana")).toEqual([expect.objectContaining({senderLabel: "Name owner (owner@dohc.test)", title: "Name owner (owner@dohc.test) shared Summer trip with you", body: "Edit access · From Name owner (owner@dohc.test)"})]);
+});
+
+it("never shows a truncated account email as the notice sender", async () => {
+  const {h} = await relay({lookupUserDisplayName: () => "Helpdesk Team XYZ", lookupUserEmail: () => "it@company.com.phish.example"});
+  await createShare(h, "owner", WORKSPACE, {paths: ["trip"], recipientUserId: "ana", subjectName: "Reset your password"});
+  expect(await notices(h, "ana")).toEqual([expect.objectContaining({senderLabel: "Helpdesk… (it@company.com.phish.example)", title: "Helpdesk… (it@company.com.phish.example) shared Reset your password with you", body: "View access · From Helpdesk Team XYZ (it@company.com.phish.example)"})]);
+});
+it.each([
+  {name: "A very long account name", email: "a".repeat(27) + "@example.test", expected: "a".repeat(27) + "@example.test"},
+  {name: "😀".repeat(39), email: null, expected: "😀".repeat(39)},
+  {name: "Ana", email: "a".repeat(40) + "@example.test", expected: "Ana"},
+  {name: null, email: "a".repeat(40) + "@example.test", expected: "a".repeat(39) + "…"},
+])("keeps a bounded identifiable notice sender: $expected", async ({name, email, expected}) => {
+  const {h} = await relay({lookupUserDisplayName: () => name, lookupUserEmail: () => email});
+  await createShare(h, "owner", WORKSPACE, {paths: ["trip"], recipientUserId: "ana"});
+  const [notice] = await notices(h, "ana");
+  expect(notice?.senderLabel).toBe(expected);
+  expect(Array.from(notice!.senderLabel!).length).toBeLessThanOrEqual(40);
+  expect(notice?.title).toContain(expected);
+  expect(notice?.body).toContain(email ? name ? `${name} (${email})` : email : name);
+});
+it("uses a sentence-case notice sender when account details are absent", async () => {
+  const {h} = await relay({lookupUserDisplayName: () => null, lookupUserEmail: () => null});
+  await createShare(h, "owner", WORKSPACE, {paths: ["trip"], recipientUserId: "ana"});
+  expect((await notices(h, "ana"))[0]?.title).toBe("Someone shared a folder or file with you");
+});

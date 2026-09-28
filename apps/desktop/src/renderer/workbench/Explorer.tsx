@@ -1,3 +1,4 @@
+import { useFocusSurface } from "../ui/focusReturn";
 import { SectionLabel } from "../ui/controls";
 import { basenameOf, dirnameOf } from "../path";
 import {
@@ -118,10 +119,10 @@ export interface ExplorerProps {
   // keyboard expand/collapse is untouched.
   collectionFolders: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
-  dataCollections?: Array<{ datasetId: string; tableId: string; name: string; archived?: boolean }>;
+  dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
   includeArchivedCollections?: boolean;
   onIncludeArchivedCollections?(enabled: boolean): void;
-  onOpenDataCollection?: (datasetId: string, tableId: string) => void;
+  onOpenDataCollection?: (datasetPath: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
   onRestoreCollection?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
@@ -496,6 +497,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const pendingFocusPath = useRef<string | null>(null);
   const fileTreeRef = useRef<HTMLElement>(null);
+  const renameFocus = useRef<{ from: string; to: string } | null>(null);
+  useFocusSurface(fileTreeRef, () => {
+    const paths = renameFocus.current;
+    renameFocus.current = null;
+    return paths ? rowRefs.current.get(paths.to) ?? rowRefs.current.get(paths.from) : null;
+  });
   const workspaceTreeRef = useRef<HTMLUListElement>(null);
   const openEditorsListRef = useRef<HTMLUListElement>(null);
   const [virtualRange, setVirtualRange] = useState<VirtualRange>({
@@ -521,6 +528,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // fires with a stale closure — without this latch the edit would commit
   // twice (and the second rename would fail on the now-missing source).
   const editDone = useRef(false);
+  const [editPending, setEditPending] = useState(false);
   // Internal drag state: HTML5 DnD dataTransfer is unreadable during
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
@@ -784,6 +792,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       }
       setEditValue("");
       editDone.current = false;
+      setEditPending(false);
       setEditing({ mode: "create", kind, parentPath });
     },
     [onSetFolderExpanded],
@@ -810,6 +819,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     (path: string, isFolder: boolean) => {
       setEditValue(basenameOf(path));
       editDone.current = false;
+      setEditPending(false);
       setEditing({ mode: "rename", path, isFolder });
     },
     [],
@@ -842,6 +852,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     async (
       changes: PendingTreeChange[],
       run: (change: PendingTreeChange) => Promise<unknown>,
+      afterBegin?: () => void,
     ) => {
       if (changes.length === 0) return;
       // Land the stable active draft and drain queued collection writes
@@ -853,6 +864,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       } catch (cause) {
         onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
         return;
+      } finally {
+        afterBegin?.();
       }
       try {
         setPending((current) => [...current, ...changes]);
@@ -917,13 +930,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 
   const commitRename = useCallback(
-    (path: string, isFolder: boolean, value: string) => {
+    (edit: Extract<EditingState, { mode: "rename" }>, value: string) => {
+      const { path, isFolder } = edit;
       const typed = resolveTypedPath(value, dirnameOf(path));
       // A file name without an extension means markdown here too, so
       // "hello.md" typed as "hello" stays put and "hello.m" becomes markdown.
       const toPath = typed && !isFolder ? withMarkdownDefault(typed) : typed;
-      setEditing(null);
-      if (!toPath || toPath === path) return;
+      if (!toPath || toPath === path) {
+        setEditing(null);
+        return;
+      }
       void runChanges(
         [
           {
@@ -933,7 +949,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             toPath,
           },
         ],
-        () => bridge().moveWorkspacePath({ workspaceId, fromPath: path, toPath }),
+        async () => {
+          try {
+            return await bridge().moveWorkspacePath({ workspaceId, fromPath: path, toPath });
+          } catch (cause) {
+            if (document.activeElement === rowRefs.current.get(toPath)) {
+              renameFocus.current = { from: toPath, to: path };
+            }
+            throw cause;
+          }
+        },
+        // Remove this input in the same commit that stages the renamed row.
+        () => setEditing(current => current === edit ? null : current),
       );
     },
     [runChanges, workspaceId],
@@ -1451,13 +1478,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 : "New file name"
           }
           value={editValue}
+          readOnly={editPending}
           onChange={(event) => setEditValue(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Escape") finishEdit(false);
-            else if (event.key === "Enter") finishEdit(true);
+            if (event.key === "Escape") finishEdit(false, true);
+            else if (event.key === "Enter") finishEdit(true, true);
             event.stopPropagation();
           }}
-          onBlur={() => finishEdit(true)}
+          onBlur={() => { renameFocus.current = null; finishEdit(true); }}
           // The name keeps the row's exact type (13px sans, square) — F2
           // must not morph the label into a web-input pill — and the strong
           // border IS the focus affordance (the input is focused while open;
@@ -1468,9 +1496,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     </li>
   );
 
-  function finishEdit(commit: boolean): void {
+  function finishEdit(commit: boolean, returnFocus = false): void {
     if (editDone.current || !editing) return;
     editDone.current = true;
+    setEditPending(true);
+    renameFocus.current = null;
+    if (editing.mode === "rename" && returnFocus) {
+      const typed = commit ? resolveTypedPath(editValue, dirnameOf(editing.path)) : null;
+      renameFocus.current = {
+        from: editing.path,
+        to: typed ? (editing.isFolder ? typed : withMarkdownDefault(typed)) : editing.path,
+      };
+    }
     if (!commit || editValue.trim() === "") {
       setEditing(null);
       return;
@@ -1478,7 +1515,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     if (editing.mode === "create") {
       commitCreate(editing.kind, editing.parentPath, editValue);
     } else {
-      commitRename(editing.path, editing.isFolder, editValue);
+      commitRename(editing, editValue);
     }
   }
 
@@ -1586,6 +1623,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     <>
       <nav
         ref={fileTreeRef}
+        tabIndex={-1}
+        data-focus-surface="tree"
         data-testid="file-tree"
         aria-label="Files"
         onKeyDown={onTreeKeyDown}
@@ -1604,10 +1643,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       >
         {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
           <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
-          {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`}
+          {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
             className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
-            onClick={() => props.onOpenDataCollection?.(collection.datasetId, collection.tableId)}>
-            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
+            onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
+            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
           </button>)}
           {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
           {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}

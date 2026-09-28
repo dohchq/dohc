@@ -56,7 +56,7 @@ const SECRET_RETIRE_FAILED: CaptureError = CaptureError {
 /// The workspace key could not be loaded or created — a transient/config
 /// failure, kept dirty for retry (never silently dropping secret capture).
 const POLICY_UNAVAILABLE: CaptureError = CaptureError {
-    reason: "files.toml unreadable: ownership unknown, holding for retry",
+    reason: "files.toml unavailable: ownership unknown, holding for retry",
 };
 const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
     reason: "workspace secret key unavailable",
@@ -292,7 +292,7 @@ pub struct StoreCaptureSink {
     author_json: Option<String>,
     search_policy: Arc<SearchPolicySnapshot>,
     files_policy: PolicyState,
-    /// Set when any op this run was held on an unreadable policy. The driver
+    /// Set when any op this run was held on an unavailable policy. The driver
     /// reads it after the apply to arm its policy-recovery trigger — a
     /// deterministic signal from the exact decision point, immune to the
     /// blip being over before any re-read could observe it.
@@ -353,7 +353,7 @@ pub(crate) enum PolicyState {
     /// rule (writes are never dropped for a bad policy; search is where a
     /// broken policy fails closed).
     Known(Option<Vec<FilesPolicyRule>>),
-    /// The file exists but could not be read (IO error, symlink refusal,
+    /// The file uses an unsupported version or could not be read (IO error, symlink refusal,
     /// oversize — possibly a transient editor lock). The narrowing set is
     /// unknown: falling back to floor-only would durably capture paths the
     /// user may have excluded, and the policy-retire branch would delete
@@ -378,15 +378,10 @@ impl StoreCaptureSink {
             provenance,
         } = params;
         // `.dohc/files.toml` can only narrow engine ownership below the hard
-        // floor. See [`PolicyState`] for the absent/malformed/unreadable
-        // split: only a file that exists but cannot be read makes ownership
-        // unknown; malformed keeps the WS-F floor-only rule.
+        // floor. Unreadable and unsupported policies hold capture;
+        // malformed policies keep the WS-F floor-only rule.
         let snapshot = Arc::new(read_engine_search_policy(&shadow_root));
-        let files_unreadable = snapshot.diagnostics.iter().any(|diagnostic| {
-            diagnostic.file == "files.toml"
-                && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
-        });
-        let files_policy = if files_unreadable {
+        let files_policy = if snapshot.holds_file_capture() {
             PolicyState::Unavailable
         } else {
             PolicyState::Known(snapshot.files_policy.clone())
@@ -485,7 +480,7 @@ impl StoreCaptureSink {
         Ok(self.secret_key.as_ref().expect("key just ensured"))
     }
 
-    /// Whether any op this run was held on an unreadable policy.
+    /// Whether any op this run was held on an unavailable policy.
     pub fn policy_held(&self) -> bool {
         self.policy_held.get()
     }

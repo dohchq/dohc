@@ -206,7 +206,7 @@ beforeEach(() => {
   bridgeMock.listChatChannelShares.mockResolvedValue({
     joined: [],
     sessionKey: "session-a",
-    relay: { state: "answered" as const, granted: [], received: [] },
+    relay: { state: "answered" as const, granted: [], received: [], removed: [] },
   });
   // Solo default: no DMs, DM surface unavailable.
   bridgeMock.syncDms.mockResolvedValue({
@@ -545,7 +545,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
         },
       ],
       sessionKey: "session-a",
-    relay: { state: "answered" as const, granted: [], received: [] },
+    relay: { state: "answered" as const, granted: [], received: [], removed: [] },
     });
     const rec = recordingCollab();
     const user = userEvent.setup();
@@ -619,7 +619,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
         },
       ],
       sessionKey: "session-a",
-    relay: { state: "answered" as const, granted: [], received: [] },
+    relay: { state: "answered" as const, granted: [], received: [], removed: [] },
     });
     const rec = recordingCollab();
     const user = userEvent.setup();
@@ -951,7 +951,7 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
         },
       ],
       sessionKey: "session-a",
-    relay: { state: "answered" as const, granted: [], received: [] },
+    relay: { state: "answered" as const, granted: [], received: [], removed: [] },
     });
     const rec = recordingCollab();
     const user = userEvent.setup();

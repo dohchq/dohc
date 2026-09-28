@@ -1,3 +1,5 @@
+import { creationPartialMessage } from "@dohc/cli/creation";
+import { nameSlug } from "@dohc/workspace-contracts/names";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   CLI_PROTOCOL_VERSION,
@@ -17,11 +19,15 @@ import {
   type CliShowMessage,
 } from "@dohc/cli/protocol";
 import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
+import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { collectionAutomationId } from "@dohc/automation-executor/automation-plan";
+import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
 import type {
   CollectionAutomationRun,
   CollectionAutomationRunDetail,
+  PressWaitReason,
 } from "@dohc/automation-executor/collection-automations";
+import type { NamedPress, NamedPressResult } from "../ipc/automationButtonsIpc";
 import {
   createLocalChangeAuthor,
   isSharedWithMePath,
@@ -49,15 +55,17 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import {
   DaemonRefusalError,
+  type AutomationPressActor,
   decodeCollectionValue,
   encodeCollectionValue,
   MAX_GRANULAR_CHAT_QUERY_CHARS,
   type ChatUnreadFileThread,
   type GranularChatMessageSearchResponse,
   type GranularChatMessageSearchResult,
+  type KeptCopySaveResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
   chmod,
@@ -86,6 +94,7 @@ import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { AutomationRunRetry } from "../automations/automationNotices";
+import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import {
   LiveDocumentEditAppliedError,
   type LiveDocumentEditOrigin,
@@ -180,9 +189,10 @@ export interface CliCollectionWriteSeam {
   createRecord(input: {
     collectionPath: string;
     name: string;
+    recordId?: string;
     fields?: Record<string, unknown>;
     author: ChangeAuthor;
-  }): Promise<{ path: string; recordId: string }>;
+  }): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
 }
 
 // Engine-backed collection access for the CLI verbs. Reads go to the engine
@@ -212,6 +222,14 @@ export interface CliDocumentsPort {
   }): Promise<{ path: string }>;
 }
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile, and the step that moves one to a visible copy beside its
+// file. The desktop's Notices row offers the same step.
+export interface CliKeptCopiesPort {
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  save(id: number): Promise<KeptCopySaveResult>;
+}
+
 // The Automations panel's run history and Try again, for the automation
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
@@ -221,8 +239,18 @@ export interface CliAutomationsPort {
   retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
 }
 
+// Button presses for the press verb, through the same press path a window's
+// press takes. `waiting` is why the run the press started waits, if it does.
+export interface CliButtonsPort {
+  press(
+    input: Omit<NamedPress, "workspaceId">,
+    by: AutomationPressActor,
+  ): Promise<{ result: NamedPressResult; waiting: PressWaitReason | null }>;
+}
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
-  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
+  // `agent` is the agent this socket's write is, or null for the person.
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
@@ -246,7 +274,10 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
   writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
+  // Absent in a shared view, which keeps no copies of its own.
+  keptCopies?: CliKeptCopiesPort;
   automations?: CliAutomationsPort;
+  buttons?: CliButtonsPort;
 }
 
 export interface CliRunMessageLink {
@@ -574,6 +605,18 @@ function collectionWriteAuthor(
   return createLocalChangeAuthor(options.localUserDisplayName());
 }
 
+// The agent a dataset invocation through this socket is, as writeActor
+// decides: an agent that names itself, at 0 outside a chain, or any caller
+// during a run an automation started, at its depth. Null for the person.
+function datasetAgent(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): LocalDatasetAgent | null {
+  const depth = options.agentRunDepth(context.workspaceId);
+  return depth > 0 || actor === "agent" ? { depth } : null;
+}
+
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
 // local owner, recorded under its handshake name or the unnamed agent label,
@@ -591,6 +634,13 @@ function documentEditOrigin(
       onBehalfOf: "local",
       depth: options.agentRunDepth(context.workspaceId),
     },
+  };
+}
+
+function keptCopiesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "kept copies are not available in this workspace",
   };
 }
 
@@ -636,8 +686,38 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
     updatedAtMs: run.updatedAtMs,
     trigger: run.trigger,
     definitionChanged: run.definitionChanged,
+    neverStarted: run.neverStarted,
     chainStopped: run.chainStopped,
     undone: run.undone,
+  };
+}
+
+// Who presses for the person: the agent a collection write through this
+// socket would be, at its run's depth, or the person. A press counts in the
+// chain as that agent's own record write does, and stops at the cap.
+function pressActor(actor: CliActor, context: CliWorkspaceContext, options: CliServerOptions): AutomationPressActor {
+  const author = collectionWriteAuthor(actor, context, options, undefined);
+  return author.kind === "agent" ? { kind: "agent", originId: author.agentId, depth: author.depth } : { kind: "human" };
+}
+
+function automationPressResult(pressed: { result: NamedPressResult; waiting: PressWaitReason | null }): CliResultByVerb["automationPress"] {
+  const { result, waiting } = pressed;
+  if ("confirm" in result) {
+    const names = result.confirm.map((action) => `"${action.label}" (--confirm ${action.name})`).join(", ");
+    return {
+      ok: false,
+      reason: `This press runs actions dohc cannot undo: ${names}. Confirm each by name to run them.`,
+      confirm: result.confirm,
+    };
+  }
+  if (result.busy) return { ok: false, reason: result.reason };
+  if ("relayed" in result) return { ok: true, relayed: true };
+  return {
+    ok: true,
+    run: result.claimId,
+    outcome: result.settled?.outcome ?? null,
+    error: result.settled?.error ?? null,
+    waiting: waiting === null ? null : PRESS_WAITING[waiting],
   };
 }
 
@@ -1919,7 +1999,7 @@ async function dispatch(
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("Collection export requires an explicit savePath.");
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.dataset) throw new CliCommandError("Collections require the owning workspace.");
-      return context.dataset(request.args.request);
+      return context.dataset(request.args.request, datasetAgent(request.args.actor, context, options));
     }
     case "ownerAppResponses": {
       if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.ownerAppResponses)throw new CliCommandError("App responses require the owning workspace.");
@@ -2127,6 +2207,8 @@ async function dispatch(
             ? { cursor: decodedCollectionCursor(args.cursor) }
             : {}),
         });
+        const versionError = collectionVersionError(result.collection.reasons, `${validated.normalized}/collection.yaml`);
+        if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
           collection: result.collection,
@@ -2167,6 +2249,8 @@ async function dispatch(
             ? { beforeHistoryId: request.args.beforeHistoryId }
             : {}),
         });
+        const versionError = collectionVersionError(result.collection.reasons, `${validated.normalized}/collection.yaml`);
+        if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
           collection: result.collection,
@@ -2190,6 +2274,15 @@ async function dispatch(
           })),
         };
       } catch (error) {
+        // Unsupported schemas have no record bindings, so getRecord can fail
+        // before returning the collection diagnostic.
+        try {
+          const result = await collections.query({ collectionPath: validated.normalized, limit: 1 });
+          const versionError = collectionVersionError(result.collection.reasons, `${validated.normalized}/collection.yaml`);
+          if (versionError) return { ok: false as const, reason: versionError };
+        } catch {
+          // Preserve the original read failure if the schema is unavailable too.
+        }
         return mcpFailure(
           error,
           `failed to read record: ${request.args.recordId}`,
@@ -2250,13 +2343,16 @@ async function dispatch(
         const outcome = await collections.writes.createRecord({
           collectionPath: collectionValidated.normalized,
           name: request.args.name,
+          recordId: request.args.recordId,
           fields: request.args.fields,
           author: collectionWriteAuthor(request.args.actor, context, options, request.args.agent),
         });
+        if ("kind" in outcome) return { ok: false as const, reason: creationPartialMessage(outcome), partial: outcome };
         return {
           ok: true as const,
           recordId: outcome.recordId,
           recordPath: outcome.path,
+          ...(outcome.kept ? { kept: outcome.kept } : {}),
         };
       } catch (error) {
         return mcpFailure(
@@ -2342,6 +2438,35 @@ async function dispatch(
       } catch (error) { return mcpFailure(error, "dohc could not write the files. Check that the files are writable."); }
     }
 
+    // A shared view's press is checked and relayed as the app's is.
+    case "automationPress": {
+      const buttons = context.buttons;
+      if (!buttons) return { ok: false as const, reason: "buttons are not available in this workspace" };
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.collectionPath);
+      if (isSharedWithMePath(validated.normalized)) {
+        return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
+      }
+      const { field, record, table, confirm, requestId } = request.args;
+      const collectionPath = validated.normalized;
+      const pressWith = async (pressKey: string) => {
+        try {
+          return automationPressResult(await buttons.press({
+            collectionPath, field, recordId: record, ...(table === undefined ? {} : { table }), confirm, pressKey,
+          }, pressActor(request.args.actor, context, options)));
+        } catch (error) {
+          return mcpFailure(error, `failed to press ${field}`);
+        }
+      };
+      if (requestId === undefined) return await pressWith(randomUUID());
+      // Only a press is remembered, so a press refused for its questions can be sent again with confirm.
+      return await onceForRequestId(context, options, requestId, [collectionPath, field, record, table ?? null, confirm], async () => {
+        // The request id is the press's key, so a resend after a restart names the same press.
+        const result = await pressWith(requestId);
+        return { done: result.ok, result };
+      });
+    }
+
     case "documentRead": {
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
@@ -2352,6 +2477,28 @@ async function dispatch(
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
       } catch (error) {
         return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "keptCopies": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await keptCopies.list()) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list kept copies");
+      }
+    }
+
+    case "saveKeptCopy": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        const saved = await keptCopies.save(request.args.id);
+        if (saved.status === "saved") await notifyWrite(options, context);
+        return { ok: true as const, ...saved };
+      } catch (error) {
+        return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
       }
     }
 
@@ -2900,7 +3047,7 @@ async function dispatch(
           threadId: thread.thread.id,
         });
         const result = await buildThreadContent(context, thread, messages);
-        const channelDir = join(outputRoot, safePathSegment(thread.group.slug));
+        const channelDir = join(outputRoot, nameSlug(thread.group.slug) || "chat");
         await mkdir(channelDir, { recursive: true });
         const publicThreadId = cliThreadId(thread.thread.id);
         const path = join(channelDir, `${safePathSegment(publicThreadId)}.md`);

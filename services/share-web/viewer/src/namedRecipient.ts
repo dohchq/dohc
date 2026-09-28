@@ -1,20 +1,25 @@
+import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {LiveAuthorityUnavailableError, parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {RETRY_BUDGET_MS} from "./retry";
+import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 
 // The existing share-web authenticated metadata ceiling also bounds invitation and account responses.
 const RESPONSE_BYTES = 2 * 1024 * 1024;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
-export interface NamedRecipientFiles {userId: string; workspaceId: string; shareId: string; grantId: string;
+export interface NamedRecipientFiles {subjectName: string | null; sharerName: string | null; access: "edit";userId: string; workspaceId: string; shareId: string; grantId: string;
   files: {objectId: string; path: string}[]; limits: NamedLiveBrowserLimits}
+export class ShareAccessRemovedError extends Error { constructor() { super("The owner removed your access."); } }
 export async function namedRequest(path: string, signal: AbortSignal, body?: unknown): Promise<unknown> {
   signal = AbortSignal.any([signal, AbortSignal.timeout(RETRY_BUDGET_MS)]);
   const response = await fetch(path, {method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
     redirect: "error", signal, headers: {accept: "application/json", ...(body === undefined ? {} : {"content-type": "application/json"})},
     ...(body === undefined ? {} : {body: JSON.stringify(body)})});
   try {
-    if ([401, 403, 404].includes(response.status)) throw new LiveAuthorityUnavailableError("Unavailable");
-    if (response.status !== 200 || response.redirected || !response.body ||
+    const removedResponse = response.status === 404;
+    const linkRefused = path.startsWith("/api/live/link-") && [403, 429, 503].includes(response.status);
+    if ([401, 403].includes(response.status) && !linkRefused) throw new LiveAuthorityUnavailableError("Unavailable");
+    if ((!linkRefused && !removedResponse && response.status !== 200) || response.redirected || !response.body ||
       response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw Error("Unavailable");
     const reader = response.body.getReader(), decoder = new TextDecoder("utf-8", {fatal: true});
     let length = 0, text = "";
@@ -28,7 +33,18 @@ export async function namedRequest(path: string, signal: AbortSignal, body?: unk
         if (chunk.value.length > RESPONSE_BYTES - length) throw Error("Response too large");
         length += chunk.value.length; text += decoder.decode(chunk.value, {stream: true});
       }
-      return JSON.parse(text + decoder.decode()) as unknown;
+      const value: unknown = JSON.parse(text + decoder.decode());
+      if (removedResponse) {
+        if (record(value) && value.code === "share_access_removed") throw new ShareAccessRemovedError();
+        throw new LiveAuthorityUnavailableError("Unavailable");
+      }
+      if (linkRefused) {
+        const code = parseLinkRefusal(value, response.status);
+        const message = code ? LINK_REFUSALS[code].error : "Unavailable";
+        if (response.status === 503) throw Error(message);
+        throw new LiveAuthorityUnavailableError(message);
+      }
+      return value;
     } finally {signal.removeEventListener("abort", cancel); await reader.cancel().catch(() => {}); reader.releaseLock();}
   } finally {await response.body?.cancel().catch(() => {});}
 }
@@ -39,8 +55,8 @@ export function accountUser(value: unknown): {id: string; name: string} | null {
   return {id: parseLiveUpdateIdentifier(value.user.id), name: value.user.name};
 }
 export function namedFiles(value: unknown, userId: string, grantId: string): NamedRecipientFiles {
-  if (!record(value) || Object.keys(value).sort().join() !== "files,grantId,limits,shareId,userId,workspaceId" ||
-    value.userId !== userId || value.grantId !== grantId || !Array.isArray(value.files)) throw Error("Invalid selection");
+  if (!record(value) || Object.keys(value).sort().join() !== "access,files,grantId,limits,shareId,sharerName,subjectName,userId,workspaceId" ||
+    value.access !== "edit" || value.userId !== userId || value.grantId !== grantId || !Array.isArray(value.files)) throw Error("Invalid selection");
   const seen = new Set<string>();
   const files = value.files.map(file => {
     if (!record(file) || Object.keys(file).sort().join() !== "objectId,path" || typeof file.path !== "string" ||
@@ -48,6 +64,6 @@ export function namedFiles(value: unknown, userId: string, grantId: string): Nam
     const objectId = parseLiveUpdateIdentifier(file.objectId); seen.add(objectId);
     return {objectId, path: file.path};
   });
-  return {userId, grantId, workspaceId: parseLiveUpdateIdentifier(value.workspaceId), shareId: parseLiveUpdateIdentifier(value.shareId),
+  return {subjectName: normalizeShareLabel(value.subjectName), sharerName: normalizeShareLabel(value.sharerName, 320), access: "edit", userId, grantId, workspaceId: parseLiveUpdateIdentifier(value.workspaceId), shareId: parseLiveUpdateIdentifier(value.shareId),
     files, limits: parseNamedLiveBrowserLimits(value.limits)};
 }

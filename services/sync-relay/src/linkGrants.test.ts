@@ -1,4 +1,5 @@
 import { TokenBucketLimiter } from "@dohc/service-http";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import { timingSafeEqual } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -930,7 +931,7 @@ describe("owner link contract", () => {
           }),
         )
       ).status,
-    ).toBe(401);
+    ).toBe(404);
     const commentExchange = await json(
       await h(request(null, "/sync/link-exchange", jsonBody({ secret: commentSecret }))),
     );
@@ -1456,7 +1457,7 @@ describe("owner link contract", () => {
       ),
     );
     expect(revokeResponse.status).toBe(200);
-    expect(await json(revokeResponse)).toEqual({
+    expect(await json(revokeResponse)).toMatchObject({
       ok: true,
       grantId: "named-promoted",
       access: "comment",
@@ -1622,7 +1623,7 @@ describe("owner link contract", () => {
       parentGrantId: null,
     });
 
-    const revokeShareGrant = vi.spyOn(storage, "revokeShareGrant");
+    const revokeShareGrant = vi.spyOn(storage, "removeShareAccess");
     const revokeMissingBefore = storage.getShareGrant(
       "named-revoke-missing-workspace",
     );
@@ -1733,7 +1734,7 @@ describe("owner link contract", () => {
       ).toMatchObject({ ok: true });
 
       const moveShareThen =
-        <M extends "retuneShareGrant" | "promoteShareGrant" | "revokeShareGrant">(method: M) =>
+        <M extends "retuneShareGrant" | "promoteShareGrant" | "removeShareAccess">(method: M) =>
         (target: SyncRelayStorage, ...args: Parameters<SyncRelayStorage[M]>) => {
           updateShareWorkspace(dbPath, "share-existing", OTHER_WORKSPACE);
           const real = target[method] as (
@@ -1745,7 +1746,7 @@ describe("owner link contract", () => {
       const racedStorage = interceptStorage(storage, {
         retuneShareGrant: transition === "retune" ? moveShareThen("retuneShareGrant") : undefined,
         promoteShareGrant: transition === "promote" ? moveShareThen("promoteShareGrant") : undefined,
-        revokeShareGrant: transition === "revoke" ? moveShareThen("revokeShareGrant") : undefined,
+        removeShareAccess: transition === "revoke" ? moveShareThen("removeShareAccess") : undefined,
       });
       const h = handler(racedStorage);
       const targetGrantId =
@@ -2546,6 +2547,7 @@ describe("owner link inventory and impact preconditions", () => {
       "link-damaged",
     ]);
     expect(links[0]).toEqual({
+      subjectName: null, sharerName: null,
       shareId: "share-existing",
       grantId: activeGrantId,
       selector: { paths: ["docs"], versionId: null },
@@ -2589,6 +2591,7 @@ describe("owner link inventory and impact preconditions", () => {
       dependents: [],
     });
     expect(links[2]).toEqual({
+      subjectName: null, sharerName: null,
       shareId: "share-damaged",
       grantId: "link-damaged",
       selector: null,
@@ -5007,6 +5010,7 @@ describe("relay link grants", () => {
     );
     const capability = String(exchanged.capabilityToken);
     expect(limiter.allow(hmac(capability), 2_000)).toBe(true);
+    const replace = vi.spyOn(storage, "replaceLinkSession");
 
     const refused = await h(
       request(null, "/sync/link-refresh", {
@@ -5018,10 +5022,15 @@ describe("relay link grants", () => {
     expect(refused.status).toBe(429);
     expect(await json(refused)).toEqual({
       ok: false,
-      error: "too many link reads",
+      error: "This link has reached its request limit. Try again later.",
       code: "link_read_rate_limited",
     });
     expect(storage.findLinkSessionByCapabilityHash(hmac(capability))).not.toBeNull();
+    expect(replace).not.toHaveBeenCalled();
+    storage.revokeShareGrant({shareId: "share-existing", grantId: String(created.grantId), revokedAtMs: 2_000});
+    const revoked = await h(request(null, "/sync/link-refresh", {method: "POST", headers: {authorization: `LinkCapability ${capability}`}}));
+    expect(revoked.status).toBe(404);
+    expect(await json(revoked)).toEqual({ok: false, error: "not found"});
   });
 
   it("spends refreshes from the grant read budget", async () => {
@@ -5058,7 +5067,7 @@ describe("relay link grants", () => {
     expect(refused.status).toBe(429);
     expect(await json(refused)).toEqual({
       ok: false,
-      error: "too many link reads",
+      error: "This link has reached its request limit. Try again later.",
       code: "link_read_rate_limited",
     });
   });
@@ -5113,7 +5122,7 @@ describe("relay link grants", () => {
       }),
     );
     expect(await denialBytes(missingKey)).toBe(
-      await denialBytes(await h(request(null, "/missing"))),
+      '404:{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5161,9 +5170,9 @@ describe("relay link grants", () => {
         },
       }),
     );
-    expect(refused.status).toBe(401);
+    expect(refused.status).toBe(404);
     expect(await refused.text()).toBe(
-      '{"ok":false,"error":"not found","code":"not_found"}',
+      '{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5212,9 +5221,9 @@ describe("relay link grants", () => {
       }),
     );
 
-    expect(refused.status).toBe(401);
+    expect(refused.status).toBe(404);
     expect(await refused.text()).toBe(
-      '{"ok":false,"error":"not found","code":"not_found"}',
+      '{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5262,9 +5271,9 @@ describe("relay link grants", () => {
     );
 
     expect(replaceLinkSessionInterceptions).toBe(1);
-    expect(refused.status).toBe(401);
+    expect(refused.status).toBe(404);
     expect(await refused.text()).toBe(
-      '{"ok":false,"error":"not found","code":"not_found"}',
+      '{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5321,9 +5330,9 @@ describe("relay link grants", () => {
         },
       }),
     );
-    expect(refused.status).toBe(401);
+    expect(refused.status).toBe(404);
     expect(await refused.text()).toBe(
-      '{"ok":false,"error":"not found","code":"not_found"}',
+      '{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5339,7 +5348,7 @@ describe("relay link grants", () => {
     });
     await seedFileShare(h);
     const created = await createLink(h);
-    const generic = await denialBytes(await h(request(null, "/missing")));
+    const generic = '404:{"ok":false,"error":"not found"}';
 
     const missing = await denialBytes(
       await h(
@@ -5537,7 +5546,7 @@ describe("relay link grants", () => {
     ).toBe(missing);
   });
 
-  it("returns the standard unexpected-error response when exchange storage fails", async () => {
+  it("keeps exchange storage failure details private and retryable", async () => {
     const storage = await newStorage();
     const throwingStorage = interceptStorage(storage, {
       findLinkGrantByCredentialHash: () => {
@@ -5554,12 +5563,8 @@ describe("relay link grants", () => {
           jsonBody({ secret: "g".repeat(43) }),
         ),
       );
-      expect(response.status).toBe(500);
-      expect(await json(response)).toEqual({
-        ok: false,
-        error: "internal error",
-        code: "internal_error",
-      });
+      expect(response.status).toBe(503);
+      expect(await json(response)).toEqual(linkRefusalBody("link_unavailable"));
       expect(errorSpy).toHaveBeenCalled();
     } finally {
       errorSpy.mockRestore();
@@ -5614,7 +5619,7 @@ describe("relay link grants", () => {
       input.headers.set("x-dohc-relay-client-ip",ip);return h(input);
     };
     const before=counted.calls.length;
-    for(let index=0;index<2_500;index++) expect([404,429]).toContain((await exchange("bad-network","z".repeat(43))).status);
+    for(let index=0;index<2_500;index++) expect((await exchange("bad-network","z".repeat(43))).status).toBe(index < 12 ? 404 : 429);
     expect(counted.calls.length-before).toBe(600);
     expect((await exchange("other-network")).status).toBe(200);
     const controller=new AbortController();
@@ -5766,7 +5771,7 @@ describe("explicit public Edit release", () => {
 
     const closed = handler(storage, {...releaseOptions, publicEditRelease: undefined, newLinkBearer});
     const mintedBeforeClosure = newLinkBearer.mock.calls.length;
-    expect((await closed(renewal(renewed.capabilityToken))).status).toBe(401);
+    expect((await closed(renewal(renewed.capabilityToken))).status).toBe(404);
     expect(newLinkBearer).toHaveBeenCalledTimes(mintedBeforeClosure);
 
     const rotatedResponse = await enabled(request(OWNER, `/sync/shares/share-existing/links/${String(created.grantId)}/rotate`,
@@ -5774,7 +5779,7 @@ describe("explicit public Edit release", () => {
     expect(rotatedResponse.status).toBe(200);
     const rotated = await json(rotatedResponse);
     const mintedBeforeStaleRenewal = newLinkBearer.mock.calls.length;
-    expect((await enabled(renewal(renewed.capabilityToken))).status).toBe(401);
+    expect((await enabled(renewal(renewed.capabilityToken))).status).toBe(404);
     expect(newLinkBearer).toHaveBeenCalledTimes(mintedBeforeStaleRenewal);
     const freshResponse = await enabled(exchangeRequest(linkSecret(rotated.url)));
     expect(freshResponse.status).toBe(200);

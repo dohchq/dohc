@@ -3,6 +3,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { CreationPartial } from "./creation";
 import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
@@ -158,6 +159,11 @@ const fileWriteArgsSchema = z.object({
   requestId: requestIdSchema,
 }).strict();
 
+const keptCopiesArgsSchema = z.object(argsBase).strict();
+const saveKeptCopyArgsSchema = z
+  .object({ ...argsBase, id: z.number().int() })
+  .strict();
+
 const documentEditArgsSchema = z
   .object({
     ...argsBase,
@@ -312,6 +318,7 @@ const collectionCreateRecordArgsSchema = z
         { message: "a record name is one file name, not a path" },
       ),
     fields: collectionCreateFieldsSchema,
+    recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
   })
   .strict();
 
@@ -331,6 +338,21 @@ const automationRunArgsSchema = z
 // failed, or a run whose progress is gone, from its first step.
 const automationRetryArgsSchema = z
   .object({ ...automationArgs, run: automationRunIdArg, startOver: z.boolean() })
+  .strict();
+// A press of a Button field on one record. `record` is a document record's
+// id, or a dataset record's primary key as JSON. `confirm` names the actions
+// dohc cannot undo that the caller chose to run. A `requestId` sent again
+// answers the same press instead of pressing twice.
+const automationPressArgsSchema = z
+  .object({
+    ...argsBase,
+    collectionPath: collectionPathArg,
+    field: z.string().min(1).max(256),
+    record: z.string().min(1).max(1024),
+    table: z.string().min(1).max(256).optional(),
+    confirm: z.array(z.string().min(1).max(256)).max(64),
+    requestId: requestIdSchema.optional(),
+  })
   .strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
@@ -377,12 +399,15 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileWrite"), args: fileWriteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationRuns"), args: automationRunsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationRun"), args: automationRunArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationRetry"), args: automationRetryArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("automationPress"), args: automationPressArgsSchema }).strict(),
 ]);
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
@@ -841,9 +866,10 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
       ok: z.literal(true),
       recordId: z.string().min(1),
       recordPath: z.string().min(1),
+      kept: z.record(z.string(), z.json()).optional(),
     })
     .strict(),
-  rawFailureSchema,
+  rawFailureSchema.extend({ partial: CreationPartial.optional() }),
 ]);
 
 const documentReadResultSchema = z.discriminatedUnion("ok", [
@@ -868,6 +894,31 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
       warning: z.string().min(1).optional(),
     })
     .strict(),
+  rawFailureSchema,
+]);
+
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
+// visible copy beside its file.
+const keptCopiesResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    keptCopies: z.array(z.object({
+      id: z.number().int(),
+      path: z.string().min(1),
+      keptAtMs: z.number().int().nonnegative(),
+    }).strict()),
+    more: z.boolean(),
+  }).strict(),
+  rawFailureSchema,
+]);
+// `saved` with the copy's path; `gone` when nothing is kept under that id any
+// more; `no-valid-name` when no name beside the file fits dohc's path limits,
+// so the copy stays kept.
+const saveKeptCopyResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("saved"), path: z.string().min(1) }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("gone") }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("no-valid-name") }).strict(),
   rawFailureSchema,
 ]);
 
@@ -945,6 +996,9 @@ const automationRunFields = {
   trigger: automationTriggerSchema,
   // The run began under another version of the automation.
   definitionChanged: z.boolean(),
+  // It failed before it started, as a chain stop or a change too large to
+  // start automations for, so it cannot run again.
+  neverStarted: z.boolean(),
   // The chain depth cap stopped it before it ran.
   chainStopped: z.boolean(),
   undone: z.boolean(),
@@ -1016,6 +1070,32 @@ const fileWriteResultSchema = z.discriminatedUnion("ok", [
   }).strict(),
 ]);
 
+const automationPressResultSchema = z.union([
+  // The run the press started. `outcome` is set when a press sent again
+  // finds its run already ended; `waiting` says why the run waits, if it does.
+  z
+    .object({
+      ok: z.literal(true),
+      run: automationRunIdArg,
+      outcome: z.enum(["done", "skipped", "failed", "ended"]).nullable(),
+      error: z.string().nullable(),
+      waiting: z.string().nullable(),
+    })
+    .strict(),
+  // A shared view's press went to the owner's computer, which runs it. Its
+  // changes arrive as synced edits, and a failure as a notice.
+  z.object({ ok: z.literal(true), relayed: z.literal(true) }).strict(),
+  // The press would run actions dohc cannot undo. Name each in confirm to run them.
+  z
+    .object({
+      ok: z.literal(false),
+      reason: z.string().min(1),
+      confirm: z.array(z.object({ name: z.string().min(1), label: z.string().min(1) }).strict()).min(1),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+
 export const cliResultSchemas = {
   fileWrite: fileWriteResultSchema,
   dataset: DatasetResult,
@@ -1040,12 +1120,15 @@ export const cliResultSchemas = {
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
+  keptCopies: keptCopiesResultSchema,
+  saveKeptCopy: saveKeptCopyResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,
   automationRuns: automationRunsResultSchema,
   automationRun: automationRunResultSchema,
   automationRetry: automationRetryResultSchema,
+  automationPress: automationPressResultSchema,
 } as const;
 
 export type CliResultByVerb = {

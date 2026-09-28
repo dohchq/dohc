@@ -67,6 +67,8 @@ export function useDatasetAutomations(props: {
   fieldMarks: FieldMarks;
   /** Opens the panel's builder on a new automation, such as one a button starts. */
   start: (automation: Automation) => void;
+  // The folder that holds the dataset's automations.yaml, once dohc finds it.
+  collectionPath: string | null;
 } {
   const { workspaceId, datasetId, tableId, dataset, onError } = props;
   const described = dataset?.tables.find((candidate) => candidate.tableId === tableId);
@@ -94,8 +96,8 @@ export function useDatasetAutomations(props: {
     }
   }, [workspaceId, datasetId, onError]);
   useEffect(() => {
-    void find();
-  }, [find]);
+    if (datasetId) void find();
+  }, [find, datasetId]);
   const collectionPath = found !== null && found !== "failed" && found.status === "found" ? found.collectionPath : null;
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [open, setOpen] = useState(false);
@@ -169,5 +171,5 @@ export function useDatasetAutomations(props: {
       ) : found.status === "cannot-run" ? found.reason : undefined}
     </AutomationsNote>
   );
-  return { button, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith };
+  return { button, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith, collectionPath };
 }

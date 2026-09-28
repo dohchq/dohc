@@ -25,7 +25,7 @@ use crate::error::local_corruption;
 use crate::journal::{ack_tx, crashes, read_ack_tx};
 use crate::{ReplicationEnvelope, SyncError};
 
-const DIRECT_RPC_REFUSAL_REPORT_ID: &str = "direct-rpc";
+pub(crate) const DIRECT_RPC_REFUSAL_REPORT_ID: &str = "direct-rpc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyOutcome<T> {
@@ -68,6 +68,33 @@ impl<T> ApplyOutcome<T> {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::{ApplyDisposition, ApplyOutcome, RefusalReason, ReplicationRefusal};
+
+    #[test]
+    fn collision_slug_preserves_shared_name_boundaries() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../dohc-engine-domain/tests/shared/name-boundaries.json"
+        ))
+        .unwrap();
+        for case in cases["cases"].as_array().unwrap() {
+            assert_eq!(
+                super::truncate_slug_base(
+                    case["input"].as_str().unwrap(),
+                    case["maxBytes"].as_u64().unwrap() as usize
+                ),
+                case["expected"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+        let prefix = "界".repeat(44);
+        let slug = super::channel_collision_slug(&format!("{prefix}कि"), "channel-id", 0);
+        assert!(slug.starts_with(&format!("{prefix}-")));
+        assert!(dohc_engine_domain::chats::is_replicated_channel_slug(&slug));
+        let slug =
+            super::channel_collision_slug(&format!("q{}", "\u{0334}".repeat(80)), "channel-id", 0);
+        assert!(slug.starts_with("channel-"));
+        assert!(dohc_engine_domain::chats::is_replicated_channel_slug(&slug));
+    }
 
     #[test]
     fn sharing_decline_survives_a_skipped_primary_outcome() {
@@ -481,70 +508,22 @@ pub fn retain_refusal_for_direct_retry(
     }
 }
 
-pub(crate) fn claim_pending_refusals(
-    store: &mut EngineStore,
+pub(crate) fn read_pending_refusals(
+    store: &EngineStore,
     workspace_id: &str,
-    faults: &dyn FaultInjector,
-) -> Result<(Vec<ReplicationRefusal>, Option<String>), SyncError> {
-    match store.write_with(faults, |tx| {
-        let report_id: Option<String> = tx
-            .query_row(
-                "SELECT CASE WHEN EXISTS(SELECT 1 FROM replication_pending_refusals \
-                 WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?2) \
-                 THEN lower(hex(randomblob(16))) END",
-                params![workspace_id, DIRECT_RPC_REFUSAL_REPORT_ID],
-                |row| row.get(0),
-            )
-            .map_err(SyncError::corrupt)?;
-        let Some(report_id) = report_id else {
-            return Ok::<_, SyncError>((Vec::new(), None));
-        };
-        // A new pull supersedes any older uncommitted report. Retagging every
-        // pending row makes crash retry reconstruct all unread refusals, while
-        // the old cursor's report token can no longer sweep them.
-        tx.execute(
-            "UPDATE replication_pending_refusals SET report_id=?2 \
-             WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?3",
-            params![workspace_id, report_id, DIRECT_RPC_REFUSAL_REPORT_ID],
-        )
-        .map_err(SyncError::persist)?;
-        let refusals = {
-            let mut stmt = tx
-                .prepare(
-                    "SELECT origin_id, origin_seq, op_kind, reason_code, reason_message \
-                 FROM replication_pending_refusals \
-                 WHERE workspace_id=?1 AND report_id=?2 \
-                 ORDER BY origin_id, origin_seq",
-                )
-                .map_err(SyncError::corrupt)?;
-            let rows = stmt
-                .query_map(params![workspace_id, report_id], |row| {
-                    let origin_id: String = row.get(0)?;
-                    let origin_seq: i64 = row.get(1)?;
-                    let op_kind: String = row.get(2)?;
-                    let code: String = row.get(3)?;
-                    let message: String = row.get(4)?;
-                    let reason = match (code.as_str(), message.as_str()) {
-                        ("invalid-input", _) => RefusalReason::InvalidInput { reason: message },
-                        _ => return Err(rusqlite::Error::InvalidQuery),
-                    };
-                    Ok(ReplicationRefusal {
-                        workspace_id: workspace_id.to_owned(),
-                        origin_id,
-                        origin_seq,
-                        op_kind,
-                        reason,
-                    })
-                })
-                .map_err(SyncError::corrupt)?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(SyncError::corrupt)?
-        };
-        Ok((refusals, Some(report_id)))
-    })? {
-        TxnOutcome::Committed(claimed) => Ok(claimed),
-        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
-    }
+) -> Result<Vec<ReplicationRefusal>, SyncError> {
+    store.read_with(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT origin_id, origin_seq, op_kind, reason_message FROM replication_pending_refusals \
+             WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?2 ORDER BY origin_id, origin_seq",
+        ).map_err(SyncError::corrupt)?;
+        stmt.query_map(params![workspace_id, DIRECT_RPC_REFUSAL_REPORT_ID], |row| {
+            Ok(ReplicationRefusal {
+                workspace_id: workspace_id.to_owned(), origin_id: row.get(0)?, origin_seq: row.get(1)?,
+                op_kind: row.get(2)?, reason: RefusalReason::InvalidInput { reason: row.get(3)? },
+            })
+        }).map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)
+    })
 }
 
 fn coordinate_matches(
@@ -623,13 +602,7 @@ fn is_persisted_safe_integer(value: i64) -> bool {
 }
 
 pub(crate) fn is_replicated_channel_slug(value: &str) -> bool {
-    is_bounded_replicated_id(value, 200)
-        && value.split('-').all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        })
+    dohc_engine_domain::chats::is_replicated_channel_slug(value)
 }
 
 #[derive(Deserialize)]
@@ -1057,24 +1030,22 @@ fn channel_collision_slug(requested: &str, allocation_identity: &str, attempt: u
         hasher.update(attempt.to_be_bytes());
     }
     let suffix = hex(&hasher.finalize());
-    const MAX_COLLISION_BASE_UTF16_UNITS: usize = 200 - 1 - 64;
-    let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_UTF16_UNITS);
-    let slug = format!("{bounded_requested}-{suffix}");
+    const MAX_COLLISION_BASE_BYTES: usize = 200 - 1 - 64;
+    let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_BYTES);
+    let base = if bounded_requested.is_empty() {
+        "channel"
+    } else {
+        &bounded_requested
+    };
+    let slug = format!("{base}-{suffix}");
     debug_assert!(is_replicated_channel_slug(&slug));
     slug
 }
 
-fn truncate_slug_base(value: &str, max_utf16_units: usize) -> String {
-    let mut utf16_units = 0;
-    let mut end = 0;
-    for (index, ch) in value.char_indices() {
-        if utf16_units + ch.len_utf16() > max_utf16_units {
-            break;
-        }
-        utf16_units += ch.len_utf16();
-        end = index + ch.len_utf8();
-    }
-    value[..end].trim_end_matches('-').to_owned()
+fn truncate_slug_base(value: &str, max_bytes: usize) -> String {
+    dohc_engine_domain::names::truncate_name(value, max_bytes)
+        .trim_end_matches('-')
+        .to_owned()
 }
 
 fn channel_allocation_base(name: &str) -> String {

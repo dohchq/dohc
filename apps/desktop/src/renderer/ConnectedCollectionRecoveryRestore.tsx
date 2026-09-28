@@ -1,16 +1,19 @@
+import { useRef } from "react";
 import { DatasetRecoveryPreparation } from "@dohc/cli/dataset";
 import { bridge } from "./bridge";
 import { CollectionRecoveryRestoreDialog } from "./CollectionRecoveryRestoreDialog";
 
 export interface ConnectedCollectionRecoveryRestoreProps {
   workspaceId: string;
-  onRestored(datasetId: string, tableId: string): void;
+  onRestored(datasetPath: string, tableId: string): void;
   onClose(): void;
   onError(fallback: string, error: unknown, retry: (() => void) | null): void;
 }
 
 export function ConnectedCollectionRecoveryRestore(props: ConnectedCollectionRecoveryRestoreProps) {
   const { workspaceId } = props;
+  const restoredPath = useRef<string | null>(null);
+  const sourceError = useRef<string | undefined>(undefined);
   async function discard(transferId: string) {
     const result = await bridge().dataset({ action: "discardRecovery", workspaceId, transferId });
     if (result.kind !== "recovery-discarded") throw Error("dohc could not cancel this recovery. Try again.");
@@ -33,7 +36,7 @@ export function ConnectedCollectionRecoveryRestore(props: ConnectedCollectionRec
     onRestore={async (recovery, signal) => {
       signal.throwIfAborted();
       if (recovery.sourceCursor.workspaceId !== workspaceId) throw Error("The workspace changed. Open recovery in its original workspace.");
-      const result = await bridge().dataset({ action: "claimRecovery", workspaceId, datasetId: recovery.revision.datasetId,
+      const result = await bridge().dataset({ action: "claimRecovery", workspaceId,
         transferId: recovery.transferId, manifestSha256: recovery.manifestSha256, sourceCursor: recovery.sourceCursor, oldHostStopped: true });
       signal.throwIfAborted();
       if (result.kind !== "recovery-claimed" || result.transferId !== recovery.transferId || result.manifestSha256 !== recovery.manifestSha256
@@ -41,7 +44,12 @@ export function ConnectedCollectionRecoveryRestore(props: ConnectedCollectionRec
         || result.targetCursor.approvedRevisionHash !== recovery.revision.revisionSha256) {
         throw Error("dohc could not confirm this restore. Retry recovery.");
       }
+      restoredPath.current = result.datasetPath;
+      sourceError.current = result.sourceError;
     }}
     onDiscard={discard}
-    onRestored={recovery => props.onRestored(recovery.revision.datasetId, recovery.revision.definition.tables[0]!.tableId)} />;
+    onRestored={recovery => {
+      if (restoredPath.current) props.onRestored(restoredPath.current, recovery.revision.definition.tables[0]!.tableId);
+      else props.onError("Collection restored. Its source needs attention.", new Error(sourceError.current ?? "Restore its dataset.json file to open it."), null);
+    }} />;
 }

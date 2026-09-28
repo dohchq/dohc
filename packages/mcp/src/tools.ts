@@ -1,6 +1,8 @@
+import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { escapeHtml } from "@dohc/workspace-core/html";
 import { isRecord } from "@dohc/workspace-core/records";
+import { fileVersionError, fileVersionReason } from "@dohc/workspace-contracts/file-version";
 // Pure MCP tool implementations. Each operates on a workspace ROOT dir and a
 // state HOME (the desktop registry/state location). Every workspace-relative
 // write path is validated through validateUserMaterializePath (reads through
@@ -1039,11 +1041,13 @@ interface RemoteIdentity {
 }
 
 interface RegistryWorkspace {
+  shareView?: {grantedSelector?: unknown; subjectName?: unknown; sharerName?: unknown; granterEmail?: unknown; shareId?: unknown};
   workspaceId: string;
   rootPath: string;
   kind: string;
   mode?: string;
   remote?: RemoteIdentity;
+  confirmedRemovedShares?: Array<{ shareId: string; removedAtMs: number }>;
 }
 
 interface RegistryFile {
@@ -1191,23 +1195,39 @@ export async function listWorkspaces(ctx: ToolContext) {
     rootPath: w.rootPath,
     kind: w.kind,
     ...(w.remote ? { remote: w.remote } : {}),
+    ...removedShareStatus(w),
   }));
   return { workspaces };
 }
 
 // --- dohc_workspace_status --------------------------------------------------
 
+function removedShareStatus(workspace: RegistryWorkspace | null) {
+  const removedShares = (workspace?.confirmedRemovedShares ?? []).map(({ shareId }) => ({
+    shareId,
+    message: "The owner removed your access. Your local copy stays readable.",
+  }));
+  return removedShares.length ? {removedShares} : {};
+}
+
 export async function workspaceStatus(ctx: ToolContext) {
-  const [manifest, remote, credentials] = await Promise.all([
+  const [manifest, remote, credentials, entry] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
+    findWorkspaceEntry(ctx),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = remote !== null || nonEmptyString(manifest?.serverUrl);
   const credential = credentialStatusFor(remote, credentials);
   return {
+    ...(entry?.shareView ? {receivedShare: {
+      subjectName: normalizeShareLabel(entry.shareView.subjectName) ?? shareSubjectFallback(entry.shareView.grantedSelector),
+      sharerName: shareSenderLabel(entry.shareView.sharerName, entry.shareView.granterEmail),
+      access: ctx.shareAccess ?? null,
+    }} : {}),
     synced,
+    ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
     ...(remote?.workspaceId ?? manifest?.workspaceId
@@ -1438,7 +1458,13 @@ async function detectSiteAt(
         message: "dohc.json must contain a JSON object.",
       });
     } else {
-      config = parsed.value;
+      const versionError = fileVersionError(parsed.value.version, configPath);
+      const versionReason = fileVersionReason(parsed.value.version);
+      if (versionError && versionReason) {
+        diagnostics.push({ severity: "error", code: versionReason, path: configPath, message: versionError });
+      } else {
+        config = parsed.value;
+      }
     }
   }
 
@@ -1889,6 +1915,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
             path: relativeJoin(root.normalized, "dohc.json"),
             content: `${JSON.stringify(
               {
+                version: 1,
                 type: "site",
                 title,
                 preview: { mode: "static", entry: "index.html" },
@@ -2391,7 +2418,7 @@ export async function setRecordFields(
 
 export async function createRecord(
   ctx: ToolContext,
-  args: { collectionPath: string; name: string; fields?: unknown },
+  args: { collectionPath: string; name: string; fields?: unknown; recordId?: string },
   agent?: string,
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "write");
@@ -2407,7 +2434,19 @@ export async function createRecord(
     collectionPath: resolved.normalized,
     name: args.name,
     fields: fields.value,
+    ...(args.recordId ? { recordId: args.recordId } : {}),
   });
+}
+
+// Files dohc moved aside while it saved, because another program changed them
+// meanwhile. The desktop shows each as a Notices row; an agent reads the same
+// list and takes the same step.
+export async function listKeptCopies(ctx: ToolContext) {
+  return requestCli(ctx, "keptCopies", {});
+}
+
+export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
+  return requestCli(ctx, "saveKeptCopy", { id: args.id });
 }
 
 // An automation's runs, and Try again, through the desktop's Automations
@@ -2443,6 +2482,24 @@ export async function retryAutomationRun(
     automation: args.automation,
     run: args.run,
     startOver: args.startOver ?? false,
+  });
+}
+
+// A press of a Button field, through the desktop's press path. A press
+// changes records, so the path must clear the write rules.
+export async function pressButton(
+  ctx: ToolContext,
+  args: { collectionPath: string; button: string; recordId: string; table?: string; confirm?: string[]; requestId?: string },
+) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "automationPress", {
+    collectionPath: resolved.normalized,
+    field: args.button,
+    record: args.recordId,
+    ...(args.table === undefined ? {} : { table: args.table }),
+    confirm: args.confirm ?? [],
+    ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
   });
 }
 

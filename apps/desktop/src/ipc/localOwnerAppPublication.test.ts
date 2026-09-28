@@ -6,7 +6,7 @@ import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 
 vi.mock("../workspaces/ownerAppPublication", () => ({ prepareLocalAppPublication: vi.fn() }));
 const hash = "a".repeat(64);
-const capability = { kind: "dataset" as const, datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: hash,
+const capability = { kind: "dataset" as const, name: "Orders", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: hash,
   operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "list", access: "owner" as const, readOnly: true }] };
 const candidate: AppPublicationCandidate = { appRoot: "app", entryPath: "app/main.ts", packageMap: {}, versionId: "main", sourceRevision: hash, sourceDigest: hash,
   dependencyLockDigest: hash, bundleDigest: hash, buildDigest: hash, compilerIdentity: { recipe: "test", version: "test", binarySha256: hash },

@@ -132,6 +132,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.getCollection, payload),
   queryCollectionRecords: (payload) =>
     ipcRenderer.invoke(CHANNELS.queryCollectionRecords, payload),
+  createCollectionRecord: (payload) => ipcRenderer.invoke(CHANNELS.createCollectionRecord, payload),
   createWorkspaceFile: (payload) =>
     ipcRenderer.invoke(CHANNELS.createWorkspaceFile, payload),
   createWorkspaceFolder: (payload) =>
@@ -260,6 +261,7 @@ const bridge: DohcDesktopBridge = {
   getRelayReceivedShare: (payload) =>
     ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
   revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
+  undoRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.undoRelayShare, payload),
   createRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
   addRelayShareLink: (payload) =>

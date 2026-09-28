@@ -324,7 +324,7 @@ describe("executeCli", () => {
       run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.",
       createdAtMs: Date.UTC(2026, 8, 27, 9), updatedAtMs: Date.UTC(2026, 8, 27, 9),
       trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, depth: 1 },
-      definitionChanged: false, chainStopped: false, undone: false,
+      definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
     };
     const list = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }] }));
     expect(await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: list })).toEqual({
@@ -332,6 +332,11 @@ describe("executeCli", () => {
       stderr: "",
       stdout: "atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · by agent · depth 1 · 1 change · The record is open elsewhere.\n",
     });
+    // A run that could not start says so, as the panel offers it no Try again.
+    const unclaimed = { ...run, error: "This change was too large for dohc to start automations for every record. Change fewer records at a time.", neverStarted: true };
+    const unstarted = vi.fn(async () => ({ ok: true, runs: [{ ...unclaimed, changes: 0 }] }));
+    expect((await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: unstarted })).stdout)
+      .toContain(" · never started · ");
     expect(list).toHaveBeenCalledWith({
       protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "automationRuns",
@@ -341,6 +346,10 @@ describe("executeCli", () => {
     const steps = [
       { step: 1, changes: [{ kind: "field", recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" }] },
       { step: 3, changes: [{ kind: "message", messageId: "message-1", name: "Team" }] },
+      { step: 4, changes: [{
+        kind: "dataset-action", rules: { datasetId: "ds_1", revision: 2, revisionSha256: "a".repeat(64) },
+        operationId: "op_send", tableId: "tbl_invoices", name: "Send invoice", revision: 3,
+      }] },
     ];
     const show = vi.fn(async () => ({ ok: true, run: { ...run, steps, failedStep: 3, startsOver: false } }));
     expect((await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1"], cwd: "/workspace", env: {}, request: show })).stdout).toBe([
@@ -353,6 +362,8 @@ describe("executeCli", () => {
       '  set Done on tasks/one.md: null -> "2026-09-27"',
       "step 3:",
       "  posted to Team · message-1",
+      "step 4:",
+      "  ran Send invoice in table tbl_invoices",
       "",
     ].join("\n"));
     expect(JSON.parse((await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1", "--json"], env: {}, request: show })).stdout))
@@ -364,6 +375,49 @@ describe("executeCli", () => {
     expect(changedText).not.toContain("resumes");
     expect(await executeCli({ argv: ["automation", "run", "tasks", "stamp"], env: {}, request: show })).toEqual({
       exitCode: 1, stdout: "", stderr: "dohc: automation run requires a run id\n",
+    });
+  });
+
+  it("presses a button, prints the run it started, and exits with the actions to confirm", async () => {
+    const send = vi.fn(async (request: CliRequestWithoutToken) =>
+      request.verb === "automationPress" && request.args.confirm.includes("sendInvoice")
+        ? { ok: true, run: "atc_1", outcome: null, error: null, waiting: "Waiting to check who can edit this Collection." }
+        : {
+            ok: false,
+            reason: 'This press runs actions dohc cannot undo: "Send invoice" (--confirm sendInvoice). Confirm each by name to run them.',
+            confirm: [{ name: "sendInvoice", label: "Send invoice" }],
+          });
+    expect(await executeCli({ argv: ["automation", "press", "Billing", "Send", "12"], env: {}, request: send })).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: 'dohc: This press runs actions dohc cannot undo: "Send invoice" (--confirm sendInvoice). Confirm each by name to run them.\n',
+    });
+    expect(await executeCli({
+      argv: ["automation", "press", "Billing", "Send", "12", "--table", "Invoices", "--confirm", "sendInvoice", "--request-id", "press-1"],
+      cwd: "/workspace",
+      env: {},
+      request: send,
+    })).toEqual({ exitCode: 0, stderr: "", stdout: "started run atc_1\nWaiting to check who can edit this Collection.\n" });
+    expect(send).toHaveBeenLastCalledWith({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "automationPress",
+      args: {
+        cwd: WORKSPACE, actor: "human", collectionPath: "Billing", field: "Send", record: "12",
+        table: "Invoices", confirm: ["sendInvoice"], requestId: "press-1",
+      },
+    });
+    const ended = async () => ({ ok: true, run: "atc_1", outcome: "failed", error: "Paid is not a field.", waiting: null });
+    expect((await executeCli({ argv: ["automation", "press", "Billing", "Send", "12"], env: {}, request: ended })).stdout)
+      .toBe("run atc_1 failed: Paid is not a field.\n");
+    const relayed = async () => ({ ok: true, relayed: true });
+    expect((await executeCli({ argv: ["automation", "press", "Trip", "Book", "rec_1"], env: {}, request: relayed })).stdout)
+      .toBe("sent to the owner's computer, which runs it\n");
+    // A flag value that looks like a global flag stays the flag's value.
+    const record = vi.fn(send);
+    await executeCli({ argv: ["automation", "press", "Billing", "Send", "12", "--confirm", "--json"], env: {}, request: record });
+    expect(record).toHaveBeenLastCalledWith(expect.objectContaining({ args: expect.objectContaining({ confirm: ["--json"] }) }));
+    expect(await executeCli({ argv: ["automation", "press", "Billing", "Send"], env: {}, request: send })).toEqual({
+      exitCode: 1, stdout: "", stderr: "dohc: automation press requires a Collection, a button, and a record\n",
     });
   });
 

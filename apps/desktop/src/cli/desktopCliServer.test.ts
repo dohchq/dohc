@@ -55,6 +55,8 @@ function fixture(rootPath = resolve("cli-workspace")) {
     filePathForObjectId: vi.fn(async () => "notes.md"),
     listMoments: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listMoments"]>(),
     readMoment: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["readMoment"]>(),
+    listKeptCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listKeptCopies"]>(),
+    saveKeptCopy: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["saveKeptCopy"]>(),
     listVersions: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listVersions"]>(
       async () => ({ versions: [], activeVersionId: "main" })),
     // Writes the file as the capture chain does, refusing one that exists.
@@ -93,6 +95,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
   });
   const dependencies: Dependencies = {
     automations: () => ({ runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
+    buttons: () => ({ press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),

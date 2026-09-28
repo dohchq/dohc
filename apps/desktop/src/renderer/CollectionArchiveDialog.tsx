@@ -5,7 +5,7 @@ import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 
 interface Props {
-  workspaceId: string; datasetId: string; name: string;
+  workspaceId: string; datasetId: string; datasetPath: string; name: string;
   onClose(): void;
   onChanged(): void;
   onError(message: string, error: unknown, retry?: (() => void) | null): void;
@@ -16,7 +16,7 @@ export function CollectionArchiveDialog(props: Props) {
 function Archive(props: Props) {
   const [page, setPage] = useState<DatasetLifecyclePage | null>(null), [busy, setBusy] = useState(false);
   const alive = useRef(true), request = useRef(0), locked = useRef(false);
-  const scope = { workspaceId: props.workspaceId, datasetId: props.datasetId };
+  const scope = { workspaceId: props.workspaceId, datasetPath: props.datasetPath, expectedDatasetId: props.datasetId };
   async function load(after?: string) {
     if (!alive.current || locked.current) return;
     const token = ++request.current; setBusy(true);

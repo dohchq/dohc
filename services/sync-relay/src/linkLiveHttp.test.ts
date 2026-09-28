@@ -1,5 +1,6 @@
 import {afterEach, expect, it, vi} from "vitest";
 import {createLinkLiveHttp} from "./linkLiveHttp";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {createLiveTickets} from "./liveTickets";
 import {hashLinkBearer, hashLinkProfileSecret} from "./linkSecurity";
 import {audience, binding, fixture as ticketFixture, key, report, scope} from "./liveTickets.test-helper";
@@ -59,11 +60,38 @@ it.each([
 ] as Record<string, string>[])("refuses missing or mismatched private authority %j", async headers => {
   const f = await fixture(); expect((await f.handle(request(undefined, undefined, headers))).status).toBe(404);
 });
-it.each(["view", "revoked", "expired", "pinned"])("refuses current authority after %s transition", async mode => {
+it.each(["revoked", "expired", "pinned"])("refuses current authority after %s transition", async mode => {
   const f = await fixture();
-  if (mode === "view") f.raw.exec("UPDATE sync_relay_share_grants SET access='view'");
   if (mode === "revoked") f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 1000});
   if (mode === "expired") vi.mocked(Date.now).mockReturnValue(61_000);
   if (mode === "pinned") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs"], versionId: "side"}));
-  expect((await f.handle(request())).status).toBe(404);
+  const response = await f.handle(request());
+  expect(response.status).toBe(404);
+  expect(await response.text()).toBe('{"ok":false,"error":"not found"}');
+});
+
+it.each(["view", "comment"] as const)("explains %s access only for an existing file in scope", async access => {
+  const f = await fixture();
+  f.raw.prepare("UPDATE sync_relay_share_grants SET access=?").run(access);
+  const response = await f.handle(request());
+  expect(response.status).toBe(403);
+  expect(await response.json()).toEqual(linkRefusalBody(access === "view" ? "link_view_access" : "link_comment_access"));
+  for (const path of ["private/a.md", "docs/missing.md", "../docs/a.md"]) {
+    const refused = await f.handle(request({discriminator, path}));
+    expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+  }
+});
+
+it("explains an unavailable live session only after proving the file is shared", async () => {
+  const f = await fixture();
+  vi.spyOn(f.storage, "resolveLiveObjectHostBinding").mockReturnValue({kind: "refused", reason: "host-unavailable"});
+  const response = await f.handle(request());
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual(linkRefusalBody("link_live_unavailable"));
+  for (const headers of [{authorization: ""}, {authorization: `Bearer ${"z".repeat(43)}`}]) {
+    const refused = await f.handle(request(undefined, undefined, headers));
+    expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+  }
+  const hidden = await f.handle(request({discriminator, path: "private/a.md"}));
+  expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
 });
