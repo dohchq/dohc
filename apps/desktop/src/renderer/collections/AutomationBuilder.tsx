@@ -392,44 +392,139 @@ function ValueInput(props: {
   );
 }
 
-/** "Status to Done": the value's control after a visible "to". */
+type InputKind = "text" | "number" | "boolean" | "empty" | "list" | "formula";
+const INPUT_KIND_LABELS: Record<InputKind, string> = {
+  text: "Text", number: "Number", boolean: "Yes or no", empty: "Empty", list: "List", formula: "Formula",
+};
+// What each kind starts from when a person picks it.
+const INPUT_KIND_STARTS: Record<InputKind, AutomationValue> = {
+  text: { kind: "literal", value: "" },
+  number: { kind: "literal", value: "" },
+  boolean: { kind: "literal", value: true },
+  empty: { kind: "literal", value: null },
+  list: { kind: "literal", value: [] },
+  formula: { kind: "formula", expression: "" },
+};
+
+/** The kind a value is: a number being typed is text the row marks as a number. */
+function inputKindOf(value: AutomationValue, number: boolean): InputKind {
+  if (value.kind === "formula") return "formula";
+  if (number || typeof value.value === "number") return "number";
+  if (typeof value.value === "boolean") return "boolean";
+  if (value.value === null) return "empty";
+  return Array.isArray(value.value) ? "list" : "text";
+}
+
 /**
- * An action input's value: text, or a formula. An action's input has no
- * field type, so a saved number, true or false, list, or empty value shows
- * as the formula that gives it, and stays as the file wrote it until someone
- * edits it.
+ * An action input's value, as the kind the file wrote it: text, a number,
+ * yes or no, empty, a list, or a formula. An action's input has no field
+ * type, so the value keeps its kind until someone picks another. A number
+ * stays the text typed until it reads as one.
  */
 function ActionValueInput(props: {
   label: string;
   value: AutomationValue;
+  number: boolean;
   problem: Shown;
-  onChange: (value: AutomationValue) => void;
+  onChange: (value: AutomationValue, number: boolean) => void;
 }) {
   const { value } = props;
-  const text = value.kind === "literal" && typeof value.value === "string";
-  const shown = value.kind === "formula" ? value.expression : typeof value.value === "string" ? value.value : JSON.stringify(value.value);
+  const kind = inputKindOf(value, props.number);
+  const literal = value.kind === "literal" ? value.value : null;
+  const aria = invalid(props.problem);
   return (
     <div className="flex flex-col gap-1">
       <div className="flex gap-1">
         <select
           aria-label={`${props.label}, kind`}
-          value={text ? "text" : "formula"}
-          onChange={(event) => props.onChange(event.target.value === "text" ? { kind: "literal", value: "" } : { kind: "formula", expression: "" })}
+          value={kind}
+          onChange={(event) => {
+            const next = event.target.value as InputKind;
+            props.onChange(INPUT_KIND_STARTS[next], next === "number");
+          }}
           className={`${selectClass} w-auto`}
         >
-          <option value="text">Text</option>
-          <option value="formula">Formula</option>
+          {Object.entries(INPUT_KIND_LABELS).map(([option, label]) => <option key={option} value={option}>{label}</option>)}
         </select>
-        <input
-          aria-label={text ? props.label : `${props.label}, formula`}
-          value={shown}
-          spellCheck={false}
-          onChange={(event) => props.onChange(text ? { kind: "literal", value: event.target.value } : { kind: "formula", expression: event.target.value })}
-          className={text ? inputClass : formulaClass}
-          {...invalid(props.problem)}
-        />
+        {value.kind === "formula" ? (
+          <input
+            aria-label={`${props.label}, formula`}
+            value={value.expression}
+            spellCheck={false}
+            onChange={(event) => props.onChange({ kind: "formula", expression: event.target.value }, false)}
+            className={formulaClass}
+            {...aria}
+          />
+        ) : kind === "boolean" ? (
+          <select
+            aria-label={props.label}
+            value={literal === true ? "true" : "false"}
+            onChange={(event) => props.onChange({ kind: "literal", value: event.target.value === "true" }, false)}
+            className={selectClass}
+            {...aria}
+          >
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </select>
+        ) : kind === "list" || kind === "empty" ? null : (
+          <input
+            aria-label={props.label}
+            value={literal === null || Array.isArray(literal) ? "" : String(literal)}
+            inputMode={kind === "number" ? "decimal" : undefined}
+            spellCheck={false}
+            onChange={(event) => props.onChange({ kind: "literal", value: event.target.value }, kind === "number")}
+            className={inputClass}
+            {...aria}
+          />
+        )}
       </div>
+      {kind === "list" ? (
+        <ListInput
+          label={props.label}
+          items={Array.isArray(literal) ? literal : []}
+          onChange={(items) => props.onChange({ kind: "literal", value: items }, false)}
+        />
+      ) : null}
       <Problem shown={props.problem} />
+    </div>
+  );
+}
+
+/**
+ * A list input's items, one field each. An item keeps its kind, a number
+ * or yes or no too, until someone types in it; a typed item is text, and
+ * may hold a comma or nothing at all.
+ */
+function ListInput(props: {
+  label: string;
+  items: ReadonlyArray<string | number | boolean | null>;
+  onChange: (items: Array<string | number | boolean | null>) => void;
+}) {
+  const { items } = props;
+  return (
+    <div role="group" aria-label={`${props.label}, list`} className="flex flex-col gap-1">
+      {items.map((item, index) => (
+        <div key={index} className="flex items-center gap-1">
+          <input
+            aria-label={`${props.label}, item ${index + 1}`}
+            value={item === null ? "" : String(item)}
+            spellCheck={false}
+            onChange={(event) => props.onChange(items.map((old, at) => (at === index ? event.target.value : old)))}
+            className={inputClass}
+          />
+          <IconButton
+            aria-label={`Remove item ${index + 1} from ${props.label}`}
+            title="Remove"
+            onClick={() => props.onChange(items.filter((_, at) => at !== index))}
+          >
+            <Trash2 size={13} aria-hidden />
+          </IconButton>
+        </div>
+      ))}
+      <SecondaryButton size="compact" className="flex items-center gap-1 self-start" onClick={() => props.onChange([...items, ""])}>
+        <Plus size={12} aria-hidden />
+        Add item
+      </SecondaryButton>
     </div>
   );
 }
@@ -614,7 +709,8 @@ const holdsValue = (field: FieldDefinition) => field.type !== "button";
 
 // A step or row keeps its key while the draft changes, so React keeps its
 // controls and focus can follow it.
-interface Row { key: number; value: FieldValue }
+/** `number` marks an action input typed as a number, which the automation stores as one. */
+interface Row { key: number; value: FieldValue; number?: boolean }
 type Branch = "do" | "otherwise";
 interface StepEntry {
   key: number;
@@ -962,6 +1058,7 @@ export function AutomationBuilder(props: {
     key: string;
     diagnostics: AutomationDiagnostic[];
     formulaProblems: CheckCollectionAutomationResult["formulaProblems"];
+    cannotRun: string | null;
   } | null>(null);
   // Counts Saves that found a problem, each of which moves focus to the first one shown and says how many there are.
   const [refused, setRefused] = useState(0);
@@ -1057,7 +1154,12 @@ export function AutomationBuilder(props: {
       return { ...step, condition: conditionOf(entry.condition, fieldsOf(entry)) ?? "true" };
     }
     const action = editableAction(step, table);
-    if (action) return { ...action, input: rows.map(({ value: entry }) => ({ key: entry.field, value: entry.value })) };
+    if (action) {
+      return { ...action, input: rows.map(({ value: entry, number }) => ({
+        key: entry.field,
+        value: number && entry.value.kind === "literal" ? { kind: "literal", value: numberValue("number", entry.value.value) ?? entry.value.value } : entry.value,
+      })) };
+    }
     const editable = editableStep(step, table, triggerTable);
     if (editable === null) return step;
     // A Set whose records moved to another table, as when its Find reads
@@ -1152,8 +1254,8 @@ export function AutomationBuilder(props: {
 
   /** Main's check of this exact automation: what the file contract refuses, and each formula's syntax. */
   const check = async (target: Automation, key: string) => {
-    const result = await bridge().checkCollectionAutomation({ workspaceId, automation: target });
-    return { key, diagnostics: result.diagnostics, formulaProblems: result.formulaProblems };
+    const result = await bridge().checkCollectionAutomation({ workspaceId, collectionPath, automation: target });
+    return { key, diagnostics: result.diagnostics, formulaProblems: result.formulaProblems, cannotRun: result.cannotRun };
   };
   // Checked a moment after the person stops typing, so a formula's syntax
   // error shows as it happens.
@@ -1255,11 +1357,14 @@ export function AutomationBuilder(props: {
     const action = editableAction(step, table);
     if (action !== null) {
       const seen = new Set<string>();
-      rows.forEach(({ key: row, value: entry }) => {
+      rows.forEach(({ key: row, value: entry, number }) => {
         if (entry.field.trim() === "") problems.set(`row-${row}/field`, "Name this input.");
         else if (seen.has(entry.field)) problems.set(`row-${row}/field`, `${entry.field} is in this step twice.`);
         seen.add(entry.field);
         if (entry.value.kind === "formula") formulaProblem(`row-${row}/value`, entry.value.expression);
+        if (number && entry.value.kind === "literal" && typeof numberValue("number", entry.value.value) !== "number") {
+          problems.set(`row-${row}/value`, "Enter a number.");
+        }
       });
       continue;
     }
@@ -1387,8 +1492,6 @@ export function AutomationBuilder(props: {
     const find = editableFind(step, table, triggerTable);
     const action = editableAction(step, table);
     const chosen = action === null ? undefined : table?.actions.find((candidate) => candidate.name === action.operation);
-    // This table's actions, and the one the step runs when the file names another table's.
-    const offered = (table?.actions ?? []).filter((candidate) => candidate.table === table?.name || candidate === chosen);
     const targetPath = targetOf(entry);
     // Main lists the Collections a step can change; a Find's read reach shows in its saved verdict.
     const targetStopped = step.kind === "add-record" && targetPath !== collectionPath
@@ -1533,17 +1636,22 @@ export function AutomationBuilder(props: {
               className={selectClass}
             >
               {chosen === undefined ? <option value={action.operation}>{action.operation}</option> : null}
-              {offered.map((candidate) => <option key={candidate.name} value={candidate.name}>
-                {candidate.table === table?.name ? candidate.label : `${candidate.label} (${candidate.table})`}
+              {actionsByTable.map((candidate) => <option key={candidate.name} value={candidate.name}>
+                {candidate.table === watched ? candidate.label : `${candidate.label} (${candidate.table})`}
               </option>)}
             </select>
-            {chosen !== undefined && !chosen.reversible ? (
+            {chosen === undefined ? (
+              <StatusLine tone="warning" icon={AlertTriangle} label="Not an action">
+                {own} has no action named {action.operation}. Choose another.
+              </StatusLine>
+            ) : !chosen.reversible ? (
               <p className="m-0 text-[12px] text-muted">{chosen.label} can't be undone.</p>
             ) : null}
             {rows.map(({ key: rowKey, value: row }, rowIndex) => {
               const name = row.field || `input ${rowIndex + 1}`;
-              const replace = (value: FieldValue) =>
-                setRows(key, rows.map((current) => (current.key === rowKey ? { key: rowKey, value } : current)));
+              const typed = rows[rowIndex]?.number ?? false;
+              const replace = (value: FieldValue, isNumber = typed) =>
+                setRows(key, rows.map((current) => (current.key === rowKey ? { key: rowKey, value, number: isNumber } : current)));
               return (
                 <div key={rowKey} className="flex items-start gap-1">
                   <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -1562,8 +1670,9 @@ export function AutomationBuilder(props: {
                       <ActionValueInput
                         label={`Step ${number}, ${name}`}
                         value={row.value}
+                        number={typed}
                         problem={problem(`row-${rowKey}/value`)}
-                        onChange={(value) => replace({ field: row.field, value })}
+                        onChange={(value, isNumber) => replace({ field: row.field, value }, isNumber)}
                       />
                     </ToValue>
                   </div>
@@ -1806,17 +1915,22 @@ export function AutomationBuilder(props: {
             <Plus size={12} aria-hidden />
             If
           </SecondaryButton>
-          {table !== null && table.actions.some((candidate) => candidate.table === table.name) ? (
+          {table !== null && table.actions.length > 0 ? (
             <SecondaryButton
               size="compact"
               className="flex items-center gap-1"
               disabled={full}
-              onClick={() => addStep(listId, {
-                kind: "invoke",
-                operation: table.actions.find((candidate) => candidate.table === table.name)!.name,
-                // The action reads its record itself, so it takes the record's id.
-                input: noRecord || draft.when.kind === "record-removed" ? [] : [{ key: "id", value: { kind: "formula", expression: "record.id" } }],
-              })}
+              onClick={() => {
+                // The trigger's table's first action, as its record is the one a new step names.
+                const first = actionsByTable[0]!;
+                addStep(listId, {
+                  kind: "invoke",
+                  operation: first.name,
+                  // The action reads its record itself, so it takes the record's id, when the trigger has one in its table.
+                  input: noRecord || draft.when.kind === "record-removed" || first.table !== watched
+                    ? [] : [{ key: "id", value: { kind: "formula", expression: "record.id" } }],
+                });
+              }}
             >
               <Plus size={12} aria-hidden />
               Run an action
@@ -1833,6 +1947,11 @@ export function AutomationBuilder(props: {
     );
   };
 
+  // Main's answer for this draft; until it comes, what it said of the saved version, while nothing changed.
+  // An unchanged automation keeps what the list said when main gives no reason, as for a dataset whose rules are not approved, which main's check cannot see.
+  const cannotRun = current?.cannotRun ?? (dirty ? null : props.cannotRun);
+  // Every table's actions, the trigger's table first, so a new step runs one on the trigger's record.
+  const actionsByTable = [...(table?.actions ?? [])].sort((a, b) => Number(b.table === watched) - Number(a.table === watched));
   const trigger = draft.when;
   const nextRun = trigger.kind === "schedule" ? nextRunOf(trigger) : null;
   const builderTrigger = builderTriggerOf(trigger);
@@ -1866,8 +1985,8 @@ export function AutomationBuilder(props: {
           {...invalid(problem("name"))}
         />
         <Problem shown={problem("name")} />
-        {props.cannotRun ? (
-          <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">{props.cannotRun}</StatusLine>
+        {cannotRun ? (
+          <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">{cannotRun}</StatusLine>
         ) : waiting ? (
           <StatusLine tone="muted" icon={Clock} label="Waiting">Waiting to check who can edit {own}.</StatusLine>
         ) : null}

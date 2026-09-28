@@ -147,22 +147,28 @@ export function registerCollectionAutomationsIpc<
   });
 
   // The builder's check, the same one a save makes: the writer reads the
-  // automation back through the file contract. It reads nothing in the
-  // workspace, but answers only the window that has the workspace open,
-  // like every other automations call.
+  // automation back through the file contract. It also says why the draft
+  // would not run, from what the executor has indexed for its Collection,
+  // and writes nothing. It answers only the window that has the workspace
+  // open, like every other automations call.
   registerHandler(CHANNELS.checkCollectionAutomation, async (event, payload) => {
     assertTrustedSender(event);
     const input = CheckCollectionAutomationPayload.parse(payload);
-    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<CheckCollectionAutomationResult> => {
+    assertCollectionPath(input.collectionPath);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<CheckCollectionAutomationResult> => {
+      let diagnostics: CheckCollectionAutomationResult["diagnostics"];
       try {
         const written = writeAutomationsFile([{ status: "valid", automation: input.automation }]);
-        return {
-          diagnostics: written.status === "refused" ? written.diagnostics : [],
-          formulaProblems: formulaProblems(input.automation),
-        };
+        diagnostics = written.status === "refused" ? written.diagnostics : [];
       } catch {
-        return { diagnostics: [{ code: "changed-on-reread", path: "/automations/0" }], formulaProblems: [] };
+        return { diagnostics: [{ code: "changed-on-reread", path: "/automations/0" }], formulaProblems: [], cannotRun: null };
       }
+      // Whether it would run needs a readable automation, and says nothing in a shared view, whose automations run elsewhere.
+      // A status dohc cannot give, as before the executor opens, leaves the syntax and file checks standing.
+      const cannotRun = diagnostics.length > 0 || dependencies.sharedViewOf(input.workspaceId)
+        ? null
+        : await operation.state.collectionAutomations.draftCannotRun(input.collectionPath, input.automation).catch(() => null);
+      return { diagnostics, formulaProblems: formulaProblems(input.automation), cannotRun };
     });
   });
 

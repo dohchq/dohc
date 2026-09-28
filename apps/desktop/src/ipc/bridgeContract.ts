@@ -4587,16 +4587,19 @@ export type ListAutomationTargetsPayload = z.infer<typeof ListAutomationTargetsP
 export type ListAutomationTargetsResult = { collections: CollectionAutomationTarget[] } | { status: "unavailable" };
 
 // The builder checks a draft the way saving would: what the file contract
-// refuses, and the syntax error of each formula and message in it, at its
-// JSON Pointer from the automation. Only syntax is checked; nothing runs.
+// refuses, the syntax error of each formula and message in it, at its JSON
+// Pointer from the automation, and why dohc would not run it in its
+// Collection, which does not stop a save. Nothing runs.
 export const CheckCollectionAutomationPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
   automation: z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value)),
 });
 export type CheckCollectionAutomationPayload = z.infer<typeof CheckCollectionAutomationPayload>;
 export type CheckCollectionAutomationResult = {
   diagnostics: AutomationDiagnostic[];
   formulaProblems: Array<{ path: string; problem: string } | { path: string; code: AutomationDiagnostic["code"] }>;
+  cannotRun: string | null;
 };
 
 // Undo for a finished run, as the person who clicked it. `deletes` is null

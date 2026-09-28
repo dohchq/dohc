@@ -132,6 +132,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       return {
         diagnostics: written.status === "refused" ? written.diagnostics : [],
         formulaProblems: formulaProblems(automation),
+        cannotRun: null as string | null,
       };
     }),
     onAutomationRunsChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
@@ -470,7 +471,7 @@ describe("a dataset table's ⚡ panel", () => {
     ] });
   }, 30_000);
 
-  it("keeps a saved action input's number as the file wrote it, shows it as its formula, and keeps a typed today() in view", async () => {
+  it("keeps a saved action input's number as the file wrote it, shows it as a number, and keeps a typed today() in view", async () => {
     const withActions: AutomationTable = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] };
     const saved: Automation = { ...onInvoices, id: "settle", name: "Settle it", do: [{ kind: "invoke", operation: "invoices.settle", input: [
       { key: "amount", value: { kind: "literal", value: 12 } },
@@ -480,8 +481,8 @@ describe("a dataset table's ⚡ panel", () => {
     const user = userEvent.setup();
     render(<Panel table={withActions} />);
     await user.click(await screen.findByRole("button", { name: "Settle it" }));
-    expect((screen.getByRole("combobox", { name: "Step 1, amount, kind" }) as HTMLSelectElement).value).toBe("formula");
-    expect((screen.getByRole("textbox", { name: "Step 1, amount, formula" }) as HTMLInputElement).value).toBe("12");
+    expect((screen.getByRole("combobox", { name: "Step 1, amount, kind" }) as HTMLSelectElement).value).toBe("number");
+    expect((screen.getByRole("textbox", { name: "Step 1, amount" }) as HTMLInputElement).value).toBe("12");
     expect((screen.getByRole("textbox", { name: "Step 1, due, formula" }) as HTMLInputElement).value).toBe("today()");
     await user.type(screen.getByRole("textbox", { name: "Name" }), " now");
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -489,7 +490,7 @@ describe("a dataset table's ⚡ panel", () => {
     expect(written[0]!.automations[0]!.do).toEqual(saved.do);
   }, 30_000);
 
-  it("shows the label and the can't be undone line for another table's action a step runs, and offers only this table's", async () => {
+  it("shows the label and the can't be undone line for another table's action a step runs, and offers every table's, the trigger's first", async () => {
     const withActions: AutomationTable = { ...INVOICES, actions: [
       { name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false },
       { name: "refunds.issue", label: "Issue refund", table: "Refunds", reversible: false },
@@ -537,6 +538,125 @@ describe("a dataset table's ⚡ panel", () => {
     render(<Panel table={table} start={start} />);
     expect(await screen.findByRole("button", { name: "New automation" })).toBeTruthy();
     expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+  });
+
+  it("keeps each action input's kind, asks for a number where one is typed, and saves it as a number", async () => {
+    const withActions: AutomationTable = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: true }] };
+    const saved: Automation = { ...onInvoices, id: "settle", name: "Settle it", do: [{ kind: "invoke", operation: "invoices.settle", input: [
+      { key: "amount", value: { kind: "literal", value: 3 } },
+      { key: "paid", value: { kind: "literal", value: false } },
+      { key: "note", value: { kind: "literal", value: null } },
+      { key: "tags", value: { kind: "literal", value: [1, "a, b", ""] } },
+      { key: "memo", value: { kind: "literal", value: "Thanks" } },
+    ] }] };
+    const { written } = makeBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel table={withActions} />);
+    await user.click(await screen.findByRole("button", { name: "Settle it" }));
+    const kinds = ["amount", "paid", "note", "tags", "memo"].map((key) => (screen.getByRole("combobox", { name: `Step 1, ${key}, kind` }) as HTMLSelectElement).value);
+    expect(kinds).toEqual(["number", "boolean", "empty", "list", "text"]);
+    expect((screen.getByRole("combobox", { name: "Step 1, paid" }) as HTMLSelectElement).value).toBe("false");
+    // Each item is its own field, so an item with a comma, or an empty one, stays one item.
+    const tags = screen.getByRole("group", { name: "Step 1, tags, list" });
+    expect(within(tags).getAllByRole("textbox").map((item) => (item as HTMLInputElement).value)).toEqual(["1", "a, b", ""]);
+    await user.click(within(tags).getByRole("button", { name: "Add item" }));
+    await user.type(within(tags).getByRole("textbox", { name: "Step 1, tags, item 4" }), "c");
+
+    const amount = screen.getByRole("textbox", { name: "Step 1, amount" });
+    await user.clear(amount);
+    await user.type(amount, "x");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Enter a number.")).toBeTruthy();
+    expect(written).toEqual([]);
+    await user.clear(amount);
+    await user.type(amount, "4.5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    const [step] = written[0]!.automations[0]!.do;
+    const input = (saved.do[0] as Extract<Automation["do"][number], { kind: "invoke" }>).input;
+    expect(step).toEqual({ ...saved.do[0], input: [
+      { key: "amount", value: { kind: "literal", value: 4.5 } },
+      input[1], input[2],
+      { key: "tags", value: { kind: "literal", value: [1, "a, b", "", "c"] } },
+      input[4],
+    ] });
+  }, 30_000);
+
+  it("edits another table's action inside an If, and keeps an action the dataset lacks with why", async () => {
+    const withActions: AutomationTable = { ...INVOICES, actions: [
+      { name: "invoices.settle", label: "Settle", table: "Invoices", reversible: true },
+      { name: "refunds.issue", label: "Issue refund", table: "Refunds", reversible: false },
+    ] };
+    const saved: Automation = { ...onInvoices, id: "branch", name: "Branch", do: [{ kind: "if", if: "record.Points > 1", do: [
+      { kind: "invoke", operation: "gone.op", input: [] },
+    ], otherwise: [
+      { kind: "invoke", operation: "invoices.settle", input: [] },
+    ] }] };
+    const { written } = makeBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel table={withActions} />);
+    await user.click(await screen.findByRole("button", { name: "Branch" }));
+    // The action the file names is gone: it stays, says so, and the step can still be saved or changed.
+    expect(screen.getByText("Invoices has no action named gone.op. Choose another.")).toBeTruthy();
+    expect((screen.getByRole("combobox", { name: "Step 2, action" }) as HTMLSelectElement).value).toBe("gone.op");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 3, action" }), "refunds.issue");
+    expect(within(screen.getByTestId("builder-step-2")).getByText("Issue refund can't be undone.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    const [branch] = written[0]!.automations[0]!.do;
+    expect(branch).toEqual({ ...saved.do[0], otherwise: [{ kind: "invoke", operation: "refunds.issue", input: [] }] });
+  }, 30_000);
+
+  it("keeps the list's reason on an unchanged automation when main's check gives none", async () => {
+    const reason = "This Collection's rules are not approved yet, so its automations cannot run.";
+    const { bridge } = makeBridge(read([summary(onInvoices, { cannotRun: reason })]));
+    // Main's check of the unchanged automation gives no reason, as for rules it cannot see. The syntax
+    // problem it also names shows when its answer has landed.
+    bridge.checkCollectionAutomation.mockResolvedValue({
+      diagnostics: [], formulaProblems: [{ path: "/do/0/set/Finished on", problem: "Marker." }], cannotRun: null,
+    });
+    const user = userEvent.setup();
+    render(<Panel table={INVOICES} />);
+    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    expect(await screen.findByText("This formula has a syntax error. Marker.", undefined, SLOW)).toBeTruthy();
+    expect(screen.getAllByText(reason).length).toBeGreaterThan(0);
+  }, 30_000);
+
+  it("shows what main says about whether the draft would run, and lets it be saved", async () => {
+    const withActions: AutomationTable = { ...INVOICES, actions: [{ name: "invoices.remind", label: "Remind", table: "Invoices", reversible: true }] };
+    const { bridge, written } = makeBridge(read([]));
+    const reason = "A schedule starts this automation, so an action's input cannot use trigger.record. Use a value instead.";
+    bridge.checkCollectionAutomation.mockImplementation(async ({ automation }: { automation: Automation }) => ({
+      diagnostics: [], formulaProblems: [], cannotRun: automation.do.some((step) => step.kind === "invoke" && step.input.length > 0) ? reason : null,
+    }));
+    const user = userEvent.setup();
+    render(<Panel table={withActions} />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Trigger" }), "schedule");
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    await user.click(screen.getByRole("button", { name: "Run an action" }));
+    // A schedule has no record, so a new action starts with no input.
+    expect(screen.queryByRole("textbox", { name: "Step 1, input 1 name" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Add input" }));
+    await user.type(screen.getByRole("textbox", { name: "Step 1, input 1 name" }), "id");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, id, kind" }), "formula");
+    await user.type(screen.getByRole("textbox", { name: "Step 1, id, formula" }), "trigger.record.id");
+    expect(await screen.findByText(reason, undefined, SLOW)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Remove id from step 1" }));
+    await waitFor(() => expect(screen.queryByText(reason)).toBeNull(), SLOW);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual([{ kind: "invoke", operation: "invoices.remind", input: [] }]);
+  }, 30_000);
+
+  it("gives an action on another table than the trigger's no record input", async () => {
+    makeBridge(read([]));
+    const user = userEvent.setup();
+    render(<Panel table={{ ...INVOICES, actions: [{ name: "refunds.issue", label: "Issue refund", table: "Refunds", reversible: true }] }} />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.click(screen.getByRole("button", { name: "Run an action" }));
+    expect((screen.getByRole("combobox", { name: "Step 2, action" }) as HTMLSelectElement).value).toBe("refunds.issue");
+    expect(screen.queryByRole("textbox", { name: "Step 2, input 1 name" })).toBeNull();
   });
 
   it("says nothing about undo for an action whose rules name its reverse", async () => {
@@ -1857,7 +1977,7 @@ describe("the builder", () => {
     await user.type(screen.getByRole("textbox", { name: "Condition formula" }), " 3");
     // Main checks the whole draft.
     await waitFor(() => expect(bridge.checkCollectionAutomation).toHaveBeenLastCalledWith({
-      workspaceId: "ws-1", automation: expect.objectContaining({ if: "record.Points == 3" }),
+      workspaceId: "ws-1", collectionPath: "Tasks", automation: expect.objectContaining({ if: "record.Points == 3" }),
     }), SLOW);
     await waitFor(() => expect(screen.queryByText(/syntax error/)).toBeNull(), SLOW);
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -2138,6 +2258,7 @@ describe("the builder", () => {
     bridge.checkCollectionAutomation.mockResolvedValue({
       diagnostics: [{ code: "duplicate-value", path: "/automations/0/do/0/do/1/as" }],
       formulaProblems: [{ path: "/do/0/otherwise/0/set/Title", problem: "Unexpected token." }],
+      cannotRun: null,
     });
     const user = userEvent.setup();
     render(<Panel />);
