@@ -285,6 +285,7 @@ import {
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
+import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -926,6 +927,12 @@ function noticeStore(): NoticeStore {
     session: noticeSession,
     installId: localReactorFallbackId,
     onChanged: notifyNoticesChanged,
+    ...createWorkspaceRefusalNotices({
+      sessions: () => desktopEngine.sessions,
+      workspaces: listWorkspaces,
+      withOperation: withPhysicalWorkspaceOperation,
+      workspaceForRegistered: workspace => receivedShareEngine.workspaceForRegistered(workspace),
+    }),
   });
   return cachedNoticeStore;
 }
@@ -4110,6 +4117,12 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunnin
 });
 
 const desktopEngine = createDesktopEngine({
+  onWorkspaceOpened: workspaceId => {
+    void noticeStore().refreshRefusals(workspaceId).catch(error => {
+      console.warn("[notices] could not refresh workspace sync refusals after open", error);
+    });
+  },
+  onRefusalsChanged: notifyNoticesChanged,
   serverOwnerDelivery: createServerOwnerConnection({stateDir, workspaces: listWorkspaces,
     onRefusalsChanged: workspaceId => notifyRenderer({workspaceId}),
     credentials: () => cachedCredentials ? {value: cachedCredentials, signal: ownerDeliveryCredentialLifetime.signal} : null,
@@ -5606,6 +5619,7 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
     requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
+    onRefusalsChanged: notifyNoticesChanged,
   }));
 
   workspaceEngineIpc.registerHistory();

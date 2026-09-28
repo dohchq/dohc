@@ -18,9 +18,6 @@ pub struct RelayCursor {
     pub stream_identity: String,
     /// Local bases may originate after the initial pull drains or an earlier local push.
     pub bootstrap_complete: bool,
-    /// Local-only ownership token for refusal rows surfaced with this pending
-    /// cursor. Persisted relay positions never carry one.
-    pub refusal_report_id: Option<String>,
     /// Local-only ownership token for applied settlements and deferred relay work.
     pub settlement_report_id: Option<String>,
 }
@@ -66,7 +63,6 @@ pub fn read_relay_cursor(
                     replication_epoch,
                     stream_identity,
                     bootstrap_complete,
-                    refusal_report_id: None,
                     settlement_report_id: None,
                 })
             })
@@ -138,20 +134,6 @@ pub fn commit_relay_cursor(
                     now_ms,
                 )?
             };
-            // Refusals can also be created outside a pull when open/resync/
-            // close drains an already-ACKed Y.Doc coordinate. Delete only the
-            // rows that this exact pull claimed and surfaced. A later drain is
-            // unowned (report_id NULL), and a newer pull retags all pending
-            // rows, so neither a delayed nor stale cursor commit can destroy
-            // a refusal its caller never received.
-            if let Some(report_id) = &cursor.refusal_report_id {
-                tx.execute(
-                    "DELETE FROM replication_pending_refusals \
-                     WHERE workspace_id=?1 AND report_id=?2",
-                    params![workspace_id, report_id],
-                )
-                .map_err(SyncError::persist)?;
-            }
             if let Some(report_id) = &cursor.settlement_report_id {
                 tx.execute(
                     "DELETE FROM relay_deferred_ops WHERE workspace_id=?1 AND report_id=?2",

@@ -8738,6 +8738,30 @@ describe("notices sent to you", () => {
     );
   }
 
+  it("keeps a newer refusal after an older shell dismissal finishes", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const shown: NoticeRow = { ...MENTION, store: "local", kind: "sync-refusal", noticeId: "refusal",
+      body: "A change needs review", refusalCoordinates: [{ originId: "peer", originSeq: 1 }] };
+    const dismissed = deferred<void>();
+    const notices = { ...sentNotices([shown]), dismiss: vi.fn(() => dismissed.promise) };
+    const view = renderWithNotices(bridge, { sentNotices: notices });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("notice-refusal-dismiss"));
+    expect(notices.dismiss).toHaveBeenCalledWith(shown);
+    const newer = { ...shown, body: "A newer change needs review",
+      refusalCoordinates: [{ originId: "peer", originSeq: 2 }] };
+    view.rerender(<>
+      <CollectionFieldWriteHost />
+      <DesktopWorkspaceShell workspace={WORKSPACE} workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}}
+        sentNotices={{ ...notices, notices: [newer] }} />
+    </>);
+    expect((await screen.findByTestId("notice-refusal")).textContent).toContain(newer.body);
+    await act(async () => dismissed.resolve());
+    expect(screen.getByTestId("notice-refusal").textContent).toContain(newer.body);
+  });
+
   it("opens a notice's file in this workspace and marks it read", async () => {
     const user = userEvent.setup();
     const notices = sentNotices([MENTION]);

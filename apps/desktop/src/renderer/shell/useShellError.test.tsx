@@ -79,6 +79,25 @@ describe("useShellError", () => {
     for (const path of paths) expect(copied).toContain(`Created: ${path}`);
     expect(copied).toContain(`Next: ${error.partial.retry.instruction}`);
   });
+
+  it("shows each persisted refusal as a toast and keeps its row through retry", () => {
+    const retry = vi.fn();
+    const { result, rerender } = renderHook(({workspace}) => useShellError(workspace), {initialProps: {workspace: "ws-a"}});
+    const notice = { noticeId: "refusal-1", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "A change needs your review",
+      body: 'dohc could not apply the resolution for "doc.md". Review its conflict.', target: {}, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry));
+    expect(result.current.shellErrors[0]).toMatchObject({message: notice.body, seen: false, retry});
+    act(() => result.current.hideShellError(notice.noticeId));
+    act(() => result.current.showSyncRefusals([notice], retry));
+    expect(result.current.shellErrors[0]!.seen).toBe(true);
+    act(() => result.current.retryShellError(notice.noticeId));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(result.current.shellErrors).toHaveLength(1);
+    rerender({workspace: "ws-b"});
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
   it("runs a retry exactly once, even under Strict Mode, and drops the row", () => {
     const retry = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"), { wrapper: strict });

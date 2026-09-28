@@ -12,12 +12,14 @@ import { useRequestSequence } from "../useRequestSequence";
 // toast. An older one waits in Notices.
 export const SENT_NOTICE_TOAST_MS = 2 * 60_000;
 
-export const sentNoticeRef = ({ store, noticeId }: NoticeRef): NoticeRef => ({ store, noticeId });
+export const sentNoticeRef = ({ store, noticeId, refusalCoordinates }: NoticeRef): NoticeRef => ({
+  store, noticeId, ...(refusalCoordinates === undefined ? {} : { refusalCoordinates }),
+});
 
 // A notice as the list of one account showed it. Another account's notice
 // with the same id has another key, so a mark or a toast never carries over.
-const noticeKey = (account: string | null, { store, noticeId }: NoticeRef): string =>
-  JSON.stringify([account, store, noticeId]);
+const noticeKey = (account: string | null, { store, noticeId, refusalCoordinates }: NoticeRef): string =>
+  JSON.stringify([account, store, noticeId, refusalCoordinates]);
 
 // One list from main: the signed-in account it shows, and its rows.
 interface Listed {

@@ -18,6 +18,7 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
 >;
 
 export function workspaceVersionHandlers(dependencies: {
+  onRefusalsChanged?(): void;
   requireEngineCapture(workspaceId: string, feature: "Versions"): Promise<{ capture: VersionOperations }>;
   notifyRenderer(target: { workspaceId: string }): void;
   activity: { queueCloudSync(workspaceId: string): void };
@@ -129,6 +130,7 @@ export function workspaceVersionHandlers(dependencies: {
       // open until an unrelated edit happened to trigger a sync.
       activity.queueCloudSync(input.workspaceId);
       notifyRenderer({ workspaceId: input.workspaceId });
+      dependencies.onRefusalsChanged?.();
       return {
         conflicts: outcome.remaining.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: outcome.remaining.nextAfterConflictId,

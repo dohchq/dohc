@@ -1133,6 +1133,35 @@ pub enum ShareViewIdentityRecord {
 }
 
 impl ActorHandle {
+    pub async fn sync_refusal_notices(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<dohc_engine_sync::RefusalNotice>, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::list_refusal_notices(store, &workspace_id).map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn dismiss_sync_refusal(
+        &self,
+        workspace_id: String,
+        notice_id: String,
+        refusal_coordinates: Vec<dohc_engine_sync::RefusalCoordinate>,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::dismiss_refusal_notice(
+                store,
+                &workspace_id,
+                &notice_id,
+                &refusal_coordinates,
+                &NoFaults,
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn reset_claim_refusal(
         &self,
         workspace_id: String,

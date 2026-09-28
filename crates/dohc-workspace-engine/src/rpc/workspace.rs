@@ -2512,7 +2512,6 @@ mod tests {
                     cursor: 7,
                     replication_epoch: "epoch".to_owned(),
                     stream_identity: "stream".to_owned(),
-                    refusal_report_id: None,
                     settlement_report_id: None,
                 }),
             },
