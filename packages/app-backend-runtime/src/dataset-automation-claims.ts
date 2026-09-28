@@ -77,8 +77,8 @@ export type DatasetActor =
   | { kind: "named"; userId: string; appId?: string; agent?: PressingAgent }
   | { kind: "link"; appId?: string }
   | { kind: "automation"; automationId: string; depth: number }
-  // The owner's agent, in a run an automation started, at the run's chain depth.
-  | { kind: "agent"; depth: number };
+  // The owner's agent, at its run's chain depth, and the app it wrote through, if any.
+  | { kind: "agent"; depth: number; appId?: string };
 /**
  * An agent that pressed a button for its person, from a run at `depth`. The
  * press claims at that depth, and stops at once at the chain cap.

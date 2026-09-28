@@ -879,3 +879,32 @@ it("runs an automation's custom action without link read approval", async () => 
   await expect(f.host.invoke("helper", { ...request, access: { kind: "app", appId: "form" } })).rejects.toThrow("access");
   expect((await f.host.invoke("helper", request)).result).toEqual({ kind: "automation", automationId: "collection:orders#notify" });
 });
+
+it("attributes an owner's write to its agent at any depth from 0, through an app too, and grants the agent nothing", async () => {
+  let agent: { depth: number } | undefined, named = false;
+  const f = await fixture({ resolveAuthority: (_context, request) => ({ principalKey: "owner", ...(request.access.kind === "app" ? { appId: "form" } : {}),
+    caller: named ? { kind: "named", userId: "helper", grantId: "member", access: "view", helper: false } : { kind: "owner", userId: "owner" },
+    ...(agent ? { agent } : {}) }) });
+  await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  f.host.automationClaims.subscribe(scope, { automationId: "watch", tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: "a".repeat(64) });
+  const invoke = (idempotencyKey: string, appId?: string) => f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256,
+    operationId: id(6), input: { value: idempotencyKey }, idempotencyKey, ...(appId ? { access: { kind: "app" as const, appId } } : {}) });
+  agent = { depth: 0 };
+  await invoke("direct");
+  expect(f.host.automationClaims.next(scope.workspaceId)).toMatchObject({ depth: 0, actor: { kind: "agent", depth: 0 } });
+  agent = { depth: 2 };
+  await invoke("app", "form");
+  expect(f.host.automationClaims.next(scope.workspaceId)).toMatchObject({ depth: 2, actor: { kind: "agent", depth: 2, appId: "form" } });
+  // Owner administration refuses an agent at any depth.
+  agent = { depth: 0 };
+  expect(() => f.host.archiveDataset("owner", scope)).toThrow("You do not have access to this Collection.");
+  for (const refused of [{ depth: -1 }, { depth: 65 }, { depth: 0.5 }]) {
+    agent = refused;
+    await expect(invoke("refused")).rejects.toThrow("You do not have access to this Collection.");
+  }
+  // Only the owner's agent exists.
+  agent = { depth: 0 }; named = true;
+  await expect(invoke("named", "form")).rejects.toThrow("You do not have access to this Collection.");
+  expect(f.host.automationClaims.next(scope.workspaceId)).toBeNull();
+});
