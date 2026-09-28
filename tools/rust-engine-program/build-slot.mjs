@@ -372,7 +372,7 @@ async function acquireSlot({
   const cancellation = new AbortController();
   const cancel = (signal, code) => {
     process.exitCode = code;
-    cancellation.abort(new Error(`Build slot acquisition cancelled by ${signal}.`));
+    cancellation.abort(new Error(`${label[0].toUpperCase()}${label.slice(1)} acquisition cancelled by ${signal}.`));
   };
   const onSigint = () => cancel("SIGINT", 130);
   const onSigterm = () => cancel("SIGTERM", 143);
@@ -395,7 +395,7 @@ async function acquireSlot({
     if (reclaimStaleSlots({ root, slots, staleMs, kind }) > 0) continue;
     if (!denied) {
       denied = true;
-      logEvent(root, `denied: pid ${process.pid} found all ${slots} ${kind}s held`);
+      logEvent(root, `denied: pid ${process.pid} found all ${slots} slots held`);
     }
     if (Date.now() >= deadline) {
       throw new Error(

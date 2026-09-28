@@ -1066,7 +1066,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     `;
     const invoke = (extra = []) => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
       cwd: root, encoding: "utf8", timeout: 20_000,
-      env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))) },
+      env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), DOHC_BUILD_SLOT_ROOT: join(root, "slots") },
     });
     const clean = invoke();
     assert.equal(clean.error, undefined);
