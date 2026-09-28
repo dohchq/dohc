@@ -215,9 +215,10 @@ export function validateLinkCapability(input: {
 }): ValidatedLinkCapability | null {
   const capabilityHash = hashLinkBearer(input.capabilityToken, input.linkKey);
   const session = input.storage.findLinkSessionByCapabilityHash(capabilityHash);
+  const matches = constantTimeHashEqual(capabilityHash, session?.capabilityHash ?? hashLinkBearer("", input.linkKey));
   if (
     !session ||
-    !constantTimeHashEqual(capabilityHash, session.capabilityHash) ||
+    !matches ||
     session.expiresAtMs <= input.nowMs
   ) {
     return null;

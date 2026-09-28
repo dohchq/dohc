@@ -254,11 +254,10 @@ describe("share grants", () => {
     expect(storage.revokeShare("share-post-await", 2_000)).toBe(true);
     releaseLookup();
 
-    const missing = await denialBytes(
-      await h(request(RECIPIENT, "/sync/shares/share-missing")),
-    );
-    expect(await denialBytes(await pending)).toBe(missing);
-    expect(counted.scansForShare("share-post-await")).toBe(2);
+    const removed = await pending;
+    expect(removed.status).toBe(404);
+    expect(await removed.json()).toMatchObject({code: "share_access_removed", error: "The owner removed your access."});
+    expect(counted.scansForShare("share-post-await")).toBe(3);
   });
 
   it("omits a received-list row revoked during the granter email lookup", async () => {
@@ -871,7 +870,7 @@ describe("share grants", () => {
     expect(await deleted.text()).toBe(deletedContent);
   });
 
-  it("stops serving a revoked share on the next fetch, byte-identically to one that never existed", async () => {
+  it("stops serving a revoked share and explains the removal only to its named recipient", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
@@ -900,10 +899,12 @@ describe("share grants", () => {
       revokedAtMs: 5555,
     });
 
-    const missing = await denialBytes(await h(request(RECIPIENT, "/sync/shares/share-404/log?since=0")));
-    expect(await denialBytes(await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0")))).toBe(missing);
-    expect(await denialBytes(await h(request(RECIPIENT, "/sync/shares/share-0")))).toBe(missing);
-    expect(await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${sharedSha}`)))).toBe(missing);
+    for (const path of ["/sync/shares/share-0/log?since=0", "/sync/shares/share-0", `/sync/shares/share-0/blobs/${sharedSha}`]) {
+      const response = await h(request(RECIPIENT, path));
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({code: "share_access_removed"});
+      expect(await denialBytes(await h(request(STRANGER, path)))).toContain('"code":"not_found"');
+    }
 
     // Revoked shares vanish from the recipient's list but stay (stamped) in
     // the granter's management list.
@@ -1005,6 +1006,7 @@ describe("share grants", () => {
     // 404 rather than serving one last filtered page.
     const raced = await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0"));
     expect(raced.status).toBe(404);
+    expect(await raced.json()).toMatchObject({code: "share_access_removed"});
   });
 
   it("aborts an in-flight shared-blob read when the share is revoked mid-request (revocation race)", async () => {
@@ -1024,6 +1026,7 @@ describe("share grants", () => {
 
     const raced = await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${sharedSha}`));
     expect(raced.status).toBe(404);
+    expect(await raced.json()).toMatchObject({code: "share_access_removed"});
   });
 
   it("advances the shared-log cursor across filtered-out rows so pagination cannot stall", async () => {

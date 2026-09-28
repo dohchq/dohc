@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./link-refusal": "./src/linkRefusal.ts",
     "./dataset-conversion": "./src/datasetConversion.ts",
     "./dataset-attempts": "./src/datasetAttempts.ts",
     "./dataset-artifacts": "./src/datasetArtifacts.ts",

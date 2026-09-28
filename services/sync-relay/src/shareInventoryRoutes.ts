@@ -17,6 +17,7 @@ export function createShareInventoryRoutes(
   storage: Pick<SyncRelayStorage,
     | "listSharesGrantedBy"
     | "listSharesReceivedBy"
+    | "listRemovedSharesForRecipient"
     | "getShare"
     | "setShareLabels"
     | "shareHasActiveGrants"
@@ -110,7 +111,7 @@ export function createShareInventoryRoutes(
               ),
             ];
       });
-      return jsonResponse({ ok: true, granted, received });
+      return jsonResponse({ ok: true, granted, received, removed: storage.listRemovedSharesForRecipient(actor.userId) });
     }
     if (route.route === "shares-list") throw relayError("method_not_allowed");
 
@@ -134,7 +135,7 @@ export function createShareInventoryRoutes(
         actorUserId: actor.userId,
         shareId: route.shareId,
       });
-      if (!authorized.ok) throw notFound();
+      if (!authorized.ok) { requireShareAction(route.shareId, actor.userId, "read"); throw notFound(); }
       const summary = receivedShareSummary(
         { share: authorized.share, grant: authorized.grant },
         granterEmail,

@@ -338,7 +338,7 @@ test('seeded post is found by its title and yields the engine thread id the DOM 
 test('collection fixture writes the schema first and deterministic pre-minted record ids', () => {
   const files = collectionFixtureFiles(3);
   assert.deepEqual(files.map(f => f.path), ['records/collection.yaml', 'records/record-000001.md', 'records/record-000002.md', 'records/record-000003.md']);
-  assert.match(files[0].content, /^name: Records\nfields:\n {2}Name:\n {4}type: text\n/);
+  assert.match(files[0].content, /^version: 1\nname: Records\nfields:\n {2}Name:\n {4}type: text\n/);
   const ids = files.slice(1).map(f => f.content.match(/^id: (\S+)$/m)[1]);
   for (const id of ids) assert.match(id, /^rec_[a-z2-7]{26}$/);
   assert.equal(new Set(ids).size, 3);

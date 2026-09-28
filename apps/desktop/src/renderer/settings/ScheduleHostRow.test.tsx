@@ -15,8 +15,8 @@ const relay = (overrides: Partial<Extract<ScheduleHostResult, { kind: "relay" }>
   hostInstallId: "laptop",
   handoverFrom: null,
   computers: [
-    { installId: "desk", label: "Ice's desktop", lastSeenMs: SEP_25, thisComputer: true },
-    { installId: "laptop", label: "Ice's laptop", lastSeenMs: SEP_20, thisComputer: false },
+    { installId: "desk", kind: "computer", label: "Ice's desktop", lastSeenMs: SEP_25, thisComputer: true },
+    { installId: "laptop", kind: "computer", label: "Ice's laptop", lastSeenMs: SEP_20, thisComputer: false },
   ],
   ...overrides,
 });
@@ -171,9 +171,9 @@ describe("Schedules run on", () => {
   it("gives the list one tab stop and moves between computers with the arrows, Home, and End", async () => {
     install({ readScheduleHost: vi.fn(async () => relay({
       computers: [
-        { installId: "desk", label: "Ice's desktop", lastSeenMs: SEP_25, thisComputer: true },
-        { installId: "laptop", label: "Ice's laptop", lastSeenMs: SEP_20, thisComputer: false },
-        { installId: "mini", label: "Studio mini", lastSeenMs: SEP_20, thisComputer: false },
+        { installId: "desk", kind: "computer", label: "Ice's desktop", lastSeenMs: SEP_25, thisComputer: true },
+        { installId: "laptop", kind: "computer", label: "Ice's laptop", lastSeenMs: SEP_20, thisComputer: false },
+        { installId: "mini", kind: "computer", label: "Studio mini", lastSeenMs: SEP_20, thisComputer: false },
       ],
     })) });
     render(<ScheduleHostRow workspaceId="ws" />);

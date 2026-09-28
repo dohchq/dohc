@@ -1,4 +1,5 @@
 {
+  "version": 1,
   "entryPath": "../board.ts",
   "inputs": [
     "../board.ts",

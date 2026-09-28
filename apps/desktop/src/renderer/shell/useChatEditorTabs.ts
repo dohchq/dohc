@@ -7,12 +7,24 @@ import { chatEditorPath, chatEditorTitle, chatsNavigationLeavesConversation, cha
 type ChatEditor = {
   nav: ChatsNav | undefined;
   drafts: ChatsDrafts | undefined;
+  // A prefill waits in the new-post composer, which takes focus until the
+  // page first reports its drafts.
+  focusNewPost: boolean;
   revision: number;
   generation: number;
   restoreAttempted: boolean;
   onNavChange: (nav: ChatsNav) => void;
   onNavCommand: (nav: ChatsNav) => void;
   onDraftsChange: (drafts: ChatsDrafts) => void;
+};
+
+const EMPTY_DRAFTS: ChatsDrafts = {
+  composer: "",
+  newThreadBody: "",
+  dmRecipients: "",
+  dmDraft: "",
+  replyTarget: null,
+  resolveTargetMessageId: null,
 };
 
 // Inactive editors unmount. Keep only their navigation and unsent input here;
@@ -68,6 +80,7 @@ export function useChatEditorTabs(input: {
     const entry: ChatEditor = {
       nav: undefined,
       drafts: undefined,
+      focusNewPost: false,
       revision: 0,
       generation: session.current.generation,
       restoreAttempted: false,
@@ -82,16 +95,41 @@ export function useChatEditorTabs(input: {
         entry.onNavChange(nav);
       },
       onDraftsChange(drafts) {
-        if (store.current === owner && owner.entries.get(path) === entry) entry.drafts = drafts;
+        if (store.current !== owner || owner.entries.get(path) !== entry) return;
+        entry.drafts = drafts;
+        entry.focusNewPost = false;
       },
     };
     owner.entries.set(path, entry);
     return entry;
   }, []);
-  const open = useCallback((nav: ChatsNav) => {
+  // A prefill lands in the conversation's new-post composer, after anything
+  // the person already typed there, and remounts the tab so it shows. It
+  // never leaves a reply the person has not sent: the tab keeps its thread
+  // and the answer is false.
+  const open = useCallback((nav: ChatsNav, prefill?: string): boolean => {
     callbacks.current.onNavigate();
     const path = chatEditorPath(nav);
     const entry = get(path);
+    if (prefill !== undefined) {
+      if (chatsNavigationLeavesConversation(entry.nav ?? null, nav)) {
+        if (entry.drafts?.composer.trim()) {
+          callbacks.current.onOpen(path);
+          return false;
+        }
+        // A thread in this tab belongs to this channel, whose new post the
+        // person may have started before opening the thread.
+        entry.drafts = entry.drafts && { ...EMPTY_DRAFTS, newThreadBody: entry.drafts.newThreadBody };
+      }
+      const typed = entry.drafts?.newThreadBody.trim() ? `${entry.drafts.newThreadBody}\n\n` : "";
+      entry.drafts = { ...(entry.drafts ?? EMPTY_DRAFTS), newThreadBody: `${typed}${prefill}` };
+      entry.focusNewPost = true;
+      entry.nav = nav;
+      entry.revision += 1;
+      render((value) => value + 1);
+      callbacks.current.onOpen(path);
+      return true;
+    }
     // A sidebar channel click focuses its tab, including its current thread.
     // A message link still commands a jump inside that tab.
     const focusOnly = entry.nav && entry.nav.level !== "channels" && chatEditorPath(entry.nav) === path &&
@@ -109,6 +147,7 @@ export function useChatEditorTabs(input: {
       render((value) => value + 1);
     }
     callbacks.current.onOpen(path);
+    return true;
   }, [get]);
   // Mounted pages resolve their own destinations. Hydrate only hidden tabs.
   const pathsKey = JSON.stringify(input.paths.filter((path) => !input.activePaths?.includes(path)));

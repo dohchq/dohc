@@ -61,6 +61,10 @@ export function registerSharedViewsIpcHandlers<
     refusal: EngineStoreRefusal | null,
     detail: string | null,
   ): void;
+  // Reads the relay's account listing again for an ended view the owner can
+  // still restore, so the view resumes. Decides for itself whether the
+  // recheck is due; a refresh only says the view is ended.
+  recheckRemovedShares?(workspaceId: string): Promise<void>;
 }): void {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -69,6 +73,7 @@ export function registerSharedViewsIpcHandlers<
     refreshNativeWorkspaceSurfaces, workspaceAuthorities, canonicalWorkspaceFor,
     withStaleSensitiveWorkspaceOperation, shareViewFiles, receivedShareEngine,
     openWorkspaceActivity, requireWorkspace, notifyRenderer, recordShareViewStoreRefusal,
+    recheckRemovedShares,
   } = dependencies;
   // A shared view has no recorder, so its refresh is what meets a store only
   // a newer dohc opens. That stops the whole workspace, so the refusal goes
@@ -324,6 +329,13 @@ export function registerSharedViewsIpcHandlers<
           assertCurrent: () => operation.assertCurrent(),
         });
         workspace = currentShareViewWorkspace();
+        // An ended view the owner has since put back resumes: the reconcile
+        // below reads the registry, which the recheck may have changed.
+        if (workspace.shareView.ended && recheckRemovedShares) {
+          await recheckRemovedShares(workspace.workspaceId);
+          operation.assertCurrent();
+          workspace = currentShareViewWorkspace();
+        }
         // Refresh the relay-derived chat fact for the banner's next step. It
         // does not grant desktop generic-chat writes. Keep the share identity
         // current for the separate Edit proposal lane.

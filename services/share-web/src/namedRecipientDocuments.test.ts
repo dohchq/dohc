@@ -66,14 +66,20 @@ it.each(["other-account", "revoked", "view", "pinned", "oversized", "claims", "c
   if (mode === "cross-origin") input.headers.set("origin", "https://other.test");
   const response = await f.web(input); expect(response.status).toBe(404);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
-  expect(await response.json()).toEqual({ok: false, error: "not found"});
+  if (mode === "revoked") {
+    expect(await response.json()).toEqual({ok: false, code: "share_access_removed", error: "The owner removed your access."});
+  } else {
+    expect(await response.json()).toEqual({ok: false, error: "not found"});
+  }
 });
 it("rechecks the grant after reading current files", async () => {
   const f = await fixture(), read = f.storage.readCurrentFileState.bind(f.storage);
   vi.spyOn(f.storage, "readCurrentFileState").mockImplementation(input => {
     const result = read(input); f.storage.revokeShareGrant({shareId: "share", grantId: "grant", revokedAtMs: 4}); return result;
   });
-  expect((await f.web(request())).status).toBe(404);
+  const response = await f.web(request());
+  expect(response.status).toBe(404);
+  expect(await response.json()).toMatchObject({code: "share_access_removed", error: "The owner removed your access."});
 });
 it("keeps cancelled navigation in capacity until account resolution finishes", async () => {
   const f = await fixture();
@@ -109,4 +115,12 @@ it("opens named documents without a sender label when account lookup fails", asy
   const response = await f.web(request());
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({sharerName: null, access: "edit"});
+});
+
+it("explains removal only to the verified recipient through the web proxy", async () => {
+  const f = await fixture(); f.storage.revokeShareGrant({shareId: "share", grantId: "grant", revokedAtMs: 4});
+  const response = await f.web(request()); expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({ok: false, code: "share_access_removed", error: "The owner removed your access."});
+  const probe = await f.web(request("bob")); expect(probe.status).toBe(404);
+  expect(await probe.json()).toEqual({ok: false, error: "not found"});
 });

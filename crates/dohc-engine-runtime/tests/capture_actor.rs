@@ -1281,3 +1281,113 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
 
     supervisor.close(&db).expect("close actor");
 }
+
+/// A capture that saw a path missing asks the actor to confirm it. The
+/// materializer runs on the actor's thread, so a replace caught between its
+/// two renames is finished by then and the retire is refused.
+#[test]
+fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
+    const WORKSPACE_ID: &str = "ws-absence-retire";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let retire = || CaptureRetire {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        version_id: "main".to_owned(),
+        path: "notes/a.md".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        now_ms: 20,
+        request_id: None,
+        only_if_text_head: false,
+        only_if_capture_origin: false,
+        allow_ydoc_origin: true,
+    };
+    let retire_absent = |handle: &dohc_engine_runtime::ActorHandle| {
+        handle.capture_retire_materialized_blocking_guarded(
+            retire(),
+            scratch.path().to_path_buf(),
+            true,
+            Arc::new(()),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            Arc::new(ExistingRootGuard),
+        )
+    };
+    let refused = |result: Result<_, RuntimeError>| {
+        matches!(
+            result,
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState { .. }
+            ))
+        )
+    };
+
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    handle
+        .capture_ingest_blocking(
+            CaptureIngest {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "main".to_owned(),
+                path: "notes/a.md".to_owned(),
+                text: "captured".to_owned(),
+                metadata_origin: "capture".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("capture");
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
+    std::fs::write(scratch.path().join("notes/a.md"), "captured").expect("file on disk");
+    assert!(
+        refused(retire_absent(&handle)),
+        "a file on disk is not a delete"
+    );
+    supervisor.close(&db).expect("close actor");
+
+    // A replace staged the target and could not put it back: the file sits
+    // in staging, under the name that spells job `job`, with the target name
+    // empty.
+    let staging = scratch.path().join(".dohc/engine/displaced");
+    std::fs::create_dir_all(&staging).expect("staging dir");
+    std::fs::rename(scratch.path().join("notes/a.md"), staging.join("6a6f62.0"))
+        .expect("empty the name");
+    let store = EngineStore::open(&db, 15).expect("store");
+    store.put_binary_blob(b"ours").expect("job content");
+    store
+        .open_displacement(&dohc_engine_storage::DisplacementSpec {
+            job_id: "job".to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            target_path: "notes/a.md".to_owned(),
+            displaced_name: "6a6f62.0".to_owned(),
+            expected_sha256: dohc_engine_storage::hex_sha256(b"captured"),
+            content_sha256: Some(dohc_engine_storage::hex_sha256(b"ours")),
+            now_ms: 15,
+        })
+        .expect("open displacement");
+    drop(store);
+    let handle = supervisor.open(&db, 16).expect("reopen actor").actor;
+    assert!(
+        refused(retire_absent(&handle)),
+        "a path an unfinished replace moved aside is not a delete"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/a.md")).expect("returned"),
+        "captured",
+        "the refused confirmation put the displaced file back"
+    );
+    assert!(!staging.join("6a6f62.0").exists());
+    supervisor.close(&db).expect("close actor");
+
+    std::fs::remove_file(scratch.path().join("notes/a.md")).expect("a real delete");
+    let handle = supervisor.open(&db, 18).expect("reopen actor").actor;
+    let retired = retire_absent(&handle).expect("a confirmed absence retires");
+    assert!(retired.retired.is_some(), "the head was intact until now");
+    supervisor.close(&db).expect("close actor");
+}

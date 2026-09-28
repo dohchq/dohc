@@ -2546,6 +2546,29 @@ CREATE TABLE automation_group_state (
 ) STRICT;
 ";
 
+/// Files the materializer moved into its staging directory whose bytes the
+/// store does not hold. An `open` row names one until it goes back to its
+/// path, when the row is deleted. A `kept` row is the evidence of bytes
+/// another program wrote that could not go back.
+const V2_MATERIALIZATION_DISPLACEMENTS_DDL: &str = "\
+CREATE TABLE materialization_displacements (
+    displacement_id INTEGER PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    displaced_name TEXT NOT NULL,
+    expected_sha256 TEXT NOT NULL,
+    content_sha256 TEXT,
+    state TEXT NOT NULL CHECK (state IN ('open', 'kept')),
+    displaced_sha256 TEXT,
+    created_at_ms INTEGER NOT NULL,
+    resolved_at_ms INTEGER,
+    CHECK ((state = 'kept') = (resolved_at_ms IS NOT NULL))
+) STRICT;
+CREATE INDEX materialization_displacements_state
+    ON materialization_displacements(state, job_id);
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2647,7 +2670,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_YDOC_SETTLED_UPDATE_SEQ_DDL,
         sets_user_version: None,
     },
-    // Ordinal 16 belongs to another change that may land first.
+    // Ordinal 16 is unused.
     Migration {
         ordinal: 17,
         id: "v2-automation-group-coverage",
@@ -2658,6 +2681,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 19,
         id: "v2-sync-identity-claim-state",
         sql: "ALTER TABLE sync_identity ADD COLUMN claim_state TEXT CHECK (claim_state IN ('pending','workspace-unavailable','epoch-superseded','identity-not-recognized','identity-required','stream-identity-mismatch')); ALTER TABLE sync_identity ADD COLUMN claim_account_id TEXT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 20,
+        id: "v2-materialization-displacements",
+        sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
         sets_user_version: None,
     },
 ];
@@ -2993,6 +3022,10 @@ mod tests {
                 "v2-sync-identity-claim-state",
                 "3cf872e265017c043dd394e9a67c6a3108cec735d06c7cab6f89d00b164feaee",
             ),
+            (
+                "v2-materialization-displacements",
+                "2887eaf2ca3af9e0361b7dce143eddaf80e94c60dfaf46bcb2b29443c735a36b",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3034,7 +3067,10 @@ mod tests {
         let path = dir.join("engine.db");
         let mut conn = open_bare(&path);
         let ctx = MigrationContext::current(1_000);
-        let before = BASELINE_MIGRATIONS.len() - 1;
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-sync-identity-claim-state")
+            .expect("the identity claim migration ships");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('ws','origin','epoch','stream',1)", []).unwrap();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();

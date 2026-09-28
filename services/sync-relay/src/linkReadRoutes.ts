@@ -272,6 +272,7 @@ export function createLinkReadRoutes(
     ) {
       throw notFound();
     }
+
     const releaseBytes = admitLinkBlobBytes(
       capability.grantId,
       byteLength,

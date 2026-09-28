@@ -1,4 +1,5 @@
 import { readBoundedJson } from "@dohc/service-http";
+import {opaqueLinkRefusal, relayLinkRefusal} from "./linkRefusal";
 import { parseDatasetAttemptRequest, parseDatasetAttemptResult } from "@dohc/security-contract/dataset-attempts";
 import {
   APP_BACKEND_REQUEST_BYTES, APP_BACKEND_RESULT_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES, APP_BACKEND_REFUSAL_BYTES,
@@ -6,7 +7,7 @@ import {
 } from "@dohc/security-contract/app-backend";
 
 const responseHeaders = { "cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff" };
-const error = (status: number) => new Response(null, { status, headers: responseHeaders });
+const appError = (status: number) => new Response(null, { status, headers: responseHeaders });
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const exact = (value: Record<string, unknown>, keys: string[]) => {
   const actual = Object.keys(value).sort(), expected = [...keys].sort();
@@ -19,6 +20,7 @@ export async function forwardAppBackend(input: {
   capability?: string; profileSecret?: string; signal: AbortSignal;
   fetchRelay(request: Request): Promise<Response>;
 }): Promise<Response> {
+  const error = input.capability ? (_status: number) => opaqueLinkRefusal() : appError;
   if (input.request.headers.get("content-type") !== "application/json") return error(400);
   let body: unknown;
   try { body = await readBoundedJson(input.request, APP_BACKEND_UPLOAD_REQUEST_BYTES, input.signal); }
@@ -62,7 +64,9 @@ export async function forwardAppBackend(input: {
       input.signal.throwIfAborted();
       return Response.json(refusal, { status: 409, headers: responseHeaders });
     }
-    if (relay.status !== 200 || relay.redirected || relay.headers.has("location")) return error(relay.status === 401 || relay.status === 403 ? 404 : [400, 404, 409, 413, 429].includes(relay.status) ? relay.status : 503);
+    if (relay.status !== 200 || relay.redirected || relay.headers.has("location")) return input.capability
+      ? await relayLinkRefusal(relay, input.signal)
+      : error(relay.status === 401 || relay.status === 403 ? 404 : [400, 404, 409, 413, 429].includes(relay.status) ? relay.status : 503);
     const value = await readBoundedJson(relay, action === "file" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : APP_BACKEND_RESULT_BYTES, input.signal);
     if (!record(value)) return error(503);
     let result: unknown;

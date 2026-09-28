@@ -6,11 +6,20 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildEnvironment, directoryFingerprint, engineArtifactMatches, hashFile, repairOwnedEngineExecutable, sourceFingerprint } from "./build.mjs";
-import { changedFiles, postgres, selectedGates, readSelfHostNativeProof } from "./verify.mjs";
+import { changedFiles, desktopProofCommand, postgres, selectedGates, readSelfHostNativeProof } from "./verify.mjs";
 import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 import { runEarlyCloseDebugFixture } from "./debug-fixture.mjs";
+
+test("desktop proof gets an isolated display only on headless Linux", () => {
+  const args = ["--config", "apps/desktop/playwright.config.ts", "--grep", "@verification-smoke"];
+  const direct = [process.execPath, ["apps/desktop/scripts/run-playwright.mjs", ...args]];
+  assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {}}), ["xvfb-run", ["-a", direct[0], ...direct[1]]]);
+  for (const platform of ["win32", "darwin"]) assert.deepEqual(desktopProofCommand(args, {platform, env: {}}), direct);
+  assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {DISPLAY: ":99"}}), direct);
+  assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
+});
 
 test("native proof evidence rejects skips, wrong binaries, and incomplete delivery", () => {
   const output = mkdtempSync(join(tmpdir(), "dohc-native-proof-verdict-"));
@@ -436,6 +445,7 @@ test("verification selects packages and proofs and prepares the engine after Rus
           assert.deepEqual(options,${JSON.stringify({engine:rust || prepare,desktop,browser:desktop || accounts})});
           if(process.env.FIXTURE_MODE==='pr' && readFileSync('node_modules/installed.txt','utf8')!==readFileSync('pnpm-lock.yaml','utf8'))
             throw Error('doctor ran before verifier installation');
+          if(${desktop})assert.equal(readFileSync('.dohc-dev/electron-installed','utf8'),'yes');
           return {checks:[]};
         }
       `);
@@ -444,6 +454,17 @@ test("verification selects packages and proofs and prepares the engine after Rus
         export async function run(command,args,options={}) {
           const {enginePath,assertPrepared,hashFile}=await import('./build.mjs');
           appendFileSync(join(repoRoot,'.dohc-dev/all-calls.jsonl'),JSON.stringify({command,args})+'\\n');
+          if(args[0]==='apps/desktop/scripts/ensure-electron-installed.mjs') {
+            assert.ok(${desktop},'Unselected Electron installation');
+            writeFileSync(join(repoRoot,'.dohc-dev/electron-installed'),'yes');
+            return {stdout:''};
+          }
+          if(command==='xvfb-run') {
+            assert.equal(process.platform,'linux');assert.ok(!process.env.DISPLAY);
+            assert.equal(args[0],'-a');assert.equal(args[1],process.execPath);
+            assert.ok(args.includes('apps/desktop/playwright.config.ts'));
+            command=args[1];args=args.slice(2);
+          }
           if(command==='cargo' && !${rust || prepare})throw Error('Native tools unavailable for this JavaScript change');
           if(command==='pnpm' && args[1]==='@dohc/desktop' && args.includes('build') && !${desktop})throw Error('Electron unavailable for this change');
           if(command==='pnpm' && args[1]==='@dohc/app-backend-runtime') {
@@ -625,6 +646,7 @@ test("verification selects packages and proofs and prepares the engine after Rus
         assert.equal(result.status, 0, result.stderr);
         assert.deepEqual(report.steps.map(({name})=>name), [
           ...(mode === "pr" ? ["install"] : []),
+          ...(desktop ? ["electron-install"] : []),
           "app-backend-runtime",
           ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
           ...(js ? ["typecheck", "tests"] : []),

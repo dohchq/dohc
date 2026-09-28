@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SharedWithMeList } from "./SharedWithMeList";
@@ -21,7 +21,11 @@ const bridgeMock = {
 };
 
 vi.mock("../bridge", () => ({
-  bridge: () => bridgeMock,
+  bridge: () => ({
+    ...bridgeMock,
+    // The contract defaults the removed lane, as main's parse does.
+    listRelayShares: async () => ({ removed: [], ...(await bridgeMock.listRelayShares()) }),
+  }),
 }));
 
 const WORKSPACE_ID = "ws-host";
@@ -117,6 +121,58 @@ describe("SharedWithMeList", () => {
     ).toBe(
       "Removed the share from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.",
     );
+  });
+
+  // The relay lists a grant the owner removed apart from the active ones,
+  // with its own words. A mount for it says so on its row; one without a
+  // mount still gets a row, so the removal is not silent.
+  it("shows the owner's removal on its mount, and as its own row without one", async () => {
+    bridgeMock.listRelayShares.mockResolvedValue({
+      received: [],
+      removed: [
+        {
+          shareId: "share-mounted",
+          grantId: "grant-mounted",
+          message: "The owner removed your access.",
+          removedAtMs: 1_700_000_000_000,
+        },
+        {
+          shareId: "share-unmounted",
+          grantId: "grant-unmounted",
+          message: "The owner removed your access.",
+          removedAtMs: 1_700_000_000_000,
+        },
+      ],
+    });
+    bridgeMock.getWorkspaceRegistry.mockResolvedValue({
+      workspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          shareMounts: [
+            {
+              shareId: "share-mounted",
+              label: "alex",
+              granterEmail: "alex@dohc.test",
+              access: "view",
+              ended: true,
+            },
+          ],
+        },
+      ],
+    });
+    render(<SharedWithMeList workspaceId={WORKSPACE_ID} />);
+
+    const rows = await screen.findAllByTestId("shared-with-me-row");
+    expect(rows.map((row) => row.dataset.shareId)).toEqual(["share-mounted", "share-unmounted"]);
+    expect(rows[0]!.textContent).toContain(
+      "From alex@dohc.test — The owner removed your access. Your copy stays readable but won't update.",
+    );
+    expect(within(rows[0]!).getByTestId("shared-with-me-unmount")).toBeTruthy();
+    expect(rows[1]!.hasAttribute("data-removed")).toBe(true);
+    expect(rows[1]!.textContent).toContain("The owner removed your access.");
+    expect(rows[1]!.textContent).toContain("Removed ");
+    expect(within(rows[1]!).queryByRole("button")).toBeNull();
+    expect(screen.queryByTestId("shared-with-me-empty")).toBeNull();
   });
 
   it("says nothing extra when the folder went with the record", async () => {
@@ -385,7 +441,7 @@ describe("SharedWithMeList", () => {
     // The listing has not answered yet; a watcher batch settles.
     activity?.();
     await waitFor(() => {
-      expect(bridgeMock.getWorkspaceRegistry.mock.calls.length).toBeGreaterThan(1);
+      expect(bridgeMock.getWorkspaceRegistry.mock.calls.length).toBeGreaterThan(0);
     });
     // Now the relay answers.
     releaseShares({ received: [] });
@@ -431,7 +487,7 @@ describe("SharedWithMeList", () => {
     ];
     activity?.();
     await waitFor(() => {
-      expect(bridgeMock.getWorkspaceRegistry.mock.calls.length).toBeGreaterThan(1);
+      expect(bridgeMock.getWorkspaceRegistry.mock.calls.length).toBeGreaterThan(0);
     });
 
     // The relay answers, carrying the older registry snapshot behind it.

@@ -91,6 +91,7 @@ it("rechecks named authorization on backend, document, and status requests", asy
 it("distinguishes unavailable named session resolution and relay transport from refusal", async () => {
   const f = fixture(), app = await f.open();
   f.disconnect(); expect((await app.call("/status")).status).toBe(503);
+  expect((await f.issue()).status).toBe(503);
   f.failMaterial(); expect((await f.issue()).status).toBe(503);
 });
 

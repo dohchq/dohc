@@ -1098,7 +1098,7 @@ describe("shared channels (MU-C4)", () => {
     ).toBe(unknown);
   });
 
-  it("closes a revoked member's view on the next fetch and next append, byte-identically to never-existed", async () => {
+  it("explains removal to a revoked member on the next fetch and append while refusing strangers opaquely", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);
@@ -1109,7 +1109,9 @@ describe("shared channels (MU-C4)", () => {
     expect(revoke.status).toBe(200);
 
     const missing = await denialBytes(await h(request(MEMBER_A, "/sync/shares/share-404/log?since=0")));
-    expect(await denialBytes(await h(request(MEMBER_A, `/sync/shares/${shareId}/log?since=0`)))).toBe(missing);
+    const removed = `404:${JSON.stringify({ok: false, error: "The owner removed your access.", code: "share_access_removed"})}`;
+    expect(await denialBytes(await h(request(MEMBER_A, `/sync/shares/${shareId}/log?since=0`)))).toBe(removed);
+    expect(await denialBytes(await h(request(MEMBER_B, `/sync/shares/${shareId}/log?since=0`)))).toBe(missing);
     const appendBody = jsonBody({
       originId: "origin-member-a",
       ops: [messageAppend("msg-late", "thread-shared-1", "after revoke", MEMBER_A)],
@@ -1118,8 +1120,9 @@ describe("shared channels (MU-C4)", () => {
       await h(request(MEMBER_A, "/sync/shares/share-404/log", appendBody)),
     );
     expect(await denialBytes(await h(request(MEMBER_A, `/sync/shares/${shareId}/log`, appendBody)))).toBe(
-      missingAppend,
+      removed,
     );
+    expect(await denialBytes(await h(request(MEMBER_B, `/sync/shares/${shareId}/log`, appendBody)))).toBe(missingAppend);
     // Gone from the member's received list; stamped in the owner's.
     const received = (await json(await h(request(MEMBER_A, "/sync/shares")))).received as unknown[];
     expect(received).toEqual([]);

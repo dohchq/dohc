@@ -132,3 +132,12 @@ describe("CreateDatasetFormDialog", () => {
     expect((screen.getByRole("button", { name: "Create form" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+it.each(["会议", "Команда", "हिन्दी"])("creates a form folder from %s", async name => {
+  const description = dataset(); description.name = name;
+  const { onCreate } = setup({ dataset: description });
+  expect((screen.getByLabelText("App folder") as HTMLInputElement).value).toBe(name.toLowerCase() + "-form");
+  submit();
+  await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+  expect(onCreate.mock.calls[0]![0].appRoot).toBe(name.toLowerCase() + "-form");
+});
