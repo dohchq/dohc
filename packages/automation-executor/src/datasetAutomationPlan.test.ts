@@ -76,7 +76,11 @@ describe("dataset automation steps", () => {
     for (const steps of everywhere(chat, base.do)) expect(datasetAutomationProblem({ ...base, do: steps }, generated)).toBeNull();
   });
 
-  it("wakes an agent only from a button, since a commit does not say whether a person or an agent made it", () => {
+  it("claims no ledger subscription for a schedule, whose due times the engine claims", () => {
+    expect(datasetSubscriptionFor(automation("      - notify: Check\n        to: [user_ana]\n", "{schedule: day, timezone: UTC}"), definition)).toBeNull();
+  });
+
+  it("wakes an agent from a button or a schedule, since a commit does not say whether a person or an agent made it", () => {
     const wake = automation("      - wake-agent: Review this\n        person: user_ana\n").do;
     const changed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
     for (const steps of everywhere(wake, changed.do)) {
@@ -84,6 +88,8 @@ describe("dataset automation steps", () => {
     }
     const pressed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n", "button: Ask");
     for (const steps of everywhere(wake, pressed.do)) expect(datasetAutomationProblem({ ...pressed, do: steps }, generated)).toBeNull();
+    const due = automation("      - notify: Done\n        to: [user_ana]\n", "{schedule: day, timezone: UTC}");
+    for (const steps of everywhere(wake, due.do)) expect(datasetAutomationProblem({ ...due, do: steps }, generated)).toBeNull();
   });
 
   it("says which approved operation a step lacks, in the words the step card shows", () => {

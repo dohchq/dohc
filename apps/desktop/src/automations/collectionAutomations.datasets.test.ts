@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -123,7 +123,7 @@ globalThis.operations["invoices.release"] = (ctx, input) => {
 };
 `;
 
-async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean; operations?: string; descriptor?: string;
+async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean; storeFails?: boolean; operations?: string; descriptor?: string;
   /** Runs once, after the first automation invocation commits and before its run hears back, as a crash there would. */
   afterInvoke?: () => Promise<void> } = {}) {
   const root = await createTestScratch("dohc-dataset-automations-");
@@ -209,18 +209,41 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const engineFailures: Array<Omit<AutomationFailure, "datasetInstance">> = [];
   const engineRetries: string[] = [];
   let engineReadable = true;
+  // How many claims the engine has served.
+  let served = 0;
   const engine = {
     listCollections: async () => ({ collections: [] }),
     subscribeAutomation: async (input: unknown) => { subscribed.push(input); },
     releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
     watchAutomationGroups: async () => ({ needsHandover: false }),
-    claimNextAutomation: async () => null,
+    // Serves the oldest pending claim, as the engine drains its queue.
+    claimNextAutomation: async () => {
+      const next = engineClaims.filter((claim) => claim.state === "pending").sort((left, right) => left.createdAtMs - right.createdAtMs)[0];
+      if (next === undefined) return null;
+      served += 1;
+      Object.assign(next, { state: "running", attempts: next.attempts + 1 });
+      return structuredClone(next);
+    },
+    settleAutomationClaim: async ({ claimId, state, error }: { claimId: string; state: "done" | "failed"; error?: string }) => {
+      Object.assign(engineClaims.find((claim) => claim.claimId === claimId)!, { state, updatedAtMs: Date.now(), ...(error === undefined ? {} : { error }) });
+      wake();
+    },
+    releaseAutomationClaim: async ({ claimId }: { claimId: string }) => {
+      const claim = engineClaims.find((candidate) => candidate.claimId === claimId)!;
+      Object.assign(claim, { state: "pending", attempts: claim.attempts - 1 });
+      wake();
+    },
     listAutomationClaims: async ({ automationId }: { automationId: string }) => {
       if (!engineReadable) throw new Error("The engine could not read its claims.");
       return { claims: engineClaims.filter((claim) => claim.automationId === automationId).sort((left, right) => right.createdAtMs - left.createdAtMs) };
     },
     listAutomationFailures: async () => ({ failures: engineFailures }),
-    retryAutomationClaim: async ({ claimId }: { claimId: string }) => { engineRetries.push(claimId); return engineClaims.find((claim) => claim.claimId === claimId); },
+    retryAutomationClaim: async ({ claimId }: { claimId: string }) => {
+      engineRetries.push(claimId);
+      const claim = engineClaims.find((candidate) => candidate.claimId === claimId)!;
+      Object.assign(claim, { state: "pending", run: claim.run + 1 });
+      return claim;
+    },
     readAutomationGroupSkips: async () => ({ aheadAtMs: null, lateAtMs: null }),
   } as unknown as CollectionAutomationEngine;
   let roster = options.roster ?? OWNER;
@@ -230,6 +253,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   let indexed: DatasetDefinition | null = null;
   // Whether saved rules still resolve, as before an approved change that drops them.
   let rulesResolve = true;
+  // Whether opening the dataset store fails, as when another process holds it.
+  let storeFails = options.storeFails ?? false;
   // Why the host takes no press, as after the dataset moved to a server; the runtime tests fence a real journal.
   let unpressable: string | null = null;
   const opened: boolean[] = [];
@@ -283,6 +308,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     withDatasetHost: async (work, open) => {
       opened.push(open);
       if (!hostOpen && !open) return null;
+      if (!hostOpen && storeFails) throw new Error("The dataset store is in use by another process.");
       // As in main, an opened host serves the executor until it closes.
       hostOpen = true;
       const override = indexed;
@@ -308,6 +334,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   return {
     host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor, settled, waiting, messages, notices, failureReports,
     engineClaims, engineFailures, engineRetries, setEngineReadable: (readable: boolean) => { engineReadable = readable; },
+    served: () => served,
     get executor() { return executor!; },
     claims: () => host.automations.claims(AUTOMATION),
     automationsChanged: () => automationsChanged,
@@ -315,6 +342,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     openHost: () => { hostOpen = true; executor!.datasetsChanged(); },
     changeRules: (next: DatasetDefinition) => { indexed = next; executor!.datasetsChanged(); },
     dropRules: () => { rulesResolve = false; },
+    keepRules: () => { rulesResolve = true; },
+    fixStore: () => { storeFails = false; },
     moveToServer: () => { unpressable = "This Collection moved to a server, so its buttons can't run here."; },
   };
 }
@@ -533,17 +562,14 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
-  it("leaves the dataset host closed until something opens it, then runs what it holds", async () => {
+  it("opens the dataset host when the workspace opens, since a due time opens nothing, then runs what it holds", async () => {
     const f = await world({ hostOpen: false });
     await f.executor.open();
-    expect(f.opened.every((open) => !open)).toBe(true);
-    expect(f.host.automations.subscriptions()).toEqual([]);
-    f.openHost();
-    await f.until(() => f.host.automations.subscriptions().length === 1);
+    expect(f.opened[0]).toBe(true);
+    expect(f.host.automations.subscriptions()).toHaveLength(1);
     const { id: invoice } = await f.create({});
     await f.edit(invoice, { [PAID]: true });
     await f.until(async () => (await f.record(invoice))?.values[STATUS] === "Closed");
-    expect(f.opened.every((open) => !open)).toBe(true);
     await f.executor.dispose();
   });
 
@@ -690,7 +716,7 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
-  it("says in the ⚡ panel that only a button can wake your agent", async () => {
+  it("says in the ⚡ panel that a record change cannot wake your agent", async () => {
     const f = await world();
     await f.writeAutomations(closePaid("      - wake-agent: Look at this invoice\n        person: user-owner\n"));
     await f.executor.open();
@@ -1229,7 +1255,8 @@ ${step}`;
 /** An engine claim of a dataset automation, as a schedule makes one for its due time. */
 function engineClaim(claimId: string, state: AutomationClaim["state"], createdAtMs: number, automationId = AUTOMATION): AutomationClaim {
   return {
-    claimId, automationId, trigger: { key: `schedule:${createdAtMs}` }, recordId: null, collectionPath: "Budget", depth: 0,
+    claimId, automationId, trigger: { key: `schedule:${createdAtMs}` }, recordId: null,
+    collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
     state, attempts: state === "pending" ? 0 : 1, run: 1, createdAtMs, updatedAtMs: createdAtMs, ...(state === "failed" ? { error: "Not yet." } : {}),
     change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
   };
@@ -1255,6 +1282,27 @@ describe("dataset automation claims in both ledgers", () => {
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     expect(await f.executor.retry({ automationId: AUTOMATION, claimId: "atc_failed", startOver: false })).toEqual({ status: "queued", press: false });
     expect(f.engineRetries).toEqual(["atc_failed"]);
+    await f.executor.dispose();
+  });
+
+  it("refuses to undo a run made before the Collection kept its records in a dataset, and marks nothing undone", async () => {
+    const f = await world();
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const [ledgerRun] = (await store.runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
+    // An engine run from when Budget kept its records in documents.
+    await store.save({ ...ledgerRun!, claimId: "atc_document", datasetId: null, applied: [{ ordinal: 0, writes: [
+      { kind: "field", recordId: "rec_one", path: "Budget/one.md", field: "Status", before: "Open", after: "Closed" },
+    ] }] });
+    f.engineClaims.push(engineClaim("atc_document", "done", 1));
+    const trash = async () => { throw new Error("Nothing moves to the trash."); };
+    expect(await f.executor.undo({ automationId: AUTOMATION, claimId: "atc_document" }, trash)).toEqual({
+      status: "refused", reason: "This run ran before this Collection changed how it keeps its records, so dohc cannot undo it.",
+    });
+    expect((await store.runsOf(AUTOMATION, "atc_document")).runs.map((run) => run.undo)).toEqual([null]);
     await f.executor.dispose();
   });
 
@@ -1340,4 +1388,202 @@ describe("dataset automation claims in both ledgers", () => {
     expect((await store.runsOf(AUTOMATION, "atc_done_0")).runs).toEqual([]);
     await f.executor.dispose();
   }, 60_000);
+});
+
+describe("schedules on a dataset Collection", () => {
+  const SWEEP = "collection:Budget#sweep";
+  const sweep = (steps: string) => `  - id: sweep
+    name: Sweep paid invoices
+    when: {schedule: day, timezone: UTC}
+    do:
+${steps}`;
+  const closeFound = `      - find: record.Paid == true && record.Status == "Open"
+        as: paid
+        operation: invoices.list
+      - set:
+          Status: Closed
+        records: paid
+        operation: invoices.status
+`;
+  // A record change on the same dataset, which the schedule's write starts.
+  const noteClosed = `  - id: note-closed
+    name: Note closed invoices
+    when:
+      field-changed: Status
+    if: record.Status == "Closed"
+    do:
+      - set:
+          Notes: closed
+        operation: invoices.edit
+`;
+  const due = Date.UTC(2026, 8, 27, 0, 0);
+  const runDue = async (f: Awaited<ReturnType<typeof world>>, claimId = "atc_due") => {
+    f.engineClaims.push(engineClaim(claimId, "pending", due, SWEEP));
+    f.executor.notifyClaimed();
+    await f.until(() => ["done", "failed"].includes(f.engineClaims.find((claim) => claim.claimId === claimId)!.state));
+    await f.executor.idle();
+    return f.engineClaims.find((claim) => claim.claimId === claimId)!;
+  };
+
+  it("runs a due time: finds, changes found records, adds one, and notifies, one step deeper in the chain", async () => {
+    const f = await world();
+    await f.writeAutomations(sweep(`${closeFound}      - add-record:
+          Notes: '="Swept " + paid.length'
+          Status: Logged
+        operation: invoices.create
+      - notify: '{paid.length} invoices closed'
+        to: [user-owner]
+`) + noteClosed);
+    await f.executor.open();
+    const { id: paid } = await f.create({ [PAID]: true });
+    const { id: unpaid } = await f.create({});
+    expect(await runDue(f)).toMatchObject({ state: "done" });
+    expect((await f.record(paid))?.values).toMatchObject({ [STATUS]: "Closed" });
+    expect((await f.record(unpaid))?.values[STATUS]).toBe("Open");
+    expect((await f.records()).filter((row) => row.values[STATUS] === "Logged").map((row) => row.values[NOTES])).toEqual(["Swept 1"]);
+    expect(f.notices).toEqual([expect.objectContaining({ recipientUserId: "user-owner", body: "1 invoices closed" })]);
+    // The schedule's edit declares depth 1, so the record change it starts claims at depth 1 and runs.
+    expect(f.host.history({ datasetId: definition.datasetId }).entries.find((entry) => entry.automation?.automationId === SWEEP))
+      .toMatchObject({ automation: { depth: 1 } });
+    await f.until(() => f.host.automations.claims("collection:Budget#note-closed")[0]?.state === "done");
+    expect(f.host.automations.claims("collection:Budget#note-closed")).toMatchObject([{ depth: 1 }]);
+    expect((await f.record(paid))?.values[NOTES]).toBe("closed");
+    await f.executor.dispose();
+  });
+
+  it("runs a schedule that only notifies a person a formula names", async () => {
+    const f = await world();
+    await f.writeAutomations(sweep(`      - notify: Check the invoices
+        to: ['="user-owner"']
+`));
+    await f.executor.open();
+    expect(await runDue(f)).toMatchObject({ state: "done" });
+    expect(f.notices).toEqual([expect.objectContaining({ recipientUserId: "user-owner", body: "Check the invoices" })]);
+    await f.executor.dispose();
+  });
+
+  it("reports a failed run to the owner, tries it again from its saved plan, and undoes its reversible edit", async () => {
+    const f = await world();
+    await f.writeAutomations(sweep(closeFound.replace("invoices.status", "invoices.edit")));
+    await f.executor.open();
+    const { id: paid } = await f.create({ [PAID]: true });
+    // The rules stop resolving after the plan is saved, so the edit fails.
+    f.dropRules();
+    const failed = await runDue(f);
+    expect(failed).toMatchObject({ state: "failed" });
+    expect((await f.record(paid))?.values[STATUS]).toBe("Open");
+    // The engine lists the failure as any other, and its notice names the automation.
+    f.engineFailures.push({ automationId: SWEEP, claimId: "atc_due", chainStopped: false, error: failed.error!, updatedAtMs: failed.updatedAtMs, generation: 1 });
+    f.executor.failuresChanged();
+    await f.until(() => f.failureReports.some((report) => report.failure.claimId === "atc_due"));
+    expect(f.failureReports.find((report) => report.failure.claimId === "atc_due")).toMatchObject({
+      name: "Sweep paid invoices", startedBy: null, failure: { automationId: SWEEP, datasetInstance: null },
+    });
+    f.engineFailures.length = 0;
+    f.keepRules();
+    expect(await f.executor.retry({ automationId: SWEEP, claimId: "atc_due", startOver: false })).toEqual({ status: "queued", press: false });
+    await f.until(() => f.engineClaims[0]!.state === "done");
+    expect((await f.record(paid))?.values[STATUS]).toBe("Closed");
+    const trash = async () => { throw new Error("A dataset's added records stay."); };
+    expect(await f.executor.undo({ automationId: SWEEP, claimId: "atc_due" }, trash)).toMatchObject({ status: "undone", reverted: 1 });
+    expect((await f.record(paid))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+
+  it("lists a schedule written while dohc was closed when the workspace opens, from its open", async () => {
+    const f = await world({ hostOpen: false });
+    await f.writeAutomations(sweep(closeFound));
+    await f.executor.open();
+    expect(f.executor.schedules()).toEqual([expect.objectContaining({ automationId: SWEEP, enabledSince: null })]);
+    await f.executor.dispose();
+  });
+
+  it("keeps a due time waiting while the dataset store cannot open, and runs it once the store opens", async () => {
+    const f = await world({ hostOpen: false, storeFails: true });
+    await f.writeAutomations(sweep(closeFound));
+    await f.executor.open();
+    expect(f.executor.schedules()).toEqual([]);
+    const { id: paid } = await f.create({ [PAID]: true });
+    f.engineClaims.push(engineClaim("atc_due", "pending", due, SWEEP));
+    f.executor.notifyClaimed();
+    await f.until(() => f.errors.filter((error) => error.context === "open this workspace's dataset store").length >= 2);
+    await f.executor.idle();
+    expect(f.engineClaims[0]).toMatchObject({ state: "pending", attempts: 0 });
+    f.fixStore();
+    f.openHost();
+    await f.until(() => f.engineClaims[0]!.state === "done");
+    expect((await f.record(paid))?.values[STATUS]).toBe("Closed");
+    await f.executor.dispose();
+  });
+
+  it("keeps a due time waiting, without draining again, while the store opens and still holds no such dataset", async () => {
+    const f = await world();
+    await mkdir(join(f.root, "Elsewhere"));
+    await writeFile(join(f.root, "Elsewhere", "dataset.json"), JSON.stringify({ datasetId: id(98) }));
+    await writeFile(join(f.root, "Elsewhere", "automations.yaml"), `version: 1\nautomations:\n${sweep(closeFound)}`);
+    await f.executor.open();
+    f.engineClaims.push(engineClaim("atc_elsewhere", "pending", due, "collection:Elsewhere#sweep"));
+    f.executor.notifyClaimed();
+    await f.until(() => f.engineClaims[0]!.attempts === 0 && f.opened.filter((open) => open).length >= 2);
+    // The index it asked for has run, and nothing wakes the claim again.
+    const settle = async () => {
+      await f.executor.automationsIn("Budget");
+      await f.executor.idle();
+    };
+    await settle();
+    const served = f.served();
+    await settle();
+    await settle();
+    expect(f.served()).toBe(served);
+    expect(f.engineClaims[0]).toMatchObject({ state: "pending", attempts: 0 });
+    await f.executor.dispose();
+  });
+
+  it("runs a waiting due time once its folder's descriptor is fixed, and settles one whose descriptor is removed", async () => {
+    const f = await world();
+    await f.writeAutomations(sweep(closeFound));
+    const descriptor = join(f.root, "Budget", "dataset.json");
+    const fixed = await readFile(descriptor, "utf8");
+    await writeFile(descriptor, JSON.stringify({ ...JSON.parse(fixed), datasetId: id(98) }));
+    await mkdir(join(f.root, "Elsewhere"));
+    await writeFile(join(f.root, "Elsewhere", "dataset.json"), JSON.stringify({ datasetId: id(97) }));
+    await writeFile(join(f.root, "Elsewhere", "automations.yaml"), `version: 1\nautomations:\n${sweep(closeFound)}`);
+    await f.executor.open();
+    const { id: paid } = await f.create({ [PAID]: true });
+    f.engineClaims.push(engineClaim("atc_budget", "pending", due, SWEEP), engineClaim("atc_elsewhere", "pending", due + 1, "collection:Elsewhere#sweep"));
+    f.executor.notifyClaimed();
+    await f.until(() => f.engineClaims.every((claim) => claim.state === "pending" && claim.attempts === 0) && f.served() >= 2);
+    await f.executor.idle();
+    await writeFile(descriptor, fixed);
+    await rm(join(f.root, "Elsewhere", "dataset.json"));
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/dataset.json" }, { operation: "delete", path: "Elsewhere/dataset.json" }]);
+    await f.until(() => f.engineClaims.every((claim) => claim.state === "done"));
+    expect((await f.record(paid))?.values[STATUS]).toBe("Closed");
+    await f.executor.dispose();
+  });
+
+  it("says a schedule runs on another computer when this one keeps the records, and runs it here once this one is the host", async () => {
+    const elsewhere = await world();
+    await elsewhere.writeAutomations(sweep(closeFound));
+    await elsewhere.executor.open();
+    expect(await elsewhere.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: expect.stringMatching(/^Schedules run on another computer/) }] });
+    await elsewhere.executor.dispose();
+    const here = await world({ groups: true });
+    await here.writeAutomations(sweep(closeFound));
+    await here.executor.open();
+    expect(await here.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: null }] });
+    await here.executor.dispose();
+  });
+
+  it("refuses Run now on a computer that does not keep the dataset's records", async () => {
+    const f = await world();
+    await mkdir(join(f.root, "Elsewhere"));
+    await writeFile(join(f.root, "Elsewhere", "dataset.json"), JSON.stringify({ datasetId: id(98) }));
+    await f.executor.open();
+    expect(await f.executor.runNowRefusal("collection:Elsewhere#sweep"))
+      .toBe("This computer does not keep Elsewhere's records. Run it from the computer that keeps them.");
+    expect(await f.executor.runNowRefusal(SWEEP)).toBeNull();
+    expect(await f.executor.runNowRefusal("collection:Tasks#stamp")).toBeNull();
+    await f.executor.dispose();
+  });
 });

@@ -3228,14 +3228,6 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
     await runNowIntents.remove(intent.notice);
     return "This workspace isn't on this computer. Run it from the computer that has it.";
   }
-  const dismissal = await noticeStore().dismissFirst(intent.notice, intent.account);
-  // The dismissal may have landed with its answer lost: the intent stays,
-  // and the next start or window focus asks again.
-  if (dismissal === "unanswered") return "dohc could not reach your server. It runs this once it does.";
-  if (dismissal === "not-first") {
-    await runNowIntents.remove(intent.notice);
-    return "This already ran from another computer.";
-  }
   await desktopEngine.startup;
   const release = await acquireDispatchRunActivity(workspace);
   try {
@@ -3245,6 +3237,21 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
     }
     automationHosts.open(workspace.workspaceId);
     await automations.open();
+    // Checked before the dismissal: a computer that cannot run it leaves
+    // the notice for one that can.
+    const refusal = await automations.runNowRefusal(intent.automationId);
+    if (refusal !== null) {
+      await runNowIntents.remove(intent.notice);
+      return refusal;
+    }
+    const dismissal = await noticeStore().dismissFirst(intent.notice, intent.account);
+    // The dismissal may have landed with its answer lost: the intent stays,
+    // and the next start or window focus asks again.
+    if (dismissal === "unanswered") return "dohc could not reach your server. It runs this once it does.";
+    if (dismissal === "not-first") {
+      await runNowIntents.remove(intent.notice);
+      return "This already ran from another computer.";
+    }
     if (!(await automations.runNow(intent.automationId, intent.notice.noticeId))) {
       return "dohc could not start the automation. Its engine did not answer.";
     }
