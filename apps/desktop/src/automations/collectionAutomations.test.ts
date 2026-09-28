@@ -297,7 +297,7 @@ async function world(options: {
           const created: AutomationClaim = {
             claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `schedule:${due}` },
             recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
-            change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+            change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
             state: "pending", attempts: 0, run: 1, createdAtMs: due + 1_000, updatedAtMs: 0,
           };
           claims.set(created.claimId, created);
@@ -318,7 +318,7 @@ async function world(options: {
       const created: AutomationClaim = {
         claimId: `atc_claim${claimCount}`, automationId, trigger: { key },
         recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
-        change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+        change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
         state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 12), updatedAtMs: 0,
       };
       claims.set(created.claimId, created);
@@ -344,7 +344,7 @@ async function world(options: {
           claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `press:${pressId}` },
           recordId, collectionPath: record.collection, depth: by.kind === "agent" ? by.depth : 0,
           change: {
-            kind: "button", authorOriginId: by.kind === "agent" ? by.originId : null, actorKind: by.kind, onBehalfOf: pressedBy, fields: [], fieldsOmitted: 0,
+            kind: "button", authorOriginId: by.kind === "agent" ? by.originId : null, actorKind: by.kind, onBehalfOf: pressedBy, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
           },
           state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 2, 0), updatedAtMs: 0,
         };
@@ -565,7 +565,7 @@ async function world(options: {
       claimId: `atc_claim${claimCount}`, automationId, trigger: { historyId: claimCount },
       recordId: record.id, collectionPath: record.collection, depth: 0,
       change: {
-        kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null,
+        kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null,
         fields: [{ field: "Status", historyId: claimCount, previous: { value: "Doing" }, next: { value: "Done" } }],
         fieldsOmitted: 0, ...change,
       },
@@ -725,10 +725,37 @@ describe("Collection automations", () => {
       `${claim.claimId}/${hash}-1/0/${task.id}/Finished on`,
       `${claim.claimId}/${hash}-1/0/${task.id}/Note`,
     ]);
-    expect(w.journaled[0]).toMatchObject({
-      actorOriginId: "collection:Tasks#stamp",
-      attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1 },
-    });
+    // Nobody is known to have made the change, so the run's writes name nobody.
+    expect(w.journaled[0]).toMatchObject({ actorOriginId: "collection:Tasks#stamp" });
+    expect(w.journaled[0]?.attribution).toEqual({ actorKind: "automation", depth: 1 });
+  });
+
+  it("gives a record change's person to formulas and to the run's own writes", async () => {
+    const note = "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: '=person == null ? \"nobody\" : person.name'}}]\n";
+    const w = await world({ automations: { Tasks: note } });
+    const typed = w.addRecord("Tasks", "typed", { Status: "Done" });
+    const byAgent = w.addRecord("Tasks", "agent", { Status: "Done" });
+    const byFile = w.addRecord("Tasks", "file", { Status: "Done" });
+    const named = { kind: "named" as const, userId: "user-ana", grantId: "grant-ana", grantGeneration: 1 };
+    const claims = [
+      w.claim("collection:Tasks#note", typed, { actorKind: "human", onBehalfOf: "user-ice" }),
+      // An agent's change names the person it works for; the agent stays the actor.
+      w.claim("collection:Tasks#note", byAgent, { authorOriginId: "dohc-mcp", actorKind: "agent", onBehalfOf: "user-ice" }),
+      // A file another program wrote names nobody.
+      w.claim("collection:Tasks#note", byFile, { actorKind: null, onBehalfOf: null }),
+      // The engine names a collaborator whose live edit the relay accepted.
+      w.claim("collection:Tasks#note", w.addRecord("Tasks", "shared", { Status: "Done" }), { actorKind: null, onBehalfOf: "user-ana", sharedAuthor: named }),
+    ];
+    await w.executor.open();
+    for (const claim of claims) await w.settledClaim(claim);
+    expect(claims.map((claim) => claim.state)).toEqual(["done", "done", "done", "done"]);
+    expect([typed, byAgent, byFile].map((record) => w.fieldsOf(record).Note)).toEqual(["Ice", "Ice", "nobody"]);
+    expect(w.journaled.map((entry) => entry.attribution)).toEqual([
+      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1 },
+      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1 },
+      { actorKind: "automation", depth: 1 },
+      { actorKind: "automation", onBehalfOf: "user-ana", depth: 1 },
+    ]);
   });
 
   it("reads a Collection's automations again when a relay pull writes them, with no watcher batch", async () => {
@@ -1247,7 +1274,7 @@ describe("Collection automations", () => {
     // The automation creates the file as the moment's author, so the added
     // record's claim carries the automation and never triggers itself.
     expect(w.authored).toEqual([{ path: added.path, author: {
-      kind: "automation", automationId: "collection:Tasks#sweep", onBehalfOf: "local", depth: 1,
+      kind: "automation", automationId: "collection:Tasks#sweep", depth: 1,
     } }]);
     const [run] = await w.executor.runs("collection:Tasks#sweep");
     expect(run!.writes).toContainEqual({ kind: "field", recordId: sibling.id, path: sibling.path, field: "Points", before: 5, after: 10 });
@@ -1565,6 +1592,115 @@ describe("Collection automations", () => {
     expect([...w.records.values()].filter((record) => record.collection === "Budget")).toHaveLength(1);
   });
 
+  it("holds a step first seen after a link that could have written it was revoked, until a current editor confirms it", async () => {
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+    ].join("\n") } });
+    // An Edit link on Trip wrote automations directly, and was revoked before this
+    // computer ever checked its automations: the roster has no editor now.
+    w.setRoster({
+      kind: "owner", ownerUserId: "user-owner", grants: [],
+      formerEditors: [{ grantId: "g-link", generation: 1, holder: "link", recipientEmail: null, files: { paths: ["Trip"], versionId: null } }],
+    });
+    await w.executor.open();
+    const listed = await w.executor.automationsIn("Trip");
+    expect(listed).toMatchObject({
+      automations: [{ reach: { kind: "checked", steps: [{ verdict: "held", stoppedFor: "Anyone who had your share link to Trip" }] } }],
+    });
+    const trip = w.addRecord("Trip", "day-one", { Status: "Done" });
+    const claim = w.claim("collection:Trip#spend", trip);
+    const drained = w.idleDrains();
+    w.executor.notifyClaimed();
+    await w.until(() => w.idleDrains() > drained);
+    expect(claim.state).toBe("running");
+    expect([...w.records.values()].filter((record) => record.collection === "Budget")).toEqual([]);
+
+    const summary = (listed as { automations: Array<{ definitionHash: string; reach: { steps: Array<{ seq: number }> } }> }).automations[0]!;
+    await expect(w.executor.confirmReach({
+      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: "0", seq: summary.reach.steps[0]!.seq,
+    })).resolves.toBe("confirmed");
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect([...w.records.values()].filter((record) => record.collection === "Budget")).toHaveLength(1);
+  });
+
+  it("holds an allowed step once per ended editing period of a link that could have switched it on, and not again after Allow or a restart", async () => {
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+    ].join("\n") } });
+    await w.executor.open();
+    const steps = async (executor = w.executor) => {
+      const listed = await executor.automationsIn("Trip");
+      return (listed as { automations: Array<{ definitionHash: string; reach: { steps: Array<{ verdict: string; seq: number }> } }> }).automations[0]!;
+    };
+    expect((await steps()).reach.steps).toMatchObject([{ verdict: "allowed" }]);
+
+    // The next listing shows an Edit link on Trip that wrote automations directly and was
+    // revoked before this computer listed it as an editor.
+    w.setRoster({
+      kind: "owner", ownerUserId: "user-owner", grants: [],
+      formerEditors: [{ grantId: "g-link", generation: 1, holder: "link", recipientEmail: null, files: { paths: ["Trip"], versionId: null } }],
+    });
+    const before = w.holdsChanged();
+    w.executor.rosterChanged();
+    await w.until(() => w.holdsChanged() > before);
+    const held = await steps();
+    expect(held.reach.steps).toMatchObject([{ verdict: "held", stoppedFor: "Anyone who had your share link to Trip" }]);
+    await expect(w.executor.confirmReach({
+      automationId: "collection:Trip#spend", definitionHash: held.definitionHash, step: "0", seq: held.reach.steps[0]!.seq,
+    })).resolves.toBe("confirmed");
+
+    // Allow answered for that link: the next roster check and a restart keep it.
+    const restarted = w.makeExecutor();
+    await restarted.open();
+    expect(restarted.holds()).toEqual([]);
+    expect((await steps(restarted)).reach.steps).toMatchObject([{ verdict: "allowed" }]);
+    await restarted.dispose();
+
+    // The link had Edit again, wrote automations under a newer generation,
+    // and ended before this computer listed it: that is new evidence.
+    w.setRoster({
+      kind: "owner", ownerUserId: "user-owner", grants: [],
+      formerEditors: [{ grantId: "g-link", generation: 2, holder: "link", recipientEmail: null, files: { paths: ["Trip"], versionId: null } }],
+    });
+    const again = w.holdsChanged();
+    w.executor.rosterChanged();
+    await w.until(() => w.holdsChanged() > again);
+    expect((await steps()).reach.steps).toMatchObject([{ verdict: "held", stoppedFor: "Anyone who had your share link to Trip" }]);
+  });
+
+  it("holds a step first seen after the owner revoked, from another computer, the recipient who wrote it", async () => {
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+    ].join("\n") } });
+    // Bob wrote Trip's automations directly. The owner revoked him on another
+    // computer, and this computer lists the roster before it ever saw him.
+    w.setRoster({
+      kind: "owner", ownerUserId: "user-owner", grants: [],
+      formerEditors: [{ grantId: "g-bob", generation: 1, holder: "person", recipientEmail: "bob@dohc.test", files: { paths: ["Trip"], versionId: null } }],
+    });
+    await w.executor.open();
+    expect(await w.executor.automationsIn("Trip")).toMatchObject({
+      automations: [{ reach: { kind: "checked", steps: [{ verdict: "held", stoppedFor: "bob@dohc.test" }] } }],
+    });
+    const trip = w.addRecord("Trip", "day-one", { Status: "Done" });
+    const claim = w.claim("collection:Trip#spend", trip);
+    const drained = w.idleDrains();
+    w.executor.notifyClaimed();
+    await w.until(() => w.idleDrains() > drained);
+    expect(claim.state).toBe("running");
+    expect([...w.records.values()].filter((record) => record.collection === "Budget")).toEqual([]);
+  });
+
   it("clears the Allow notice when a held step stops again", async () => {
     const spend = "  - id: spend\n    name: Spend\n    when: {field-changed: Status}\n    do: [{add-record: {Amount: 5}, collection: Budget}]\n";
     const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: spend } });
@@ -1702,7 +1838,7 @@ describe("Collection automations", () => {
       claimId: claim.claimId,
       state: "failed",
       error: "The record is open in a live session elsewhere.",
-      trigger: { kind: "changed", recordId: task.id, by: "agent", depth: 0 },
+      trigger: { kind: "changed", recordId: task.id, by: "agent", sharedAuthor: null, depth: 0 },
       steps: [{ step: 1, writes: [{ kind: "field", recordId: task.id, path: task.path, field: "Count", before: 0, after: 1 }] }],
       failedStep: 2,
       startsOver: false,
@@ -1716,6 +1852,20 @@ describe("Collection automations", () => {
     await w.executor.retry({ automationId: "collection:Tasks#two", claimId: claim.claimId, startOver: false });
     await w.until(() => claim.state === "done");
     expect(await w.executor.run("collection:Tasks#two", claim.claimId)).toMatchObject({ failedStep: null, startsOver: false, steps: [{ step: 1 }, { step: 2 }] });
+  });
+
+  it("keeps the Edit link a live change came through in run history, and fills no person from it", async () => {
+    const note = "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: '=person == null ? trigger.author.kind : person.name'}}]\n";
+    const w = await world({ automations: { Tasks: note } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 0 });
+    const link = { kind: "link" as const, grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" };
+    const claim = w.claim("collection:Tasks#note", task, { actorKind: null, sharedAuthor: link });
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(task).Note).toBe("link");
+    const [listed] = await w.executor.runs("collection:Tasks#note");
+    expect(listed!.trigger).toEqual({ kind: "changed", recordId: task.id, by: null, sharedAuthor: link, depth: 0 });
   });
 
   const ITEMS = "  - id: tick\n    name: Tick\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {Count: '=record.Count + 1'}\n        records: items\n";
@@ -1984,14 +2134,14 @@ describe("Collection automations", () => {
     const hash = file.automations[0]!.definitionHash;
 
     await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: "0000000000000000" }], async () => undefined))
-      .resolves.toEqual({ undone: 0, left: 0 });
+      .resolves.toEqual({ undone: 0, left: 0, kept: 0, errorMessage: null });
     expect(w.fieldsOf(task).Count).toBe(4);
     await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: hash }], async () => undefined))
-      .resolves.toEqual({ undone: 2, left: 0 });
+      .resolves.toEqual({ undone: 2, left: 0, kept: 0, errorMessage: null });
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
     // Runs already undone are passed over.
     await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: hash }], async () => undefined))
-      .resolves.toEqual({ undone: 0, left: 0 });
+      .resolves.toEqual({ undone: 0, left: 0, kept: 0, errorMessage: null });
   });
 
   it("will not run a failed run again after someone undid what it changed", async () => {
@@ -2150,7 +2300,7 @@ describe("Collection automations", () => {
     await expect(w.executor.undoRunsOf(
       [{ automationId: "collection:Tasks#stamp", definitionHash: second.automations[0]!.definitionHash }],
       async () => undefined,
-    )).resolves.toEqual({ undone: 1, left: 0 });
+    )).resolves.toEqual({ undone: 1, left: 0, kept: 0, errorMessage: null });
     expect(w.fieldsOf(task).Count).toBe(3);
     expect(second.automations[0]!.definitionHash).not.toBe(firstHash);
   });
@@ -3490,11 +3640,16 @@ describe("Collection automations that a Group message starts", () => {
   it("runs for a Group message with the message and its author in its formulas", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     const claim = messageClaim(w);
+    claim.change = { ...claim.change, onBehalfOf: "user-ana" };
     await w.executor.open();
     await w.settledClaim(claim);
 
     expect(claim.state).toBe("done");
     expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
+    // The record it adds is made for the message's author, so its claims name them.
+    expect(w.authored.map((entry) => entry.author)).toEqual([
+      { kind: "automation", automationId: "collection:Tasks#task", onBehalfOf: "user-ana", depth: 1 },
+    ]);
   });
 
   it("finds the record a message names with a formula, and changes it", async () => {

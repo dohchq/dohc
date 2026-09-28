@@ -43,15 +43,15 @@ import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projectio
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 // The History author of a document an agent creates: the agent under the
-// name it gave, on behalf of the local owner, at its run's depth. Without a
+// name it gave, for the person its edit names, at its run's depth. Without a
 // name it has no author, unless an automation started the run: then the MCP
 // server's agent authors it, so a record it adds carries the run's depth.
 function momentAuthorFor(origin: LiveDocumentEditOrigin): MomentWriteAuthor | null {
-  const depth = origin.attribution.depth ?? 0;
+  const { depth = 0, onBehalfOf } = origin.attribution;
   const agentId = origin.actorOriginId ?? (depth > 0 ? "dohc-mcp" : undefined);
-  return agentId === undefined
+  return agentId === undefined || onBehalfOf === undefined
     ? null
-    : { kind: "agent", agentId, onBehalfOf: "local", ...(depth > 0 ? { depth } : {}) };
+    : { kind: "agent", agentId, onBehalfOf, ...(depth > 0 ? { depth } : {}) };
 }
 
 // With no editor open, the file holds the document's settled text.
@@ -104,6 +104,7 @@ interface DesktopCliServerDependencies<State> {
   startCliServer: typeof startCliServerImplementation;
   stateDir(): string;
   localUserDisplayName(): string;
+  localPersonId(): string;
   notifyRenderer(input: { workspaceId: string }): void;
   syncSharedChannelsForChatTarget(
     workspaceId: string,
@@ -134,6 +135,7 @@ export function createDesktopCliServer<State>(
     startCliServer,
     stateDir,
     localUserDisplayName,
+    localPersonId,
     notifyRenderer,
     syncSharedChannelsForChatTarget,
     chatDispatchService,
@@ -396,6 +398,7 @@ export function createDesktopCliServer<State>(
       openWorkspace: openCliWorkspace,
       chatWrites,
       localUserDisplayName,
+      localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,

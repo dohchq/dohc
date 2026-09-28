@@ -323,10 +323,17 @@ describe("executeCli", () => {
     const run = {
       run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.",
       createdAtMs: Date.UTC(2026, 8, 27, 9), updatedAtMs: Date.UTC(2026, 8, 27, 9),
-      trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, depth: 1 },
+      trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 },
       definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
     };
     const list = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }] }));
+    // A live change through an Edit link names the link, never a person.
+    const linked = {
+      ...run,
+      trigger: { ...run.trigger, by: null, depth: 0, sharedAuthor: { kind: "link" as const, grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" } },
+    };
+    expect((await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: async () => ({ ok: true, runs: [{ ...linked, changes: 0 }] }) })).stdout)
+      .toBe("atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · through Edit link grant-link · 0 changes · The record is open elsewhere.\n");
     expect(await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: list })).toEqual({
       exitCode: 0,
       stderr: "",

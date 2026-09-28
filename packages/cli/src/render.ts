@@ -166,6 +166,11 @@ function triggerText(trigger: AutomationRunLine["trigger"]): string {
     trigger.kind === null ? "unknown change" : TRIGGER_KINDS[trigger.kind],
     ...(trigger.recordId === null ? [] : [`record ${trigger.recordId}`]),
     ...(trigger.by === null ? [] : [`by ${trigger.by}`]),
+    ...(trigger.sharedAuthor === null
+      ? []
+      : trigger.sharedAuthor.kind === "link"
+        ? [`through Edit link ${trigger.sharedAuthor.grantId}`]
+        : [`by shared user ${trigger.sharedAuthor.userId}`]),
     ...(trigger.depth > 0 ? [`depth ${trigger.depth}`] : []),
   ].join(" · ");
 }

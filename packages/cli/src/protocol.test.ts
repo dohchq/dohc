@@ -12,7 +12,9 @@ describe("moment author results", () => {
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },
-  ])("keeps a $kind author without a declared principal", (author) => {
+    { kind: "named", userId: "user_ana", grantId: "grant", grantGeneration: 2 },
+    { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" },
+  ])("keeps a $kind author", (author) => {
     const result = {
       changes: [{
         id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
@@ -21,6 +23,18 @@ describe("moment author results", () => {
       count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
     };
     expect(parseCliResult("moments", result)).toEqual(result);
+  });
+
+  it("refuses a link author that claims a person", () => {
+    const author = { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", userId: "user_ana" };
+    const result = {
+      changes: [{
+        id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
+        path: "tasks/a.md", versionId: "main", fileCount: 1, author,
+      }],
+      count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
+    };
+    expect(() => parseCliResult("moments", result)).toThrow();
   });
 });
 

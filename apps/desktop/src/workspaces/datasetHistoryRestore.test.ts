@@ -1,9 +1,8 @@
-import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { datasetRevisionsPreserveAccess, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
@@ -12,7 +11,6 @@ import { generateDatasetHistoryRestore } from "./datasetHistoryRestore";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const digest = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js",
   tables: [{ tableId: id(2), name: "People", sqlName: "people", primaryKey: "id", fields: [
     { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
@@ -29,19 +27,11 @@ async function fixture(initial: DatasetDefinition = definition, remote = false, 
   const root = await mkdtemp(join(tmpdir(), "dohc-history-restore-"));
   const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024 });
   cleanup.push(async () => { await host.close(); await rm(root, { recursive: true, force: true }); });
-  const files = new Map(Object.entries(generateDatasetSources(initial).files)), blobs = new Map<string, Uint8Array>();
-  const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
-    const input = request.params as Record<string, unknown>;
-    if (request.method === "versionedText.captureSources") {
-      const selected = [...input.paths as string[]].sort().map(path => { const bytes = Buffer.from(files.get(path)!); const sha256 = digest(bytes); blobs.set(sha256, bytes);
-        return { path, objectId: path, contentKind: "text", sha256, byteLength: bytes.byteLength, latestMomentId: "m" }; });
-      return { id: request.id, result: { workspaceId: "w", versionId: "main", files: selected, totalBytes: selected.reduce((n, f) => n + f.byteLength, 0), sourceDigest: digest(JSON.stringify(["dohc-source-capture-v1", "w", "main", selected])) } };
-    }
-    const bytes = blobs.get(String(input.sha256))!;
-    return { id: request.id, result: { bytesBase64: Buffer.from(bytes).toString("base64"), byteLength: bytes.byteLength } };
-  } }, "owner", { workspaceId: "w" });
+  const files = new Map(Object.entries(generateDatasetSources(initial).files));
+  const adapter = sourceCaptureAdapter(files);
   if (sourceSuffix) files.set(initial.operationsPath, files.get(initial.operationsPath)! + sourceSuffix);
-  const first = await host.prepare({ descriptorPath: posix.join(posix.dirname(initial.schemaPath), "dataset.json"), adapter });
+  const datasetPath = posix.join(posix.dirname(initial.schemaPath), "dataset.json");
+  const first = await host.prepare({ descriptorPath: datasetPath, adapter });
   const revision = await host.approve({ preparationId: first.preparationId, revisionSha256: first.revision.revisionSha256 });
   const workspace = { workspaceId: "w" };
   let signal = new AbortController().signal, scope = "window:1", credentialGeneration = 1;
@@ -59,10 +49,10 @@ async function fixture(initial: DatasetDefinition = definition, remote = false, 
       alterSources?.(Object.keys(sources));
     } });
   async function prepare(change: DatasetSchemaChange, current = host.approvedArtifacts(id(1)).revision) {
-    const result = await handler("owner", { action: "prepareSchemaChange", workspaceId: "w", datasetId: id(1), revision: current.revision, revisionSha256: current.revisionSha256, change });
+    const result = await handler("owner", { action: "prepareSchemaChange", workspaceId: "w", datasetPath, revision: current.revision, revisionSha256: current.revisionSha256, change });
     if (result.kind !== "migration-prepared") throw new Error("Expected a review"); return result;
   }
-  return { host, files, revision, prepare, handler, tamper(fn: (paths: string[]) => void) { alterSources = fn; },
+  return { host, files, datasetPath, revision, prepare, handler, tamper(fn: (paths: string[]) => void) { alterSources = fn; },
     changeCredentials() { credentialGeneration++; }, changeScope() { scope = "window:2"; }, changeLifetime() { signal = new AbortController().signal; } };
 }
 const call = (revision: DatasetRevision, operationId: string, input = {}, key = "read") => ({ datasetId: id(1), revision: revision.revision,
@@ -77,7 +67,7 @@ const approve = async (setup: Awaited<ReturnType<typeof fixture>>, review: Await
 
 async function restore(f: Awaited<ReturnType<typeof fixture>>, target = f.revision.revisionSha256) {
   const current = f.host.approvedArtifacts(id(1));
-  const result = await f.handler("owner", { action: "prepareHistoryRestore", workspaceId: "w", datasetId: id(1),
+  const result = await f.handler("owner", { action: "prepareHistoryRestore", workspaceId: "w", datasetPath: f.datasetPath,
     revision: current.revision.revision, revisionSha256: current.revision.revisionSha256, targetRevisionSha256: target, changedRevisionSha256: current.revision.revisionSha256 });
   if (result.kind !== "migration-prepared") throw new Error("Expected a reversal review"); return result;
 }
@@ -95,7 +85,7 @@ it("prepares a forward reversal from History, keeps newer records, and saves the
   const final = await approve(f, review);
   const rows = (await f.host.query(call(final.revision, id(5)))).result as { rows: Array<{ id: string; values: Record<string, unknown> }> };
   expect(rows.rows).toMatchObject([{ id: (registration.result as { id: string }).id, values: { [id(4)]: "Tuesday registration" } }]);
-  const history = await f.handler("owner", { action: "historyRevision", workspaceId: "w", datasetId: id(1), revisionSha256: f.revision.revisionSha256 });
+  const history = await f.handler("owner", { action: "historyRevision", workspaceId: "w", datasetPath: f.datasetPath, revisionSha256: f.revision.revisionSha256 });
   expect(history.kind).toBe("history-revision");
 });
 it("reverses an added button without SQL, then puts it back, keeping later edits, actions, and access", async () => {
@@ -126,7 +116,7 @@ it("reverses an earlier change across a later button, and keeps the button", asy
   const f = await fixture();
   const renamed = await approve(f, await f.prepare({ kind: "renameField", tableId: id(2), fieldId: id(4), name: "Full name" }));
   const added = await approve(f, await f.prepare({ kind: "addButton", tableId: id(2), name: "Send receipt" }));
-  const result = await f.handler("owner", { action: "prepareHistoryRestore", workspaceId: "w", datasetId: id(1), revision: added.revision.revision,
+  const result = await f.handler("owner", { action: "prepareHistoryRestore", workspaceId: "w", datasetPath: f.datasetPath, revision: added.revision.revision,
     revisionSha256: added.revision.revisionSha256, targetRevisionSha256: f.revision.revisionSha256, changedRevisionSha256: renamed.revision.revisionSha256 });
   if (result.kind !== "migration-prepared") throw new Error("Expected a reversal review");
   expect(result.migrationSql).toBe("SELECT 1;");

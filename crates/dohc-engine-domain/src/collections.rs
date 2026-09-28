@@ -2802,7 +2802,10 @@ impl ChangeActorKind {
 }
 
 /// Declared write provenance beside `author_origin_id`: the actor kind, the
-/// principal it acted for, and its automation-chain depth. Optional
+/// person it acted for, and its automation-chain depth. The person is an
+/// account id, or a signed-out computer's installation id: the person
+/// typing, the person an agent works for, or the person whose change
+/// started an automation. Optional
 /// provenance, never a second authority — the storage and permission
 /// boundaries stay identical with or without it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2813,6 +2816,56 @@ pub struct ChangeAttribution {
     pub on_behalf_of: Option<String>,
     #[serde(default)]
     pub depth: u32,
+}
+
+/// A person the owner shared with, or an Edit share link, whose change the
+/// relay accepted from its own authentication: never a claim a client made.
+/// It names who changed a record on the computer that claims the change, so
+/// a run can say who started it. A link is its grant and generation, with
+/// the server-minted principal that tells its browser sessions apart; it is
+/// never a person's account. Provenance only, never authority: the run still
+/// acts as the automation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SharedChangeAuthor {
+    #[serde(rename = "named")]
+    Named {
+        #[serde(rename = "userId")]
+        user_id: String,
+        #[serde(rename = "grantId")]
+        grant_id: String,
+        #[serde(rename = "grantGeneration")]
+        grant_generation: i64,
+    },
+    #[serde(rename = "link")]
+    Link {
+        #[serde(rename = "grantId")]
+        grant_id: String,
+        #[serde(rename = "grantGeneration")]
+        grant_generation: i64,
+        #[serde(rename = "principalId")]
+        principal_id: String,
+    },
+}
+
+impl SharedChangeAuthor {
+    /// Every id is present and bounded, and the generation is a real one.
+    pub fn is_valid(&self) -> bool {
+        let (ids, generation) = match self {
+            Self::Named {
+                user_id,
+                grant_id,
+                grant_generation,
+            } => ([user_id, grant_id], *grant_generation),
+            Self::Link {
+                grant_id,
+                grant_generation,
+                principal_id,
+            } => ([grant_id, principal_id], *grant_generation),
+        };
+        ids.iter().all(|id| !id.is_empty() && id.len() <= 512)
+            && (1..=9_007_199_254_740_991).contains(&generation)
+    }
 }
 
 /// The most automation hops any declared chain may report. Bounds the wire,
@@ -2958,6 +3011,15 @@ pub struct CollectionRecordApplyFacts {
     pub created: bool,
     pub author_origin_id: Option<String>,
     pub attribution: Option<ChangeAttribution>,
+    /// Who the relay accepted a live-shared record's change from, when that
+    /// was a person the owner shared with or an Edit share link. Set only by
+    /// the session host, from the relay's authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_author: Option<SharedChangeAuthor>,
+    /// The relay's live journal cursor of the frame this change came in,
+    /// set only by the session host that accepted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_cursor: Option<i64>,
     /// The replication coordinate of the op this apply came from:
     /// `(origin_id, origin_seq)`. A replicated apply carries the envelope's
     /// coordinate; a local apply carries its own journaled coordinate, set by
@@ -3185,6 +3247,8 @@ pub fn index_collection_frontmatter_apply_in_tx(
         created: !index_initialized,
         author_origin_id: author_origin_id.map(str::to_owned),
         attribution: attribution.cloned(),
+        shared_author: None,
+        live_cursor: None,
         source: source_update.map(|(origin_id, origin_seq)| (origin_id.to_owned(), origin_seq)),
         recorded_at_ms,
         fields: field_facts,

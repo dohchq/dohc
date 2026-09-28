@@ -18,8 +18,8 @@ use dohc_engine_domain::{
     ChatMessageAutomation, ChatThreadLane, CollectionFieldChangeFact, CollectionRecordApplyFacts,
     DispatchClaim, DomainError, LinkedChatStore, MAX_AUTOMATION_FIELD_FACTS_BYTES,
     MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES, MAX_AUTOMATION_SUBSCRIPTION_FIELDS,
-    MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES, NoFaults, SendMessage, StartChannelThread,
-    TxnOutcome, claim_automation_triggers_in_tx, claim_group_message_in_tx,
+    MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES, NoFaults, SendMessage, SharedChangeAuthor,
+    StartChannelThread, TxnOutcome, claim_automation_triggers_in_tx, claim_group_message_in_tx,
     claim_next_pending_automation, list_automation_claims, list_automation_failures,
     moment_author_attribution, moment_author_json, read_automation_group_skips,
     reclaim_running_automations, release_automation_claim, release_automation_groups,
@@ -74,6 +74,8 @@ fn facts(
     depth: Option<u32>,
 ) -> CollectionRecordApplyFacts {
     CollectionRecordApplyFacts {
+        shared_author: None,
+        live_cursor: None,
         collection_path: collection_path.to_owned(),
         record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         created: false,
@@ -457,6 +459,8 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
     assert_eq!(
         claims[0].change,
         AutomationChange {
+            shared_author: None,
+            live_cursor: None,
             kind: AutomationChangeKind::Changed,
             author_origin_id: Some("agent-editor".to_owned()),
             actor_kind: Some(ChangeActorKind::Agent),
@@ -506,6 +510,101 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
             .get("previous"),
         Some(&json!({ "truncated": true, "bytes": big.len() }))
     );
+}
+
+#[test]
+fn a_claim_keeps_the_person_or_link_the_relay_accepted_its_change_from() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    assert!(subscribe(&mut store, "collection:tasks#stamp", "tasks"));
+    let link = SharedChangeAuthor::Link {
+        grant_id: "grant-link".to_owned(),
+        grant_generation: 2,
+        principal_id: "holder-1".to_owned(),
+    };
+    let named = SharedChangeAuthor::Named {
+        user_id: "user-ana".to_owned(),
+        grant_id: "grant-ana".to_owned(),
+        grant_generation: 1,
+    };
+    // The person is the collaborator the relay accepted the change from,
+    // never a link, and never what the frame declared.
+    for (origin_seq, author, person) in [(1, link, None), (2, named, Some("user-ana"))] {
+        let mut applied = field_change(origin_seq, &["status"]);
+        applied.shared_author = Some(author.clone());
+        applied.attribution = Some(ChangeAttribution {
+            actor_kind: ChangeActorKind::Human,
+            on_behalf_of: Some("claimed-person".to_owned()),
+            depth: 0,
+        });
+        let claims = claim_for(&mut store, WS, &applied, 10 + origin_seq);
+        assert_eq!(claims[0].change.shared_author.as_ref(), Some(&author));
+        assert_eq!(claims[0].change.on_behalf_of.as_deref(), person);
+        let (served, _) = claim_next_pending_automation(
+            &mut store,
+            WS,
+            "collection:",
+            20 + origin_seq,
+            &NO_FAULTS,
+        )
+        .expect("claim next")
+        .expect("the claim is pending");
+        assert_eq!(
+            served.change.shared_author,
+            Some(author),
+            "it survives the ledger"
+        );
+        assert_eq!(served.change.on_behalf_of.as_deref(), person);
+    }
+    // A shared author with a missing or unbounded id never reaches the ledger.
+    let mut applied = field_change(3, &["status"]);
+    applied.shared_author = Some(SharedChangeAuthor::Link {
+        grant_id: "grant-link".to_owned(),
+        grant_generation: 0,
+        principal_id: "holder-1".to_owned(),
+    });
+    let refused = store.write_with(&NO_FAULTS, |tx| {
+        claim_automation_triggers_in_tx(tx, WS, &applied, 40)
+    });
+    assert!(
+        matches!(refused, Err(DomainError::InvalidInput { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(claim_rows(&store, WS), 2);
+}
+
+#[test]
+fn a_claim_keeps_its_live_cursor_and_still_dedupes_on_its_change() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    assert!(subscribe(&mut store, "collection:tasks#stamp", "tasks"));
+    let mut applied = field_change(1, &["status"]);
+    applied.live_cursor = Some(41);
+    let claims = claim_for(&mut store, WS, &applied, 10);
+    assert_eq!(claims[0].change.live_cursor, Some(41));
+    // The same change again, as a retried apply, claims nothing: the cursor
+    // is not part of the key, whatever cursor the retry carries.
+    applied.live_cursor = Some(42);
+    assert!(claim_for(&mut store, WS, &applied, 11).is_empty());
+    let (served, _) = claim_next_pending_automation(&mut store, WS, "collection:", 20, &NO_FAULTS)
+        .expect("claim next")
+        .expect("the claim is pending");
+    assert_eq!(
+        served.change.live_cursor,
+        Some(41),
+        "it survives the ledger"
+    );
+    // A cursor the relay never issues never reaches the ledger.
+    let mut applied = field_change(2, &["status"]);
+    applied.live_cursor = Some(0);
+    let refused = store.write_with(&NO_FAULTS, |tx| {
+        claim_automation_triggers_in_tx(tx, WS, &applied, 30)
+    });
+    assert!(
+        matches!(refused, Err(DomainError::InvalidInput { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(claim_rows(&store, WS), 1);
 }
 
 #[test]
@@ -1466,6 +1565,8 @@ fn a_group_message_claims_each_matching_subscription_once() {
     assert_eq!(
         claim.change,
         AutomationChange {
+            shared_author: None,
+            live_cursor: None,
             kind: AutomationChangeKind::Message,
             author_origin_id: None,
             actor_kind: Some(ChangeActorKind::Human),

@@ -995,7 +995,7 @@ describe("Collection automations on a dataset", () => {
     if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
     const hash = definitionHash(summary.automations[0].automation);
     const trash = async () => { throw new Error("A dataset's added records stay."); };
-    await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: hash }], trash)).resolves.toEqual({ undone: 1, left: 0 });
+    await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: hash }], trash)).resolves.toMatchObject({ undone: 1, left: 0, errorMessage: null });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     expect(await f.executor.runs(AUTOMATION)).toEqual([expect.objectContaining({ undone: true })]);
     await f.executor.dispose();
@@ -1435,7 +1435,7 @@ function engineClaim(claimId: string, state: AutomationClaim["state"], createdAt
     claimId, automationId, trigger: { key: `schedule:${createdAtMs}` }, recordId: null,
     collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
     state, attempts: state === "pending" ? 0 : 1, run: 1, createdAtMs, updatedAtMs: createdAtMs, ...(state === "failed" ? { error: "Not yet." } : {}),
-    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
   };
 }
 
@@ -1469,7 +1469,7 @@ describe("dataset automation claims in both ledgers", () => {
     const stopped: AutomationClaim = {
       ...engineClaim("atc_message", "failed", Date.now()), depth: 4, attempts: 0, error: "chain-stopped",
       change: {
-        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: "user-ana", fields: [], fieldsOmitted: 0,
+        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: "user-ana", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
         message: { id: "m-1", threadId: "t", groupId: "team", lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 1, body: "Pay it", authorUserId: "user-ana" },
       },
     };
@@ -1525,7 +1525,7 @@ describe("dataset automation claims in both ledgers", () => {
     if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
     const trash = async () => { throw new Error("A dataset's added records stay."); };
     await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: definitionHash(summary.automations[0].automation) }], trash))
-      .resolves.toEqual({ undone: 1, left: 0 });
+      .resolves.toMatchObject({ undone: 1, left: 0, errorMessage: null });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     await f.executor.dispose();
   });
@@ -1809,7 +1809,7 @@ ${steps}`;
     claimId, automationId: FROM_TEAM, trigger: { key: `message:${claimId}` }, recordId: null, collectionPath: "Budget", depth: message.depth ?? 0,
     state: "pending", attempts: 0, run: 1, createdAtMs: Date.now(), updatedAtMs: Date.now(),
     change: {
-      kind: "message", authorOriginId: null, actorKind: message.authorKind ?? "human", onBehalfOf: null, fields: [], fieldsOmitted: 0,
+      kind: "message", authorOriginId: null, actorKind: message.authorKind ?? "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
       message: {
         id: `m-${claimId}`, threadId: "thread", groupId: message.groupId ?? "team", lane: "posts", authorKind: message.authorKind ?? "human",
         authorDisplayName: "Bob", createdAtMs: Date.now(), body: "Buy tickets", authorUserId: "u-bob",
@@ -1886,7 +1886,7 @@ describe("a Find that compares with a value from the message", () => {
     const claim = engineClaim(claimId, "pending", Date.now(), "collection:Budget#done");
     claim.trigger = { key: `message:${claimId}` };
     claim.change = {
-      kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, fields: [], fieldsOmitted: 0,
+      kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
       message: { id: claimId, threadId: "t", groupId: "team", lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 1, body, authorUserId: "u-ana" },
     };
     f.engineClaims.push(claim);
@@ -1968,7 +1968,7 @@ describe("a Find that compares with a value from the message", () => {
     const claim = engineClaim("atc_done", "pending", Date.now(), "collection:Budget#done");
     claim.trigger = { key: "message:m-done" };
     claim.change = {
-      kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, fields: [], fieldsOmitted: 0,
+      kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
       message: { id: "m-done", threadId: "t", groupId: "team", lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 1, body: "/done 12", authorUserId: "u-ana" },
     };
     f.engineClaims.push(claim);

@@ -56,7 +56,7 @@ function claim(change: Partial<RecordChange> = {}): AutomationClaim {
     collectionPath: "Tasks",
     depth: 0,
     change: {
-      kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null,
+      kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null,
       fields: [{ field: "Status", historyId: 7, previous: { value: "Doing" }, next: { value: "Done" } }],
       fieldsOmitted: 0,
       ...change,
@@ -235,7 +235,7 @@ describe("schedule claims", () => {
     automationId: "collection:Tasks#sweep",
     trigger: { key },
     recordId: null,
-    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
   });
 
   it("reads the due time from the claim's key", () => {
@@ -457,6 +457,20 @@ describe("plans", () => {
       bindings: {},
       now: localIsoTime(pressedAt),
     });
+  });
+
+  it("names who the relay accepted a live change from as trigger.author, and never as the person", () => {
+    const definition = automation(["id: stamp", "name: Stamp", "when: {field-changed: Status}", "do: [{set: {Note: '=trigger.author.kind'}}]"].join("\n"));
+    const link = { kind: "link" as const, grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" };
+    const linked = evaluationRequest(inputs(definition, { claim: claim({ sharedAuthor: link }) }), Date.UTC(2026, 8, 25, 1, 30));
+    expect(linked.scope.trigger).toMatchObject({ kind: "field-changed", author: link });
+    expect(linked.scope.person).toBeNull();
+    const named = { kind: "named" as const, userId: "user-ana", grantId: "grant-ana", grantGeneration: 1 };
+    const shared = evaluationRequest(inputs(definition, { claim: claim({ sharedAuthor: named }) }), Date.UTC(2026, 8, 25, 1, 30));
+    expect(shared.scope.trigger).toMatchObject({ author: named });
+    expect(shared.scope.person).toBeNull();
+    // The owner's own change names no shared author.
+    expect(evaluationRequest(inputs(definition), Date.UTC(2026, 8, 25, 1, 30)).scope.trigger).toMatchObject({ author: null });
   });
 
   it("asks for every formula in one request, reading now as the time of the change", () => {

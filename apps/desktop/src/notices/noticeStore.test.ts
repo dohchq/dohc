@@ -1397,7 +1397,7 @@ describe("automation notices reach the people involved", () => {
         moment("m2", file(null), file(true), ana),
         moment("m1", null, file(null)),
       ]), at);
-      expect(found).toEqual({ switchedOffBy: "owner", lastChangedBy: "ana", contentHash: expect.any(String) });
+      expect(found).toEqual({ switchedOffBy: { kind: "person", userId: "owner" }, lastChangedBy: "ana", contentHash: expect.any(String) });
 
       const server = await relay();
       await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
@@ -1423,7 +1423,7 @@ describe("automation notices reach the people involved", () => {
         moment(`o${index}`, `${file(true)}# ${index}\n`, `${file(true)}# ${index + 1}\n`, ana));
       const moments = [moment("m2", file(true), file(false), ana), ...others, moment("m1", file(null), file(true))];
       const found = await whoSwitchedOff(history(moments), at);
-      expect(found).toMatchObject({ switchedOffBy: "ana", lastChangedBy: "owner" });
+      expect(found).toMatchObject({ switchedOffBy: { kind: "person", userId: "ana" }, lastChangedBy: "owner" });
       await expect(whoChangedLast(history(moments), at)).resolves.toBe("ana");
     });
 
@@ -1449,11 +1449,29 @@ describe("automation notices reach the people involved", () => {
       await expect(whoSwitchedOff(history([moment("m2", file(true), file(false))]), at)).resolves.toBeNull();
     });
 
+    it("tells who changed it last when an Edit link switches it off, and tells nobody for the link's own change", async () => {
+      const link: MomentAuthor = { kind: "link", grantId: "grant-link", grantGeneration: 1, principalId: "holder" };
+      const found = await whoSwitchedOff(history([
+        moment("m2", file(true), file(false), link),
+        moment("m1", file(null), file(true), ana),
+      ]), at);
+      expect(found).toMatchObject({ switchedOffBy: { kind: "link" }, lastChangedBy: "ana" });
+      const switcherName = switcherNameFor({
+        switchedOffBy: found!.switchedOffBy, recipient: "ana", ownerUserId: "owner", ownerName: "Ice", emailOf: () => null,
+      });
+      expect(switchedOffNotice({ workspaceId: WORKSPACE, switched, path: PATH, ...found!, switcherName }))
+        .toMatchObject({ title: 'Someone with an Edit link switched off "Stamp the finish date"', recipientUserId: "ana" });
+      // The link changed it last: it is no person to tell, and an earlier editor did not make that change.
+      await expect(whoChangedLast(history([moment("m2", file(null), file(true), link), moment("m1", null, file(null), ana)]), at))
+        .resolves.toBeNull();
+    });
+
     it("names a person by email only to the owner, who shared with it", () => {
       const names = { ownerUserId: "owner", ownerName: "Ice", emailOf: (userId: string) => `${userId}@dohc.test` };
-      expect(switcherNameFor({ ...names, switchedOffBy: "ana", recipient: "owner" })).toBe("ana@dohc.test");
-      expect(switcherNameFor({ ...names, switchedOffBy: "ana", recipient: "ben" })).toBe("Someone");
-      expect(switcherNameFor({ ...names, switchedOffBy: "owner", recipient: "ben" })).toBe("Ice");
+      expect(switcherNameFor({ ...names, switchedOffBy: { kind: "person", userId: "ana" }, recipient: "owner" })).toBe("ana@dohc.test");
+      expect(switcherNameFor({ ...names, switchedOffBy: { kind: "person", userId: "ana" }, recipient: "ben" })).toBe("Someone");
+      expect(switcherNameFor({ ...names, switchedOffBy: { kind: "person", userId: "owner" }, recipient: "ben" })).toBe("Ice");
+      expect(switcherNameFor({ ...names, switchedOffBy: { kind: "link" }, recipient: "owner" })).toBe("Someone with an Edit link");
     });
   });
 });

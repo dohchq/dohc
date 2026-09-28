@@ -7,8 +7,8 @@ use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 
 const SCRATCH_PARENT: &str = "dohc-test-scratch";
@@ -37,11 +37,17 @@ const WINDOWS_CLEANUP_DELAY: Duration = Duration::from_millis(100);
 static PROCESS_RUN_ID: OnceLock<String> = OnceLock::new();
 static SWEEP_STARTED: OnceLock<()> = OnceLock::new();
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// Serializes creating a scratch directory in the run root with removing the
+/// emptied root, so a root cannot vanish between the two steps.
+static RUN_ROOT_LOCK: Mutex<()> = Mutex::new(());
 
 /// A unique directory removed when its guard drops.
 #[derive(Debug)]
 pub struct ScratchDir {
     path: PathBuf,
+    /// This process's generated run root, removed with the last scratch
+    /// directory in it. A handed-down or named root belongs to its owner.
+    owned_run_root: Option<PathBuf>,
 }
 
 impl ScratchDir {
@@ -52,20 +58,26 @@ impl ScratchDir {
 
     /// Create a scratch directory whose name identifies its test harness.
     pub fn new_named(name: &str) -> io::Result<Self> {
-        let run_root = current_run_root()?;
+        let (run_root, generated) = current_run_root()?;
         sweep_once(&run_root);
-        fs::create_dir_all(&run_root)?;
         let name = safe_component(name, "scratch");
         for _ in 0..16 {
             let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let nonce = RandomState::new().build_hasher().finish();
             let path = run_root.join(format!("{name}-{sequence}-{nonce:016x}"));
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    fs::create_dir_all(&run_root)?;
+            let created = {
+                let _root = RUN_ROOT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+                fs::create_dir_all(&run_root)?;
+                fs::create_dir(&path)
+            };
+            match created {
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        owned_run_root: generated.then(|| run_root.clone()),
+                    });
                 }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
         }
@@ -103,6 +115,16 @@ impl Drop for ScratchDir {
                 cleanup_attempts(),
                 self.path.display()
             );
+            return;
+        }
+        // nextest runs every test in its own process. A run root left behind
+        // per process grew the shared parent by thousands of entries a run, and
+        // every later process's sweep read them all. Removal fails while
+        // another scratch directory is still inside, and the lock keeps it from
+        // landing between `new_named` creating the root and its directory.
+        if let Some(root) = &self.owned_run_root {
+            let _root = RUN_ROOT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+            let _ = fs::remove_dir(root);
         }
     }
 }
@@ -116,12 +138,18 @@ impl Drop for ScratchDir {
 /// tests would write one tree and the runner would count another, absent one,
 /// and report it clean. `DOHC_TEST_SCRATCH_ROOT` removes the second derivation
 /// so the two cannot disagree.
-fn current_run_root() -> io::Result<PathBuf> {
-    resolve_run_root(
-        std::env::var("DOHC_TEST_SCRATCH_ROOT").ok().as_deref(),
-        std::env::var("DOHC_TEST_SCRATCH_RUN").ok().as_deref(),
-        &std::env::temp_dir(),
-    )
+///
+/// Also returns whether this process generated the root. A handed-down or
+/// named root belongs to whoever chose it.
+fn current_run_root() -> io::Result<(PathBuf, bool)> {
+    let root = std::env::var("DOHC_TEST_SCRATCH_ROOT").ok();
+    let run_id = std::env::var("DOHC_TEST_SCRATCH_RUN").ok();
+    let path = resolve_run_root(root.as_deref(), run_id.as_deref(), &std::env::temp_dir())?;
+    Ok((path, generates_run_root(root.as_deref(), run_id.as_deref())))
+}
+
+fn generates_run_root(root: Option<&str>, run_id: Option<&str>) -> bool {
+    root.is_none_or(str::is_empty) && run_id.is_none_or(str::is_empty)
 }
 
 fn resolve_run_root(root: Option<&str>, run_id: Option<&str>, temp: &Path) -> io::Result<PathBuf> {
@@ -353,6 +381,46 @@ mod tests {
     const THIS_RUN: &str = "current-run-4821-0000000000000003";
 
     #[test]
+    fn only_a_generated_run_root_is_this_process_to_remove() {
+        assert!(generates_run_root(None, None));
+        assert!(generates_run_root(Some(""), Some("")));
+        assert!(!generates_run_root(Some("/gate/root"), None));
+        assert!(!generates_run_root(None, Some("ci-123")));
+    }
+
+    #[test]
+    fn the_last_scratch_directory_removes_its_owned_run_root() {
+        let parent = ScratchDir::new_named("owned-root").expect("parent");
+        let root = parent.join("process-1-0000000000000001");
+        let scratch = |name: &str, owned: bool| {
+            let path = root.join(name);
+            fs::create_dir_all(&path).expect("scratch");
+            ScratchDir {
+                path,
+                owned_run_root: owned.then(|| root.clone()),
+            }
+        };
+
+        let (first, second) = (scratch("a", true), scratch("b", true));
+        drop(first);
+        assert!(
+            root.exists(),
+            "a sibling scratch directory keeps the run root"
+        );
+        drop(second);
+        assert!(
+            !root.exists(),
+            "the last scratch directory removes its run root"
+        );
+
+        drop(scratch("c", false));
+        assert!(
+            root.exists(),
+            "a handed-down or named root is its owner's to remove"
+        );
+    }
+
+    #[test]
     fn drop_removes_the_scratch_directory() {
         let path = {
             let scratch = ScratchDir::new_named("drop-test").expect("scratch");
@@ -431,7 +499,7 @@ mod tests {
             let parent = scratch.path().parent().expect("scratch has a parent");
             assert_eq!(
                 parent,
-                current_run_root().expect("run root"),
+                current_run_root().expect("run root").0,
                 "a scratch named {name:?} escaped the run root"
             );
         }

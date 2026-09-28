@@ -68,6 +68,8 @@ async fn call_error(
 
 fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {
     CollectionRecordApplyFacts {
+        shared_author: None,
+        live_cursor: None,
         collection_path: "tasks".to_owned(),
         record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         created: false,
@@ -354,6 +356,8 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             "authorOriginId": null,
             "actorKind": null,
             "onBehalfOf": null,
+            "sharedAuthor": null,
+            "liveCursor": null,
             "fields": [],
             "fieldsOmitted": 0,
         })
@@ -428,6 +432,8 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             "authorOriginId": "alice",
             "actorKind": "human",
             "onBehalfOf": null,
+            "sharedAuthor": null,
+            "liveCursor": null,
             "fields": [{
                 "field": "status",
                 "historyId": 1,
@@ -866,6 +872,8 @@ async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
             "authorOriginId": null,
             "actorKind": null,
             "onBehalfOf": null,
+            "sharedAuthor": null,
+            "liveCursor": null,
             "fields": [{
                 "field": "status",
                 "historyId": null,
@@ -1314,6 +1322,8 @@ async fn group_messages_written_here_claim_through_rpc() {
             "authorOriginId": null,
             "actorKind": "human",
             "onBehalfOf": "ada",
+            "sharedAuthor": null,
+            "liveCursor": null,
             "fields": [],
             "fieldsOmitted": 0,
             "message": {
@@ -1522,6 +1532,8 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
             "authorOriginId": null,
             "actorKind": "human",
             "onBehalfOf": "user:ada",
+            "sharedAuthor": null,
+            "liveCursor": null,
         })
     );
     assert_eq!(pressed["state"], json!("pending"));
@@ -1589,6 +1601,8 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
             "authorOriginId": "dohc-mcp",
             "actorKind": "agent",
             "onBehalfOf": "user:ada",
+            "sharedAuthor": null,
+            "liveCursor": null,
         })
     );
     // A press names who made it; an automation never presses.

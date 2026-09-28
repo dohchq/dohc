@@ -857,6 +857,15 @@ fn named_author(grant_id: &str) -> Value {
     json!({"kind":"named", "userId":"ana", "grantId":grant_id, "grantGeneration":1})
 }
 
+fn link_author(grant_id: &str) -> Value {
+    json!({"kind":"link", "grantId":grant_id, "grantGeneration":2, "principalId":"holder"})
+}
+
+/// Both authors the relay mints for a direct write.
+fn direct_write_authors(grant_id: &str) -> [Value; 2] {
+    [named_author(grant_id), link_author(grant_id)]
+}
+
 fn with_author(mut payload: Value, author: Value) -> Value {
     payload["author"] = author;
     payload
@@ -894,7 +903,7 @@ fn seed_trip_collection(store: &mut EngineStore) {
 }
 
 #[test]
-fn named_author_writes_a_collections_own_files_from_its_grant_origin() {
+fn direct_write_authors_write_a_collections_own_files_from_their_grant_origin() {
     let (_scratch, mut store) = test_store();
     seed_trip_collection(&mut store);
     let writes = [
@@ -938,13 +947,16 @@ fn named_author_writes_a_collections_own_files_from_its_grant_origin() {
             "Pastel",
         ],
     );
+    // The two authors take turns, so each writes every kind of own file.
+    let author = |seq: i64| {
+        if seq % 2 == 0 {
+            named_author("grant")
+        } else {
+            link_author("grant")
+        }
+    };
     for (seq, payload) in (0_i64..).zip(writes) {
-        let op = envelope(
-            NAMED_ORIGIN,
-            seq,
-            "ws",
-            with_author(payload, named_author("grant")),
-        );
+        let op = envelope(NAMED_ORIGIN, seq, "ws", with_author(payload, author(seq)));
         assert_eq!(
             apply_moment_envelope(&mut store, &op, &NoFaults).expect("apply"),
             ApplyOutcome::new(ApplyDisposition::Applied(0)),
@@ -964,16 +976,16 @@ fn named_author_writes_a_collections_own_files_from_its_grant_origin() {
         })
         .expect("read authors");
     assert_eq!(authors.len(), 5);
-    for author in authors {
+    for (seq, stored) in (0_i64..).zip(authors) {
         assert_eq!(
-            serde_json::from_str::<Value>(&author).expect("author JSON"),
-            named_author("grant")
+            serde_json::from_str::<Value>(&stored).expect("author JSON"),
+            author(seq)
         );
     }
 }
 
 #[test]
-fn named_author_and_collection_file_origin_travel_only_together() {
+fn direct_write_author_and_collection_file_origin_travel_only_together() {
     let (_scratch, mut store) = test_store();
     seed_trip_collection(&mut store);
     hydrate_texts(&mut store, &["version: 1\n"]);
@@ -985,10 +997,7 @@ fn named_author_and_collection_file_origin_travel_only_together() {
             "version: 1\n",
         )
     };
-    for (origin, author) in [
-        ("device-origin", named_author("grant")),
-        ("relay:collection-create:grant", named_author("grant")),
-        ("relay:collection-file:other-grant", named_author("grant")),
+    let mut cases = vec![
         (NAMED_ORIGIN, Value::Null),
         (
             NAMED_ORIGIN,
@@ -998,7 +1007,14 @@ fn named_author_and_collection_file_origin_travel_only_together() {
             NAMED_ORIGIN,
             json!({"kind":"agent", "agentId":"agent", "onBehalfOf":"owner"}),
         ),
-    ] {
+    ];
+    for author in direct_write_authors("grant") {
+        cases.push(("device-origin", author.clone()));
+        cases.push(("relay:collection-create:grant", author.clone()));
+        cases.push(("relay:collection-file:other-grant", author));
+    }
+    cases.extend(direct_write_authors("other-grant").map(|author| (NAMED_ORIGIN, author)));
+    for (origin, author) in cases {
         let seq = read_replication_acked_seq(&store, "ws", origin).expect("ack") + 1;
         let payload = if author.is_null() {
             automations()
@@ -1011,7 +1027,7 @@ fn named_author_and_collection_file_origin_travel_only_together() {
         let expected = if matches!(author["kind"].as_str(), Some("public")) {
             "public moment author requires a relay collection origin"
         } else {
-            "named moment author requires its grant's relay collection-file origin"
+            "direct-write author requires its grant's relay collection-file origin"
         };
         assert_eq!(refusal_reason(outcome), expected, "{origin} {author}");
     }
@@ -1019,7 +1035,123 @@ fn named_author_and_collection_file_origin_travel_only_together() {
 }
 
 #[test]
-fn named_author_is_refused_outside_a_collections_own_files() {
+fn link_author_is_refused_without_every_bounded_field() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    hydrate_texts(&mut store, &["version: 1\n"]);
+    let long = "p".repeat(501);
+    let invalid = "moment.append payload is invalid";
+    let malformed = "moment.append payload is malformed";
+    let cases = [
+        (
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2}),
+            malformed,
+        ),
+        (
+            json!({"kind":"link", "grantId":"grant", "principalId":"holder"}),
+            malformed,
+        ),
+        (
+            json!({"kind":"link", "grantGeneration":2, "principalId":"holder"}),
+            malformed,
+        ),
+        (
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":"2", "principalId":"holder"}),
+            malformed,
+        ),
+        (
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2.5, "principalId":"holder"}),
+            malformed,
+        ),
+        (
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":0, "principalId":"holder"}),
+            invalid,
+        ),
+        (
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":-1, "principalId":"holder"}),
+            invalid,
+        ),
+        (
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":""}),
+            invalid,
+        ),
+        (
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":long}),
+            invalid,
+        ),
+    ];
+    for (seq, (author, expected)) in (0_i64..).zip(cases) {
+        let payload = with_author(
+            absent_text_payload(
+                "automations-create",
+                "trip-automations",
+                "trip/automations.yaml",
+                "version: 1\n",
+            ),
+            author.clone(),
+        );
+        let outcome = apply_moment_envelope(
+            &mut store,
+            &envelope(NAMED_ORIGIN, seq, "ws", payload),
+            &NoFaults,
+        )
+        .expect("refusal is recorded");
+        assert_eq!(refusal_reason(outcome), expected, "{author}");
+    }
+    assert!(snapshot(&store, "trip-automations").is_none());
+}
+
+#[test]
+fn direct_write_author_is_refused_with_any_field_beyond_its_own() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    hydrate_texts(&mut store, &["version: 1\n"]);
+    let mut cases = Vec::new();
+    for author in direct_write_authors("grant") {
+        for (key, value) in [
+            ("displayName", json!("Ana")),
+            ("email", json!("ana@example.com")),
+            ("capability", json!("secret")),
+            ("onBehalfOf", json!("owner")),
+        ] {
+            let mut extra = author.clone();
+            extra[key] = value;
+            cases.push(extra);
+        }
+    }
+    let mut link_as_user = link_author("grant");
+    link_as_user["userId"] = json!("ana");
+    cases.push(link_as_user);
+    let mut named_as_link = named_author("grant");
+    named_as_link["principalId"] = json!("holder");
+    cases.push(named_as_link);
+    for (seq, author) in (0_i64..).zip(cases) {
+        let payload = with_author(
+            absent_text_payload(
+                "automations-create",
+                "trip-automations",
+                "trip/automations.yaml",
+                "version: 1\n",
+            ),
+            author.clone(),
+        );
+        let outcome = apply_moment_envelope(
+            &mut store,
+            &envelope(NAMED_ORIGIN, seq, "ws", payload),
+            &NoFaults,
+        )
+        .expect("refusal is recorded");
+        assert_eq!(
+            refusal_reason(outcome),
+            "direct-write author carries only its own fields",
+            "{author}"
+        );
+    }
+    assert!(snapshot(&store, "trip-automations").is_none());
+}
+
+#[test]
+fn direct_write_authors_are_refused_outside_a_collections_own_files() {
     let (_scratch, mut store) = test_store();
     seed_trip_collection(&mut store);
     seed_text_moment(
@@ -1169,21 +1301,24 @@ fn named_author_is_refused_outside_a_collections_own_files() {
             "name: Root\n",
         ),
     ];
-    for (seq, payload) in (0_i64..).zip(refused) {
+    let cases = direct_write_authors("grant")
+        .into_iter()
+        .flat_map(|author| {
+            refused
+                .clone()
+                .map(move |payload| with_author(payload, author.clone()))
+        });
+    for (seq, payload) in (0_i64..).zip(cases) {
         let path = payload["path"].clone();
-        let op = envelope(
-            NAMED_ORIGIN,
-            seq,
-            "ws",
-            with_author(payload, named_author("grant")),
-        );
+        let op = envelope(NAMED_ORIGIN, seq, "ws", payload);
         assert_eq!(
             refusal_reason(
                 apply_moment_envelope(&mut store, &op, &NoFaults).expect("refusal is recorded")
             ),
-            "named moment author may write only a Collection's own files",
-            "{path} {}",
-            op.payload["momentId"]
+            "direct-write author may write only a Collection's own files",
+            "{path} {} {}",
+            op.payload["momentId"],
+            op.payload["author"]["kind"]
         );
     }
     assert_eq!(

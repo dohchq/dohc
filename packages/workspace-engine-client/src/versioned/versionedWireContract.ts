@@ -73,7 +73,7 @@ export type AgentAuthor = JsonObject & {
  */
 export type WriteAuthor =
   | AgentAuthor
-  | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf: string; depth: number });
+  | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf?: string; depth: number });
 
 type MutationMetadata = JsonObject & {
   workspaceId?: string;
@@ -638,6 +638,12 @@ const NamedAuthorSchema = mutableStruct({
   grantId: Schema.String,
   grantGeneration: Schema.Int,
 });
+const LinkAuthorSchema = mutableStruct({
+  kind: Schema.Literal("link"),
+  grantId: Schema.String,
+  grantGeneration: Schema.Int,
+  principalId: Schema.String,
+});
 const AutomationAuthorSchema = mutableStruct({
   kind: Schema.Literal("automation"),
   automationId: Schema.String,
@@ -650,6 +656,7 @@ const MomentAuthorSchema = Schema.NullOr(
     AgentAuthorSchema,
     PublicAuthorSchema,
     NamedAuthorSchema,
+    LinkAuthorSchema,
     AutomationAuthorSchema,
     CorruptAuthorSchema,
   ]),

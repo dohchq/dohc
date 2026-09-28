@@ -18,6 +18,7 @@ import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import { CommentsPanel } from "./CommentsPanel";
 import { LinkDocumentEditor } from "./LinkDocumentEditor";
+import { CollectionFileEditor, isCollectionOwnFile } from "./CollectionFileEditor";
 import { LinkEntry } from "./LinkEntry";
 import {
   RETRY_BUDGET_MS,
@@ -1054,7 +1055,7 @@ function OpenInDohc(props: { session: string }) {
 export function App() {
   const [state, setState] = useState<ViewerState>({ status: "loading" });
   const [selectedPath, setSelectedPath] = useState("");
-  const [editing, setEditing] = useState<{discriminator: string; path: string} | null>(null);
+  const [editing, setEditing] = useState<{discriminator: string; path: string; blobSha256: string} | null>(null);
   const readyStateRef = useRef<ReadyState | null>(null);
   const refreshReadyStateRef = useRef<
     (() => Promise<ReadyState | null>) | null
@@ -1290,17 +1291,23 @@ export function App() {
     };
   }, [readySession]);
 
-  if (editing) return <LinkDocumentEditor key={`${editing.discriminator}:${editing.path}`} {...editing}
-    available={state.status === "ready" && state.session === editing.discriminator && state.meta.access === "edit" &&
-      state.meta.effectiveSelector.versionId === null && state.files.some(file => file.path === editing.path)}
-    onClose={() => setEditing(null)} />;
+  if (editing) {
+    const available = state.status === "ready" && state.session === editing.discriminator && state.meta.access === "edit" &&
+      state.meta.effectiveSelector.versionId === null && state.files.some(file => file.path === editing.path);
+    return isCollectionOwnFile(editing.path)
+      ? <CollectionFileEditor key={`${editing.discriminator}:${editing.path}`} session={editing.discriminator} path={editing.path}
+        blobSha256={editing.blobSha256} available={available} onClose={() => setEditing(null)} />
+      : <LinkDocumentEditor key={`${editing.discriminator}:${editing.path}`} discriminator={editing.discriminator} path={editing.path}
+        available={available} onClose={() => setEditing(null)} />;
+  }
   if (state.status === "refused") return <Unavailable />;
   if (state.status === "version-mismatch") return <main className="state"><p>{state.message}</p></main>;
   if (state.status === "loading") return <main className="state"><p>Opening shared files</p></main>;
   const selected = state.files.find((file) => file.path === selectedPath) ?? state.files[0];
   const tree = fileTree(state.files);
+  // Markdown edits live; a Collection's own files save through the direct lane.
   const canEditFile = state.meta.access === "edit" && state.meta.effectiveSelector.versionId === null &&
-    selected?.contentKind === "text" && /\.md$/i.test(selected.path);
+    selected?.contentKind === "text" && (/\.md$/i.test(selected.path) || isCollectionOwnFile(selected.path));
   return (
     <div className="viewer">
       <header>
@@ -1311,7 +1318,7 @@ export function App() {
         <div className="header-actions">
           <span className="badge">{accessLabel(state.meta.access)}</span>
           {canEditFile &&
-            <button className="handoff-button primary" onClick={() => setEditing({discriminator: state.session, path: selected.path})}>Edit file</button>}
+            <button className="handoff-button primary" onClick={() => setEditing({discriminator: state.session, path: selected.path, blobSha256: selected.blobSha256})}>Edit file</button>}
           <OpenInDohc key={state.session} session={state.session} />
         </div>
       </header>
