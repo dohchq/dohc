@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, rename, rm, rmdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
@@ -25,13 +25,14 @@ export const RUN_PLAN_BUDGET_BYTES = 4 * 1024 * 1024;
 // The largest saved run this store writes or reads. It leaves room for
 // values other people changed that are larger than the plan expected.
 export const MAX_RUN_FILE_BYTES = 4 * RUN_PLAN_BUDGET_BYTES;
-// Run history keeps this many finished runs per automation. A run a claim
-// may still resume is never dropped.
-const KEEP_FINISHED_RUNS = 20;
-// Compacted failures kept per automation, so an old claim's Try again still
-// refuses instead of starting over. Beyond this, only the engine's failure
-// row remains.
-const KEEP_COMPACTED_RUNS = 100;
+// Run history keeps a claim's saved runs this long after its last run
+// ended, as both ledgers keep the claim itself.
+const RUN_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
+// A folder is read whole at most this often, so a busy automation's runs
+// are not all read every pass; a run may stay this much past its 30 days.
+const WHOLE_READ_MS = 24 * 60 * 60 * 1000;
+// The most plan files one expiry batch reads.
+const EXPIRE_BATCH_RUNS = 200;
 
 // Values are this computer's own writes, read back as JSON.parse left them;
 // the write seam checks each one again before it writes.
@@ -200,17 +201,18 @@ const UndoRequestSchema = z.object({
   version: z.number().int().positive(),
   values: z.record(z.string(), JsonValueSchema),
 });
-// Version 3 keeps progress in a file beside the plan, and names each
-// Collection the plan writes by its Collection id. A run in any other format
-// cannot be read, and the claim fails instead of starting over.
+// Version 4 keeps progress in a file beside the plan, names each Collection
+// the plan writes by its Collection id, and records when the run ended. A
+// run in any other format cannot be read, and the claim fails instead of
+// starting over.
 const StoredRunSchema = z.object({
-  version: z.literal(3),
+  version: z.literal(4),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
   keySeed: z.string().min(1),
   startedAtMs: z.number(),
-  updatedAtMs: z.number(),
+  finishedAtMs: z.number().nullable(),
   plan: z.array(z.object({ ordinal: z.number().int().nonnegative(), effects: z.array(EffectSchema) })).nullable(),
   applied: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
   created: z.array(CreatedSchema),
@@ -222,11 +224,32 @@ const StoredRunSchema = z.object({
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
   settled: z.boolean(),
-  compacted: z.boolean(),
   outcome: z.union([
     z.object({ state: z.literal("done") }),
     z.object({ state: z.literal("failed"), error: z.string(), run: z.number().int().positive() }),
   ]).nullable(),
+});
+
+// A saved run's plan file: everything but its progress.
+const HeaderSchema = StoredRunSchema.omit({ applied: true, created: true, replans: true, undoRequests: true });
+// What run history's expiry reads of a run.
+const RunEndSchema = StoredRunSchema.pick({
+  version: true, claimId: true, automationId: true, keySeed: true, datasetId: true, finishedAtMs: true, undo: true,
+});
+// A plan file in an earlier format that still names its claim. Expiry
+// counts its 30 days from when the file last changed.
+const OlderRunSchema = z.object({
+  claimId: z.string().min(1),
+  automationId: z.string().min(1),
+  keySeed: z.string().min(1),
+  datasetId: z.string().min(1).nullable().optional(),
+  undo: z.enum(["started", "done"]).nullable().optional(),
+});
+// When each folder of saved runs next holds a claim past its 30 days, and
+// the claims in it that expiry asks about on every pass.
+const ExpirySchema = z.object({
+  version: z.literal(1),
+  folders: z.array(z.object({ folder: z.string().min(1), until: z.number(), recheck: z.array(z.string().min(1)) })),
 });
 
 /**
@@ -247,7 +270,7 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 3;
+  version: 4;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -255,7 +278,12 @@ export interface StoredRun {
   /** What the run's idempotency keys and added record ids derive from: the definition hash and the claim's run. */
   keySeed: string;
   startedAtMs: number;
-  updatedAtMs: number;
+  /**
+   * When the run ended: its outcome was saved, or a person started its claim
+   * over. Null while it can still go on. An Undo leaves it, so an undone run
+   * leaves run history when it would have anyway.
+   */
+  finishedAtMs: number | null;
   /**
    * The steps' planned effects, saved once every formula has an answer and
    * dropped when the run is done. Its writes stay.
@@ -300,11 +328,6 @@ export interface StoredRun {
   undo: "started" | "done" | null;
   /** The engine accepted this run's claim as done, so nothing will resume it. */
   settled: boolean;
-  /**
-   * The run failed long ago, and run history no longer shows its claim, so
-   * its plan and progress were dropped. It cannot resume.
-   */
-  compacted: boolean;
   /** A failed run names the claim's run it failed in: 1, plus one per Try again. */
   outcome: { state: "done" } | { state: "failed"; error: string; run: number } | null;
 }
@@ -373,6 +396,22 @@ const EnabledAutomationsSchema = z.object({
 
 /** The newest failure of one automation this computer sent a notice for. */
 export type ReportedFailure = z.infer<typeof ReportedFailuresSchema>["failures"][number];
+
+/** A claim whose saved runs expiry weighs. */
+export interface ExpiringClaim {
+  automationId: string;
+  claimId: string;
+  /** The dataset its Collection kept, whose own ledger may hold the claim. */
+  datasetId: string | null;
+}
+
+/**
+ * What the ledgers say of a claim expiry weighs. `open`: it may still run
+ * or change, as while it is pending or running, or an Undo or Try again is
+ * changing it. `settled`: a ledger holds it done or failed. `gone`: no
+ * ledger holds it. `unknown`: a ledger that may hold it cannot say.
+ */
+export type ClaimStanding = "open" | "settled" | "gone" | "unknown";
 
 /** An engine subscription this computer holds: records under a path, or one Group's messages. */
 export type StoredSubscription =
@@ -493,12 +532,17 @@ export interface AutomationRunStore {
   /** Records a dataset Undo request before it is sent again at a record's new version. */
   recordUndoRequest(run: StoredRun, request: DatasetUndoRequest): Promise<void>;
   /**
-   * Drops the oldest settled or superseded runs past the history bound,
-   * compacts failed runs whose claims are not in `resumableClaims`, and
-   * drops the oldest compacted runs past their bound. It reads the folder
-   * only once it has grown by the history bound since the last prune.
+   * Removes one batch of saved runs past run history's 30 days: every run
+   * of a claim, once each ended 30 days before `now`, none has an
+   * unfinished Undo, and no ledger holds the claim. A run that has not
+   * ended stays while its claim is open; once it is not, it ended `now`.
+   * Reads only plan files, never progress, and skips a folder until it
+   * holds a claim that can go. It asks `standing` and reads each plan
+   * file outside the write queue, then removes or ends a claim inside it
+   * only when its plan files are as it read them. `from` is what the
+   * batch before answered; the answer is null after the last batch.
    */
-  prune(automationId: string, resumableClaims: () => Promise<ReadonlySet<string> | null>): Promise<void>;
+  expire(now: number, standing: (claim: ExpiringClaim) => Promise<ClaimStanding>, from: string | null): Promise<string | null>;
   /**
    * The claims of the runs whose Undo started and has not finished, as each
    * run was last saved, or null when their list cannot be read.
@@ -572,8 +616,6 @@ export interface MetadataDirResolver {
  * folders.
  */
 export function createAutomationRunStore(rootPath: string, resolveMetadataDir: MetadataDirResolver): AutomationRunStore {
-  // The file count at which each automation's folder is pruned next.
-  const pruneAt = new Map<string, number>();
   // Writes queue behind each other, so two saves never race one rename.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
@@ -611,12 +653,11 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   // Every run keeps its plan and state in one file, written whole, and its
   // progress in a second, one line per landed effect.
   const readRun = async (folder: string, name: string, automationId: string): Promise<StoredRun | null> => {
-    const header = StoredRunSchema.omit({ applied: true, created: true, replans: true, undoRequests: true }).safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
+    const header = HeaderSchema.safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
     if (!header.success || header.data.automationId !== automationId) return null;
     if (runName(header.data.claimId, header.data.keySeed) !== name) return null;
     const run: StoredRun = { ...header.data, applied: [], created: [], replans: [], undoRequests: [] };
-    if (run.compacted) return run;
-    // A run that can resume always has its progress file, empty or not.
+    // Every saved run has its progress file, empty or not.
     const progress = await readBounded(join(folder, `${name}${PROGRESS_SUFFIX}`));
     if (progress === null || progress === undefined) return null;
     // A line cut short by a crash is an effect that may have landed and was
@@ -679,6 +720,85 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     await rm(join(folder, `${name}${PROGRESS_SUFFIX}`), { force: true });
     await rm(join(folder, `${name}${HEADER_SUFFIX}`), { force: true });
   };
+  // When each folder next holds a claim past its 30 days, and the claims in
+  // it asked about on every pass: read from expiry.json when a pass starts,
+  // saved when it ends.
+  let schedule: Map<string, { until: number; recheck: string[] }> | null = null;
+  const scheduleFile = async () => join(await base(), "expiry.json");
+  // The folder a pass is going through: the claims it weighs, grouped from
+  // one listing, and what it learned so far. A run saved there meanwhile
+  // joins its claim.
+  let expiring: {
+    folder: string;
+    path: string;
+    claims: string[][];
+    groups: Map<string, string[]>;
+    until: number;
+    recheck: string[];
+  } | null = null;
+  const claimOf = (run: string) => run.slice(0, run.indexOf("-"));
+  // What to do with one claim's runs, from their plan files as read now.
+  type Weighed =
+    | { kind: "keep"; until?: number; recheck?: true }
+    | { kind: "remove" | "end"; texts: Map<string, string | null | undefined> };
+  const weigh = async (folder: string, names: readonly string[], now: number, standing: (claim: ExpiringClaim) => Promise<ClaimStanding>): Promise<Weighed> => {
+    const texts = new Map<string, string | null | undefined>();
+    const runs: Array<{ claimId: string; automationId: string; datasetId: string | null; undo: StoredRun["undo"]; finishedAtMs: number | null }> = [];
+    for (const name of names) {
+      const path = join(folder, `${name}${HEADER_SUFFIX}`);
+      const text = await readBounded(path);
+      texts.set(name, text);
+      // Removed since the folder was listed.
+      if (text === undefined) continue;
+      let json: unknown = null;
+      try {
+        json = text === null ? null : JSON.parse(text);
+      } catch {
+        json = null;
+      }
+      const current = RunEndSchema.safeParse(json);
+      if (current.success && runName(current.data.claimId, current.data.keySeed) === name) {
+        runs.push(current.data);
+        continue;
+      }
+      const older = OlderRunSchema.safeParse(json);
+      const stats = await lstat(path).catch(() => null);
+      // A file that names no claim stays; the folder's next full pass reads it again.
+      if (!older.success || runName(older.data.claimId, older.data.keySeed) !== name || stats === null) return { kind: "keep" };
+      runs.push({ ...older.data, datasetId: older.data.datasetId ?? null, undo: older.data.undo ?? null, finishedAtMs: stats.mtimeMs });
+    }
+    const [first] = runs;
+    if (first === undefined || runs.some((run) => run.claimId !== first.claimId || run.automationId !== first.automationId)) return { kind: "keep" };
+    if (runs.some((run) => run.undo === "started")) return { kind: "keep", recheck: true };
+    const claim = { automationId: first.automationId, claimId: first.claimId, datasetId: runs.find((run) => run.datasetId !== null)?.datasetId ?? null };
+    if (runs.some((run) => run.finishedAtMs === null)) {
+      const state = await standing(claim);
+      return state === "open" || state === "unknown" ? { kind: "keep", recheck: true } : { kind: "end", texts };
+    }
+    const due = Math.max(...runs.map((run) => run.finishedAtMs!)) + RUN_HISTORY_MS;
+    if (due > now) return { kind: "keep", until: due };
+    return (await standing(claim)) === "gone" ? { kind: "remove", texts } : { kind: "keep", recheck: true };
+  };
+  // Removes a claim's runs, or records that its unended runs ended `now`,
+  // only while its plan files are as expiry read them and no run joined it.
+  const apply = (folder: string, names: readonly string[], weighed: Extract<Weighed, { texts: unknown }>, now: number) => serial(async () => {
+    for (const name of names) {
+      if (await readBounded(join(folder, `${name}${HEADER_SUFFIX}`)) !== weighed.texts.get(name)) return false;
+    }
+    if (names.length !== weighed.texts.size) return false;
+    for (const name of names) {
+      if (weighed.kind === "remove") {
+        await removeRun(folder, name);
+        continue;
+      }
+      const text = weighed.texts.get(name);
+      const header = typeof text === "string" ? HeaderSchema.safeParse(JSON.parse(text)) : null;
+      if (header?.success && header.data.finishedAtMs === null) {
+        await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify({ ...header.data, finishedAtMs: now })}\n`);
+      }
+    }
+    return true;
+  });
   const header = (run: StoredRun) => {
     const { applied: _applied, created: _created, replans: _replans, undoRequests: _undoRequests, ...rest } = run;
     return rest;
@@ -717,6 +837,14 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         if (Buffer.byteLength(plan) > MAX_RUN_FILE_BYTES || Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
         const folder = await runsFolder(run.automationId);
         const name = runName(run.claimId, run.keySeed);
+        if (expiring?.folder === hashName(run.automationId)) {
+          const group = expiring.groups.get(hashName(run.claimId));
+          if (group === undefined) {
+            const added = [name];
+            expiring.groups.set(hashName(run.claimId), added);
+            expiring.claims.push(added);
+          } else if (!group.includes(name)) group.push(name);
+        }
         // Saved first, so a run saved with its Undo started is always listed.
         if (run.undo === "started") await noteUndo(run, name);
         await writeDurably(join(folder, `${name}${PROGRESS_SUFFIX}`), progress);
@@ -742,45 +870,89 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     recordUndoRequest(run, request) {
       return serial(() => appendLine(run, { kind: "undo-request", ...request }));
     },
-    prune(automationId, resumableClaims) {
-      return serial(async () => {
-        const folder = await runsFolder(automationId);
-        const names = (await readdir(folder))
-          .filter((file) => file.endsWith(HEADER_SUFFIX) && !file.endsWith(PROGRESS_SUFFIX))
-          .map((file) => file.slice(0, -HEADER_SUFFIX.length));
-        if (names.length < (pruneAt.get(automationId) ?? KEEP_FINISHED_RUNS * 2)) return;
-        const resumable = await resumableClaims();
-        const history: Array<{ name: string; run: StoredRun }> = [];
-        const compacted: Array<{ name: string; run: StoredRun }> = [];
-        let kept = names.length;
-        for (const name of names) {
-          const run = await readRun(folder, name, automationId);
-          // A run whose Undo stopped part way stays whole until it finishes.
-          if (!run || run.undo === "started") continue;
-          // Only a run nothing can resume leaves: its claim settled done, or
-          // a person chose to start it over.
-          if ((run.settled && run.outcome?.state === "done") || run.superseded) {
-            history.push({ name, run });
-          } else if (run.compacted) {
-            compacted.push({ name, run });
-          } else if (resumable !== null && run.outcome?.state === "failed" && !resumable.has(run.claimId)) {
-            // Nothing offers its Try again any more, so only its failure stays.
-            const tombstone = { ...run, plan: null, applied: [], created: [], replans: [], undoRequests: [], compacted: true };
-            await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify(header(tombstone))}\n`);
-            await rm(join(folder, `${name}${PROGRESS_SUFFIX}`), { force: true });
-            compacted.push({ name, run: tombstone });
+    async expire(now, standing, from) {
+      const runs = await serial(async () => {
+        let found: string | null;
+        try {
+          found = await resolveMetadataDir(rootPath, { create: false });
+        } catch {
+          return null;
+        }
+        for (const segment of ["automations", "runs"]) {
+          const next = found === null ? null : await existingFolder(join(found, segment));
+          if (next === null || next === "unusable") return null;
+          found = next;
+        }
+        if (from === null) {
+          expiring = null;
+          if (schedule === null) {
+            const read = ExpirySchema.safeParse(await readJson(await scheduleFile()));
+            schedule = new Map(read.success ? read.data.folders.map(({ folder, ...rest }) => [folder, rest]) : []);
           }
         }
-        const newestFirst = (left: { run: StoredRun }, right: { run: StoredRun }) => right.run.updatedAtMs - left.run.updatedAtMs;
-        for (const { name } of [
-          ...history.sort(newestFirst).slice(KEEP_FINISHED_RUNS),
-          ...compacted.sort(newestFirst).slice(KEEP_COMPACTED_RUNS),
-        ]) {
-          await removeRun(folder, name);
-          kept -= 1;
-        }
-        pruneAt.set(automationId, kept + KEEP_FINISHED_RUNS);
+        return found;
       });
+      if (runs === null || schedule === null) return null;
+      const planned = schedule;
+      // Folders in name order, and each folder's claims in the order its
+      // listing gave, so `from` names where to go on.
+      const [fromFolder = "", fromIndex = "0"] = from?.split("/") ?? [];
+      const folders = (await readdir(runs)).sort();
+      let read = 0;
+      for (const name of folders.filter((entry) => entry >= fromFolder)) {
+        if (expiring?.folder !== name) {
+          const plan = planned.get(name);
+          // Before a folder's first claim can go, only the claims asked about on every pass are read.
+          const whole = plan === undefined || plan.until <= now;
+          if (!whole && plan.recheck.length === 0) continue;
+          const recheck = new Set(plan?.recheck);
+          const listed = await serial(async () => {
+            const path = await existingFolder(join(runs, name));
+            if (path === null || path === "unusable") return null;
+            const groups = new Map<string, string[]>();
+            for (const file of await readdir(path)) {
+              if (!file.endsWith(HEADER_SUFFIX) || file.endsWith(PROGRESS_SUFFIX)) continue;
+              const run = file.slice(0, -HEADER_SUFFIX.length);
+              if (!whole && !recheck.has(claimOf(run))) continue;
+              groups.set(claimOf(run), [...(groups.get(claimOf(run)) ?? []), run]);
+            }
+            // A folder read whole is read whole again 30 days on, at the latest.
+            expiring = { folder: name, path, claims: [...groups.values()], groups, until: whole ? now + RUN_HISTORY_MS : plan.until, recheck: [] };
+            return expiring;
+          });
+          if (listed === null) continue;
+        }
+        const current = expiring!;
+        for (let index = name === fromFolder ? Number(fromIndex) : 0; index < current.claims.length; index += 1) {
+          if (read >= EXPIRE_BATCH_RUNS) return `${name}/${index}`;
+          const names = current.claims[index]!;
+          read += names.length;
+          let weighed = await weigh(current.path, names, now, standing);
+          if (weighed.kind !== "keep") {
+            const ended: Weighed = { kind: "keep", until: now + RUN_HISTORY_MS };
+            weighed = !(await apply(current.path, names, weighed, now)) ? { kind: "keep", recheck: true } : weighed.kind === "end" ? ended : weighed;
+          }
+          if (weighed.kind !== "keep") continue;
+          if (weighed.until !== undefined) current.until = Math.min(current.until, Math.max(weighed.until, now + WHOLE_READ_MS));
+          if (weighed.recheck) current.recheck.push(claimOf(names[0]!));
+        }
+        await serial(async () => {
+          expiring = null;
+          // An automation whose every run left, such as one deleted since, leaves no folder.
+          if ((await readdir(current.path)).length === 0) {
+            await rmdir(current.path).catch(() => undefined);
+            planned.delete(name);
+          } else {
+            planned.set(name, { until: current.until, recheck: current.recheck });
+          }
+        });
+      }
+      await serial(async () => {
+        for (const folder of planned.keys()) if (!folders.includes(folder)) planned.delete(folder);
+        const entries = [...planned].map(([folder, plan]) => ({ folder, ...plan }));
+        await writeDurably(await scheduleFile(), `${JSON.stringify({ version: 1, folders: entries })}\n`);
+      });
+      return null;
     },
     async readSubscriptions() {
       const parsed = SubscriptionsSchema.safeParse(await readJson(join(await base(), "subscriptions.json")));

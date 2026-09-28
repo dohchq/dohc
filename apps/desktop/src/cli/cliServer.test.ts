@@ -1325,7 +1325,10 @@ describe("CLI socket server", () => {
     ];
     context.automations = {
       automationIdAt: vi.fn(async (collectionPath: string, id: string) => (collectionPath === "tasks" ? `collection:object-tasks#${id}` : null)),
-      runs: vi.fn(async () => [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }]),
+      runs: vi.fn(async (_automationId: string, _before?: string) => ({
+        runs: [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }],
+        next: "1:atc_1",
+      })),
       run: vi.fn(async (_automationId: string, claimId: string) =>
         claimId === "atc_1" ? { ...run, steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
       retry: vi.fn(async (input) => {
@@ -1341,8 +1344,12 @@ describe("CLI socket server", () => {
         run: "atc_1", state: "failed", error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
         trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false, changes: 2,
       }],
+      next: "1:atc_1",
     });
-    expect(context.automations!.runs).toHaveBeenCalledWith(AUTOMATION);
+    expect(context.automations!.runs).toHaveBeenCalledWith(AUTOMATION, undefined);
+    // The next page names where the last one ended.
+    await invoke("automationRuns", { ...args, page: "1:atc_1" });
+    expect(context.automations!.runs).toHaveBeenLastCalledWith(AUTOMATION, "1:atc_1");
     await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
       ok: true,
       run: { run: "atc_1", trigger, steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },

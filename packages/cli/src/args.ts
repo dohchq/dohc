@@ -62,7 +62,7 @@ type CliCommandBody =
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "moment"; id: string; side: "before" | "after" }
-  | { verb: "automationRuns"; collectionPath: string; automation: string }
+  | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
   | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
   | {
@@ -477,10 +477,15 @@ const AUTOMATION_VERBS = {
   runs: {
     summary: "List an automation's runs on this computer, newest first.",
     operands: "<collection> <automation>",
-    notes: ["Lists the 20 newest runs, as the Automations panel does. Each line starts with the run's ID."],
+    flags: [{ name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." }],
+    notes: [
+      "Lists 20 runs at a time, newest first, as the Automations panel does. Each line starts with the run's ID.",
+      "When older runs remain, the last line gives the --page value that lists them.",
+    ],
     parse: (input) => {
       const { collectionPath, automation } = automationOperands(input, "runs", false);
-      return { verb: "automationRuns", collectionPath, automation };
+      const page = lastValue(input, "--page");
+      return { verb: "automationRuns", collectionPath, automation, ...(page === undefined ? {} : { page }) };
     },
   },
   run: {

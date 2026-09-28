@@ -40,8 +40,11 @@ export function useSentNoticeProps(input: {
   workspaceId: string;
   workspaces: readonly WorkspaceSummary[];
   openFile: (path: string) => void;
-  /** Opens an automation's Collection; resolves to a sentence for the row when it cannot. */
-  openAutomation: (automationId: string) => Promise<string | null>;
+  /**
+   * Opens an automation's runs, at the run a notice names when this
+   * computer ran it; resolves to a sentence for the row when it cannot.
+   */
+  openAutomation: (automationId: string, run: string | null) => Promise<string | null>;
   onSwitchWorkspace: (workspace: WorkspaceSummary, openPath?: string) => void;
   onOpenShare: (share: NoticeShare) => void;
   reportShellError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
@@ -136,7 +139,8 @@ export function useSentNoticeProps(input: {
           } else if (place.mount === null && notice.target?.automation && AUTOMATION_NOTICE_KINDS.has(notice.kind)) {
             let note: string | null;
             try {
-              note = await openAutomation(notice.target.automation);
+              // Only the computer that ran a run holds it.
+              note = await openAutomation(notice.target.automation, notice.postedHere ? notice.target.run ?? null : null);
             } catch {
               note = AUTOMATION_LOOKUP_FAILED_NOTE;
             }

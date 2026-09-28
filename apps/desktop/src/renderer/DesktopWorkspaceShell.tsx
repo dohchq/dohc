@@ -2344,16 +2344,16 @@ export function DesktopWorkspaceShell(props: {
     [openVirtualTab],
   );
   // Open automation, from a notice: the automation's Collection opens with
-  // the ⚡ panel on its runs. The page takes the ask once and clears it; the
+  // the ⚡ panel on its runs, at the run it names. The page takes the ask once and clears it; the
   // counter keeps rising after a clear, so each ask is new to the panel.
   const [automationFocus, setAutomationFocus] = useState<
-    { collectionPath: string; automationId: string; seq: number } | null
+    { collectionPath: string; automationId: string; run: string | null; seq: number } | null
   >(null);
   const automationFocusSeq = useRef(0);
   // Main finds the Collection by its id, so a Collection that moved still
   // opens. Resolves to a sentence for the notice's row when it cannot open.
   const openAutomation = useCallback(
-    async (automationId: string): Promise<string | null> => {
+    async (automationId: string, run: string | null): Promise<string | null> => {
       const owner = workspaceId;
       const found = await bridge().findAutomationCollection({ workspaceId: owner, automationId });
       if (workspaceIdRef.current !== owner) return null;
@@ -2363,6 +2363,7 @@ export function DesktopWorkspaceShell(props: {
       setAutomationFocus({
         collectionPath: found.collectionPath,
         automationId,
+        run,
         seq: automationFocusSeq.current,
       });
       return null;

@@ -422,7 +422,7 @@ export async function runDatasetAutomation(
     run.outcome = { state: "done" };
     run.plan = null;
   }
-  run.updatedAtMs = dependencies.nowMs();
+  run.finishedAtMs = dependencies.nowMs();
   await dependencies.store.save(run);
   return outcome;
 }
@@ -893,7 +893,6 @@ async function applyPlan(
       const applied = { ordinal, writes };
       await dependencies.store.appendEffect(run, applied);
       run.applied.push(applied);
-      run.updatedAtMs = dependencies.nowMs();
     }
     return { kind: "done" };
   });

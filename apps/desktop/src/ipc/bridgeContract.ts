@@ -4541,14 +4541,29 @@ export const ListCollectionAutomationsPayload = z.object({
 export type ListCollectionAutomationsPayload = z.infer<typeof ListCollectionAutomationsPayload>;
 export type ListCollectionAutomationsResult = CollectionAutomationsFile | { status: "unavailable" };
 
+// One page of an automation's runs, newest first. `before` is the `next`
+// of the page before; `next` is null after the oldest.
 export const ListCollectionAutomationRunsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: COLLECTION_AUTOMATION_ID,
+  before: z.string().min(1).max(512).optional(),
 });
 export type ListCollectionAutomationRunsPayload = z.infer<typeof ListCollectionAutomationRunsPayload>;
 // A shared view keeps no runs: its automations run on the owner's computer.
 export type ListCollectionAutomationRunsResult =
-  | { status: "listed"; runs: CollectionAutomationRun[] }
+  | { status: "listed"; runs: CollectionAutomationRun[]; next: string | null }
+  | { status: "unavailable" };
+
+// One run however old, as run history lists it, such as the run a notice opens.
+export const GetCollectionAutomationRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  claimId: z.string().min(1).max(256),
+});
+export type GetCollectionAutomationRunPayload = z.infer<typeof GetCollectionAutomationRunPayload>;
+export type GetCollectionAutomationRunResult =
+  | { status: "found"; run: CollectionAutomationRun }
+  | { status: "missing" }
   | { status: "unavailable" };
 
 // Try again for a failed run. `startOver` confirms running an automation
@@ -5506,7 +5521,7 @@ export const RetryAutomationNoticePayload = z.object({
 });
 export const RetryAutomationNoticeResult = z.union([
   z.object({ status: z.literal("queued"), press: z.boolean() }),
-  z.object({ status: z.enum(["definition-changed", "progress-gone"]), repeatsMessages: z.boolean() }),
+  z.object({ status: z.literal("definition-changed"), repeatsMessages: z.boolean() }),
   z.object({ status: z.literal("refused"), reason: z.string().min(1).max(2_000) }),
 ]);
 
@@ -6084,6 +6099,7 @@ export interface DohcDesktopBridge
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
+  getCollectionAutomationRun(payload: GetCollectionAutomationRunPayload): Promise<GetCollectionAutomationRunResult>;
   retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;

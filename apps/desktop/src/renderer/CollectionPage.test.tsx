@@ -441,12 +441,12 @@ describe("CollectionPage", () => {
         valid: true, automationId: "collection:tasks#stamp", automation: stamp, definitionHash: "0123456789abcdef",
         cannotRun: null, reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
       }] })),
-      listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [] })),
+      listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [], next: null })),
       onAutomationRunsChanged: () => () => undefined,
       onAutomationHoldsChanged: () => () => undefined,
     });
     vi.stubGlobal("dohcDesktop", bridge);
-    const page = (focus: { automationId: string; seq: number } | null) => (
+    const page = (focus: { automationId: string; run: string | null; seq: number } | null) => (
       <CollectionPage
         workspaceId="ws-1"
         collectionPath="tasks"
@@ -458,7 +458,7 @@ describe("CollectionPage", () => {
         automationFocus={focus}
       />
     );
-    const { rerender } = render(page({ automationId: "collection:tasks#stamp", seq: 1 }));
+    const { rerender } = render(page({ automationId: "collection:tasks#stamp", run: null, seq: 1 }));
     expect(await screen.findByText("This automation has not run on this computer yet.")).toBeDefined();
     // The shell clears its ask once the page took it.
     rerender(page(null));

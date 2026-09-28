@@ -62,7 +62,7 @@ import {
   type ReachShare,
   type ReachStep,
 } from "./automationReach";
-import type { AutomationRunStore, ReportedFailure, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
+import type { AutomationRunStore, ClaimStanding, ExpiringClaim, ReportedFailure, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
@@ -576,9 +576,6 @@ export type CollectionAutomationRetry =
   // must choose that. `repeatsMessages` says the confirmation must also say
   // that messages it sent may be sent again.
   | { status: "definition-changed"; repeatsMessages: boolean }
-  // The run failed so long ago that dohc dropped its progress. Running it
-  // again starts from the beginning, and the person must choose that too.
-  | { status: "progress-gone"; repeatsMessages: boolean }
   | { status: "refused"; reason: string };
 
 export type CollectionAutomationUndo =
@@ -626,16 +623,15 @@ function datasetActorKind(claim: DatasetAutomationClaim): CollectionAutomationTr
 /**
  * How Try again treats a claim's saved runs: it refuses, or it runs the
  * claim again, from the first step when `startsOver`, which the caller must
- * confirm. `progressGone` says why it starts over.
+ * confirm.
  */
 function tryAgainOf(
   runs: ClaimRuns,
-): { refused: string } | (Extract<ClaimRuns, { unreadable: false }> & { startsOver: boolean; progressGone: boolean }) {
+): { refused: string } | (Extract<ClaimRuns, { unreadable: false }> & { startsOver: boolean }) {
   if (runs.unreadable) return { refused: UNREADABLE_RUN_ERROR };
   // An undone run's keys and record ids are spent, so it cannot run again.
   if (runs.undo) return { refused: UNDONE_RUN_ERROR };
-  const progressGone = runs.done === null && runs.current?.compacted === true;
-  return { ...runs, startsOver: progressGone || (runs.current === null && runs.changedSince !== null), progressGone };
+  return { ...runs, startsOver: runs.current === null && runs.changedSince !== null };
 }
 
 /** The step whose change a run had not landed when it stopped, from its saved plan and progress, numbered from 1. */
@@ -734,8 +730,8 @@ type HistoryClaim = Pick<AutomationClaimSummary, "claimId" | "state" | "createdA
   error?: string | null;
   trigger: CollectionAutomationTrigger;
 };
-/** One ledger's newest claims of an automation, newest first, and the failed claim its notice offers. */
-type LedgerHistory = { claims: HistoryClaim[]; failure: string | null };
+/** One page of an automation's claims, newest first, and the `before` of the next page, or null after the oldest. */
+type ClaimPage = { claims: HistoryClaim[]; next: string | null };
 /**
  * A claim found in the ledger that holds it: the dataset ledger for a
  * record change or a press on a dataset, the engine otherwise. `pressedBy`
@@ -750,9 +746,10 @@ type LedgerClaim = {
   history: HistoryClaim;
 };
 
-/** Claims from both ledgers, merged newest first. */
+/** Claims from both ledgers, merged newest first, in the order both page them. */
 function newestFirst(claims: HistoryClaim[]): HistoryClaim[] {
-  return claims.sort((left, right) => right.createdAtMs - left.createdAtMs);
+  return claims.sort((left, right) =>
+    right.createdAtMs - left.createdAtMs || (left.claimId < right.claimId ? 1 : left.claimId > right.claimId ? -1 : 0));
 }
 
 function engineHistoryClaim(claim: AutomationClaimSummary): HistoryClaim {
@@ -785,8 +782,8 @@ type WaitReason = PressWaitReason | "dataset";
 type ClaimAction =
   | { kind: "release"; waitsFor?: WaitReason }
   | { kind: "settle"; input: SettleInput; outcome: Exclude<PressSettled["outcome"], "ended">; settled: () => Promise<void> };
-// Run history shows this many runs, and their failures keep what Try again needs.
-const RESUMABLE_FAILURES = 20;
+// One page of run history shows this many runs.
+const RUN_PAGE = 20;
 // The most claims one page of either ledger holds.
 const CLAIM_PAGE_LIMIT = 100;
 
@@ -881,8 +878,12 @@ export class CollectionAutomations {
   private busyTimer: ReturnType<typeof setTimeout> | null = null;
   // When run history last expired, or null before the first time.
   private historyPrunedAtMs: number | null = null;
-  // The expiry in progress. An Undo waits for it before it reads its claim.
+  // The expiry pass in progress; a later pass starts after it.
   private historyPruning: Promise<void> = Promise.resolve();
+  // The expiry batch in progress. An Undo waits for it before it reads its claim.
+  private historyBatch: Promise<unknown> = Promise.resolve();
+  // The next expiry while the workspace stays open.
+  private historyTimer: ReturnType<typeof setTimeout> | null = null;
   private runAbort = new AbortController();
   private readonly nowMs: () => number;
   // Claims waiting for their dataset, with its id.
@@ -1197,10 +1198,12 @@ export class CollectionAutomations {
   async close(): Promise<void> {
     if (this.state !== "open") return;
     this.generation += 1;
+    // Closed before the drain ends and claims are handed back, as dispose
+    // does, so a settle paid below starts no drain and no expiry pass.
+    this.state = "closed";
     this.stopRuns();
     await Promise.allSettled([this.draining]);
     await this.payOwed(false);
-    if (this.state === "open") this.state = "closed";
     this.opened = null;
     await Promise.allSettled([this.chain, this.verdictChain]);
   }
@@ -1340,8 +1343,7 @@ export class CollectionAutomations {
     const lastRuns = new Map(await Promise.all(indexed.file.entries.flatMap((entry) => entry.status === "valid"
       ? [collectionAutomationId(collectionId, entry.automation.id)]
       : []).map(async (automationId) => {
-      const ledgers = await this.ledgerHistories(automationId, false, 1);
-      const [newest] = newestFirst(ledgers?.flatMap((ledger) => ledger.claims) ?? []);
+      const [newest] = (await this.claimPage(automationId, { limit: 1 }))?.claims ?? [];
       return [automationId, newest ? { state: newest.state, atMs: newest.updatedAtMs } : null] as const;
     })));
     const automations = indexed.file.entries.map((entry): CollectionAutomationSummary => {
@@ -1824,20 +1826,36 @@ export class CollectionAutomations {
     if (this.locate(automationId) === null) await this.enqueue(() => this.indexDatasets(true));
   }
 
-  /** One automation's newest runs on this computer, newest first. */
-  async runs(automationId: string, limit = 20): Promise<CollectionAutomationRun[]> {
+  /**
+   * One page of an automation's runs on this computer, newest first, and
+   * the `before` of the next page, or null after the oldest.
+   */
+  async runs(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null }> {
     await this.indexAutomation(automationId);
-    const shown = Math.min(limit, CLAIM_PAGE_LIMIT);
-    const ledgers = await this.ledgerHistories(automationId, false, shown);
-    if (ledgers === null) throw new Error("The workspace engine is not running.");
+    const page = await this.claimPage(automationId, { before, limit: RUN_PAGE });
+    if (page === null) throw new Error("The workspace engine is not running.");
     const hash = this.currentHash(automationId);
     const runs: CollectionAutomationRun[] = [];
     // Only the runs shown are read.
-    for (const claim of newestFirst(ledgers.flatMap((ledger) => ledger.claims)).slice(0, shown)) {
-      const { stored, run } = await this.runOf(automationId, claim, hash);
-      runs.push({ ...run, writes: stepWritesOf(stored).map(({ write }) => write) });
-    }
-    return runs;
+    for (const claim of page.claims) runs.push(await this.runRow(automationId, claim, hash));
+    return { runs, next: page.next };
+  }
+
+  /**
+   * One of an automation's runs as run history lists it, however old and
+   * whether or not its automation is still in the file. Null when this
+   * computer has no such run.
+   */
+  async listedRun(automationId: string, claimId: string): Promise<CollectionAutomationRun | null> {
+    await this.indexAutomation(automationId);
+    const found = await this.findClaim(automationId, claimId, false);
+    if (found === null) throw new Error("The workspace engine is not running.");
+    return found === "missing" ? null : await this.runRow(automationId, found.history, this.currentHash(automationId));
+  }
+
+  private async runRow(automationId: string, claim: HistoryClaim, hash: string | null): Promise<CollectionAutomationRun> {
+    const { stored, run } = await this.runOf(automationId, claim, hash);
+    return { ...run, writes: stepWritesOf(stored).map(({ write }) => write) };
   }
 
   /** One of an automation's runs on this computer, with what each step changed, or null when this computer has no such run. */
@@ -1939,13 +1957,13 @@ export class CollectionAutomations {
       }
       const runs = tryAgainOf(await runsForClaim(this.options.store, input, automation));
       if ("refused" in runs) return { status: "refused", reason: runs.refused };
-      const { startsOver, progressGone } = runs;
+      const { startsOver } = runs;
       if (startsOver && !input.startOver) {
         // Either version may have sent messages that a new run sends again.
         const earlier = runs.current ?? runs.changedSince;
         const repeatsMessages = sendsMessages(automation) ||
           (earlier?.applied.some((effect) => effect.writes.some((write) => (write.kind === "message" || write.kind === "notice"))) ?? false);
-        return { status: progressGone ? "progress-gone" : "definition-changed", repeatsMessages };
+        return { status: "definition-changed", repeatsMessages };
       }
       this.waitingFor.delete(input.claimId);
       const retried = known.ledger === "dataset"
@@ -1955,8 +1973,8 @@ export class CollectionAutomations {
       if (startsOver) {
         const hash = definitionHash(automation);
         for (const run of (await this.options.store.runsOf(input.automationId, input.claimId)).runs) {
-          if (run.superseded || (!progressGone && run.definitionHash === hash)) continue;
-          await this.options.store.save({ ...run, superseded: true, updatedAtMs: this.nowMs() });
+          if (run.superseded || run.definitionHash === hash) continue;
+          await this.options.store.save({ ...run, superseded: true, finishedAtMs: run.finishedAtMs ?? this.nowMs() });
         }
       }
     } finally {
@@ -2384,7 +2402,7 @@ export class CollectionAutomations {
     this.changing.add(input.claimId);
     try {
       // An expiry batch already sent may not know this claim is being undone.
-      await this.historyPruning;
+      await this.historyBatch;
       const claim = await this.findClaim(input.automationId, input.claimId, true);
       if (claim === null) throw new Error("The workspace engine is not running.");
       if (claim === "missing") return { status: "refused", reason: "dohc no longer has this run on this computer." };
@@ -2424,7 +2442,7 @@ export class CollectionAutomations {
       // Saved before anything is reversed, so no run resumes over what this
       // puts back, even if it stops part way.
       for (const run of pending) {
-        if (run.undo === null) await this.options.store.save({ ...run, undo: "started", updatedAtMs: this.nowMs() });
+        if (run.undo === null) await this.options.store.save({ ...run, undo: "started" });
       }
       const undone = dataset
         ? await this.withLiveHost((host) => undoDatasetAutomationRuns(host, input.claimId, runs, async (request) => {
@@ -2440,7 +2458,7 @@ export class CollectionAutomations {
           collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
         }, pending, this.runAbort.signal);
       if (undone === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
-      for (const run of pending) await this.options.store.save({ ...run, undo: "done", updatedAtMs: this.nowMs() });
+      for (const run of pending) await this.options.store.save({ ...run, undo: "done" });
       return { status: "undone", ...undone };
     } finally {
       this.changing.delete(input.claimId);
@@ -2533,54 +2551,48 @@ export class CollectionAutomations {
   }
 
   /**
-   * One automation's history in each ledger that can hold its claims, and
-   * optionally the failure each ledger's notice offers. The engine claims
-   * schedules, Group messages, and a document's changes and presses. A
-   * dataset's own ledger claims its record changes and presses. An
-   * automation whose trigger changed between those kinds has claims in
-   * both. Null when either ledger cannot be read.
+   * One page of an automation's claims in each ledger that can hold them,
+   * newest first, both ledgers merged. The engine claims schedules, Group
+   * messages, and a document's changes and presses. A dataset's own ledger
+   * claims its record changes and presses. An automation whose trigger
+   * changed between those kinds has claims in both. Null when either ledger
+   * cannot be read.
    */
-  private async ledgerHistories(automationId: string, withFailure: boolean, limit: number): Promise<LedgerHistory[] | null> {
+  private async claimPage(automationId: string, page: { before?: string; limit: number }): Promise<ClaimPage | null> {
     const id = this.locate(automationId);
-    const failureOf = (failures: ReadonlyArray<{ automationId: string; claimId: string }>) =>
-      failures.find((failure) => failure.automationId === automationId)?.claimId ?? null;
-    const engine = await this.withLiveEngine(async (live) => ({
-      claims: (await live.listAutomationClaims({ automationId, limit })).claims.map(engineHistoryClaim),
-      failure: withFailure ? failureOf((await live.listAutomationFailures()).failures) : null,
-    }));
+    const engine = await this.withLiveEngine(async (live): Promise<ClaimPage> => {
+      const listed = await live.listAutomationClaims({ automationId, ...page });
+      return { claims: listed.claims.map(engineHistoryClaim), next: listed.next };
+    });
     if (engine === null) return null;
-    if (id === null || !this.datasets.has(id.collectionPath)) return [engine];
-    const dataset = await this.withLiveHost((ledger) => ({
-      claims: ledger.claims(automationId, { limit }).claims.map(datasetHistoryClaim),
-      failure: withFailure ? failureOf(ledger.failures()) : null,
-    }));
-    return dataset === null ? null : [dataset, engine];
+    const pages = [engine];
+    if (id !== null && this.datasets.has(id.collectionPath)) {
+      const dataset = await this.withLiveHost((ledger): ClaimPage => {
+        const listed = ledger.claims(automationId, page);
+        return { claims: listed.claims.map(datasetHistoryClaim), next: listed.next };
+      });
+      if (dataset === null) return null;
+      pages.push(dataset);
+    }
+    // Both ledgers page by when a claim was made, so either goes on after the last claim shown.
+    const merged = newestFirst(pages.flatMap((listed) => listed.claims));
+    const claims = merged.slice(0, page.limit);
+    const last = claims.at(-1);
+    const more = merged.length > page.limit || pages.some((listed) => listed.next !== null);
+    return { claims, next: more && last !== undefined ? `${last.createdAtMs}:${last.claimId}` : null };
   }
 
-  /**
-   * Every claim of one automation that either ledger keeps on this computer,
-   * a page at a time, newest first, both ledgers merged. Null when either
-   * ledger cannot be read.
-   */
+  /** Every claim of one automation that either ledger keeps on this computer, newest first. Null when either ledger cannot be read. */
   private async everyClaim(automationId: string): Promise<HistoryClaim[] | null> {
-    const id = this.locate(automationId);
     const claims: HistoryClaim[] = [];
     let before: string | undefined;
     do {
-      const page = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId, before, limit: CLAIM_PAGE_LIMIT }));
+      const page = await this.claimPage(automationId, { before, limit: CLAIM_PAGE_LIMIT });
       if (page === null) return null;
-      claims.push(...page.claims.map(engineHistoryClaim));
+      claims.push(...page.claims);
       before = page.next ?? undefined;
     } while (before !== undefined);
-    if (id !== null && this.datasets.has(id.collectionPath)) {
-      do {
-        const page = await this.withLiveHost((ledger) => ledger.claims(automationId, { before, limit: CLAIM_PAGE_LIMIT }));
-        if (page === null) return null;
-        claims.push(...page.claims.map(datasetHistoryClaim));
-        before = page.next ?? undefined;
-      } while (before !== undefined);
-    }
-    return newestFirst(claims);
+    return claims;
   }
 
   /**
@@ -2622,6 +2634,10 @@ export class CollectionAutomations {
     this.runAbort = new AbortController();
     if (this.busyTimer) clearTimeout(this.busyTimer);
     this.busyTimer = null;
+    if (this.historyTimer) clearTimeout(this.historyTimer);
+    this.historyTimer = null;
+    // The next open expires run history again, and keeps doing so hourly.
+    this.historyPrunedAtMs = null;
   }
 
   /** Each document Collection the engine lists once it has recorded the watcher's changes, with its Collection id. */
@@ -3406,7 +3422,7 @@ export class CollectionAutomations {
     if (id === null || automation === null || !automation.enabled || !inCollection) {
       // The automation is gone or off, so its subscription is stale.
       if (id !== null && !this.isSubscribed(held)) void this.enqueue(() => this.dropStaleSubscription(held));
-      return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: async () => undefined };
+      return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: () => this.afterSettle() };
     }
     // A record change or a press on a dataset cannot start an automation
     // that now starts on a schedule or a Group message, as a document's
@@ -3418,17 +3434,17 @@ export class CollectionAutomations {
     // the folder the relay allowed it in, however long it waited.
     const bound = held.source === "engine" ? boundPress(held.claim) : null;
     if (bound !== null && bound.definition !== definitionHash(automation) && automation.when.kind === "button") {
-      return { kind: "settle", input: { state: "failed", error: changedSincePressed(automation.when.field) }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+      return { kind: "settle", input: { state: "failed", error: changedSincePressed(automation.when.field) }, outcome: "failed", settled: () => this.afterSettle() };
     }
     if (bound !== null && bound.place !== placeHash(id.collectionPath)) {
-      return { kind: "settle", input: { state: "failed", error: MOVED_SINCE_PRESSED }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+      return { kind: "settle", input: { state: "failed", error: MOVED_SINCE_PRESSED }, outcome: "failed", settled: () => this.afterSettle() };
     }
     // A claim this version cannot run, or that names a field its Collection
     // lacks, fails with the reason the panel shows, so it reaches the failure
     // notice and Try again runs it once that is fixed.
     const unsupported = this.cannotRun(id.collectionPath, automation);
     if (unsupported !== null) {
-      return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+      return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.afterSettle() };
     }
     // Every step needs the roster, even one inside the Collection: someone
     // with Edit on the file alone is an editor who cannot edit its records.
@@ -3443,7 +3459,7 @@ export class CollectionAutomations {
         const stopped = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, id.collectionPath), steps })
           .find((reach) => !reach.allowed);
         const error = stopped && !stopped.allowed ? stopped.reason : "dohc could not check who can edit this Collection.";
-        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.afterSettle() };
       }
       return { kind: "release", waitsFor: "roster" };
     }
@@ -3464,7 +3480,7 @@ export class CollectionAutomations {
           kind: "settle",
           input: { state: "failed", error: "This workspace's automations moved to another computer before this press ran." },
           outcome: "failed",
-          settled: () => this.pruneRuns(claim.automationId),
+          settled: () => this.afterSettle(),
         };
       }
       hostHold = taken;
@@ -3495,7 +3511,7 @@ export class CollectionAutomations {
         return { kind: "settle", input: { state: "done" }, outcome: outcome.kind, settled: () => this.markSettled(claim, automation) };
       case "failed-before":
         // Its run was counted when it failed.
-        return { kind: "settle", input: { state: "failed", error: outcome.error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+        return { kind: "settle", input: { state: "failed", error: outcome.error }, outcome: "failed", settled: () => this.afterSettle() };
       case "failed": {
         let error = outcome.error;
         if (await this.countTimeout(claim.automationId, outcome.timedOut) >= TIMEOUTS_BEFORE_SWITCH_OFF) {
@@ -3503,7 +3519,7 @@ export class CollectionAutomations {
           if (note === null) return release;
           error = `${error} ${note}`;
         }
-        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.afterSettle() };
       }
     }
   }
@@ -3531,26 +3547,50 @@ export class CollectionAutomations {
     } catch (error) {
       this.options.onError(`record automation claim "${claim.claimId}" as done`, error);
     }
-    await this.pruneRuns(claim.automationId);
+    void this.pruneHistory();
   }
 
   /**
    * Expires run history past 30 days in both ledgers, except each
-   * automation's newest failure: at open, then at most
-   * hourly after a run settles, for every automation, including those whose
-   * definitions were deleted. A run an unfinished Undo still names stays.
-   * Nothing expires while the list of unfinished Undos cannot be read. Each
-   * call to a ledger expires one batch in its own transaction.
+   * automation's newest failure, then in the saved runs: at open, then at
+   * most hourly after a run settles or while the workspace stays open, for
+   * every automation, including those whose definitions were deleted. A run
+   * an unfinished Undo still names stays. The ledgers expire nothing while
+   * the list of unfinished Undos cannot be read. Each call to a ledger
+   * expires one batch in its own transaction, and each call to the run store
+   * reads one batch of saved runs.
    */
   private pruneHistory(): Promise<void> {
     const now = this.nowMs();
+    // A settle paid while the workspace closes starts no pass and no timer.
+    if (this.state !== "open") return this.historyPruning;
     if (this.historyPrunedAtMs !== null && now - this.historyPrunedAtMs < HISTORY_PRUNE_INTERVAL_MS) return this.historyPruning;
     this.historyPrunedAtMs = now;
-    this.historyPruning = this.expireHistory().catch((error: unknown) => this.options.onError("expire automation run history", error));
+    // An automation that stopped running expires too, while the workspace stays open.
+    if (this.historyTimer) clearTimeout(this.historyTimer);
+    this.historyTimer = setTimeout(() => {
+      this.historyTimer = null;
+      this.historyPrunedAtMs = null;
+      if (this.state === "open") void this.pruneHistory();
+    }, HISTORY_PRUNE_INTERVAL_MS);
+    this.historyTimer.unref?.();
+    // A pass an engine restart or a close left stops at its next batch.
+    const generation = this.generation;
+    this.historyPruning = this.historyPruning
+      .then(() => this.expireHistory(generation))
+      .catch((error: unknown) => this.options.onError("expire automation run history", error));
     return this.historyPruning;
   }
 
-  private async expireHistory(): Promise<void> {
+  private async expireHistory(generation: number): Promise<void> {
+    const current = () => this.generation === generation && this.state === "open";
+    // Runs one batch, which an Undo waits for; the event loop runs after it.
+    const batch = async <T>(work: Promise<T>): Promise<T> => {
+      this.historyBatch = work.catch(() => undefined);
+      const done = await work;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return done;
+    };
     // Read again before each batch: an Undo or Try again under way keeps its claim too.
     const keep = async () => {
       const undoing = await this.options.store.unfinishedUndos();
@@ -3563,37 +3603,48 @@ export class CollectionAutomations {
     };
     // Each batch is its own transaction; the event loop runs between them.
     const batches = async (prune: (keep: string[]) => Promise<{ more: boolean } | null>) => {
-      for (let more = true; more;) {
+      for (let more = true; more && current();) {
         const kept = await keep();
-        if (kept === null) return;
-        more = (await prune(kept))?.more === true;
-        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (kept === null || !current()) return;
+        more = (await batch(prune(kept)))?.more === true;
       }
     };
     await batches((kept) => this.withLiveEngine((engine) => engine.pruneAutomationHistory({ keep: kept })));
     await batches((kept) => this.withLiveHost((host) => host.pruneHistory(kept)));
+    // Saved runs last, so a failed claim's runs stay until its ledger lets it go.
+    const now = this.nowMs();
+    let from: string | null = null;
+    while (current()) {
+      from = await batch(this.options.store.expire(now, (claim) => this.standingOf(claim, current), from));
+      if (from === null) break;
+    }
+  }
+
+  /** After a run settles, run history expires, at most hourly, without holding up the drain. */
+  private async afterSettle(): Promise<void> {
+    void this.pruneHistory();
   }
 
   /**
-   * Trims the automation's saved runs. A failed run keeps what Try again
-   * needs while run history shows its claim among the newest, or while its
-   * failure notice offers it.
+   * What the ledgers say of a claim whose saved runs expiry weighs. An Undo
+   * or Try again changing it keeps it open.
    */
-  private async pruneRuns(automationId: string): Promise<void> {
-    try {
-      await this.options.store.prune(automationId, async () => {
-        const ledgers = await this.ledgerHistories(automationId, true, RESUMABLE_FAILURES);
-        if (ledgers === null) return null;
-        // Each ledger's newest, and the failure its own notice offers.
-        return new Set(ledgers.flatMap((ledger) => [
-          ...ledger.claims.slice(0, RESUMABLE_FAILURES).map((claim) => claim.claimId),
-          ...(ledger.failure === null ? [] : [ledger.failure]),
-        ]));
-      });
-    } catch (error) {
-      this.options.onError(`prune runs of "${automationId}"`, error);
+  private async standingOf(claim: ExpiringClaim, current: () => boolean): Promise<ClaimStanding> {
+    if (this.changing.has(claim.claimId)) return "open";
+    // A pass the workspace closed under asks no ledger, even one it waited
+    // for: each ledger is asked only once it is at hand.
+    const dataset = await this.withLiveHost((ledger) => (current() ? { held: ledger.claim(claim.automationId, claim.claimId) } : "stale"));
+    if (dataset === "stale") return "unknown";
+    // Only a dataset Collection's claim can be in its dataset's ledger, which cannot say while its host is closed.
+    if (dataset === null && claim.datasetId !== null) return "unknown";
+    let state = dataset?.held?.state;
+    if (state === undefined) {
+      const engine = await this.withLiveEngine(async (live) => (current() ? await live.getAutomationClaim({ claimId: claim.claimId }) : "stale"));
+      if (engine === null || engine === "stale") return "unknown";
+      if (engine.claim === null) return "gone";
+      state = engine.claim.state;
     }
-    void this.pruneHistory();
+    return state === "pending" || state === "running" ? "open" : "settled";
   }
 
   /**

@@ -223,7 +223,8 @@ export interface CliDocumentsPort {
 export interface CliAutomationsPort {
   /** The engine id of an automation in the Collection at a path, or null when no Collection is there. */
   automationIdAt(collectionPath: string, id: string): Promise<string | null>;
-  runs(automationId: string): Promise<CollectionAutomationRun[]>;
+  /** One page of runs, newest first, after `before`, and the `before` of the next page or null. */
+  runs(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null }>;
   run(automationId: string, claimId: string): Promise<CollectionAutomationRunDetail | null>;
   retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
 }
@@ -634,11 +635,6 @@ function documentEditOrigin(
 const SHARED_VIEW_AUTOMATIONS =
   "A shared view has no automation runs. The owner's computer runs this workspace's automations.";
 
-const START_OVER = {
-  "definition-changed": "This automation changed since the run failed.",
-  "progress-gone": "dohc no longer has this run's progress.",
-} as const;
-
 // Try again as the panel answers it, in words for an agent: a run that
 // would start over needs startOver, as the panel's confirmation asks.
 function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["automationRetry"] {
@@ -646,13 +642,12 @@ function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["aut
     case "queued":
       return { ok: true, status: "queued" };
     case "definition-changed":
-    case "progress-gone":
       return {
         ok: false,
         status: result.status,
         repeatsMessages: result.repeatsMessages,
         reason: [
-          START_OVER[result.status],
+          "This automation changed since the run failed.",
           "Running it again starts from the first step and can repeat changes it already made.",
           ...(result.repeatsMessages ? ["Posts, direct messages, and notices it already sent may be sent again."] : []),
           "To do that, try again with --start-over, or startOver: true.",
@@ -2360,10 +2355,11 @@ async function dispatch(
         const automationId = await automations.automationIdAt(validated.normalized, request.args.automation);
         if (automationId === null) return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
         if (request.verb === "automationRuns") {
-          const runs = await automations.runs(automationId);
+          const page = await automations.runs(automationId, request.args.page);
           const listed: CliResultByVerb["automationRuns"] = {
             ok: true,
-            runs: runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
+            runs: page.runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
+            next: page.next,
           };
           return listed;
         }

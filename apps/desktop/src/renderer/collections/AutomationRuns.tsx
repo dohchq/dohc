@@ -1,5 +1,5 @@
-import { AlertTriangle, CheckCircle2, CircleDashed, Undo2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { AlertTriangle, CheckCircle2, CircleDashed, LoaderCircle, Undo2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ListCollectionAutomationRunsResult,
   UndoCollectionAutomationRunResult,
@@ -10,8 +10,9 @@ import { SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 
 // One automation's runs on this computer, newest first (claims are local,
-// so run history is too). A failed run offers Try again unless it failed
-// before it started, and a run that changed records offers Undo.
+// so run history is too), a page at a time. A failed run offers Try again
+// unless it failed before it started, and a run that changed records offers
+// Undo. The run a notice opens shows first, marked, when no page shown holds it.
 
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
 type RunWrite = Run["writes"][number];
@@ -103,20 +104,59 @@ function RunMark({ run }: { run: Run }) {
   return <CircleDashed size={13} aria-label="Running" className="mt-0.5 shrink-0 text-subtle" />;
 }
 
+const MISSING_RUN = "This run is no longer in run history. dohc keeps runs for 30 days after they end.";
+
+// Newest first, as run history pages them: by when each run's claim was made, then by its id.
+function newer(left: Run, right: Run): boolean {
+  return left.createdAtMs > right.createdAtMs || (left.createdAtMs === right.createdAtMs && left.claimId > right.claimId);
+}
+
+/**
+ * The newest page over the runs shown. Older pages stay while the newest
+ * page reaches them; otherwise only the newest page shows. Runs read one
+ * at a time replace their rows, and leave when run history no longer has them.
+ */
+function merged(
+  shown: { runs: Run[]; next: string | null; opened: Run | null } | null,
+  head: { runs: Run[]; next: string | null },
+  read: ReadonlyMap<string, Run | null>,
+  opened: string | null,
+): { runs: Run[]; next: string | null; opened: Run | null } {
+  const last = head.runs.at(-1);
+  const older = shown !== null && head.next !== null && last !== undefined && shown.runs.length > 0 && !newer(last, shown.runs[0]!)
+    ? { runs: shown.runs.filter((run) => newer(last, run)), next: shown.next }
+    : null;
+  const runs = older === null ? head.runs : [...head.runs, ...older.runs];
+  const current = runs.flatMap((run) => (read.has(run.claimId) ? (read.get(run.claimId) === null ? [] : [read.get(run.claimId)!]) : [run]));
+  const openedRun = opened === null ? null : read.has(opened) ? read.get(opened)! : shown?.opened ?? null;
+  return { runs: current, next: older === null ? head.next : older.next, opened: openedRun };
+}
+
 function RunRow(props: {
   run: Run;
   onRetry: () => void;
   onUndo: () => void;
   undoing: boolean;
+  /** The run a notice opened: marked, scrolled to, and its changes shown. */
+  opened: boolean;
 }) {
   const { run } = props;
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(props.opened);
+  const row = useRef<HTMLLIElement | null>(null);
+  useEffect(() => {
+    if (props.opened) row.current?.scrollIntoView({ block: "nearest" });
+  }, [props.opened]);
   const canRetry = run.state === "failed" && !run.neverStarted && !run.undone;
   const canUndo = (run.state === "done" || run.state === "failed") && !run.undone &&
     run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit" ||
       (write.kind === "dataset-action" && write.undo !== undefined));
   return (
-    <li data-testid={`automation-run-${run.claimId}`} className="border-b border-line px-3 py-2 last:border-b-0">
+    <li
+      ref={row}
+      data-testid={`automation-run-${run.claimId}`}
+      aria-current={props.opened ? "true" : undefined}
+      className={`border-b border-line px-3 py-2 last:border-b-0${props.opened ? " bg-selected" : ""}`}
+    >
       <div className="flex items-start gap-2">
         <RunMark run={run} />
         <div className="min-w-0 flex-1">
@@ -160,6 +200,8 @@ function RunRow(props: {
 export function AutomationRuns(props: {
   workspaceId: string;
   automationId: string;
+  /** The run to open, as a notice names it, or null. */
+  run?: string | null;
   /** Rises when the Collection or its automations may have changed. */
   refreshKey: number;
   onRetry: (target: { automationId: string; claimId: string }) => void;
@@ -169,22 +211,59 @@ export function AutomationRuns(props: {
   onUndone?: () => void;
 }) {
   const { workspaceId, automationId, onError, onNotice } = props;
-  // "unavailable" in a shared view: its automations run on the owner's computer.
-  const [runs, setRuns] = useState<Run[] | "unavailable" | null>(null);
+  const opened = props.run ?? null;
+  // The runs shown, newest first, and the `before` of the page after them, or
+  // null after the oldest. `opened` is the run a notice opened, shown first
+  // while no page shown holds it. "unavailable" in a shared view: its
+  // automations run on the owner's computer.
+  const [list, setList] = useState<{ runs: Run[]; next: string | null; opened: Run | null } | "unavailable" | null>(null);
+  const listRef = useRef(list);
+  listRef.current = list;
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [undoing, setUndoing] = useState<string | null>(null);
-  const request = useRequestSequence([workspaceId, automationId]);
+  // Runs a person undid or tried again here. A refresh reads each again when
+  // the newest page does not hold it, so a row further down stays current.
+  const touched = useRef(new Set<string>());
+  // Whether the opened run was looked for yet, and found gone: it is not read again.
+  const openedChecked = useRef(false);
+  const openedGone = useRef(false);
+  // A caller may pass a new function each render; a read must not start again for that.
+  const reportError = useRef(onError);
+  reportError.current = onError;
+  const request = useRequestSequence([workspaceId, automationId, opened]);
   // Rises only when the workspace or automation changes, or the view
   // closes, so an Undo that answers after that reports nothing here.
   const scope = useRequestSequence([workspaceId, automationId]);
+  // Reads the newest page, and each touched, opened, or still going run it
+  // does not hold, and keeps the older pages already shown.
   const load = useCallback(async () => {
     const token = request.next();
     try {
-      const result = await bridge().listCollectionAutomationRuns({ workspaceId, automationId });
-      if (request.isCurrent(token)) setRuns(result.status === "listed" ? result.runs : "unavailable");
+      const head = await bridge().listCollectionAutomationRuns({ workspaceId, automationId });
+      if (!request.isCurrent(token)) return;
+      if (head.status === "unavailable") return setList("unavailable");
+      // Rows further down that are still going change without a person here touching them.
+      const shown = listRef.current;
+      const going = shown === null || shown === "unavailable" ? [] : shown.runs.filter((run) => run.state === "pending" || run.state === "running");
+      const claims = new Set([...touched.current, ...going.map((run) => run.claimId)]);
+      if (opened !== null && !openedGone.current) claims.add(opened);
+      const read = new Map<string, Run | null>();
+      for (const claimId of claims) {
+        if (head.runs.some((run) => run.claimId === claimId)) continue;
+        const result = await bridge().getCollectionAutomationRun({ workspaceId, automationId, claimId });
+        if (!request.isCurrent(token)) return;
+        read.set(claimId, result.status === "found" ? result.run : null);
+      }
+      if (opened !== null && !openedChecked.current) {
+        openedChecked.current = true;
+        openedGone.current = read.get(opened) === null;
+        if (openedGone.current) reportError.current(MISSING_RUN, new Error(MISSING_RUN));
+      }
+      setList((current) => merged(current === "unavailable" ? null : current, head, read, opened));
     } catch (error) {
-      if (request.isCurrent(token)) onError("dohc could not read this automation's runs.", error, () => void load());
+      if (request.isCurrent(token)) reportError.current("dohc could not read this automation's runs.", error, () => void load());
     }
-  }, [workspaceId, automationId, onError]);
+  }, [workspaceId, automationId, opened]);
   useEffect(() => {
     void load();
   }, [load, props.refreshKey]);
@@ -195,7 +274,34 @@ export function AutomationRuns(props: {
     return () => clearInterval(interval);
   }, []);
 
+  // Reads only the page after the runs shown.
+  const loadOlder = () => {
+    if (list === null || list === "unavailable" || list.next === null || loadingOlder) return;
+    const before = list.next;
+    const epoch = scope.current();
+    setLoadingOlder(true);
+    void bridge()
+      .listCollectionAutomationRuns({ workspaceId, automationId, before })
+      .then((result) => {
+        if (!scope.isCurrent(epoch)) return;
+        if (result.status === "unavailable") return setList("unavailable");
+        // A refresh that dropped the pages this one follows drops it too.
+        setList((current) => current === null || current === "unavailable" || current.next !== before ? current : {
+          ...current,
+          runs: [...current.runs, ...result.runs.filter((run) => !current.runs.some((shown) => shown.claimId === run.claimId))],
+          next: result.next,
+        });
+      })
+      .catch((error: unknown) => {
+        if (scope.isCurrent(epoch)) onError("dohc could not read this automation's older runs.", error, loadOlder);
+      })
+      .finally(() => {
+        if (scope.isCurrent(epoch)) setLoadingOlder(false);
+      });
+  };
+
   const undo = (claimId: string) => {
+    touched.current.add(claimId);
     const epoch = scope.current();
     setUndoing(claimId);
     void bridge()
@@ -219,24 +325,40 @@ export function AutomationRuns(props: {
       });
   };
 
-  if (runs === null) return null;
-  if (runs === "unavailable") {
+  if (list === null) return null;
+  if (list === "unavailable") {
     return <p className="m-0 px-3 py-4 text-[12px] text-muted">This Collection's automations run on its owner's computer.</p>;
   }
-  if (runs.length === 0) {
+  const openedRun = list.opened;
+  const shown = openedRun === null || list.runs.some((run) => run.claimId === openedRun.claimId) ? list.runs : [openedRun, ...list.runs];
+  if (shown.length === 0) {
     return <p className="m-0 px-3 py-4 text-[12px] text-muted">This automation has not run on this computer yet.</p>;
   }
   return (
-    <ul data-testid="automation-runs" className="m-0 list-none p-0">
-      {runs.map((run) => (
-        <RunRow
-          key={run.claimId}
-          run={run}
-          undoing={undoing === run.claimId}
-          onRetry={() => props.onRetry({ automationId, claimId: run.claimId })}
-          onUndo={() => undo(run.claimId)}
-        />
-      ))}
-    </ul>
+    <>
+      <ul data-testid="automation-runs" className="m-0 list-none p-0">
+        {shown.map((run) => (
+          <RunRow
+            key={run.claimId}
+            run={run}
+            opened={run.claimId === opened}
+            undoing={undoing === run.claimId}
+            onRetry={() => {
+              touched.current.add(run.claimId);
+              props.onRetry({ automationId, claimId: run.claimId });
+            }}
+            onUndo={() => undo(run.claimId)}
+          />
+        ))}
+      </ul>
+      {list.next !== null ? (
+        <div className="flex justify-center px-3 py-2">
+          <SecondaryButton size="compact" className="inline-flex items-center gap-1.5" disabled={loadingOlder} aria-busy={loadingOlder} onClick={loadOlder}>
+            {loadingOlder ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" /> : null}
+            Older runs
+          </SecondaryButton>
+        </div>
+      ) : null}
+    </>
   );
 }

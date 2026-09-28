@@ -3929,7 +3929,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     };
     return {
       automationIdAt: async (collectionPath, id) => (await opened()).automationIdAt(collectionPath, id),
-      runs: async (automationId) => (await opened()).runs(automationId),
+      runs: async (automationId, before) => (await opened()).runs(automationId, before),
       run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
       retry: (input) => retryAutomationRun({
         notices: noticeStore(),

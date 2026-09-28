@@ -31,8 +31,11 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const dismissStops = vi.fn(async () => undefined);
   const shareStop = { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" as const };
   const shareImpact = vi.fn(async () => [shareStop]);
+  const oldRun = { claimId: "atc_old", state: "done" as const, writes: [] };
+  const runs = vi.fn(async () => ({ runs: [], next: null }));
+  const listedRun = vi.fn(async (_automationId: string, claimId: string) => (claimId === oldRun.claimId ? oldRun : null));
   const executor = {
-    pinOperations, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+    runs, listedRun, pinOperations, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -58,7 +61,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const marks = (collectionPath: string) =>
     handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
   const check = (payload: Record<string, unknown>) => call(CHANNELS.checkCollectionAutomation, payload);
-  return { write, call, marks, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, dismissStops, shareImpact, check, createFile, writeText, reindexed };
+  return { write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, dismissStops, shareImpact, check, createFile, writeText, reindexed };
 }
 
 describe("steps a share stops", () => {
@@ -198,7 +201,21 @@ describe("writing automations.yaml from the panel", () => {
 
 describe("reading a Collection's automation runs", () => {
   it("answers unavailable in a shared view, as the list does", async () => {
-    await expect(fixture({ sharedView: true }).call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp" }))
+    const f = fixture({ sharedView: true });
+    await expect(f.call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp" }))
       .resolves.toEqual({ status: "unavailable" });
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_old" }))
+      .resolves.toEqual({ status: "unavailable" });
+  });
+
+  it("reads the page after the one before, and one run by its id however old", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp", before: "5:atc_five" }))
+      .resolves.toEqual({ status: "listed", runs: [], next: null });
+    expect(f.runs).toHaveBeenCalledWith("collection:Tasks#stamp", "5:atc_five");
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_old" }))
+      .resolves.toEqual({ status: "found", run: f.oldRun });
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_gone" }))
+      .resolves.toEqual({ status: "missing" });
   });
 });
