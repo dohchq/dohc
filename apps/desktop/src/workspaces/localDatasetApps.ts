@@ -23,6 +23,8 @@ export function createLocalDatasetApps(options: {
   assertCurrent(): void; charge(datasetId: string, bytes: number): void;
   /** The agent run active in this workspace attachment now, or null. */
   agentRun(): LocalDatasetAgent | null;
+  /** The person on this computer, whom a local app's commits are made for. */
+  localPersonId(): string;
   approved(datasetId: string): { revision: DatasetRevision; active: boolean };
   bind(datasetId: string, appId: string, binding: AppDatasetBinding | null, commit: () => void): void;
   invoke(context: LocalDatasetAppContext, input: InvokeDatasetInput): Promise<DatasetInvocationResult>;
@@ -58,7 +60,8 @@ export function createLocalDatasetApps(options: {
     const checked = current(context.publicationId, context.authorityRevision);
     if (request.datasetId !== checked.row.dataset_id) throw new Error("App access is not permitted.");
     return { caller: { kind: "owner", userId: options.ownerId }, principalKey: `${options.ownerId}:app:${context.publicationId}`,
-      appId: context.publicationId, authorityToken: String(context.authorityRevision), ...(context.agent === null ? {} : { agent: { depth: context.agent.depth } }) };
+      appId: context.publicationId, authorityToken: String(context.authorityRevision), person: options.localPersonId(),
+      ...(context.agent === null ? {} : { agent: { depth: context.agent.depth } }) };
   }
   async function inContext<T>(id: string, expected: number, signal: AbortSignal | undefined, work: (context: LocalDatasetAppContext) => Promise<T>): Promise<T> {
     signal?.throwIfAborted(); current(id, expected);

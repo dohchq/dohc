@@ -29,6 +29,7 @@ import type { DatasetEffect, DatasetReplan, RunWrite, StoredRun, StoredStep } fr
 import { KEPT_CHANGING_ERROR, MAX_REREADS, runSteps, StepRecordChanged, unfinishedStep, type StepBackend } from "./automationStepRun";
 import {
   applyChatEffect,
+  claimPerson,
   groupChangedOutcome,
   groupMessage,
   newRun,
@@ -101,7 +102,7 @@ const MAX_REPLANS = MAX_REREADS;
 const READ_KEY = "automation-read";
 
 /** The caller a dataset host gives one run: every invocation the run makes carries it. */
-export interface DatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number }
+export interface DatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number; readonly person: string | null }
 
 /** One invocation of an approved operation, as a run or an Undo sends it. */
 export interface DatasetInvocation {
@@ -116,7 +117,8 @@ export interface DatasetInvocation {
 
 /** The dataset host as a run uses it. LocalDatasetHost's `automations` satisfies it. */
 export interface DatasetRunHost {
-  context(input: { automationId: string; claimId: string; depth: number }): DatasetAutomationContext;
+  /** The context a run's dataset calls go through, at `depth`, for `person`. */
+  context(input: { automationId: string; claimId: string; depth: number; person: string | null }): DatasetAutomationContext;
   invoke(context: DatasetAutomationContext, input: DatasetInvocation): Promise<DatasetInvocationResult>;
   revision(datasetId: string): DatasetRevision;
   generated(datasetId: string): boolean;
@@ -132,6 +134,21 @@ export interface DatasetAutomationRunDependencies extends Pick<
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
   /** Who can edit the workspace's Collections now, as last read, for the check before each record effect. */
   cachedRoster(): Promise<ReachRoster>;
+}
+
+/**
+ * The person a dataset claim's run acts for: who pressed its button, or who
+ * made the commit or had an agent or automation make it. Null for a link
+ * visitor, and when nobody is known.
+ */
+export function datasetPerson(claim: Pick<DatasetAutomationClaim, "actor">): string | null {
+  const { actor } = claim;
+  return actor.kind === "link" ? null : actor.userId ?? null;
+}
+
+/** The person a run's writes are made for, so the changes they cause name them too. */
+function runPerson(held: DatasetRunClaim): string | null {
+  return held.source === "dataset" ? datasetPerson(held.claim) : claimPerson(held.claim);
 }
 
 /** The person who pressed the button a claim runs for, or null for a change. */
@@ -416,14 +433,16 @@ export async function runDatasetAutomation(
     if ("outcome" in got) return got.outcome;
     message = got.message;
   }
-  const pressedBy = held.source === "dataset" ? datasetPresser(held.claim) : null;
+  // An engine claim is a schedule, with nobody, or a Group message, whose
+  // formulas name its author from the message itself.
+  const personId = held.source === "dataset" ? datasetPerson(held.claim) : null;
   const run = current ?? { ...newRun(claim, automation, `${definitionHash(automation)}-${claim.run}`, dependencies.nowMs()), readableFields: [...readable].sort(),
     rules: { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 } };
   const ctx: RunContext = {
     automation,
     claim: runClaim,
     message,
-    person: pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) },
+    person: personId === null ? null : { id: personId, name: dependencies.personName(personId) },
     chat,
     // Formulas read `now` as the time of the change, or a schedule's due
     // time, so every attempt reads the same.
@@ -472,7 +491,7 @@ function datasetBackend(
       if (target.kind === "problem") throw new Error(target.problem);
       if (target.kind !== "dataset" || target.approved.datasetId !== datasetId) throw new Error(RULES_CHANGED_ERROR);
       const result = await dependencies.withHost(async (host) => {
-        const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth });
+        const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth, person: runPerson(held) });
         // Each record the step read, by identity, with the version it read.
         const versions = new Map<string, { id: DatasetRecordId; version: number }>();
         const snapshots = new Map<string, RunRecord>();
@@ -577,7 +596,7 @@ function datasetBackend(
         if (effect.kind === "set" || effect.kind === "add" || effect.kind === "invoke") {
           return { outcome: failed("This automation's saved steps do not match this Collection. Ask the owner to check the automation.") };
         }
-        const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth });
+        const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth, person: runPerson(held) });
         if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") {
           // Reach (ADR 0012) again, just before each record effect, so an
           // editor added since the step was planned stops what is left

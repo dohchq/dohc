@@ -1520,7 +1520,7 @@ describe("Collection automations", () => {
       await mkdir(dirname(join(w.root, path)), { recursive: true });
       await writeFile(join(w.root, path), text);
     }
-    const host = await createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: w.root, capacityBytes: 1024 * 1024 });
+    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: w.root, capacityBytes: 1024 * 1024 });
     const executor = w.makeExecutor({ withDatasetHost: async (work) => await work(host.automations) });
     try {
       const prepared = await host.prepare({ descriptorPath: "Donations/dataset.json", adapter: sourceCaptureAdapter(new Map(Object.entries(files)), { workspaceId: "workspace" }) });

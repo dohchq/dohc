@@ -77,18 +77,19 @@ const ERROR_BYTES = 1024, ROW_BYTES = 256;
 
 export type DatasetChangeKind = DatasetChangeFact["kind"];
 /**
- * Who made a commit or pressed a button. The host derives it from the
- * invoking context, never from input. A link visitor stays anonymous. A
- * press names the owner's account too, since the run acts for the person
- * who pressed.
+ * Who made a commit or pressed a button, and `userId`, the person they did
+ * it for: the one who pressed, the named person, the owner's person on the
+ * computer that committed, or the person whose change started an
+ * automation's run. The host derives both from the invoking context, never
+ * from input. A link visitor stays anonymous. Left out when nobody is known.
  */
 export type DatasetActor =
   | { kind: "owner"; userId?: string; appId?: string; agent?: PressingAgent }
   | { kind: "named"; userId: string; appId?: string; agent?: PressingAgent }
   | { kind: "link"; appId?: string }
-  | { kind: "automation"; automationId: string; depth: number }
+  | { kind: "automation"; automationId: string; depth: number; userId?: string }
   // The owner's agent, at its run's chain depth, and the app it wrote through, if any.
-  | { kind: "agent"; depth: number; appId?: string };
+  | { kind: "agent"; depth: number; appId?: string; userId?: string };
 /**
  * An agent that pressed a button for its person, from a run at `depth`. The
  * press claims at that depth, and stops at once at the chain cap.

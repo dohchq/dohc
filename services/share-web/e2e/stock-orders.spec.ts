@@ -17,7 +17,7 @@ const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).d
 test("stock orders use custom apps, relations, transactions, and attachments through the same Collection and agent APIs", async ({ browser }, info) => {
   test.setTimeout(90000);
   const directory = await mkdtemp(join(tmpdir(), "dohc-stock-browser-"));
-  const host = await createLocalDatasetHost({workspaceId:"stock-workspace",workspaceRoot:directory});
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId:"stock-workspace",workspaceRoot:directory});
   const lifetime = new AbortController(), launcher = await createLocalAppLaunchHost({backend:host.apps,lifetime:lifetime.signal});
   const context = await browser.newContext();
   const root = fileURLToPath(new URL("../../../examples/stock-orders",import.meta.url));
