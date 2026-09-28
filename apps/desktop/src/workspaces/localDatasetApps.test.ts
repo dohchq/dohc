@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
+import { createLocalDatasetHost, type LocalDatasetAgent, type LocalDatasetHost } from "./localDatasetHost";
 import { generateDatasetSources } from "./datasetGenerator";
 import { generateDatasetFormSources } from "./datasetFormGenerator";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
@@ -32,9 +32,9 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 const sourceAdapter = (files: Map<string, string>) => sourceCaptureAdapter(files);
-async function fixture() {
+async function fixture(agentRun?: () => LocalDatasetAgent | null) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-dataset-app-")); roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024 }); hosts.push(host);
+  const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
   const generated = generateDatasetSources(definition);
   const files = new Map(Object.entries(generated.files)); files.set("data/dataset.json", JSON.stringify(definition));
   files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{
@@ -218,4 +218,92 @@ it("keeps local form uploads, submissions and selected fields working through re
   expect(await restarted.apps.request(f.published.publicationId,"invoke",f.invocation("Next","after-restart"))).toMatchObject({replayed:false});
   restarted.apps.withdraw(f.published.publicationId,1);
   await expect(restarted.apps.request(f.published.publicationId,"invoke",invoke)).rejects.toThrow("approval changed");
+});
+
+describe("local app write attribution", () => {
+  const watcher = "collection:registrations#tally";
+  async function attributed() {
+    let run: LocalDatasetAgent | null = null;
+    const f = await fixture(() => run);
+    f.host.automations.subscribe(id(1), { automationId: watcher, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: hash(watcher) });
+    const invoke = (key: string) => f.host.apps.request(f.published.publicationId, "invoke", f.invocation(key, key));
+    return { ...f, invoke, setRun(value: LocalDatasetAgent | null) { run = value; } };
+  }
+
+  it("names the app, and the agent at its run's depth while a run is active", async () => {
+    const f = await attributed(), appId = f.published.publicationId;
+    expect(await f.invoke("no-run")).toMatchObject({ replayed: false });
+    expect(f.host.automations.next()).toMatchObject({ depth: 0, actor: { kind: "owner", appId } });
+    for (const depth of [0, 1, 3]) {
+      f.setRun({ depth });
+      expect(await f.invoke(`depth-${depth}`)).toMatchObject({ replayed: false });
+      expect(f.host.automations.next()).toMatchObject({ automationId: watcher, depth, actor: { kind: "agent", depth, appId } });
+    }
+    // At the cap the write commits, and the automation it would start stops before it runs.
+    f.setRun({ depth: 4 });
+    expect(await f.invoke("depth-4")).toMatchObject({ replayed: false });
+    expect(f.host.automations.next()).toBeNull();
+    expect(f.host.automations.claims(watcher)).toContainEqual(expect.objectContaining({
+      state: "failed", error: "chain-stopped", attempts: 0, depth: 4, actor: { kind: "agent", depth: 4, appId } }));
+  });
+
+  it("keeps the depth an invocation started with after its run ends or another replaces it", async () => {
+    const f = await attributed();
+    f.setRun({ depth: 1 });
+    const ended = f.invoke("ended");
+    f.setRun(null);
+    await ended;
+    expect(f.host.automations.next()).toMatchObject({ depth: 1, actor: { kind: "agent", depth: 1 } });
+    f.setRun({ depth: 1 });
+    const replaced = f.invoke("replaced");
+    f.setRun({ depth: 3 });
+    await replaced;
+    expect(f.host.automations.next()).toMatchObject({ depth: 1, actor: { kind: "agent", depth: 1 } });
+  });
+
+  it("counts a person's click during a run as the run's, and leaves the owner's own edits the owner's", async () => {
+    const f = await attributed();
+    f.setRun({ depth: 2 });
+    // The app cannot tell a click from the agent's request, so both are the run's.
+    await Promise.all([f.invoke("person"), f.invoke("agent")]);
+    expect([f.host.automations.next(), f.host.automations.next()]).toEqual([
+      expect.objectContaining({ depth: 2, actor: expect.objectContaining({ kind: "agent" }) }),
+      expect.objectContaining({ depth: 2, actor: expect.objectContaining({ kind: "agent" }) }),
+    ]);
+    // An edit the person makes in the Collection itself is not an app's.
+    await f.host.action({ datasetId: id(1), revision: 1, revisionSha256: f.revision.revisionSha256, operationId: id(6), idempotencyKey: "owner",
+      input: { values: { [id(4)]: "Owner" } } });
+    expect(f.host.automations.next()).toMatchObject({ depth: 0, actor: { kind: "owner" } });
+  });
+
+  it("replays a retry under its first attribution, with one commit and one claim", async () => {
+    const f = await attributed();
+    const first = await f.invoke("retry");
+    expect(f.host.automations.next()).toMatchObject({ depth: 0, actor: { kind: "owner" } });
+    for (const run of [{ depth: 3 }, { depth: 0 }, null]) {
+      f.setRun(run);
+      expect(await f.invoke("retry")).toEqual({ ...first as object, replayed: true });
+    }
+    expect(f.host.automations.next()).toBeNull();
+    expect(f.host.history({ datasetId: id(1) }).entries).toHaveLength(1);
+  });
+
+  it("grants an app nothing through a run and takes no actor or depth from its request", async () => {
+    const f = await attributed();
+    f.setRun({ depth: 1 });
+    await expect(f.host.apps.request(f.published.publicationId, "invoke", { ...f.invocation("x", "listed"), operation: "list" })).rejects.toThrow(/not approved/);
+    for (const forged of [{ agent: { depth: 0 } }, { depth: 0 }, { actor: { kind: "owner" } }]) {
+      expect(() => f.host.apps.request(f.published.publicationId, "invoke", { ...f.invocation("x", "forged"), ...forged })).toThrow(/Unexpected app backend fields/);
+    }
+    f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    await expect(f.invoke("revoked")).rejects.toThrow(/approval changed/);
+    expect(f.host.automations.next()).toBeNull();
+    expect(f.host.history({ datasetId: id(1) }).entries).toEqual([]);
+  });
+
+  it("refuses an invocation when main cannot read the run for this host's attachment", async () => {
+    const f = await fixture(() => { throw new Error("The Collection workspace attachment changed."); });
+    await expect(f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).rejects.toThrow(/attachment changed/);
+    expect(f.host.history({ datasetId: id(1) }).entries).toEqual([]);
+  });
 });

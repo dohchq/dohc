@@ -277,6 +277,7 @@ A result or a read scope that arrives after its limit is a timeout. A watchdog r
 That formula times out and a new worker evaluates the ones after it.
 When an item breaks a worker's QuickJS instance, that item's own result asks for a new worker, which evaluates the items after it. A worker that fails before it finishes any item makes the items sent to it fail with `runtime` instead of starting another worker.
 A request keeps two totals: the time its formulas run, and the time it spends reading the scope.
+A run that sends several requests, as a run with code steps does, passes the same `spent` record to each, so the two totals cover the whole run.
 Reading a 256 KiB scope takes 15 to 25 ms on a desktop, so 64 formulas can spend several seconds reading it. That time never cuts off a formula's run time.
 Formulas that start after either total passes 8 seconds time out without running. Each total passes 8 seconds only by the item running when it did, so one request takes at most about 21 seconds.
 When 16 requests are waiting or running, a new request returns `busy` for every item at once. The evaluator does this before it reads the scope or the formulas, so it returns `busy` even for input it would reject. The caller runs the automation again later.

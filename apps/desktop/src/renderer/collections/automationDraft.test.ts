@@ -118,6 +118,14 @@ it("counts an agent wake before a record edit", () => {
   ])).toEqual([[0], [1]]);
 });
 
+it("counts a code step's view of its Collection before a record edit", () => {
+  expect(reachPlaces([
+    { kind: "run", code: "return {}", as: null },
+    { kind: "if", if: "true", do: [{ kind: "run-file", file: "scripts/a.js", as: null }], otherwise: [] },
+    { kind: "set", values: [], records: null, operation: null },
+  ])).toEqual([[0], [1], [2]]);
+});
+
 it("leaves the Group trigger verdict before its step verdicts", () => {
   expect(reachPlaces([
     { kind: "post", text: "Hi", group: "Trip" },

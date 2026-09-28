@@ -1,6 +1,6 @@
 import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
+import type { LocalDatasetAgent, LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
@@ -35,16 +35,15 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
   automationName?(workspace: W, automationId: string): Promise<string | null>;
-  /**
-   * The chain depth of the agent run holding the workspace's run slot, or 0.
-   * Only the owner CLI, which an agent's run uses, supplies it, so an action
-   * the agent invokes during a run an automation started carries the chain on.
-   */
-  agentRunDepth?(workspace: W): number;
 }) {
   const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; credentialGeneration?: number; review: LocalDatasetMigrationPreparation; clear(): void }>();
   let preparingMigrations = 0;
-  return async (caller: Caller, raw: unknown) => {
+  /**
+   * `agent` is set only by the owner CLI, from the actor main derived for the
+   * call, never from the request, so the agent's local invocation names it
+   * and carries its run's chain on.
+   */
+  return async (caller: Caller, raw: unknown, agent: LocalDatasetAgent | null = null) => {
     const request = DatasetRequest.parse(raw);
     return dependencies.withWorkspaceOperation(caller, request.workspaceId, async operation => {
       const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
@@ -344,8 +343,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       if (input.action === "invoke") {
         try {
-          const agentDepth = dependencies.agentRunDepth?.(operation.workspace) ?? 0;
-          const result = await data.invoke({ ...input, signal: operation.signal, ...(agentDepth > 0 ? { agentDepth } : {}) });
+          const result = await data.invoke({ ...input, signal: operation.signal, ...(agent === null ? {} : { agent }) });
           current();
           return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) };
         } catch (error) {

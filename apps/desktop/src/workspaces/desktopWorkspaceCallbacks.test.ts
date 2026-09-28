@@ -84,10 +84,14 @@ describe("desktop workspace callbacks", () => {
       expect(test.handleWatcherEvents).not.toHaveBeenCalled();
       expect(test.notifyRenderer).not.toHaveBeenCalled();
       expect(test.scanWorkspace).not.toHaveBeenCalled();
+      // A reader bound to the attachment, as its dataset host's agent run is, reads nothing.
+      expect(test.callbacks.withWorkspaceAttachment(original, () => "read")).toBeUndefined();
       expect(test.disposed).toEqual([]);
     } finally { held.release(); await retired; }
     const replacement = test.attach();
     expect(replacement.attachmentId).not.toBe(original.attachmentId);
+    expect(test.callbacks.withWorkspaceAttachment(original, () => "read")).toBeUndefined();
+    expect(test.callbacks.withWorkspaceAttachment(replacement, () => "read")).toBe("read");
     test.callbacks.onWatcherBatch(original, events);
     oldRelay();
     expect(test.handleWatcherEvents).not.toHaveBeenCalled();

@@ -362,7 +362,7 @@ A shared view keeps no automation runs, so it does not offer this tool.
 - `collectionPath`: `string`. Required.
 - `automation`: `string`. Required.
 
-Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, changes }[] } | { ok: false, reason }`.
+Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[] } | { ok: false, reason }`.
 
 ### `dohc_read_automation_run`
 
@@ -374,7 +374,7 @@ A shared view keeps no automation runs, so it does not offer this tool.
 - `automation`: `string`. Required.
 - `run`: `string`. Required.
 
-Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, steps, failedStep, startsOver } } | { ok: false, reason }`.
+Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, steps, failedStep, startsOver } } | { ok: false, reason }`.
 
 ### `dohc_retry_automation_run`
 
@@ -1250,7 +1250,7 @@ List an automation's runs on this computer, newest first.
 
 Lists the 20 newest runs, as the Automations panel does. Each line starts with the run's ID.
 
-With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, changes }[] }`.
+With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[] }`.
 
 #### `dohc automation run`
 
@@ -1262,7 +1262,7 @@ Show one run: what started it, what each step changed, and why it failed.
 
 Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
 
-With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, steps, failedStep, startsOver } }`.
+With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, steps, failedStep, startsOver } }`.
 
 #### `dohc automation retry`
 

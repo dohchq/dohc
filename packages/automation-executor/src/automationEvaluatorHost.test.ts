@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AutomationEvaluator, AutomationOutcome, JsonValue } from "@dohc/app-backend-runtime/automation";
+import type { AutomationEvaluator, AutomationOutcome, CodeStepReturn, JsonValue } from "@dohc/app-backend-runtime/automation";
 import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
 
 const scope = { trigger: { kind: "record-added" }, person: null, now: "2026-09-25T09:30:00.000+08:00" };
@@ -33,6 +33,21 @@ describe("the shared formula evaluator", () => {
     await expect(shared.forWorkspace("trip").evaluate("collection:Tasks#bump", scope, formula)).resolves.toBe("busy");
     slow.resolve([{ ok: true, value: 2 }]);
     await first;
+  });
+
+  it("counts a code step as the automation's one waiting request", async () => {
+    const slow = Promise.withResolvers<AutomationOutcome<CodeStepReturn>>();
+    const shared = createAutomationFormulaEvaluator(() => ({
+      evaluate: async () => [{ ok: true, value: 1 }],
+      runCode: async (_scope, source) => source === "full" ? { ok: false, error: { code: "busy", message: "Full." } } : await slow.promise,
+      close: async () => undefined,
+    }));
+    const evaluator = shared.forWorkspace("trip");
+    const running = evaluator.runCode("collection:Tasks#code", scope, "return {}");
+    await expect(evaluator.evaluate("collection:Tasks#code", scope, formula)).resolves.toBe("busy");
+    await expect(evaluator.runCode("collection:Tasks#other", scope, "full")).resolves.toBe("busy");
+    slow.resolve({ ok: true, value: { output: 2 } });
+    await expect(running).resolves.toEqual({ ok: true, value: { output: 2 } });
   });
 
   it("answers busy when the evaluator's own queue is full", async () => {
