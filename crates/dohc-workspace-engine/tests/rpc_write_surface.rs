@@ -350,6 +350,19 @@ async fn text_write_enqueues_no_materialization_and_binary_write_enqueues_one() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_text_write_materializes_to_disk() {
+    let (scratch, transport, handle) = fixture("text-publish").await;
+    let text = call(&transport, &handle, 2, "versionedText.write", json!({
+        "versionId": "main", "path": "plain.md", "text": "published", "origin": "api", "publish": true, "requestId": "plain-1",
+    })).await;
+    assert_eq!(text["materializeOutcome"], "applied");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("plain.md")).unwrap(),
+        "published"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conflicted_binary_materialize_returns_the_committed_moment() {
     let (scratch, transport, handle) = fixture("binary-conflict-result").await;
     std::fs::write(scratch.path().join("occupied.bin"), b"external").expect("external file");

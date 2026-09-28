@@ -640,7 +640,7 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
     let (_scratch, transport, handle, workspace_id) = fixture("past-frame-limit").await;
     let path =
         open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
-    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let frame = 8 * 1024 * 1024;
     // Every newline encodes as two bytes, so this body is 4 MiB raw and 8 MiB
     // once encoded: under any raw-byte budget, past the frame that has to
     // carry it. A raw-byte check would accept it here and let the client's own
@@ -855,7 +855,7 @@ async fn metadata_beside_a_large_body_is_measured_against_the_same_frame() {
     let (_scratch, transport, handle, workspace_id) = fixture("metadata-headroom").await;
     let path =
         open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
-    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let frame = 8 * 1024 * 1024;
     let metadata = "\"".repeat(16 * 1024 - 1);
     // Comfortably inside the frame on its own, past it beside the metadata.
     let merged = "x".repeat(frame - 40 * 1024);
@@ -921,7 +921,7 @@ async fn a_request_that_exactly_fills_the_frame_is_applied_and_one_byte_more_is_
     // bytes, and everything inside that band is valid work refused with a size
     // that never existed.
     //
-    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let frame = 8 * 1024 * 1024;
     let (_scratch, transport, handle, workspace_id) = fixture("frame-boundary").await;
     let path =
         open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
@@ -1035,7 +1035,7 @@ async fn the_largest_accepted_request_crosses_as_one_control_frame() {
     // be one the transport can carry. This pins that: a resolve request built
     // to sit just inside the budget encodes into one control frame.
     //
-    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let frame = 8 * 1024 * 1024;
     let envelope = Envelope::Request(request(
         12,
         "conflicts.resolve",
@@ -1238,8 +1238,8 @@ async fn oversized_conflict_inventory_is_wire_safe_across_pages_and_session_surv
         result: Value::Array(all_rows),
     });
     assert!(
-        encode_control(&legacy, &WireLimits::default()).is_err(),
-        "the same inventory as one legacy array must exceed the wire frame"
+        serde_json::to_vec(&legacy).unwrap().len() > 8 * 1024 * 1024,
+        "the same inventory as one legacy array must exceed the response budget"
     );
 
     let status = transport

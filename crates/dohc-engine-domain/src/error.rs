@@ -81,6 +81,9 @@ pub enum DomainError {
     #[error("target path already exists")]
     TargetPathExists,
 
+    #[error("file changed since it was read")]
+    WritePreconditionFailed { current_sha256: Option<String> },
+
     #[error("live document binding is still active")]
     LiveDocumentBindingActive,
 
@@ -227,6 +230,7 @@ impl DomainError {
             DomainError::BinaryHeadNotText => "binary-head-not-text",
             DomainError::TextHeadNotBinary => "text-head-not-binary",
             DomainError::CaptureNotOwned => "capture-not-owned",
+            DomainError::WritePreconditionFailed { .. } => "write-precondition-failed",
             DomainError::TargetPathExists => "target-path-exists",
             DomainError::LiveDocumentBindingActive => "live-document-binding-active",
             DomainError::ForkBaseNotFound => "fork-base-not-found",

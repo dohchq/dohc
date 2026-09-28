@@ -12,7 +12,7 @@ use crate::store::{
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
-    enqueue_job, has_binary_blob, put_binary_blob, put_binary_blob_verified,
+    enqueue_job, has_binary_blob, put_binary_blob_verified,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -1077,14 +1077,13 @@ pub fn enqueue_write(
     )? {
         return Ok(());
     }
-    let sha = put_binary_blob(tx, result.snapshot.text.as_bytes())?;
     enqueue_job(
         tx,
         &MaterializationJobSpec {
             job_id: format!("{prefix}-mat_{}", result.moment.moment_id),
             workspace_id: result.snapshot.workspace_id.clone(),
             target_path: result.snapshot.path.clone(),
-            content_sha256: sha,
+            content_sha256: result.snapshot.blob_sha256.clone(),
             preimage,
             target_generation: result.moment.moment_order,
             now_ms: result.moment.recorded_at_ms,
@@ -1102,14 +1101,13 @@ pub fn enqueue_delete(
     if !version_is_active(tx, &result.before.workspace_id, &result.before.version_id)? {
         return Ok(());
     }
-    let sha = put_binary_blob(tx, result.before.text.as_bytes())?;
     enqueue_delete_job(
         tx,
         &MaterializationJobSpec {
             job_id: format!("{prefix}-mat_{}", result.moment.moment_id),
             workspace_id: result.before.workspace_id.clone(),
             target_path: result.before.path.clone(),
-            content_sha256: sha,
+            content_sha256: result.before.blob_sha256.clone(),
             preimage: Preimage::Present(result.before.blob_sha256.clone()),
             target_generation: result.moment.moment_order,
             now_ms: result.moment.recorded_at_ms,
@@ -2307,7 +2305,7 @@ mod tests {
                     )
                     .map_err(DomainError::sql_persist)?;
                 }
-                put_binary_blob(tx, bytes).map_err(DomainError::from)?;
+                dohc_engine_storage::put_binary_blob(tx, bytes).map_err(DomainError::from)?;
                 write_binary_file_in_tx(
                     tx,
                     &WriteBinaryFile {
@@ -2370,7 +2368,7 @@ mod tests {
                     [WORKSPACE_ID],
                 )
                 .map_err(DomainError::sql_persist)?;
-                put_binary_blob(tx, bytes).map_err(DomainError::from)?;
+                dohc_engine_storage::put_binary_blob(tx, bytes).map_err(DomainError::from)?;
                 write_binary_file_in_tx(
                     tx,
                     &WriteBinaryFile {

@@ -1209,6 +1209,7 @@ async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
         "versionedText.write",
         json!({
             "versionId": "main",
+            "publish": true,
             "createOnly": true,
             "objectId": "object-beta",
             "path": "tasks/beta.md",
@@ -1236,7 +1237,7 @@ async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
         &mut id,
         "versionedText.write",
         json!({
-            "versionId": "main", "createOnly": true, "path": "tasks/beta.md",
+            "versionId": "main", "publish": true, "createOnly": true, "path": "tasks/beta.md",
             "text": "must not replace beta", "momentId": "collision-loser", "origin": "api",
         }),
     )

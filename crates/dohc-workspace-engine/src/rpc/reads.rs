@@ -146,8 +146,9 @@ pub(super) const SINGLE_ROW_HARD_CAP_BYTES: usize = 700 * 1024;
 /// its rows; `conflicts.resolve` answers a conflict, a write and a delete),
 /// and the daemon's writer treats an over-frame answer as fatal rather than
 /// answering it.
-pub(super) const RESPONSE_FRAME_BYTES: usize =
-    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+// Authored blob requests need a larger transport frame; response pagination
+// and blob egress retain their existing in-band budget.
+pub(super) const RESPONSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

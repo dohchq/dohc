@@ -1,3 +1,4 @@
+import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import { createHash, randomUUID } from "node:crypto";
 import {
   DaemonClientCapabilityError,
@@ -407,7 +408,9 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     text: string;
+    publish?: boolean;
     createOnly?: boolean;
+    expectedSha256?: string;
     requestId?: string;
     restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
@@ -416,28 +419,35 @@ export class VersionedLiveAdapter {
   }): Promise<VersionedMethodResultMap["versionedText.write"]> {
     this.assertWorkspace(input.workspaceId);
     const requestId = input.requestId ?? randomUUID();
-    return this.request(
-      VERSIONED_METHOD.textWrite,
-      {
-        workspaceId: input.workspaceId,
-        versionId: input.versionId,
-        path: input.path,
-        text: input.text,
-        ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
-        ...(input.restoreBeforeMomentId !== undefined ? { restoreBeforeMomentId: input.restoreBeforeMomentId } : {}),
-        origin: input.metadata.origin,
-        ...(input.metadata.summary !== undefined
-          ? { summary: input.metadata.summary }
-          : {}),
-        ...(input.metadata.correlationId !== undefined
-          ? { correlationId: input.metadata.correlationId }
-          : {}),
-        ...(input.author ? { author: input.author } : {}),
-        ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-        requestId,
-      },
-      { idempotencyKey: requestId },
-    );
+    const params = {
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      path: input.path,
+      ...(input.publish !== undefined ? { publish: input.publish } : {}),
+      ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
+      ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
+      ...(input.restoreBeforeMomentId !== undefined ? { restoreBeforeMomentId: input.restoreBeforeMomentId } : {}),
+      origin: input.metadata.origin,
+      ...(input.metadata.summary !== undefined
+        ? { summary: input.metadata.summary }
+        : {}),
+      ...(input.metadata.correlationId !== undefined
+        ? { correlationId: input.metadata.correlationId }
+        : {}),
+      ...(input.author ? { author: input.author } : {}),
+      ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
+      requestId,
+    };
+    if (Buffer.byteLength(input.text, "utf8") > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
+      const bytes = Buffer.from(input.text, "utf8");
+      const result = await this.request(VERSIONED_METHOD.textWriteBlob, {
+        ...params,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        bytesBase64: bytes.toString("base64"),
+      }, { idempotencyKey: requestId });
+      return { ...result, snapshot: { ...result.snapshot, text: input.text } };
+    }
+    return this.request(VERSIONED_METHOD.textWrite, { ...params, text: input.text }, { idempotencyKey: requestId });
   }
 
   async writeBinaryFile(input: {
@@ -445,12 +455,15 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     bytes: Uint8Array;
+    createOnly?: boolean;
+    expectedSha256?: string;
+    requestId?: string;
     metadata: AdapterWriteMetadata;
     author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
+    const requestId = input.requestId ?? randomUUID();
     if (input.bytes.byteLength > INBAND_BINARY_COLLECTION_CAP_BYTES) {
       const sha256 = createHash("sha256").update(input.bytes).digest("hex");
       return this.request(
@@ -459,6 +472,8 @@ export class VersionedLiveAdapter {
           workspaceId: input.workspaceId,
           versionId: input.versionId,
           path: input.path,
+          ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
+          ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
           sha256,
           ...(input.metadata.origin === "restore"
             ? {}
@@ -483,6 +498,8 @@ export class VersionedLiveAdapter {
         workspaceId: input.workspaceId,
         versionId: input.versionId,
         path: input.path,
+        ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
+        ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
         bytes: Array.from(input.bytes),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined

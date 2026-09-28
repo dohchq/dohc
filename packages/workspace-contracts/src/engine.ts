@@ -49,6 +49,7 @@ export type VersionedTextStoreErrorCode =
   | "persist-failed"
   | "state-corrupt"
   | "target-path-exists"
+  | "write-precondition-failed"
   | "version-name-conflict"
   | "version-not-found"
   | "workspace-mismatch";
@@ -429,6 +430,8 @@ interface VersionedTextMomentPayload {
 }
 
 interface VersionedTextWriteResult {
+  materialized?: boolean;
+  materializeOutcome?: "applied" | "skipped" | "conflict" | "superseded" | "error";
   object: FileObjectRecord;
   snapshot: TextFileSnapshot;
   moment: VersionedTextMoment;
@@ -478,7 +481,11 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     versionId: VersionId;
     path: string;
+    requestId?: string;
+    expectedSha256?: string;
     text: string;
+    /** Publish after committing. Omit when recording bytes already on disk. */
+    publish?: boolean;
     createOnly?: boolean;
     restoreBeforeMomentId?: VersionedTextMomentId;
     metadata: ActorNeutralWriteMetadata;
@@ -489,7 +496,10 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     versionId: VersionId;
     path: string;
+    requestId?: string;
+    expectedSha256?: string;
     bytes: Uint8Array;
+    createOnly?: boolean;
     metadata: ActorNeutralWriteMetadata;
     author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;

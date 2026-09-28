@@ -24,7 +24,6 @@
 //! task outlives the actor). Cancellation ([`CancellationToken`](tokio_util::sync::CancellationToken)) is checked
 //! between bounded units, never inside a transaction.
 
-mod authored_create;
 mod automations;
 mod capture;
 mod chats;
@@ -50,7 +49,10 @@ pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,
 };
-pub use versioned::{BinaryWriteExecutionResult, MergeExecutionResult, RollbackExecutionResult};
+pub use versioned::{
+    BinaryWriteExecutionResult, MergeExecutionResult, RollbackExecutionResult,
+    TextWriteExecutionResult, WriteConditions,
+};
 pub use versions::{ActiveVersionSwitch, HistoryPageRead};
 pub use ydoc::{
     ArtifactAssetDescriptor, YdocAppend, YdocCloseSessionOutcome, YdocOpenState, YdocResyncState,

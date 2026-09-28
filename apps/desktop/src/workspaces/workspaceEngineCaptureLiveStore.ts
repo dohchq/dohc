@@ -77,6 +77,7 @@ const VERSIONED_TEXT_STORE_ERROR_CODES = [
   "persist-failed",
   "state-corrupt",
   "target-path-exists",
+  "write-precondition-failed",
   "version-name-conflict",
   "version-not-found",
   "workspace-mismatch",
@@ -887,7 +888,10 @@ export function createCaptureLiveStores(
       workspaceId: string;
       versionId: string;
       path: string;
+      requestId?: string;
+      expectedSha256?: string;
       text: string;
+      publish?: boolean;
       createOnly?: boolean;
       restoreBeforeMomentId?: string;
       metadata: ActorNeutralWriteMetadata;
@@ -895,17 +899,19 @@ export function createCaptureLiveStores(
       momentId?: string;
     }) {
       const { metadata, author, ...writeInput } = input;
-      const requestId = input.createOnly ? randomUUID() : undefined;
+      const requestId = input.requestId ?? randomUUID();
       const raw = await runMutation(
         async (adapter) =>
           await adapter.writeTextFile({
             ...writeInput,
-            ...(requestId ? { requestId } : {}),
+            requestId,
             ...(author ? { author: adapterAuthor(author) } : {}),
             metadata: adapterMetadata(metadata),
           }),
       );
       return {
+        materialized: raw.materialized,
+        materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(raw.snapshot, input.metadata),
         moment: momentFromWire(
@@ -920,16 +926,21 @@ export function createCaptureLiveStores(
       workspaceId: string;
       versionId: string;
       path: string;
+      requestId?: string;
+      expectedSha256?: string;
       bytes: Uint8Array;
+      createOnly?: boolean;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       momentId?: string;
     }) {
       const { metadata, author, ...writeInput } = input;
+      const requestId = input.requestId ?? randomUUID();
       const raw = await runMutation(
         async (adapter) =>
           await adapter.writeBinaryFile({
             ...writeInput,
+            requestId,
             ...(author ? { author: adapterAuthor(author) } : {}),
             metadata: adapterMetadata(metadata),
           }),
@@ -949,6 +960,8 @@ export function createCaptureLiveStores(
         metadataOrigin: input.metadata.origin,
       };
       return {
+        materialized: raw.materialized,
+        materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(value, input.metadata),
         moment: momentFromWire(

@@ -25,7 +25,7 @@ use serde_json::Value;
 use serde_json::json;
 
 const COLLECTION_RESPONSE_HARD_CAP_BYTES: usize =
-    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+    crate::rpc::reads::RESPONSE_FRAME_BYTES - 64 * 1024;
 
 const COLLECTION_INTEGER_MARKER: &str = "$dohcInt64";
 

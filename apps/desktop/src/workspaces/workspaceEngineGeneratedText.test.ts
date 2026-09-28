@@ -13,6 +13,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
+import { createFakeDaemonCapture } from "../testing/fakeDaemonCapture";
 import { createTestScratch } from "./testTemp";
 import {
   createDefaultDiskWriter,
@@ -36,6 +37,23 @@ function createWorkspaceEngineCapture(
 }
 
 const roots: string[] = [];
+
+function mockPublishingSessions(input: { rootPath: string; workspaceId: string; loopback: VersionedLoopbackEngine; requests?: Request[] }) {
+  const disk = createFakeDaemonCapture(input);
+  const loopback = new Proxy(input.loopback, {
+    get(target, property, receiver) {
+      if (property !== "sendRequest") return Reflect.get(target, property, receiver);
+      return async (request: Request) => {
+        if (request.method === VERSIONED_METHOD.textWrite || request.method === VERSIONED_METHOD.textWriteBlob) {
+          const response = await disk.sendRequest(request);
+          if (response) return response;
+        }
+        return target.sendRequest(request);
+      };
+    },
+  });
+  return mockLiveSessions(loopback, input.requests);
+}
 
 async function root(): Promise<string> {
   const value = await createTestScratch("dohc-generated-text-");
@@ -104,7 +122,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-bookmark-recovery-test",
       rootPath,
-      rustEngineSessions: mockLiveSessions(loopback, requests),
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-bookmark-recovery-test", loopback, requests }),
     });
 
     const upgraded = await writeChatBookmarkProjection({
@@ -141,7 +159,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-bookmark-collision-test",
       rootPath,
-      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-bookmark-collision-test", loopback: new VersionedLoopbackEngine() }),
     });
     const unrelatedPath = "Bookmarks/Chats/unrelated.md";
     const unrelatedText = bookmarkProjection("bookmark-someone-else", "Unrelated");
@@ -191,7 +209,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-bookmark-archive-recovery-test",
       rootPath,
-      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-bookmark-archive-recovery-test", loopback: new VersionedLoopbackEngine() }),
     });
     const legacyBookmark = {
       bookmarkId: "bookmark-disk-only-archive",
@@ -262,7 +280,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-bookmark-archive-reactivate-race-test",
       rootPath,
-      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-bookmark-archive-reactivate-race-test", loopback: new VersionedLoopbackEngine() }),
     });
     await seed({
       method: CHATS_METHOD.channelCreate,
@@ -380,7 +398,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-text-test",
       rootPath,
-      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-text-test", loopback: new VersionedLoopbackEngine() }),
     });
 
     const created = await capture.writeGeneratedTextFile({
@@ -416,7 +434,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-path-test",
       rootPath,
-      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-path-test", loopback: new VersionedLoopbackEngine() }),
     });
 
     await expect(
@@ -457,7 +475,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-write-limit-test",
       rootPath,
-      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-write-limit-test", loopback: new VersionedLoopbackEngine() }),
     });
 
     await expect(
@@ -477,7 +495,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-archive-test",
       rootPath,
-      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-archive-test", loopback: new VersionedLoopbackEngine() }),
     });
     const created = await capture.writeGeneratedTextFile({
       path: "Bookmarks/Chats/launch.md",
@@ -515,7 +533,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-archive-retry-test",
       rootPath,
-      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-archive-retry-test", loopback: new VersionedLoopbackEngine() }),
       diskWriter: {
         writeTextFile: disk.writeTextFile,
         writeBinaryFile: disk.writeBinaryFile,
@@ -569,7 +587,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
       const capture = createWorkspaceEngineCapture({
         workspaceId: `generated-archive-${scenario.name}-source-test`,
         rootPath,
-        rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+        rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: `generated-archive-${scenario.name}-source-test`, loopback: new VersionedLoopbackEngine() }),
         diskWriter: {
           writeTextFile: disk.writeTextFile,
           writeBinaryFile: disk.writeBinaryFile,
