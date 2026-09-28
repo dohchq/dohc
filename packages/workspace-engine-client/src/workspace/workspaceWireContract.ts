@@ -1016,6 +1016,12 @@ const automationChangeFields = {
   kind: Schema.Literals(["added", "changed", "removed", "message", "button", "schedule"]),
   authorOriginId: NullableString,
   actorKind: Schema.NullOr(Schema.Literals(["human", "agent", "automation"])),
+  /**
+   * The person the change was made by or for: who pressed a button, who
+   * wrote a message, or who made a record change or had an agent or
+   * automation make it. For a live-shared change, the person the relay
+   * accepted it from; an Edit share link names no one.
+   */
   onBehalfOf: NullableString,
   sharedAuthor: Schema.NullOr(SharedChangeAuthorSchema),
   /** The relay's live journal cursor of the frame a live-shared change came in; null for any other change. */

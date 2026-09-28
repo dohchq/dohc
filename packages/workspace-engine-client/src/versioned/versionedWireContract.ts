@@ -72,7 +72,7 @@ export type AgentAuthor = JsonObject & {
  */
 export type WriteAuthor =
   | AgentAuthor
-  | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf: string; depth: number });
+  | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf?: string; depth: number });
 
 type MutationMetadata = JsonObject & {
   workspaceId?: string;

@@ -278,6 +278,9 @@ export interface CliServerOptions {
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
   localUserDisplayName(): string;
+  // The person this computer's agents work for: the account, or this
+  // installation's id when signed out.
+  localPersonId(): string;
   // The chain depth of the agent run in progress in the workspace, or 0. Every
   // write during a run an automation started is the agent's at this depth, so
   // an automation that woke the agent and the agent cannot start each other
@@ -569,7 +572,7 @@ function writeActor(
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
 // traffic reaches this socket through the MCP server, whose declared identity
-// is agent `dohc-mcp` acting on behalf of the local owner, at the depth of the
+// is agent `dohc-mcp` acting for this computer's person, at the depth of the
 // agent run in progress; a human write is attributed as this device's local
 // author under the workspace display name.
 function collectionWriteAuthor(
@@ -581,7 +584,7 @@ function collectionWriteAuthor(
     return {
       kind: "agent",
       agentId: "dohc-mcp",
-      onBehalfOf: "local",
+      onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     };
   }
@@ -601,8 +604,8 @@ function datasetAgent(
 }
 
 // Provenance for a document edit, derived here. A person types in the
-// editor, so every edit through this socket is an agent's on behalf of the
-// local owner, recorded under the name the agent gave itself or under none,
+// editor, so every edit through this socket is an agent's for this
+// computer's person, recorded under the name the agent gave itself or under none,
 // at the depth of the agent run in progress. Any process holding the socket
 // token could otherwise claim the person's typing.
 function documentEditOrigin(
@@ -614,7 +617,7 @@ function documentEditOrigin(
     ...(agent === undefined ? {} : { actorOriginId: agent }),
     attribution: {
       actorKind: "agent",
-      onBehalfOf: "local",
+      onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     },
   };

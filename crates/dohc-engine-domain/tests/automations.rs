@@ -527,11 +527,19 @@ fn a_claim_keeps_the_person_or_link_the_relay_accepted_its_change_from() {
         grant_id: "grant-ana".to_owned(),
         grant_generation: 1,
     };
-    for (origin_seq, author) in [(1, link), (2, named)] {
+    // The person is the collaborator the relay accepted the change from,
+    // never a link, and never what the frame declared.
+    for (origin_seq, author, person) in [(1, link, None), (2, named, Some("user-ana"))] {
         let mut applied = field_change(origin_seq, &["status"]);
         applied.shared_author = Some(author.clone());
+        applied.attribution = Some(ChangeAttribution {
+            actor_kind: ChangeActorKind::Human,
+            on_behalf_of: Some("claimed-person".to_owned()),
+            depth: 0,
+        });
         let claims = claim_for(&mut store, WS, &applied, 10 + origin_seq);
         assert_eq!(claims[0].change.shared_author.as_ref(), Some(&author));
+        assert_eq!(claims[0].change.on_behalf_of.as_deref(), person);
         let (served, _) = claim_next_pending_automation(
             &mut store,
             WS,
@@ -546,6 +554,7 @@ fn a_claim_keeps_the_person_or_link_the_relay_accepted_its_change_from() {
             Some(author),
             "it survives the ledger"
         );
+        assert_eq!(served.change.on_behalf_of.as_deref(), person);
     }
     // A shared author with a missing or unbounded id never reaches the ledger.
     let mut applied = field_change(3, &["status"]);

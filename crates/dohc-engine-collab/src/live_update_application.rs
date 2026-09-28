@@ -2920,6 +2920,26 @@ mod tests {
             ],
             "a collaborator's or a link's edit names who the relay accepted it from; the owner's names nobody"
         );
+        let persons = |store: &EngineStore| -> Vec<Option<String>> {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT on_behalf_of FROM automation_claims ORDER BY created_at_ms, claim_id",
+                    )?;
+                    let rows = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, rusqlite::Error>(rows)
+                })
+                .unwrap()
+        };
+        // The person a run reads is the collaborator the relay accepted the
+        // edit from. A link names no person, and neither does the owner's
+        // authority, which an automation on the server also writes under.
+        assert_eq!(
+            persons(&store),
+            vec![None, Some("guest-1".to_owned()), None]
+        );
 
         let body_only = event("body-only", 4, source.plaintext_insert(0, "body"));
         ack(apply(&mut store, &mut cache, &handle, body_only));
@@ -2951,7 +2971,7 @@ mod tests {
                 origin: crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
                     actor_origin_id: Some("collection:notes#stamp".into()),
                     actor_kind: Some("automation".into()),
-                    on_behalf_of: Some("local".into()),
+                    on_behalf_of: Some("person-1".into()),
                     chain_depth: Some(2),
                     recorded_at_ms: 1,
                 },
@@ -2972,14 +2992,14 @@ mod tests {
                 .unwrap();
             appended.delivery_id
         };
-        let newest = |store: &EngineStore| -> (Option<String>, i64) {
+        let newest = |store: &EngineStore| -> (Option<String>, i64, Option<String>) {
             store
                 .read_with(|conn| {
                     conn.query_row(
-                        "SELECT author_origin_id, depth FROM automation_claims \
+                        "SELECT author_origin_id, depth, on_behalf_of FROM automation_claims \
                          ORDER BY created_at_ms DESC, claim_id DESC LIMIT 1",
                         [],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                 })
                 .unwrap()
@@ -2991,8 +3011,12 @@ mod tests {
         ack(apply(&mut store, &mut cache, &handle, accepted));
         assert_eq!(
             newest(&store),
-            (Some("collection:notes#stamp".to_owned()), 2),
-            "the host's own draft keeps its automation author and depth"
+            (
+                Some("collection:notes#stamp".to_owned()),
+                2,
+                Some("person-1".to_owned())
+            ),
+            "the host's own draft keeps its automation author, depth and person"
         );
         // The same bytes under another delivery are not that draft.
         let restamped = source.frontmatter_set("status", "restamped").unwrap();
@@ -3000,7 +3024,7 @@ mod tests {
         let mut elsewhere = event("elsewhere", 6, restamped);
         elsewhere.metadata.accepted.received_at_ms = 40;
         ack(apply(&mut store, &mut cache, &handle, elsewhere));
-        assert_eq!(newest(&store), (Some("owner-1".to_owned()), 0));
+        assert_eq!(newest(&store), (Some("owner-1".to_owned()), 0, None));
 
         // Each claim keeps the relay journal cursor of the frame it came in,
         // the host's own drafts' too, so the relay can place it in the

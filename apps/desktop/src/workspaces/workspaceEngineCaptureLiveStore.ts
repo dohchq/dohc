@@ -551,8 +551,12 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
 // relay replication, never from this computer.
 function adapterAuthor(author: MomentWriteAuthor): WriteAuthor {
   if (author.kind === "automation") {
-    if (author.onBehalfOf === undefined) throw new VersionedTextStoreError("invalid-input", "The write does not name the person it acts for.");
-    return { kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth };
+    return {
+      kind: "automation",
+      automationId: author.automationId,
+      ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
+      depth: author.depth,
+    };
   }
   return captureAuthor(author);
 }

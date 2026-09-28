@@ -820,7 +820,10 @@ export interface RunInputs {
   message: JsonObject | null;
   /** Where posts and direct messages go; null when the automation sends none. */
   chat: ChatDirectory | null;
-  /** The person who pressed the button, or null for a change. */
+  /**
+   * The person who pressed the button or made the record change, or null
+   * when nobody is known. A Group message's person is its author instead.
+   */
   person: AutomationScope["person"];
   /**
    * The only keys of the trigger record formulas may read, when the run could
@@ -1131,7 +1134,7 @@ function runScope(inputs: FindValueInputs, nowMs: number, bindings: JsonObject):
           // grant and never a person, so it names no `person` below.
           author: claim.change.sharedAuthor ?? null,
         },
-    // A press or Group message names the person who started it.
+    // A press, a record change or a Group message names the person who started it.
     person: person ?? author,
     bindings,
     now: localIsoTime(nowMs),

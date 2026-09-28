@@ -64,7 +64,8 @@ export interface AgentIntegrationOptions {
   // The state home (registry dir) handed to a spawned server as --home.
   home?: string;
   agentId?: string;
-  onBehalfOf?: string;
+  // The person this computer's agent runs work for, read when a run starts.
+  localPersonId(): string;
   now?: () => number;
   // Injectable id seam (oracle/tests) for the AgentRunRecord id. Omitted ⇒ a
   // real randomUUID, identical to today's behavior.
@@ -128,7 +129,6 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
   const agentId = options.agentId ?? DEFAULT_AGENT_ID;
-  const onBehalfOf = options.onBehalfOf ?? "local";
 
   function serialize<T>(
     state: AgentIntegrationState,
@@ -157,7 +157,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
         id: createId(),
         startedAt: now(),
         agentId,
-        onBehalfOf,
+        onBehalfOf: options.localPersonId(),
         status: "running",
       };
       await serialize(state, async () => {

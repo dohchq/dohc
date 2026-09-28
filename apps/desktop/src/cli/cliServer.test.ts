@@ -403,6 +403,7 @@ describe("CLI socket server", () => {
     };
     agentRunDepth = 0;
     serverOptions = {
+      localPersonId: () => "person-local",
       stateDir,
       listWorkspaces() {
         calls.listWorkspaces += 1;
@@ -1231,7 +1232,7 @@ describe("CLI socket server", () => {
               next: { present: true, value: 9007199254740993n },
               authorOriginId: "origin_agent",
               actorKind: "agent" as const,
-              onBehalfOf: "local",
+              onBehalfOf: "person-local",
               depth: 0,
               recordedAtMs: SERVER_NOW_MS,
             },
@@ -1515,7 +1516,7 @@ describe("CLI socket server", () => {
         input: {
           recordPath: "tasks/a.md",
           fields: { status: "done", notes: null },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
         },
       },
       {
@@ -1524,7 +1525,7 @@ describe("CLI socket server", () => {
           collectionPath: "tasks",
           name: "write-brief",
           fields: { status: "open" },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
         },
       },
       {
@@ -1574,7 +1575,7 @@ describe("CLI socket server", () => {
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
     // An agent that names itself is recorded under that name, and one that
     // does not stays an agent with no name.
-    const agent = { actorKind: "agent", onBehalfOf: "local", depth: 0 };
+    const agent = { actorKind: "agent", onBehalfOf: "person-local", depth: 0 };
     expect(edits).toEqual([
       {
         path: "notes/plan.md",
@@ -1656,8 +1657,8 @@ describe("CLI socket server", () => {
     agentRunDepth = 0;
     await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "open" } });
 
-    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 3 };
-    const attribution = { actorKind: "agent", onBehalfOf: "local", depth: 3 };
+    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 };
+    const attribution = { actorKind: "agent", onBehalfOf: "person-local", depth: 3 };
     expect(authors).toEqual([
       woken,
       woken,
@@ -1734,7 +1735,7 @@ describe("CLI socket server", () => {
       markdown: "# New",
       origin: {
         actorOriginId: "claude-code",
-        attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+        attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 },
       },
     }]);
   });

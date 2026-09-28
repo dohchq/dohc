@@ -31,9 +31,9 @@ describe("AgentIntegration", () => {
       });
 
       const run = await integration.startAgentRun("ws");
-      expect(run).toMatchObject({ status: "running", agentId: "dohc-mcp", onBehalfOf: "local" });
+      expect(run).toMatchObject({ status: "running", agentId: "dohc-mcp", onBehalfOf: "person-local" });
       // The watcher slot now carries this run's attribution.
-      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: run.id, depth: 0 });
+      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: run.id, depth: 0 });
 
       // The record is durable and inspectable on disk.
       const persisted = JSON.parse(await readFile(join(root, ".dohc/agent-runs.json"), "utf8"));
@@ -105,7 +105,7 @@ describe("AgentIntegration", () => {
       // End the older run A: B still owns the workspace, so its attribution
       // slot must stay set (not silently cleared to local).
       await integration.endAgentRun("ws", a.id);
-      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: b.id, depth: 0 });
+      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: b.id, depth: 0 });
       expect(await integration.getAgentRunStatus("ws")).toMatchObject({
         mcpEnabled: true,
         activeRun: { id: b.id },
@@ -125,14 +125,14 @@ describe("AgentIntegration", () => {
             startedAt: 1,
             endedAt: 2,
             agentId: "dohc-mcp",
-            onBehalfOf: "local",
+            onBehalfOf: "person-local",
             status: "failed",
           },
           {
             id: "bad-status",
             startedAt: 3,
             agentId: "dohc-mcp",
-            onBehalfOf: "local",
+            onBehalfOf: "person-local",
             status: "done",
           },
         ]),
@@ -209,6 +209,7 @@ describe("AgentIntegration", () => {
       const setStarted = Promise.withResolvers<void>();
       const allowSettle = Promise.withResolvers<void>();
       const integration = createPhysicalAgentIntegration({
+        localPersonId: () => "person-local",
         workspaceIds: () => ["ws"],
         acquire: () => {
           const heldState = currentState;
@@ -248,6 +249,7 @@ describe("AgentIntegration", () => {
       const setAgentRun = vi.fn();
       const release = vi.fn();
       const integration = createPhysicalAgentIntegration({
+        localPersonId: () => "person-local",
         workspaceIds: () => ["ws"],
         acquire: () => ({
           attachmentId: Symbol.for("test-retired-after-persist"),
@@ -288,19 +290,20 @@ describe("AgentIntegration", () => {
       id: "run-first",
       startedAt: 1,
       agentId: "dohc-mcp",
-      onBehalfOf: "local",
+      onBehalfOf: "person-local",
       status: "running",
     };
     secondState.activeRun = {
       id: "run-second",
       startedAt: 2,
       agentId: "dohc-mcp",
-      onBehalfOf: "local",
+      onBehalfOf: "person-local",
       status: "running",
     };
     const releases: string[] = [];
     const clearedSlots: string[] = [];
     const integration = createPhysicalAgentIntegration({
+      localPersonId: () => "person-local",
       workspaceIds: () => ["workspace-first", "workspace-second"],
       acquire: (workspaceId) => ({
         attachmentId: Symbol.for(`test-workspace-attachment:${workspaceId}`),

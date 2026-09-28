@@ -277,7 +277,11 @@ pub struct AutomationGroupMessage<'a> {
 
 /// The change a claim runs for and who made it, named as record history
 /// names them: the author origin, and the declared actor kind and the
-/// principal it acted for. Each is `None` when the write did not declare it.
+/// person it acted for. Each is `None` when the write did not declare it.
+/// `on_behalf_of` is that person: who pressed a button, who wrote a message,
+/// or who made a record change or had an agent or automation make it. A
+/// record change the relay accepted from a person the owner shared with
+/// names that person, and one from an Edit share link names no one.
 /// `shared_author` is the person the owner shared with, or the Edit share
 /// link, the relay accepted the change from. `live_cursor` is the relay's
 /// live journal cursor of the frame a live-shared record's change came in,
@@ -1988,10 +1992,14 @@ pub fn claim_automation_triggers_in_tx(
                 .attribution
                 .as_ref()
                 .map(|attribution| attribution.actor_kind),
-            on_behalf_of: facts
-                .attribution
-                .as_ref()
-                .and_then(|attribution| attribution.on_behalf_of.clone()),
+            on_behalf_of: match &facts.shared_author {
+                Some(SharedChangeAuthor::Named { user_id, .. }) => Some(user_id.clone()),
+                Some(SharedChangeAuthor::Link { .. }) => None,
+                None => facts
+                    .attribution
+                    .as_ref()
+                    .and_then(|attribution| attribution.on_behalf_of.clone()),
+            },
             shared_author: facts.shared_author.clone(),
             live_cursor: facts.live_cursor,
         },
