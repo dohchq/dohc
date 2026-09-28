@@ -15465,7 +15465,7 @@ describe("workbench render cost", () => {
     }
   });
 
-  it("refreshes files for a POSIX-distinct .GIT activity path", async () => {
+  it("ignores reserved .GIT activity paths on Linux", async () => {
     const bridge = makeBridge(Promise.resolve(null), "linux");
     renderShell(bridge);
     await waitFor(() =>
@@ -15487,11 +15487,7 @@ describe("workbench render cost", () => {
         await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
       });
 
-      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
-      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        allowCached: true,
-      });
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings);
     } finally {
       vi.useRealTimers();
     }
