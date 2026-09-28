@@ -496,12 +496,16 @@ describe("local dataset owner adapter", () => {
     const watcher = "collection:items#tally";
     host.automations.subscribe(id(1), {automationId: watcher, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: digest(watcher)});
     // An agent run woken by an automation's message at depth 2 writes at depth 3.
-    expect(await host.action({...call(approved, id(6), "agent", {name: "Pens"}), agentDepth: 3})).toMatchObject({replayed: false});
+    expect(await host.action({...call(approved, id(6), "agent", {name: "Pens"}), agent: {depth: 3}})).toMatchObject({replayed: false});
     expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 3, actor: {kind: "agent", depth: 3}});
+    // An agent outside a chain is still named, at depth 0.
+    expect(await host.action({...call(approved, id(6), "unchained", {name: "Tape"}), agent: {depth: 0}})).toMatchObject({replayed: false});
+    expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 0, actor: {kind: "agent", depth: 0}});
     expect(await host.action(call(approved, id(6), "person", {name: "Ink"}))).toMatchObject({replayed: false});
     expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 0, actor: {kind: "owner"}});
     // The agent retries under the owner's identity, so its retry replays.
-    expect(await host.action({...call(approved, id(6), "person", {name: "Ink"}), agentDepth: 3})).toMatchObject({replayed: true});
+    expect(await host.action({...call(approved, id(6), "person", {name: "Ink"}), agent: {depth: 3}})).toMatchObject({replayed: true});
+    expect(host.automations.next()).toBeNull();
   });
 
   it("tells the executor after each change to a dataset's approved rules or lifecycle", async () => {

@@ -61,10 +61,10 @@ export interface DatasetAuthority {
    */
   chainDepth?: number;
   /**
-   * Set only when the owner's agent writes in a run an automation started,
-   * with the chain depth the run's writes declare. Attribution that grants
-   * nothing: it requires the owner caller, and owner administration refuses
-   * it.
+   * Set only when the owner's agent writes, directly or through an app, with
+   * the chain depth its run's writes declare: 0 outside a chain. Attribution
+   * that grants nothing: it requires the owner caller, and owner
+   * administration refuses it.
    */
   agent?: { depth: number };
 }
@@ -167,14 +167,14 @@ function chainDepth(value: number | undefined, caller: AppBackendCaller): number
 const MAX_DECLARED_DEPTH = 64;
 function agent(value: DatasetAuthority["agent"], caller: AppBackendCaller): DatasetAuthority["agent"] {
   if (value === undefined) return undefined;
-  if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 1 || value.depth > MAX_DECLARED_DEPTH) denied();
+  if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 0 || value.depth > MAX_DECLARED_DEPTH) denied();
   return { depth: value.depth };
 }
 /** Who made a commit, from the authority the host derived. */
 function actor(authority: DatasetAuthority): DatasetActor {
   if (authority.caller.kind === "automation") return { kind: "automation", automationId: authority.caller.automationId, depth: authority.chainDepth! };
-  if (authority.agent) return { kind: "agent", depth: authority.agent.depth };
   const app = authority.appId === undefined ? {} : { appId: authority.appId }, caller = authority.caller;
+  if (authority.agent) return { kind: "agent", depth: authority.agent.depth, ...app };
   if (caller.kind === "named") return { kind: "named", userId: caller.userId, ...app };
   return caller.kind === "owner" ? { kind: "owner", ...app } : { kind: "link", ...app };
 }

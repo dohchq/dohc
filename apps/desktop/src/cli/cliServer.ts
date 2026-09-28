@@ -90,6 +90,7 @@ import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { AutomationRunRetry } from "../automations/automationNotices";
+import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import {
   LiveDocumentEditAppliedError,
   type LiveDocumentEditOrigin,
@@ -235,7 +236,8 @@ export interface CliButtonsPort {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
-  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
+  // `agent` is the agent this socket's write is, or null for the person.
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
@@ -584,6 +586,18 @@ function collectionWriteAuthor(
     };
   }
   return createLocalChangeAuthor(options.localUserDisplayName());
+}
+
+// The agent a dataset invocation through this socket is, as writeActor
+// decides: an agent that names itself, at 0 outside a chain, or any caller
+// during a run an automation started, at its depth. Null for the person.
+function datasetAgent(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): LocalDatasetAgent | null {
+  const depth = options.agentRunDepth(context.workspaceId);
+  return depth > 0 || actor === "agent" ? { depth } : null;
 }
 
 // Provenance for a document edit, derived here. A person types in the
@@ -1960,7 +1974,7 @@ async function dispatch(
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("Collection export requires an explicit savePath.");
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.dataset) throw new CliCommandError("Collections require the owning workspace.");
-      return context.dataset(request.args.request);
+      return context.dataset(request.args.request, datasetAgent(request.args.actor, context, options));
     }
     case "ownerAppResponses": {
       if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.ownerAppResponses)throw new CliCommandError("App responses require the owning workspace.");

@@ -541,10 +541,20 @@ describe("CLI socket server", () => {
     context.dataset = vi.fn(async () => ({kind:"invoked" as const,result:{accepted:true},revision:1,replayed:false}));
     const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetId:"00000000-0000-4000-8000-000000000001",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};
     for (const actor of ["human","agent"] as const) expect(await invoke("dataset",{cwd:workspaceRoot,actor,request})).toEqual({kind:"invoked",result:{accepted:true},revision:1,replayed:false});
+    // The person invokes as the owner; an agent that names itself is the agent, at 0 outside a chain.
+    expect(vi.mocked(context.dataset).mock.calls.map(call => call[1])).toEqual([null,{depth:0}]);
     await expect(invoke("dataset",{cwd:workspaceRoot,actor:"agent",request:{...request,workspaceId:"elsewhere"}})).rejects.toThrow("owning workspace");
     context.readOnly = true;
     await expect(invoke("dataset",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
     expect(context.dataset).toHaveBeenCalledTimes(2);
+  });
+
+  it("invokes a dataset action as the run's agent during a run an automation started, whoever the caller names", async () => {
+    context.dataset = vi.fn(async () => ({kind:"invoked" as const,result:{accepted:true},revision:1,replayed:false}));
+    const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetId:"00000000-0000-4000-8000-000000000001",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};
+    agentRunDepth = 3;
+    for (const actor of ["human","agent"] as const) await invoke("dataset",{cwd:workspaceRoot,actor,request});
+    expect(vi.mocked(context.dataset).mock.calls.map(call => call[1])).toEqual([{depth:3},{depth:3}]);
   });
 
   it("writes a random capability endpoint descriptor for a Windows named pipe", async (ctx) => {

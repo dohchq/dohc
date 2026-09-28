@@ -8,8 +8,7 @@ import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
 function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">,
-  automationName?: (workspace: { workspaceId: string }, automationId: string) => Promise<string | null>,
-  agentRunDepth?: (workspace: { workspaceId: string }) => number) {
+  automationName?: (workspace: { workspaceId: string }, automationId: string) => Promise<string | null>) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
   let current = true;
@@ -33,7 +32,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     hostForWorkspace: vi.fn(async () => host as unknown as LocalDatasetHost),
     ...(remote ? { dataForWorkspace: async () => remote } : {}),
     ...(named ? { namedDataForWorkspace: async () => named } : {}),
-    withAdapter, createSources, ...(automationName ? { automationName } : {}), ...(agentRunDepth ? { agentRunDepth } : {}),
+    withAdapter, createSources, ...(automationName ? { automationName } : {}),
   });
   const createForm = { action: "createForm", workspaceId: "workspace", datasetId, revision: 1, revisionSha256: revision.revisionSha256,
     tableId: definition.tables[0]!.tableId, createOperationId: definition.operations[0]!.operationId, appRoot: "apps/form", fieldIds: definition.operations[0]!.fieldIds };
@@ -141,19 +140,21 @@ it("uses remote metadata and file operations after authority moves", async () =>
   expect(await f.handler("window", { ...pinned, action: "file", fileId: "f".repeat(32) })).toMatchObject({ kind: "file" });
   expect(remote.file).toHaveBeenCalled();
 });
-it("carries the agent run's chain depth into an owner CLI invocation, and nothing else from the request", async () => {
-  let depth = 3;
-  const f = fixture(undefined, undefined, undefined, () => depth);
+it("carries the agent main derived into an owner CLI invocation, and nothing of it from the request", async () => {
+  const f = fixture();
   const request = { action: "invoke", workspaceId: "workspace", datasetId,
     operationId: datasetId, revision: 1, revisionSha256: "a".repeat(64), input: {}, idempotencyKey: "retry" };
+  await f.handler("cli", request, { depth: 3 });
+  expect(f.host.invoke).toHaveBeenLastCalledWith(expect.objectContaining({ idempotencyKey: "retry", agent: { depth: 3 } }));
+  // An agent outside a chain is still the agent.
+  await f.handler("cli", request, { depth: 0 });
+  expect(f.host.invoke).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { depth: 0 } }));
+  // With no agent, the invocation is the owner's own.
   await f.handler("cli", request);
-  expect(f.host.invoke).toHaveBeenLastCalledWith(expect.objectContaining({ idempotencyKey: "retry", agentDepth: 3 }));
-  // With no run an automation started, the invocation is the owner's own.
-  depth = 0;
-  await f.handler("cli", request);
-  expect(f.host.invoke).toHaveBeenLastCalledWith(expect.not.objectContaining({ agentDepth: expect.anything() }));
-  // A caller cannot name a depth itself.
-  await expect(f.handler("cli", { ...request, agentDepth: 9 })).rejects.toThrow();
+  expect(f.host.invoke).toHaveBeenLastCalledWith(expect.not.objectContaining({ agent: expect.anything() }));
+  // A caller cannot name an agent or a depth itself.
+  for (const forged of [{ agent: { depth: 0 } }, { agentDepth: 9 }]) await expect(f.handler("cli", { ...request, ...forged })).rejects.toThrow();
+  expect(f.host.invoke).toHaveBeenCalledTimes(3);
 });
 
 it("does not accept authority or raw SQL in an invocation", async () => {
