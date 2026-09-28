@@ -8,7 +8,7 @@ import type { JsonValue } from "@dohc/app-backend-runtime";
 import { DATASET_AUTOMATION_HISTORY } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -16,6 +16,7 @@ import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel } from "@dohc/automation-executor/automation-chat";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
+import type { AutomationFailure } from "@dohc/automation-executor/automation-failed-notice";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import {
   CollectionAutomations,
@@ -203,14 +204,23 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
 
   // Group subscriptions the executor asks the engine for.
   const subscribed: unknown[] = [];
+  // Claims the engine holds for this Collection's automations, as a schedule or a Group message makes them.
+  const engineClaims: AutomationClaim[] = [];
+  const engineFailures: Array<Omit<AutomationFailure, "datasetInstance">> = [];
+  const engineRetries: string[] = [];
+  let engineReadable = true;
   const engine = {
     listCollections: async () => ({ collections: [] }),
     subscribeAutomation: async (input: unknown) => { subscribed.push(input); },
     releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
     watchAutomationGroups: async () => ({ needsHandover: false }),
     claimNextAutomation: async () => null,
-    listAutomationClaims: async () => ({ claims: [] }),
-    listAutomationFailures: async () => ({ failures: [] }),
+    listAutomationClaims: async ({ automationId }: { automationId: string }) => {
+      if (!engineReadable) throw new Error("The engine could not read its claims.");
+      return { claims: engineClaims.filter((claim) => claim.automationId === automationId).sort((left, right) => right.createdAtMs - left.createdAtMs) };
+    },
+    listAutomationFailures: async () => ({ failures: engineFailures }),
+    retryAutomationClaim: async ({ claimId }: { claimId: string }) => { engineRetries.push(claimId); return engineClaims.find((claim) => claim.claimId === claimId); },
     readAutomationGroupSkips: async () => ({ aheadAtMs: null, lateAtMs: null }),
   } as unknown as CollectionAutomationEngine;
   let roster = options.roster ?? OWNER;
@@ -297,6 +307,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   makeExecutor();
   return {
     host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor, settled, waiting, messages, notices, failureReports,
+    engineClaims, engineFailures, engineRetries, setEngineReadable: (readable: boolean) => { engineReadable = readable; },
     get executor() { return executor!; },
     claims: () => host.automations.claims(AUTOMATION),
     automationsChanged: () => automationsChanged,
@@ -1213,4 +1224,120 @@ ${step}`;
       await f.executor.dispose();
     }
   });
+});
+
+/** An engine claim of a dataset automation, as a schedule makes one for its due time. */
+function engineClaim(claimId: string, state: AutomationClaim["state"], createdAtMs: number, automationId = AUTOMATION): AutomationClaim {
+  return {
+    claimId, automationId, trigger: { key: `schedule:${createdAtMs}` }, recordId: null, collectionPath: "Budget", depth: 0,
+    state, attempts: state === "pending" ? 0 : 1, run: 1, createdAtMs, updatedAtMs: createdAtMs, ...(state === "failed" ? { error: "Not yet." } : {}),
+    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+  };
+}
+
+describe("dataset automation claims in both ledgers", () => {
+
+  it("lists both ledgers' runs as one history after a trigger edit, and reaches an engine claim for Undo and Try again", async () => {
+    const f = await world();
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    const ledgerClaim = f.claims()[0]!;
+    // The automation then ran on a schedule, and its run changed the same record.
+    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const [ledgerRun] = (await store.runsOf(AUTOMATION, ledgerClaim.claimId)).runs;
+    await store.save({ ...ledgerRun!, claimId: "atc_schedule" });
+    f.engineClaims.push(engineClaim("atc_schedule", "done", ledgerClaim.createdAtMs + 1), engineClaim("atc_failed", "failed", ledgerClaim.createdAtMs - 1));
+    expect((await f.executor.runs(AUTOMATION)).map((run) => run.claimId)).toEqual(["atc_schedule", ledgerClaim.claimId, "atc_failed"]);
+    const trash = async () => { throw new Error("A dataset's added records stay."); };
+    expect(await f.executor.undo({ automationId: AUTOMATION, claimId: "atc_schedule" }, trash)).toMatchObject({ status: "undone", reverted: 1 });
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    expect(await f.executor.retry({ automationId: AUTOMATION, claimId: "atc_failed", startOver: false })).toEqual({ status: "queued", press: false });
+    expect(f.engineRetries).toEqual(["atc_failed"]);
+    await f.executor.dispose();
+  });
+
+  it("lists the newest 100 runs of both ledgers, and still reads an older run and undoes it", async () => {
+    const f = await world();
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    const ledgerClaim = f.claims()[0]!;
+    // The automation then ran 100 times on a schedule, after its record change.
+    for (let index = 0; index < 100; index += 1) f.engineClaims.push(engineClaim(`atc_later_${index}`, "done", ledgerClaim.createdAtMs + 1 + index));
+    const listed = await f.executor.runs(AUTOMATION, 500);
+    expect(listed).toHaveLength(100);
+    expect(listed.some((run) => run.claimId === ledgerClaim.claimId)).toBe(false);
+    expect(await f.executor.run(AUTOMATION, ledgerClaim.claimId)).toMatchObject({ claimId: ledgerClaim.claimId, state: "done" });
+    const summary = await f.executor.automationsIn("Budget");
+    if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
+    const trash = async () => { throw new Error("A dataset's added records stay."); };
+    await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: definitionHash(summary.automations[0].automation) }], trash))
+      .resolves.toEqual({ undone: 1, left: 0 });
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+
+  it("keeps each ledger's offered failure resumable when it prunes, and prunes nothing while a ledger cannot be read", async () => {
+    let fail = false;
+    const base = sharedEvaluator.forWorkspace("workspace");
+    const evaluator: AutomationFormulaEvaluator = {
+      evaluate: async (automationId, scope, formulas) => fail
+        ? formulas.map(() => ({ ok: false as const, error: { code: "runtime" as const, message: "Not yet." } }))
+        : await base.evaluate(automationId, scope, formulas),
+    };
+    const f = await world({ evaluator });
+    await f.writeAutomations(`  - id: close-paid
+    name: Close paid invoices
+    when:
+      field-changed: Paid
+    if: record.Status != "Never"
+    do:
+      - set:
+          Status: Closed
+        operation: invoices.status
+`);
+    await f.executor.open();
+    const paid = async () => {
+      const { id: invoice } = await f.create({});
+      const before = f.claims().length;
+      await f.edit(invoice, { [PAID]: true });
+      await f.until(() => f.claims().length > before && f.claims()[0]!.state !== "pending" && f.claims()[0]!.state !== "running");
+      await f.executor.idle();
+    };
+    await paid();
+    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const [template] = (await store.runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
+    fail = true;
+    await paid();
+    const ledgerFailure = f.claims()[0]!.claimId;
+    const failed = { outcome: { state: "failed" as const, error: "Not yet.", run: 1 }, settled: false };
+    // The ledger's failure, and two older engine failures, one its notice offers, behind 40 newer engine runs.
+    await store.save({ ...template!, claimId: ledgerFailure, ...failed });
+    for (const [claimId, at] of [["atc_offered", 2], ["atc_old", 1]] as const) {
+      await store.save({ ...template!, claimId, ...failed });
+      f.engineClaims.push(engineClaim(claimId, "failed", at));
+    }
+    f.engineFailures.push({ automationId: AUTOMATION, claimId: "atc_offered", chainStopped: false, error: "Not yet.", updatedAtMs: 2, generation: 1 });
+    for (let index = 0; index < 40; index += 1) {
+      await store.save({ ...template!, claimId: `atc_done_${index}`, settled: true });
+      f.engineClaims.push(engineClaim(`atc_done_${index}`, "done", Date.now() + 1_000 + index));
+    }
+    const compacted = async (claimId: string) => (await store.runsOf(AUTOMATION, claimId)).runs[0]?.compacted ?? false;
+
+    fail = false;
+    f.setEngineReadable(false);
+    await paid();
+    expect(f.errors.map((error) => error.context)).toContain(`prune runs of "${AUTOMATION}"`);
+    expect(await Promise.all([ledgerFailure, "atc_offered", "atc_old"].map(compacted))).toEqual([false, false, false]);
+    expect((await store.runsOf(AUTOMATION, "atc_done_0")).runs).toHaveLength(1);
+
+    f.setEngineReadable(true);
+    await paid();
+    expect(await Promise.all([ledgerFailure, "atc_offered", "atc_old"].map(compacted))).toEqual([false, false, true]);
+    expect((await store.runsOf(AUTOMATION, "atc_done_0")).runs).toEqual([]);
+    await f.executor.dispose();
+  }, 60_000);
 });
