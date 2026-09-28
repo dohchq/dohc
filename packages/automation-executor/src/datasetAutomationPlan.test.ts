@@ -91,6 +91,32 @@ describe("dataset automation steps", () => {
     }
   });
 
+  it("counts every edit, create, and read on the watched table among what a code step can call, for presses and the share warning", () => {
+    const code = automation("      - run: \"return { set: { Status: 'Done' } }\"\n");
+    const all = ["invoices.list", "invoices.status", "invoices.edit", "invoices.create"];
+    expect(datasetOperationsOf(code, generated).sort()).toEqual([...all].sort());
+    const reached = datasetReachSteps(code, { path: "Budget", name: "Budget" }, generated, { workspaceId: "workspace", grants: [] }, null)!
+      .flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : []);
+    expect(reached.sort()).toEqual([...all].sort());
+    // Without a code step, only what the steps name and read.
+    const set = automation("      - set:\n          Status: Done\n        operation: invoices.status\n");
+    expect(datasetOperationsOf(set, generated).sort()).toEqual(["invoices.list", "invoices.status"]);
+    // On operations someone wrote, code changes no record, so it can call none.
+    expect(datasetOperationsOf(code, { definition, generated: false })).toEqual([]);
+    // A schedule watches no table: its code reads and changes the only one, so every editor must be able to read its fields.
+    const nightly = automation("      - run: \"return {}\"\n", "schedule: day\n      timezone: UTC");
+    expect(datasetReachSteps(nightly, { path: "Budget", name: "Budget" }, generated, { workspaceId: "workspace", grants: [] }, null)!
+      .flatMap((step) => step.kind === "dataset-field" ? [step.field.name] : [])).toEqual(["ID", "Status", "Notes", "Finished on"]);
+    // Code never picks an action, so a press of its button has none to warn about.
+    expect(datasetIrreversibleActions(code, definition)).toEqual([]);
+  });
+
+  it("runs code steps on datasets, in branches too", () => {
+    const code = automation("      - run: \"return { set: { Status: 'Done' } }\"\n").do;
+    const base = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
+    for (const steps of everywhere(code, base.do)) expect(datasetAutomationProblem({ ...base, do: steps }, generated)).toBeNull();
+  });
+
   it("says which approved operation a step lacks, in the words the step card shows", () => {
     expect(datasetAutomationProblem(automation("      - set:\n          Finished on: '=today()'\n        operation: invoices.edit\n"), generated))
       .toBe("Budget has no approved edit that changes Finished on.");
@@ -212,12 +238,13 @@ describe("dataset automation steps", () => {
     expect(datasetFindOf('contains(record.Notes, "x")')).toHaveProperty("problem");
   });
 
-  it("keys each effect in 66 characters, apart for each record and each replan", () => {
-    const key = datasetEffectKey("claim", "hash-1", 2, "rec/1", 0);
+  it("keys each effect in 66 characters, apart for each record, each added record, and each replan", () => {
+    const key = datasetEffectKey("claim", "hash-1", 2, 0, "rec/1", 0);
     expect(key).toMatch(/^a\.[0-9a-f]{64}$/);
-    expect(new Set([key, datasetEffectKey("claim", "hash-1", 2, "rec/1", 1), datasetEffectKey("claim", "hash-1", 2, 5, 0),
-      datasetEffectKey("claim", "hash-1", 2, null, 0), datasetEffectKey("claim", "hash-2", 2, "rec/1", 0)]).size).toBe(5);
-    expect(datasetEffectKey("claim", "hash-1", 2, "rec/1", 0)).toBe(key);
+    expect(new Set([key, datasetEffectKey("claim", "hash-1", 2, 0, "rec/1", 1), datasetEffectKey("claim", "hash-1", 2, 0, 5, 0),
+      datasetEffectKey("claim", "hash-1", 2, 0, null, 0), datasetEffectKey("claim", "hash-1", 2, 1, null, 0),
+      datasetEffectKey("claim", "hash-2", 2, 0, "rec/1", 0)]).size).toBe(6);
+    expect(datasetEffectKey("claim", "hash-1", 2, 0, "rec/1", 0)).toBe(key);
   });
 
   it("checks every operation a run can call, the read a stale record needs included, and every field its formulas could see", () => {

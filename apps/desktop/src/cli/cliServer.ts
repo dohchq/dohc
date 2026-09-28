@@ -1,3 +1,4 @@
+import { creationPartialMessage } from "@dohc/cli/creation";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
@@ -59,6 +60,7 @@ import {
   type ChatUnreadFileThread,
   type GranularChatMessageSearchResponse,
   type GranularChatMessageSearchResult,
+  type KeptCopySaveResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -90,6 +92,7 @@ import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { AutomationRunRetry } from "../automations/automationNotices";
+import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import {
   LiveDocumentEditAppliedError,
   type LiveDocumentEditOrigin,
@@ -184,9 +187,10 @@ export interface CliCollectionWriteSeam {
   createRecord(input: {
     collectionPath: string;
     name: string;
+    recordId?: string;
     fields?: Record<string, unknown>;
     author: ChangeAuthor;
-  }): Promise<{ path: string; recordId: string }>;
+  }): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
 }
 
 // Engine-backed collection access for the CLI verbs. Reads go to the engine
@@ -216,6 +220,14 @@ export interface CliDocumentsPort {
   }): Promise<{ path: string }>;
 }
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile, and the step that moves one to a visible copy beside its
+// file. The desktop's Notices row offers the same step.
+export interface CliKeptCopiesPort {
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  save(id: number): Promise<KeptCopySaveResult>;
+}
+
 // The Automations panel's run history and Try again, for the automation
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
@@ -235,7 +247,8 @@ export interface CliButtonsPort {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
-  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
+  // `agent` is the agent this socket's write is, or null for the person.
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
@@ -258,6 +271,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
+  // Absent in a shared view, which keeps no copies of its own.
+  keptCopies?: CliKeptCopiesPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -586,6 +601,18 @@ function collectionWriteAuthor(
   return createLocalChangeAuthor(options.localUserDisplayName());
 }
 
+// The agent a dataset invocation through this socket is, as writeActor
+// decides: an agent that names itself, at 0 outside a chain, or any caller
+// during a run an automation started, at its depth. Null for the person.
+function datasetAgent(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): LocalDatasetAgent | null {
+  const depth = options.agentRunDepth(context.workspaceId);
+  return depth > 0 || actor === "agent" ? { depth } : null;
+}
+
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
 // local owner, recorded under the name the agent gave itself or under none,
@@ -603,6 +630,13 @@ function documentEditOrigin(
       onBehalfOf: "local",
       depth: options.agentRunDepth(context.workspaceId),
     },
+  };
+}
+
+function keptCopiesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "kept copies are not available in this workspace",
   };
 }
 
@@ -648,6 +682,7 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
     updatedAtMs: run.updatedAtMs,
     trigger: run.trigger,
     definitionChanged: run.definitionChanged,
+    neverStarted: run.neverStarted,
     chainStopped: run.chainStopped,
     undone: run.undone,
   };
@@ -1960,7 +1995,7 @@ async function dispatch(
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("Collection export requires an explicit savePath.");
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.dataset) throw new CliCommandError("Collections require the owning workspace.");
-      return context.dataset(request.args.request);
+      return context.dataset(request.args.request, datasetAgent(request.args.actor, context, options));
     }
     case "ownerAppResponses": {
       if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.ownerAppResponses)throw new CliCommandError("App responses require the owning workspace.");
@@ -2304,13 +2339,16 @@ async function dispatch(
         const outcome = await collections.writes.createRecord({
           collectionPath: collectionValidated.normalized,
           name: request.args.name,
+          recordId: request.args.recordId,
           fields: request.args.fields,
           author: collectionWriteAuthor(request.args.actor, context, options),
         });
+        if ("kind" in outcome) return { ok: false as const, reason: creationPartialMessage(outcome), partial: outcome };
         return {
           ok: true as const,
           recordId: outcome.recordId,
           recordPath: outcome.path,
+          ...(outcome.kept ? { kept: outcome.kept } : {}),
         };
       } catch (error) {
         return mcpFailure(
@@ -2409,6 +2447,28 @@ async function dispatch(
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
       } catch (error) {
         return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "keptCopies": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await keptCopies.list()) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list kept copies");
+      }
+    }
+
+    case "saveKeptCopy": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        const saved = await keptCopies.save(request.args.id);
+        if (saved.status === "saved") await notifyWrite(options, context);
+        return { ok: true as const, ...saved };
+      } catch (error) {
+        return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
       }
     }
 

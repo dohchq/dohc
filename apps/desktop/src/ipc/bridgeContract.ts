@@ -279,6 +279,8 @@ export const WorkspaceSummary = z.object({
       // live-share action (refresh, dismiss) is addressed by share id, so a
       // marker that cannot name itself cannot be presented as a live share.
       shareId: OPAQUE_ID.optional(),
+      subjectName: z.string().max(320).nullable().optional(),
+      sharerName: z.string().max(320).nullable().optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
       // The pinned level. Absent only when `damaged` says the stored
       // grant could not be read. The banner states the level; it never
@@ -658,6 +660,14 @@ export const QueryCollectionRecordsResult: z.ZodType<CollectionQueryResultContra
     nextCursor: CollectionQueryCursorSchema.nullable(),
   });
 export type QueryCollectionRecordsResult = CollectionQueryResultContract;
+
+export const CreateCollectionRecordPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  name: z.string().min(1).max(200),
+  recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
+}).strict();
+export type CreateCollectionRecordPayload = z.infer<typeof CreateCollectionRecordPayload>;
 
 export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2698,6 +2708,33 @@ export const TryInVersionStateResult = z.object({
 });
 export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile. Each waits in the engine's staging directory until
+// saveKeptCopy moves it to a visible copy. That answer is `saved` with the
+// copy's path, `gone` when nothing is kept under the id any more, or
+// `no-valid-name` when no name beside the file fits, so the copy stays kept.
+export const KeptCopy = z.object({
+  id: z.number().int(),
+  path: z.string().min(1),
+  keptAtMs: z.number().int().nonnegative(),
+});
+export type KeptCopy = z.infer<typeof KeptCopy>;
+export const ListKeptCopiesResult = z.object({
+  keptCopies: z.array(KeptCopy),
+  more: z.boolean(),
+});
+export type ListKeptCopiesResult = z.infer<typeof ListKeptCopiesResult>;
+export const SaveKeptCopyPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  id: z.number().int(),
+});
+export const SaveKeptCopyResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("saved"), path: z.string().min(1) }),
+  z.object({ status: z.literal("gone") }),
+  z.object({ status: z.literal("no-valid-name") }),
+]);
+export type SaveKeptCopyResult = z.infer<typeof SaveKeptCopyResult>;
+
 // A window works only on the versions of the workspace open in it.
 const versionGuard = {
   guard: "active-workspace",
@@ -2733,6 +2770,14 @@ export const workspaceVersionOperations = {
   resolveWorkspaceVersionConflict: {
     channel: "desktop:resolve-workspace-version-conflict",
     payload: ResolveWorkspaceVersionConflictPayload, result: ResolveWorkspaceVersionConflictResult, ...versionGuard,
+  },
+  listKeptCopies: {
+    channel: "desktop:list-kept-copies",
+    payload: WorkspaceIdPayload, result: ListKeptCopiesResult, ...versionGuard,
+  },
+  saveKeptCopy: {
+    channel: "desktop:save-kept-copy",
+    payload: SaveKeptCopyPayload, result: SaveKeptCopyResult, ...versionGuard,
   },
   tryInWorkspaceVersion: {
     channel: "desktop:try-in-workspace-version",
@@ -3243,6 +3288,8 @@ const RelayShareDamagedState = z.object({
 });
 
 const RelayShareGrantedRowBase = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   // The workspace coordinate. This device need not have that workspace in
   // its local registry.
@@ -3269,6 +3316,8 @@ export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 // relay deliberately omits the granter's workspace id; the selector and
 // granter identity are all a recipient ever sees.
 const RelayShareReceivedRowBase = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   granterEmail: EMAIL_STRING.nullable(),
   genericChatWritable: z.boolean(),
@@ -4335,6 +4384,8 @@ export const ChatChannelShareGrantRow = z.object({
 export type ChatChannelShareGrantRow = z.infer<typeof ChatChannelShareGrantRow>;
 
 export const ChatChannelShareReceivedRow = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   channelWireId: CHANNEL_WIRE_ID,
   access: ChatShareAccess,
@@ -4626,7 +4677,7 @@ export const ConfirmCollectionAutomationStepPayload = z.object({
   definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
   step: z.string().min(1).max(512),
   seq: z.number().int().nonnegative(),
-  // A person a formula named, whose hold this is.
+  // A person a formula named, or a Collection a code step named, whose hold this is.
   recipient: z.string().min(1).max(1_024).optional(),
 });
 export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
@@ -5409,8 +5460,11 @@ export const NoticeTargetShape = z.object({
   automation: NOTICE_TARGET_FIELD,
   run: NOTICE_TARGET_FIELD,
 });
+export const RefusalCoordinate = z.object({ originId: z.string(), originSeq: z.number().int() });
+export type RefusalCoordinate = z.infer<typeof RefusalCoordinate>;
 export const NoticeRow = z.object({
   store: NoticeStoreName,
+  refusalCoordinates: z.array(RefusalCoordinate).optional(),
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
   kind: z.string().min(1).max(64),
   // A local row names this computer's workspace. An account row names the
@@ -5421,6 +5475,7 @@ export const NoticeRow = z.object({
   senderLabel: codePoints(1, NOTICE_SENDER_LABEL_MAX_CHARS).nullable(),
   title: codePoints(1, NOTICE_TITLE_MAX_CHARS),
   body: codePoints(0, NOTICE_BODY_MAX_CHARS),
+  detail: z.string().max(262_144).optional(),
   // Null once the person can no longer open what the notice pointed at.
   target: NoticeTargetShape.nullable(),
   createdAtMs: z.number().int().nonnegative(),
@@ -5432,6 +5487,7 @@ export const NoticeRow = z.object({
 export type NoticeRow = z.infer<typeof NoticeRow>;
 export const NoticeRef = z.object({
   store: NoticeStoreName,
+  refusalCoordinates: NoticeRow.shape.refusalCoordinates,
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
 });
 export type NoticeRef = z.infer<typeof NoticeRef>;
@@ -5864,6 +5920,7 @@ export interface DohcDesktopBridge
   listWorkspaceFiles(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListWorkspaceFilesResult>;
+  createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
   createWorkspaceFile(
     payload: CreateWorkspaceFilePayload,
   ): Promise<CreateWorkspaceFileResult>;

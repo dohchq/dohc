@@ -1828,8 +1828,7 @@ fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
         store.get_binary_blob(&hex_sha256(&bytes)).unwrap(),
         Some(bytes.clone())
     );
-    let (refusals, report) =
-        crate::apply::claim_pending_refusals(&mut store, "ws", &NoFaults).unwrap();
+    let refusals = crate::apply::read_pending_refusals(&store, "ws").unwrap();
     assert_eq!(refusals.len(), 1);
     crate::commit_relay_cursor(
         &mut store,
@@ -1839,7 +1838,6 @@ fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
             cursor: 1,
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
-            refusal_report_id: report,
             settlement_report_id: None,
         },
         &NoFaults,
@@ -1856,7 +1854,7 @@ fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
         )?;
         assert_eq!(serde_json::from_str::<Value>(&saved.0).unwrap(), op.payload);
         assert_eq!((saved.1, saved.2, saved.3, saved.4), ("refused".into(), op.recorded_at_ms, 1, 0));
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM replication_pending_refusals", [], |r| r.get::<_,i64>(0))?, 0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM replication_pending_refusals", [], |r| r.get::<_,i64>(0))?, 1);
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM replication_refused_moment_blobs", [], |r| r.get::<_,i64>(0))?, 3);
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM moments WHERE moment_id='refused-moment'", [], |r| r.get::<_,i64>(0))?, 0);
         assert!(conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [hex_sha256(&bytes)]).is_err());

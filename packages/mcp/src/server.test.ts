@@ -176,6 +176,19 @@ describe("parseArgs", () => {
 
 
 describe("MCP tool results", () => {
+  it("marks partial form creation as an error and preserves structured facts", async () => {
+    const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",
+      retry: { mode: "resume", instruction: "Try again with the same form settings and folder." } };
+    const { client } = await connectedToolNames({ root: "/workspace", home: "/home", request: async () => partial });
+    const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    const result = await client.callTool({ name: "dohc_dataset", arguments: { request: {
+      action: "createForm", workspaceId: "workspace", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64),
+      tableId: id(2), createOperationId: id(4), appRoot: "form", fieldIds: [id(3)],
+    } } });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual(partial);
+    expect(result.content).toEqual([{ type: "text", text: JSON.stringify(partial, null, 2) }]);
+  });
   it("omits tools that cannot perform the advertised action", async () => {
     const { names } = await connectedToolNames({ root: "/workspace", home: "/home" });
     for (const name of ["build_app", "preview_app", "publish_app", "share", "open_in_dohc", "resolve_conflict"]) {

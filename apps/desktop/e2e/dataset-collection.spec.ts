@@ -53,7 +53,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected one Collection.");
     const dataset = listed.datasets[0]!;
     const table = dataset.tables[0]!;
-    const path = `dohc://data-collection/${dataset.datasetId}/${table.tableId}`;
+    const path = `dohc://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
     await page.getByTestId(`tab-${path}`).click();
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Synthetic participant");
@@ -64,7 +64,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     await collection.getByRole("button", { name: "Undo last edit" }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Synthetic participant");
     const operationId = dataset.operations.find(operation => operation.kind === "read")!.operationId;
-    const request = { action: "invoke" as const, workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256,
+    const request = { action: "invoke" as const, workspaceId, datasetPath: dataset.datasetPath!, revision: dataset.revision, revisionSha256: dataset.revisionSha256,
       operationId, input: { limit: 50 }, idempotencyKey: "agent-read" };
     const read = await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "dataset", args: { cwd: workspace.rootPath, actor: "agent", request } }, { stateDir: workspace.homeDir });
     expect(JSON.stringify(read)).toContain("Synthetic participant");
@@ -186,7 +186,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     if (listed.kind !== "list" || !listed.datasets[0]) throw Error("Expected the restored Collection.");
     const savePath = join(workspace.rootPath, "equipment.dohc-recovery");
     const result = await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "dataset", args: { cwd: workspace.rootPath, actor: "agent",
-      request: { action: "export", workspaceId, datasetId: listed.datasets[0].datasetId, savePath } } }, { stateDir: workspace.homeDir });
+      request: { action: "export", workspaceId, datasetPath: listed.datasets[0].datasetPath!, savePath } } }, { stateDir: workspace.homeDir });
     expect(result).toMatchObject({ kind: "exported", savedPath: savePath });
     expect((await readFile(savePath)).byteLength).toBeGreaterThan(4096);
     await openManagement(collection);

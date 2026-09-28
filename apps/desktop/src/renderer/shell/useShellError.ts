@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
+
+// A file dohc kept while it saved, as its Notices row reads, and the step
+// that moves it to a visible copy.
+export interface KeptCopyNotice {
+  id: number;
+  message: string;
+  save: () => void;
+}
 
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
@@ -12,8 +21,11 @@ export type ShellErrorKind =
   | "tab-limit"
   | "workspace-search"
   | "cloud-sync"
+  | "sync-refusal"
   | "import-files"
   | "share-refresh"
+  | "kept-copies-summary"
+  | "kept-copies-more"
   | "drive-no-atomic-placement"
   | "file-recovery-unavailable"
   | "kept-files"
@@ -42,6 +54,9 @@ export interface ShellError {
   action?: { label: string; run: () => void; ends?: boolean };
   onDismiss?: () => void;
   kind?: ShellErrorKind;
+  // A kept copy's row: it stays while the engine lists that copy.
+  keptCopyId?: number;
+  creationIdentity?: string;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
@@ -52,6 +67,10 @@ export function useShellError(workspaceId: string) {
   const shellErrorsRef = useRef(shellErrors);
   shellErrorsRef.current = shellErrors;
   const nextId = useRef(0);
+  // Kept copies already shown in this workspace. A row the person dismissed
+  // stays dismissed until the workspace opens again.
+  const shownKeptCopies = useRef(new Set<number>());
+  const shownKeptCopiesMore = useRef(false);
 
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
@@ -67,10 +86,11 @@ export function useShellError(workspaceId: string) {
           ? `${error.message.slice(0, SHELL_ERROR_MAX_CHARS - 1)}…`
           : error.message;
       setShellErrors((current) => {
-        const replaced =
-          error.kind === undefined
-            ? undefined
-            : current.find((existing) => existing.kind === error.kind);
+        const matches = (existing: ShellError) =>
+          error.creationIdentity !== undefined || existing.creationIdentity !== undefined
+            ? error.creationIdentity === existing.creationIdentity
+            : existing.message === message || (error.kind !== undefined && existing.kind === error.kind);
+        const replaced = current.find(matches);
         const next: ShellError = {
           ...error,
           message,
@@ -79,11 +99,7 @@ export function useShellError(workspaceId: string) {
           seen: seen === "keep" ? (replaced?.seen ?? true) : seen,
         };
         return [
-          ...current.filter(
-            (existing) =>
-              existing.message !== next.message &&
-              (next.kind === undefined || existing.kind !== next.kind),
-          ),
+          ...current.filter((existing) => !matches(existing)),
           next,
         ];
       });
@@ -127,6 +143,8 @@ export function useShellError(workspaceId: string) {
 
   useEffect(() => {
     setShellErrors([]);
+    shownKeptCopies.current = new Set();
+    shownKeptCopiesMore.current = false;
   }, [workspaceId]);
 
   const reportShellError = useCallback(
@@ -137,9 +155,20 @@ export function useShellError(workspaceId: string) {
       kind?: ShellErrorKind,
     ) => {
       const { cause } = readError(error);
+      const partial = error instanceof CreationPartialError ? error.partial : undefined;
+      const details: ReadonlyArray<ErrorDetailField> = partial ? [
+        ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
+        ["Stage", partial.failedStage],
+        ["Record ID", partial.retry.recordId],
+        ["Reason", partial.reason, partial.reason.length],
+        ["Next", partial.retry.instruction, partial.retry.instruction.length],
+      ] : cause ? [["Cause", cause]] : [];
       push({
-        message: withErrorWords(fallback, error),
-        ...(cause ? { details: [["Cause", cause]] } : {}),
+        message: partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
+        ...(partial ? { creationIdentity: partial.retry.recordId
+          ? `record:${partial.retry.recordId}`
+          : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : {}),
+        ...(details.length ? { details } : {}),
         retry,
         ...(kind ? { kind } : {}),
       });
@@ -204,6 +233,16 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
+  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void) => {
+    setShellErrors(current => [
+      ...current.filter(error => error.kind !== "sync-refusal"),
+      ...notices.map(notice => {
+        const prior = current.find(error => error.id === notice.noticeId);
+        return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
+          details: [["Detail", notice.detail ?? notice.body]] as const, atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null, retry };
+      }),
+    ]);
+  }, []);
   // A drive limit: one row that a remount files again without a toast.
   const reportDriveLimit = useCallback(
     (notice: { message: string; toast: boolean }) =>
@@ -331,6 +370,67 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
+  // One row per kept copy the engine lists. A copy listed for the first time
+  // arrives as a toast; several at once arrive as one summary toast instead.
+  // A copy no longer listed, because it was saved, loses its row. `more`
+  // says the engine kept copies past its list, and holds one row of its own.
+  const showKeptCopies = useCallback((copies: readonly KeptCopyNotice[], more: boolean) => {
+    const listed = new Set(copies.map((copy) => copy.id));
+    const atMs = Date.now();
+    const row = (fields: Omit<ShellError, "id" | "atMs">): ShellError => {
+      nextId.current += 1;
+      return { ...fields, id: `shell-error-${nextId.current}`, atMs };
+    };
+    const arrived = copies.filter((copy) => !shownKeptCopies.current.has(copy.id));
+    for (const copy of arrived) shownKeptCopies.current.add(copy.id);
+    const summarized = arrived.length > 1;
+    const fresh: ShellError[] = arrived.map((copy) => row({
+      message: copy.message,
+      retry: null,
+      action: { label: "Save copy", run: copy.save },
+      keptCopyId: copy.id,
+      seen: summarized,
+    }));
+    if (summarized) {
+      fresh.push(row({
+        message: `dohc kept ${arrived.length} copies of files other programs changed.`,
+        retry: null,
+        kind: "kept-copies-summary",
+        seen: false,
+      }));
+    }
+    const addMore = more && !shownKeptCopiesMore.current;
+    shownKeptCopiesMore.current = more;
+    const moreRow = row({
+      message: "dohc kept more copies than Notices can list. Save these copies to see the rest.",
+      retry: null,
+      kind: "kept-copies-more",
+      seen: true,
+    });
+    setShellErrors((current) => {
+      const added = addMore ? [...fresh, moreRow] : fresh;
+      const stays = current.filter((error) =>
+        (error.keptCopyId === undefined || listed.has(error.keptCopyId)) &&
+        (error.kind !== "kept-copies-more" || more) &&
+        (error.kind !== "kept-copies-summary" || (copies.length > 0 && !summarized)));
+      return added.length === 0 && stays.length === current.length
+        ? current
+        : [...stays, ...added];
+    });
+  }, []);
+  // What a Save copy did: a saved copy's row opens the copy, and a copy
+  // that was already gone says so.
+  const showKeptCopySaved = useCallback(
+    (message: string, open: (() => void) | null) => {
+      push({
+        message,
+        retry: null,
+        tone: "success",
+        ...(open ? { action: { label: "Open", run: open, ends: true } } : {}),
+      });
+    },
+    [push],
+  );
   // The toast closes; the row in Notices stays.
   const hideShellError = useCallback((id: string) => {
     setShellErrors((current) =>
@@ -346,7 +446,9 @@ export function useShellError(workspaceId: string) {
     // Clearing first is what shows the control took: the read is on its
     // way, and a failure that is being retried is no longer the newest
     // thing this surface knows. The retry runs once, outside the updater.
-    setShellErrors((current) => current.filter((error) => error.id !== id));
+    setShellErrors(current => target?.kind === "sync-refusal"
+      ? current
+      : current.filter(error => error.id !== id));
     target?.retry?.();
   }, []);
 
@@ -359,6 +461,7 @@ export function useShellError(workspaceId: string) {
     reportSearchError,
     clearSearchError,
     reportSyncFailure,
+    showSyncRefusals,
     clearSyncFailure,
     reportDriveLimit,
     reportKeptFiles,
@@ -370,6 +473,8 @@ export function useShellError(workspaceId: string) {
     showSettingsFileNotice,
     showDirectWriteNotice,
     showSuccessNotice,
+    showKeptCopies,
+    showKeptCopySaved,
     hideShellError,
     dismissShellError,
     retryShellError,

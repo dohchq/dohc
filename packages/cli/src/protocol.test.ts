@@ -233,8 +233,9 @@ describe("collection result schemas", () => {
         ok: true,
         recordId: "rec_abcdefghijklmnopqrstuvwxyz",
         recordPath: "tasks/b.md",
+        kept: { status: "done", priority: null },
       }),
-    ).toMatchObject({ ok: true });
+    ).toMatchObject({ ok: true, kept: { status: "done", priority: null } });
     expect(
       parseCliResult("collectionSetFields", { ok: false, reason: "refused" }),
     ).toEqual({ ok: false, reason: "refused" });

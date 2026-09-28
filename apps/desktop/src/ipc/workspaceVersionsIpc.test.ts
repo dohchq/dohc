@@ -29,6 +29,7 @@ const conflict: VersionedTextConflictRecord = {
 };
 const conflictPage = { conflicts: [conflict], nextAfterConflictId: "next-conflict" };
 const tryResult = { versionId, versionName: "Draft", runId: "run" };
+const keptCopy = { id: 7, path: "notes.md", keptAtMs: 5 };
 
 const captureRequests = [
   [ops.listWorkspaceVersions.channel, { workspaceId }],
@@ -39,6 +40,8 @@ const captureRequests = [
   [ops.listWorkspaceVersionConflicts.channel, { workspaceId }],
   [ops.resolveWorkspaceVersionConflict.channel, { workspaceId, conflictId: "conflict", resolution: { kind: "keep-current" } }],
   [ops.tryInWorkspaceVersion.channel, { workspaceId, task: "Try this" }],
+  [ops.listKeptCopies.channel, { workspaceId }],
+  [ops.saveKeptCopy.channel, { workspaceId, id: 7 }],
 ] as const;
 const allRequests = [
   ...captureRequests,
@@ -46,7 +49,7 @@ const allRequests = [
   [ops.dismissTryInVersionReview.channel, { workspaceId }],
 ] as const;
 
-function harness() {
+function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
   const handlers = new Map<string, (event: Event, payload: unknown) => Promise<unknown>>();
   const steps: string[] = [];
   const operations = {
@@ -57,6 +60,8 @@ function harness() {
     mergeVersionIntoMain: vi.fn<Operations["mergeVersionIntoMain"]>(async () => { steps.push("merge"); return { mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1 }; }),
     listOpenConflictsPage: vi.fn<Operations["listOpenConflictsPage"]>(async () => { steps.push("conflicts"); return conflictPage; }),
     resolveConflict: vi.fn<Operations["resolveConflict"]>(async () => { steps.push("resolve"); return { conflict, remaining: conflictPage }; }),
+    listKeptCopies: vi.fn<Operations["listKeptCopies"]>(async () => { steps.push("kept"); return { keptCopies: [keptCopy], more: false }; }),
+    saveKeptCopy: vi.fn<Operations["saveKeptCopy"]>(async () => { steps.push("save kept"); return { status: "saved", path: "notes (kept copy).md" }; }),
   };
   const requireEngineCapture = vi.fn<Dependencies["requireEngineCapture"]>(async () => {
     steps.push("capture");
@@ -85,6 +90,7 @@ function harness() {
     ops,
     workspaceVersionHandlers({
       requireEngineCapture, notifyRenderer,
+      onRefusalsChanged,
       activity: { queueCloudSync }, tryInVersionSessions: sessions, desktopMarks,
     }),
   );
@@ -154,6 +160,20 @@ describe("registered workspace version handlers", () => {
     expect(h.queueCloudSync).not.toHaveBeenCalled();
   });
 
+  it("lists kept copies and saves one, repainting only when a copy was saved", async () => {
+    const h = harness();
+    await expect(h.invoke(ops.listKeptCopies.channel, { workspaceId })).resolves.toEqual({ keptCopies: [keptCopy], more: false });
+    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 })).resolves.toEqual({ status: "saved", path: "notes (kept copy).md" });
+    expect(h.operations.saveKeptCopy).toHaveBeenCalledExactlyOnceWith(7);
+    expect(h.steps).toEqual(["capture", "kept", "capture", "save kept", "notify"]);
+    h.operations.saveKeptCopy.mockResolvedValue({ status: "gone" });
+    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 })).resolves.toEqual({ status: "gone" });
+    h.operations.saveKeptCopy.mockResolvedValue({ status: "no-valid-name" });
+    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 }))
+      .resolves.toEqual({ status: "no-valid-name" });
+    expect(h.notifyRenderer).toHaveBeenCalledOnce();
+  });
+
   it("switches through the capture owner and returns its changed-file count", async () => {
     const h = harness();
     await expect(h.invoke(ops.switchWorkspaceVersion.channel, { workspaceId, versionId })).resolves.toEqual({ activeVersionId: versionId, changedFileCount: 2 });
@@ -215,6 +235,15 @@ describe("registered workspace version handlers", () => {
     await expect(h.invoke(ops.resolveWorkspaceVersionConflict.channel, { workspaceId, conflictId: "conflict", resolution: { kind: "keep-current" } })).rejects.toBe(refusal);
     expect(h.notifyRenderer).not.toHaveBeenCalled();
     expect(h.queueCloudSync).not.toHaveBeenCalled();
+  });
+
+  it("refreshes engine Notices after a committed resolution", async () => {
+    const changed = vi.fn();
+    const h = harness(changed);
+    await expect(h.invoke(ops.resolveWorkspaceVersionConflict.channel, { workspaceId, conflictId: "conflict", resolution: { kind: "keep-current" } })).resolves.toMatchObject({ nextAfterConflictId: "next-conflict" });
+    expect(h.queueCloudSync).toHaveBeenCalledExactlyOnceWith(workspaceId);
+    expect(h.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId });
+    expect(changed).toHaveBeenCalledOnce();
   });
 
   it("keeps result parsing after the completed mutation and notification", async () => {

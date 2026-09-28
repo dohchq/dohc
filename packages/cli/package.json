@@ -7,6 +7,7 @@
     "dohc": "./bin/dohc.js"
   },
   "exports": {
+    "./creation": "./src/creation.ts",
     "./dataset": "./src/dataset.ts",
     "./app-responses": "./src/appResponses.ts",
     "./app-publication": "./src/appPublication.ts",

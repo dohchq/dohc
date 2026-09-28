@@ -208,7 +208,8 @@ export function reachPlaces(steps: readonly AutomationStep[], first = 0): number
   let next = first;
   const walk = (list: readonly AutomationStep[], into: number[]) => {
     for (const step of list) {
-      if (step.kind === "set" || step.kind === "add-record" || step.kind === "find" || step.kind === "post" || step.kind === "wake-agent") into.push(next++);
+      if (step.kind === "set" || step.kind === "add-record" || step.kind === "find" || step.kind === "post" || step.kind === "wake-agent" ||
+        step.kind === "run" || step.kind === "run-file") into.push(next++);
       if (step.kind === "direct-message" || step.kind === "notify") {
         for (const person of step.to) {
           if (person.kind === "literal" && typeof person.value === "string") into.push(next++);

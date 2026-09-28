@@ -110,6 +110,17 @@ pub fn apply_replication_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
+    apply_replication_envelope_in_batch(store, cache, envelope, faults, leases, false)
+}
+
+pub(crate) fn apply_replication_envelope_in_batch(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
+    batch_inactive: bool,
+) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     if envelope
         .origin_id
         .starts_with(crate::moment_apply::COLLECTION_FILE_ORIGIN_PREFIX)
@@ -167,7 +178,14 @@ pub fn apply_replication_envelope(
             },
         ),
         OwnedRoute::Ydoc => map_applied(
-            crate::apply_ydoc_envelope(store, cache, envelope, faults, leases),
+            crate::ydoc_apply::apply_ydoc_envelope_in_batch(
+                store,
+                cache,
+                envelope,
+                faults,
+                leases,
+                batch_inactive,
+            ),
             |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,
                 record_facts: ydoc.record_facts,

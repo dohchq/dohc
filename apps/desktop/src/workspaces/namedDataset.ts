@@ -1,8 +1,8 @@
-import { createRemoteDatasetData, type OwnerDatasetData } from "./remoteDataset";
+import { createRemoteDatasetData, DatasetCatalogPage, type OwnerDatasetData } from "./remoteDataset";
 import { recordedShareSelector } from "./shareViewRecords";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { readDatasetResponse } from "../ipc/readDatasetResponse";
-import { DatasetInvocationResult, DatasetResult } from "@dohc/cli/dataset";
+import { DatasetInvocationResult } from "@dohc/cli/dataset";
 import { parseDatasetDescription } from "@dohc/security-contract/dataset";
 import type { NamedDatasetPageCache } from "./namedDatasetCache";
 import { NamedDatasetOfflineError } from "./namedDatasetTransport";
@@ -75,8 +75,7 @@ export function createNamedDatasetData(input: {
   return {
     async list(page) {
       const result = await request(["list", page], remote => remote.list(page), value => {
-        const result = DatasetResult.parse({ ...(value as object), kind: "list" });
-        if (result.kind !== "list") throw Error("The saved Collection list is damaged. Reconnect and refresh it.");
+        const result = DatasetCatalogPage.parse(value);
         return { datasets: result.datasets, nextCursor: result.nextCursor };
       }, true);
       return result.value;

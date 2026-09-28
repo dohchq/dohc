@@ -84,6 +84,7 @@ It starts a dedicated Postgres container when selected tests or proofs need one.
 Selected integration suites must run; unavailable prerequisites cause failure rather than a silent skip.
 The native self-host editing proof checks the prepared engine and its complete delivery evidence when selected.
 The Rust gate uses the repository build budget and checks its summary verdict.
+On the shared Windows host, one PR verification runs at a time. A later run waits for the first to finish.
 The runner removes its Postgres container by the recorded container ID.
 
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
@@ -103,7 +104,7 @@ After review fixes or integration changes, rerun affected checks and record why 
 Keep each receipt's tested commit and target unchanged; document reuse in the PR.
 Use the report's `steps[].seconds` when recording verification delays.
 Use its top-level `seconds` for the complete run, including preparation and cleanup.
-The `timings` rows record source checks, preparation, and database setup and cleanup, including failed phases.
+The `timings` rows record the queue wait, source checks, preparation, and database setup and cleanup, including failed phases.
 Rows can overlap during failed startup cleanup. Do not add them to estimate elapsed time.
 
 `pnpm test` builds the SDK and app runtime before testing packages.

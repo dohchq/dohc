@@ -63,6 +63,43 @@ function deferred<T>() {
   return Promise.withResolvers<T>();
 }
 
+it("runs only on an existing current binding and never reconnects", async () => {
+  const workspace = await tempWorkspace();
+  const first = new MockClient("first");
+  const second = new MockClient("second");
+  let client = first;
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+  const operation = vi.fn(async binding => binding.workspace);
+  expect(await sessions.runIfOpen(workspace, operation)).toBeNull();
+  expect(first.requests).toEqual([]);
+  await sessions.run(workspace, async () => undefined);
+  expect(await sessions.runIfOpen(workspace, operation)).toBe("first");
+  await expect(sessions.runIfOpen(workspace, async () => { throw transportFailure(); })).rejects.toThrow();
+  expect(first.requests.filter(request => request.method === "workspace.open")).toHaveLength(1);
+  client = second;
+  expect(await sessions.runIfOpen(workspace, operation)).toBeNull();
+  expect(second.requests).toEqual([]);
+  await sessions.closeAll();
+});
+
+it("drains an existing-binding operation before close and refuses new work while closing", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("open");
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+  await sessions.run(workspace, async () => undefined);
+  const pending = deferred<void>();
+  const reading = sessions.runIfOpen(workspace, () => pending.promise);
+  const closing = sessions.closeWorkspace(workspace);
+  expect(await sessions.runIfOpen(workspace, async () => "unexpected")).toBeNull();
+  expect(client.requests.map(request => request.method)).toEqual(["workspace.open"]);
+  pending.resolve();
+  await reading;
+  await closing;
+  expect(client.requests.map(request => request.method)).toEqual(["workspace.open", "workspace.close"]);
+  expect(await sessions.runIfOpen(workspace, async () => "unexpected")).toBeNull();
+  await sessions.closeAll();
+});
+
 class MockClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
   private readonly eventHandlers = new Set<(event: Event) => void>();

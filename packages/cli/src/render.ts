@@ -172,7 +172,7 @@ function triggerText(trigger: AutomationRunLine["trigger"]): string {
 
 function runStateText(run: Omit<AutomationRunLine, "changes">): string {
   return [
-    run.chainStopped ? "chain stopped" : run.state,
+    run.chainStopped ? "chain stopped" : run.neverStarted ? "never started" : run.state,
     ...(run.undone ? ["undone"] : []),
     ...(run.definitionChanged ? ["automation changed since"] : []),
   ].join(", ");

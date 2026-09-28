@@ -3,6 +3,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { CreationPartial } from "./creation";
 import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
@@ -140,6 +141,11 @@ const documentReadArgsSchema = z
 // after a timeout for example, the request returns its first result while
 // dohc runs instead of doing its work twice.
 export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
+
+const keptCopiesArgsSchema = z.object(argsBase).strict();
+const saveKeptCopyArgsSchema = z
+  .object({ ...argsBase, id: z.number().int() })
+  .strict();
 
 const documentEditArgsSchema = z
   .object({
@@ -293,6 +299,7 @@ const collectionCreateRecordArgsSchema = z
         { message: "a record name is one file name, not a path" },
       ),
     fields: collectionCreateFieldsSchema,
+    recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
   })
   .strict();
 
@@ -372,6 +379,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     args: collectionCreateRecordArgsSchema,
   }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -837,9 +846,10 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
       ok: z.literal(true),
       recordId: z.string().min(1),
       recordPath: z.string().min(1),
+      kept: z.record(z.string(), z.json()).optional(),
     })
     .strict(),
-  rawFailureSchema,
+  rawFailureSchema.extend({ partial: CreationPartial.optional() }),
 ]);
 
 const documentReadResultSchema = z.discriminatedUnion("ok", [
@@ -864,6 +874,31 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
       warning: z.string().min(1).optional(),
     })
     .strict(),
+  rawFailureSchema,
+]);
+
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
+// visible copy beside its file.
+const keptCopiesResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    keptCopies: z.array(z.object({
+      id: z.number().int(),
+      path: z.string().min(1),
+      keptAtMs: z.number().int().nonnegative(),
+    }).strict()),
+    more: z.boolean(),
+  }).strict(),
+  rawFailureSchema,
+]);
+// `saved` with the copy's path; `gone` when nothing is kept under that id any
+// more; `no-valid-name` when no name beside the file fits dohc's path limits,
+// so the copy stays kept.
+const saveKeptCopyResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("saved"), path: z.string().min(1) }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("gone") }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("no-valid-name") }).strict(),
   rawFailureSchema,
 ]);
 
@@ -941,6 +976,9 @@ const automationRunFields = {
   trigger: automationTriggerSchema,
   // The run began under another version of the automation.
   definitionChanged: z.boolean(),
+  // It failed before it started, as a chain stop or a change too large to
+  // start automations for, so it cannot run again.
+  neverStarted: z.boolean(),
   // The chain depth cap stopped it before it ran.
   chainStopped: z.boolean(),
   undone: z.boolean(),
@@ -1053,6 +1091,8 @@ export const cliResultSchemas = {
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
+  keptCopies: keptCopiesResultSchema,
+  saveKeptCopy: saveKeptCopyResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

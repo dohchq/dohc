@@ -10,8 +10,8 @@ import { SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 
 // One automation's runs on this computer, newest first (claims are local,
-// so run history is too). A failed run offers Try again unless the chain
-// cap stopped it, and a run that changed records offers Undo.
+// so run history is too). A failed run offers Try again unless it failed
+// before it started, and a run that changed records offers Undo.
 
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
 type RunWrite = Run["writes"][number];
@@ -111,7 +111,7 @@ function RunRow(props: {
 }) {
   const { run } = props;
   const [open, setOpen] = useState(false);
-  const canRetry = run.state === "failed" && !run.chainStopped && !run.undone;
+  const canRetry = run.state === "failed" && !run.neverStarted && !run.undone;
   const canUndo = (run.state === "done" || run.state === "failed") && !run.undone &&
     run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit" ||
       (write.kind === "dataset-action" && write.undo !== undefined));

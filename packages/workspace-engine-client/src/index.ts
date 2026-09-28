@@ -68,7 +68,7 @@ export {
   type KeyEnvelopeUploadResult,
 } from "./relay/keyEnvelopeWireContract";
 
-export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeAutomationGroupHandover, decodeCollectionValue, decodeWorkspaceResult, encodeCollectionValue, type AutomationChangeKind, type AutomationClaim, type AutomationClaimMessage, type AutomationClaimSummary, type AutomationGroupHandover, type AutomationGroupRelayRecord, type AutomationPressActor, type AutomationReleaseGroupsResult, type AutomationWatchGroupsParams, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type SearchQueryPageParams, type SearchResult, type WatcherStatusResult } from "./workspace/workspaceWireContract";
+export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeAutomationGroupHandover, decodeCollectionValue, decodeWorkspaceResult, encodeCollectionValue, type AutomationChangeKind, type AutomationClaim, type AutomationClaimMessage, type AutomationClaimSummary, type AutomationGroupHandover, type AutomationGroupRelayRecord, type AutomationPressActor, type AutomationReleaseGroupsResult, type AutomationWatchGroupsParams, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type KeptCopy, type KeptCopySaveResult, type SearchQueryPageParams, type SearchResult, type WatcherStatusResult } from "./workspace/workspaceWireContract";
 
 export {
   OwnerYDocOutbox,
