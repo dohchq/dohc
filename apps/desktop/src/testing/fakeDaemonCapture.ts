@@ -310,6 +310,17 @@ export function createFakeDaemonCapture(input: {
           await ingest(await activeVersionId());
           return { id: request.id, result: { settled: true, running: true, degraded: false } };
         }
+        case VERSIONED_METHOD.textDelete: {
+          // Like the engine, confirm the caller's absence against the disk.
+          if (params.onlyIfAbsentOnDisk === true) {
+            const present = await lstat(join(rootPath, String(params.path))).then(
+              () => true,
+              () => false,
+            );
+            if (present) throw new Error("retryable state: path-present-on-disk");
+          }
+          return null;
+        }
         case VERSIONED_METHOD.versionsSetActive: {
           const from = await activeVersionId();
           const to = String(params.versionId);

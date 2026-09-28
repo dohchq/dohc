@@ -837,7 +837,14 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
     ) -> Result<(), CaptureError> {
-        self.retire_head_with(path, only_if_text_head, summary, true)
+        self.retire_head_with(path, only_if_text_head, summary, true, false)
+    }
+
+    /// Retire a head because its file is gone. The actor confirms the absence
+    /// on its own thread and refuses while the file is back, so a replace
+    /// caught between its two renames is never recorded as a delete.
+    fn retire_absent_head(&self, path: &str, summary: Option<String>) -> Result<(), CaptureError> {
+        self.retire_head_with(path, false, summary, true, true)
     }
 
     fn retire_head_with(
@@ -846,6 +853,7 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
         allow_ydoc_origin: bool,
+        confirm_absent: bool,
     ) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
         match self.actor.capture_retire_materialized_blocking_guarded(
@@ -862,6 +870,7 @@ impl StoreCaptureSink {
                 allow_ydoc_origin,
             },
             self.shadow_root.clone(),
+            confirm_absent,
             Arc::new(self.self_writes.clone()),
             self.leases.clone(),
             Arc::new(NoFaults),
@@ -1354,13 +1363,15 @@ impl CaptureSink for StoreCaptureSink {
                 }
             }
             CurrentContent::Absent => {
+                // Raced a delete between scan and re-read: retire like an
+                // ordinary delete (pass provenance; no ownership label), and
+                // report NotOwned so the manifest forgets the path. A refused
+                // retire keeps the self-write identity: the file is back, and
+                // the rescan may find dohc's own bytes.
+                self.retire_absent_head(path, self.provenance.summary.clone())?;
                 if changed {
                     self.self_writes.clear_path(&self.workspace_id, path);
                 }
-                // Raced a delete between scan and re-read: retire like an
-                // ordinary delete (pass provenance; no ownership label), and
-                // report NotOwned so the manifest forgets the path.
-                self.retire_head(path, false, self.provenance.summary.clone())?;
                 Ok(IngestOutcome::NotOwned)
             }
             CurrentContent::NonOwnable => {
@@ -1393,6 +1404,7 @@ impl CaptureSink for StoreCaptureSink {
                     path,
                     false,
                     Some("Stopped tracking non-text content".to_owned()),
+                    false,
                     false,
                 )?;
                 Ok(IngestOutcome::NotOwned)
@@ -1457,7 +1469,7 @@ impl CaptureSink for StoreCaptureSink {
                 match self.path_containment(path) {
                     Containment::Contained => {}
                     Containment::Absent => {
-                        return self.retire_head(path, false, self.provenance.summary.clone());
+                        return self.retire_absent_head(path, self.provenance.summary.clone());
                     }
                     Containment::Escaped => return Err(ESCAPES_ROOT),
                 }
@@ -1467,7 +1479,7 @@ impl CaptureSink for StoreCaptureSink {
                     // file gone; absence confirms it outright.
                     Ok(_) => self.retire_head(path, false, self.provenance.summary.clone()),
                     Err(err) if absent_error(&err) => {
-                        self.retire_head(path, false, self.provenance.summary.clone())
+                        self.retire_absent_head(path, self.provenance.summary.clone())
                     }
                     // Indeterminate (permissions, locks): cannot prove
                     // absence — retain last-known-good, fail-safe.

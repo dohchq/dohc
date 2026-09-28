@@ -1013,6 +1013,7 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     expectedObjectId?: string;
+    onlyIfAbsentOnDisk?: boolean;
     requestId?: string;
     metadata: AdapterWriteMetadata;
     author?: WriteAuthor | null;
@@ -1032,6 +1033,7 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         ...(input.expectedObjectId !== undefined ? { expectedObjectId: input.expectedObjectId } : {}),
+        ...(input.onlyIfAbsentOnDisk ? { onlyIfAbsentOnDisk: true } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined
           ? { summary: input.metadata.summary }

@@ -361,6 +361,11 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
+  recoveryCopies: z.boolean().optional(),
+});
+export type RevealWorkspaceFolderPayload = z.infer<typeof RevealWorkspaceFolderPayload>;
+
 // Who asked for a sync pass now. A person's retry counts toward the attempts
 // a failure's notice weighs; a retry on reconnecting or waking does not.
 export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
@@ -1241,6 +1246,13 @@ const SYNC_STATUS_BASE_FIELDS = {
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
   historyShareView: z.boolean(),
+  // True when the workspace's drive cannot refuse to replace a file (FAT,
+  // exFAT, some network shares), so a save can lose another program's change
+  // made at the same moment. Optional, unlike its neighbours: an omitted
+  // warning reads as "no warning", which is the safe reading.
+  atomicPlacementUnavailable: z.boolean().optional(),
+  recoveryUnavailable: z.boolean().optional(),
+  keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
@@ -5775,7 +5787,7 @@ export interface DohcDesktopBridge
     payload: AttachWorkspaceFolderPayload,
   ): Promise<WorkspaceSummary>;
   forgetWorkspace(payload: WorkspaceIdPayload): Promise<void>;
-  revealWorkspaceFolder(payload: WorkspaceIdPayload): Promise<void>;
+  revealWorkspaceFolder(payload: RevealWorkspaceFolderPayload): Promise<void>;
   // Opens (or focuses) a window for the workspace and leaves this window as
   // it is. The manager window closes itself after.
   openWorkspaceWindow(payload: WorkspaceIdPayload): Promise<void>;
@@ -6099,6 +6111,7 @@ export interface DohcDesktopBridge
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
+  retryFileRecovery(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.
   retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(

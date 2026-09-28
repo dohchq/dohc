@@ -27,7 +27,13 @@ const info: ShareViewInfo = {
   selector: { paths: ["docs"], versionId: null, access: "edit" }, createdAtMs: 1,
 };
 const outcome = { ok: true as const, status: "updated" as const, changedPaths: 2, excludedPaths: [], unjournalablePaths: [], collisionRecordQuarantined: false, refusedOps: 1, refusedDetail: "refused path" };
-const ready: WatcherStatusResult = { phase: "ready", terminal: false, running: true, degraded: false };
+const ready: WatcherStatusResult = {
+  phase: "ready",
+  terminal: false,
+  running: true,
+  degraded: false,
+  noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+};
 
 async function harness() {
   const steps: string[] = [];

@@ -132,6 +132,7 @@ type VersionedTextDeleteParams = MutationMetadata & {
   versionId: string;
   path: string;
   expectedObjectId?: string;
+  onlyIfAbsentOnDisk?: boolean;
 };
 
 type VersionedTextRollbackParams = Omit<MutationMetadata, "nowMs"> & {

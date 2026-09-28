@@ -126,6 +126,7 @@ const REQUIRED_TABLES: &[&str] = &[
     // R04 durability tables.
     "binary_blobs",
     "materialization_jobs",
+    "materialization_displacements",
     // R08 secret-backed-file tables.
     "secret_files",
     "secret_fork_bases",

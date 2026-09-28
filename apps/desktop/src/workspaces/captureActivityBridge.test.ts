@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Event } from "@dohc/workspace-engine-client";
 import {
   CAPTURE_MOMENT_RECORDED_EVENT,
+  CAPTURE_NO_ATOMIC_PLACEMENT_EVENT,
   bridgeCaptureEventsToRenderer,
+  bridgeNoAtomicPlacement,
   onWorkspaceCaptureSettled,
 } from "./captureActivityBridge";
 
@@ -184,6 +186,20 @@ describe("onWorkspaceCaptureSettled", () => {
 
     expect(seen).toEqual([["tasks/two.md"], null, null]);
     unsubscribe();
+    expect(handlerCount()).toBe(0);
+  });
+});
+
+describe("bridgeNoAtomicPlacement", () => {
+  it("names the workspace the engine reports, and ignores anything else", () => {
+    const { daemon, emit, handlerCount } = fakeDaemon();
+    const noted: string[] = [];
+    const dispose = bridgeNoAtomicPlacement(daemon, (workspaceId) => noted.push(workspaceId));
+    emit(captureEvent(CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, { workspaceId: "ws-usb" }));
+    emit(captureEvent(CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, null));
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, { workspaceId: "ws-other" }));
+    expect(noted).toEqual(["ws-usb"]);
+    dispose();
     expect(handlerCount()).toBe(0);
   });
 });
