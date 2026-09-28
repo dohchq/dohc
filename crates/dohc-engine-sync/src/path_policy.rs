@@ -41,7 +41,7 @@ pub fn classify_share_path(path: &str) -> PathClass {
         return PathClass::Unsafe;
     }
     if segments.iter().any(|segment| {
-        dohc_engine_files::floor::segment_is_ignored(&dohc_engine_files::floor::collision_key(
+        dohc_engine_files::floor::segment_is_ignored(&dohc_engine_files::floor::reserved_key(
             segment,
         ))
     }) {

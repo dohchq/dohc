@@ -41,7 +41,7 @@ describe("Collection references", () => {
 });
 
 describe("Collection data requests", () => {
-  it.each([".dohc", ".DOHC", ".Dohc", ".ＤＯＨＣ", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"])("refuses reserved Collection path %s", (name) => {
+  it.each([".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"])("refuses reserved Collection path %s", (name) => {
     expect(() => parseCollectionRef({ kind: "document", path: `notes/${name}/data` })).toThrow();
     expect(parseCollectionRef({ kind: "document", path: "my-dohc/data" })).toEqual({ kind: "document", path: "my-dohc/data" });
   });

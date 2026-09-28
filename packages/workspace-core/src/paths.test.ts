@@ -196,7 +196,7 @@ describe("Check A — reserved-path (security core, every surface, every platfor
   });
 
   it("rejects `shared-with-me` 8.3 aliases on write but allows them on read", () => {
-    for (const candidate of ["SHARED~1/alex/brief.md", "share~10/x.md", "SHARED~2"]) {
+    for (const candidate of ["SHARED~1/alex/brief.md", "share~10/x.md", "SHARED~2", "shar~1"]) {
       // Write reservation (like shared-with-me itself).
       expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
       expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
@@ -214,7 +214,6 @@ describe("Check A — reserved-path (security core, every surface, every platfor
       "draft~2.md",
       "DOHC~1.md", // has an extension → aliases a long .md name, not `.dohc`
       "DOHCXY~1", // prefix past the stem → a real user file
-      "shar~1", // too short to be the shared-with-me stem
       "LONGDI~1/notes.md",
     ]) {
       expect(isReservedPath(candidate)).toBe(false);
@@ -455,7 +454,7 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
 
 describe("hasEngineIgnoredSegment (Rust capture floor parity)", () => {
   it.each(["linux", "darwin", "win32"] as const)("folds reserved names on %s", (platform) => {
-    for (const name of [".dohc", ".DOHC", ".Dohc", ".ＤＯＨＣ", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"]) {
+    for (const name of [".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"]) {
       const path = `notes/${name}/engine/store`;
       expect(hasEngineIgnoredSegment(path, platform), path).toBe(true);
       expect(validateUserWritePath(path), path).toEqual({ ok: false, reason: "reserved" });

@@ -9,14 +9,9 @@
 //! is a SQLite sidecar (`*.db-wal` / `-shm` / `-journal`, and the `.sqlite`
 //! variants).
 //!
-//! Reserved names use the same Unicode folding as collision keys on every
-//! platform. Only Windows strips trailing dots/spaces from on-disk names.
-//!
-//! We deliberately do not re-open the ADS-colon (7.2), device-name (7.10), or
-//! 8.3-short-name (7.12) hazards here: those are `validateWorkspacePath`
-//! admission concerns, not scan-floor concerns, and each is a separate
-//! NEEDS-DECISION owned elsewhere. The floor's only job is to decide, given a
-//! real on-disk relative path, whether the scan tracks it.
+//! Reserved names use canonical Unicode case folding and reject possible
+//! reserved 8.3 aliases on every platform. Only Windows strips trailing
+//! dots/spaces from on-disk names.
 
 /// The engine-owned storage segment.
 pub const ENGINE_STORAGE_SEGMENT: &str = ".dohc";
@@ -45,34 +40,89 @@ const DB_BASE_EXTENSIONS: &[&str] = &[".db", ".sqlite", ".sqlite3"];
 /// the floor keeps them out of the workspace's tracked set.
 const CONFLICT_ARTIFACT_SUFFIX: &str = ".conflict";
 
-/// Unicode folding shared by reserved names and peer collision keys.
+#[derive(serde::Deserialize)]
+struct FoldData {
+    mappings: std::collections::HashMap<char, String>,
+    ignorables: Vec<(u32, u32)>,
+}
+
+fn fold_data() -> &'static FoldData {
+    static DATA: std::sync::OnceLock<FoldData> = std::sync::OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../../packages/workspace-contracts/src/pathFoldData.json"
+        ))
+        .expect("checked-in Unicode folding data")
+    })
+}
+
+/// Full case folding with canonical equivalence and default-ignorable removal.
 pub fn fold_segment(segment: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     if segment.is_ascii() {
         return segment.to_ascii_lowercase();
     }
-    segment
+    let data = fold_data();
+    let mut folded = String::with_capacity(segment.len());
+    for character in segment.nfd() {
+        if data
+            .ignorables
+            .iter()
+            .any(|&(start, end)| (start..=end).contains(&u32::from(character)))
+        {
+            continue;
+        }
+        if let Some(mapping) = data.mappings.get(&character) {
+            folded.push_str(mapping);
+        } else {
+            folded.push(character);
+        }
+    }
+    folded.nfc().collect()
+}
+
+/// A possible prefix-derived 8.3 alias of an already-folded reserved name.
+pub fn is_reserved_83_alias(segment: &str, reserved: &str) -> bool {
+    let Some((base, digits)) = segment.split_once('~') else {
+        return false;
+    };
+    !base.is_empty()
+        && segment.len() <= 8
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && reserved.trim_start_matches('.').starts_with(base)
+}
+
+/// Reserved-name admission, including Win32 trailing aliases.
+pub fn reserved_key(segment: &str) -> String {
+    fold_segment(segment)
+        .trim_end_matches(['.', ' '])
+        .to_owned()
+}
+
+/// Conservative peer collision matching, separate from reserved admission.
+pub fn collision_key(segment: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    if segment.is_ascii() {
+        return reserved_key(segment);
+    }
+    let compatible = segment
         .nfkc()
         .collect::<String>()
         .to_lowercase()
         .to_uppercase()
-        .to_lowercase()
-        .nfkc()
-        .collect()
-}
-
-/// Cross-platform peer comparison, including Win32 trailing aliases.
-pub fn collision_key(segment: &str) -> String {
-    fold_segment(segment)
-        .trim_end_matches(['.', ' '])
-        .to_owned()
+        .to_lowercase();
+    reserved_key(&compatible)
 }
 
 /// Normalize an on-disk name for the capture floor.
 pub fn normalize_segment(segment: &str) -> String {
     #[cfg(windows)]
     {
-        collision_key(segment)
+        reserved_key(segment)
     }
     #[cfg(not(windows))]
     {
@@ -84,9 +134,12 @@ pub fn normalize_segment(segment: &str) -> String {
 /// prefix.
 pub fn segment_is_ignored(normalized: &str) -> bool {
     RESERVED_SEGMENTS.contains(&normalized)
-        || IGNORED_FILE_PREFIXES
+        || RESERVED_SEGMENTS
             .iter()
-            .any(|prefix| normalized.starts_with(prefix))
+            .any(|name| is_reserved_83_alias(normalized, name))
+        || IGNORED_FILE_PREFIXES.iter().any(|prefix| {
+            normalized.starts_with(prefix) || is_reserved_83_alias(normalized, prefix)
+        })
 }
 
 /// Whether a workspace-relative, forward-slash path has any ignored segment.
@@ -135,6 +188,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_unicode_and_alias_fixtures() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            input: String,
+            folded: String,
+            ignored: bool,
+        }
+        let cases: Vec<Case> = serde_json::from_str(include_str!(
+            "../../../packages/workspace-contracts/src/pathFoldFixtures.json"
+        ))
+        .unwrap();
+        for case in cases {
+            assert_eq!(fold_segment(&case.input), case.folded, "{}", case.input);
+            assert_eq!(
+                segment_is_ignored(&case.folded),
+                case.ignored,
+                "{}",
+                case.input
+            );
+            let path = format!("notes/{}/x.md", case.input);
+            assert_eq!(
+                crate::policy::classify_engine_file_path(&path)
+                    == crate::policy::PathClassification::Ignored,
+                case.ignored,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn removes_every_default_ignorable() {
+        for &(start, end) in &fold_data().ignorables {
+            for code in start..=end {
+                let name = format!(".do{}hc", char::from_u32(code).unwrap());
+                assert_eq!(fold_segment(&name), ".dohc", "U+{code:04X}");
+                assert!(has_ignored_segment(&name));
+            }
+        }
+    }
+
+    #[test]
+    fn ascii_fast_path_matches_full_fold() {
+        for code in 0..128u8 {
+            let name = char::from(code).to_string();
+            assert_eq!(
+                fold_segment(&name),
+                fold_segment(&format!("{name}\u{200d}"))
+            );
+        }
+    }
+
+    #[test]
     fn reserved_folding_does_not_change_the_secret_rule() {
         let path = "notes/config.ｅｎｖ";
         assert_eq!(
@@ -148,14 +253,17 @@ mod tests {
     }
 
     #[test]
-    fn reserved_names_fold_like_collision_keys_on_every_platform() {
+    fn reserved_names_fold_on_every_platform() {
         for name in [
             ".dohc",
             ".DOHC",
             ".Dohc",
-            ".ＤＯＨＣ",
+            ".do‍hc",
             ".GIT",
             "NODE_MODULES",
+            "GIT~1",
+            "NODE_M~1",
+            "DOHC~1",
             ".DOHC-WRITE-tmp",
         ] {
             let path = format!("notes/{name}/engine/private.md");

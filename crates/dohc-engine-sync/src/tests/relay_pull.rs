@@ -1994,10 +1994,14 @@ fn relay_pull_refuses_reserved_case_variants() {
         ".DOHC",
         ".Dohc",
         ".dohc",
-        ".ＤＯＨＣ",
+        ".do‍hc",
         ".GIT",
         "NODE_MODULES",
+        "GIT~1",
+        "NODE_M~1",
+        "DOHC~1",
         "my-dohc",
+        ".ＤＯＨＣ",
     ] {
         let (_scratch, _path, mut engine) = open_store();
         seed_identity(&mut engine);
@@ -2051,7 +2055,7 @@ fn relay_pull_refuses_reserved_case_variants() {
         else {
             panic!("incomplete pull: {outcome:?}");
         };
-        if name == "my-dohc" {
+        if name == "my-dohc" || name == ".ＤＯＨＣ" {
             assert_eq!((applied, refused), (1, 0));
             assert_eq!(changed_paths.len(), 1);
         } else {

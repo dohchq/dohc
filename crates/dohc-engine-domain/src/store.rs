@@ -1429,7 +1429,7 @@ pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
     }
     // The engine's own directory is reserved; a file must never alias into it.
     if path.split('/').any(|segment| {
-        dohc_engine_files::floor::segment_is_ignored(&dohc_engine_files::floor::collision_key(
+        dohc_engine_files::floor::segment_is_ignored(&dohc_engine_files::floor::reserved_key(
             segment,
         ))
     }) {

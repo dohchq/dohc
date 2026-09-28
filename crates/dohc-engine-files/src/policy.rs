@@ -21,8 +21,7 @@ pub enum PathClassification {
     Secret,
 }
 
-const DOHC_SHORT_NAME_STEM: &str = "DOHC";
-const SHARED_WITH_ME_SHORT_NAME_STEM: &str = "SHARED";
+use crate::floor::is_reserved_83_alias;
 
 /// Maximum UTF-8 byte length of one canonical workspace-relative path.
 pub const MAX_CANONICAL_WORKSPACE_PATH_BYTES: usize = 1_024;
@@ -191,38 +190,18 @@ fn strip_windows_alias_suffix(segment: &str) -> &str {
     segment.trim_end_matches(['.', ' '])
 }
 
-fn is_reserved_83_alias(segment: &str, stem: &str) -> bool {
-    let Some((base, digits)) = segment.rsplit_once('~') else {
-        return false;
-    };
-    if base.is_empty()
-        || base.len() > 8
-        || !base.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        || digits.is_empty()
-        || !digits.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return false;
-    }
-    let Some(width) = 7usize.checked_sub(digits.len()) else {
-        return false;
-    };
-    let base_len = stem.len().min(width);
-    base_len >= 1 && base.eq_ignore_ascii_case(&stem[..base_len])
-}
-
 fn normalized_segments(path: &str) -> impl Iterator<Item = String> + '_ {
-    path.split(['/', '\\']).map(crate::floor::collision_key)
+    path.split(['/', '\\']).map(crate::floor::reserved_key)
 }
 
 fn is_dohc_metadata_path(path: &str) -> bool {
     normalized_segments(path)
-        .any(|segment| segment == ".dohc" || is_reserved_83_alias(&segment, DOHC_SHORT_NAME_STEM))
+        .any(|segment| segment == ".dohc" || is_reserved_83_alias(&segment, ".dohc"))
 }
 
-fn is_shared_with_me_path(path: &str) -> bool {
+pub(crate) fn is_shared_with_me_path(path: &str) -> bool {
     normalized_segments(path).next().is_some_and(|segment| {
-        segment == "shared-with-me"
-            || is_reserved_83_alias(&segment, SHARED_WITH_ME_SHORT_NAME_STEM)
+        segment == "shared-with-me" || is_reserved_83_alias(&segment, "shared-with-me")
     })
 }
 

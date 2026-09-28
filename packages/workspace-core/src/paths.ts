@@ -1,5 +1,5 @@
 import { SITE_SOURCE_CODE_EXT_RE } from "@dohc/workspace-contracts/domain-values";
-import { foldPathSegment, isIgnoredPathSegment } from "@dohc/workspace-contracts/path-floor";
+import { foldPathSegment, isIgnoredPathSegment, isReserved83Alias } from "@dohc/workspace-contracts/path-floor";
 
 export function defaultWorkspaceRoot(homeDir: string): string {
   return `${homeDir.replace(/\/+$/, "")}/dohc`;
@@ -33,23 +33,6 @@ export function stripWindowsAliasSuffix(segment: string): string {
   return segment.replace(/[. ]+$/, "");
 }
 
-// On Windows an 8.3 short-name alias resolves to its long form, so `DOHC~1`
-// addresses `.dohc` and `SHARED~1` addresses `shared-with-me`. A reserved guard
-// that only compared literal segments would let those aliases through. This
-// detects a short-name-shaped segment whose expansion could be `stem` (the 8.3
-// base of a reserved name): Windows keeps `base + "~" + digits` within 8 chars,
-// shrinking the base as the collision index grows, so the alias prefix is the
-// stem truncated to that width. Platform-independent on purpose — a reservation
-// bypass must never depend on the guard running on the OS that expands aliases.
-function isReserved83Alias(segment: string, stem: string): boolean {
-  const match = /^([a-z0-9]{1,8})~(\d+)$/i.exec(segment);
-  if (!match) return false;
-  const baseLen = Math.min(stem.length, 7 - match[2].length);
-  return baseLen >= 1 && match[1].toUpperCase() === stem.slice(0, baseLen);
-}
-
-const DOHC_SHORT_NAME_STEM = "DOHC"; // 8.3 base of `.dohc`
-const SHARED_WITH_ME_SHORT_NAME_STEM = "SHARED"; // 8.3 base of `shared-with-me`
 
 // Case-insensitive: on default macOS/Windows filesystems .DOHC aliases .dohc,
 // so a case-sensitive guard would let writes overwrite dohc metadata. Reserved
@@ -66,7 +49,7 @@ export function isDohcMetadataPath(relativePath: string): boolean {
     .split("/")
     .map(foldPathSegment)
     .map(stripWindowsAliasSuffix)
-    .some((segment) => segment === ".dohc" || isReserved83Alias(segment, DOHC_SHORT_NAME_STEM));
+    .some((segment) => segment === ".dohc" || isReserved83Alias(segment, ".dohc"));
 }
 
 // The top-level shared-with-me projection: share mounts materialize there,
@@ -76,7 +59,7 @@ export function isDohcMetadataPath(relativePath: string): boolean {
 // refuses it.
 export function isSharedWithMePath(relativePath: string): boolean {
   const first = relativePath.replaceAll("\\", "/").split("/").map(foldPathSegment).map(stripWindowsAliasSuffix)[0] ?? "";
-  return first === "shared-with-me" || isReserved83Alias(first, SHARED_WITH_ME_SHORT_NAME_STEM);
+  return first === "shared-with-me" || isReserved83Alias(first, "shared-with-me");
 }
 
 export function isReservedPath(relativePath: string): boolean {

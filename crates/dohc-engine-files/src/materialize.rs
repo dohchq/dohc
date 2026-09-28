@@ -1272,7 +1272,7 @@ fn preimage_matches(preimage: &Preimage, current: &CurrentTarget) -> bool {
 /// Resolve a workspace-relative forward-slash path to an absolute target under
 /// `root`, rejecting escapes, absolute inputs, and path-floor entries.
 fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
-    if rel.is_empty() || is_excluded_file(rel) {
+    if rel.is_empty() || is_excluded_file(rel) || crate::policy::is_shared_with_me_path(rel) {
         return Err(MaterializeError::UnsafeTargetPath);
     }
     let mut out = root.to_path_buf();
@@ -1288,6 +1288,35 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
             return Err(MaterializeError::UnsafeTargetPath);
         }
         out.push(segment);
+        #[cfg(windows)]
+        {
+            reject_link_or_reparse(&out)?;
+            match std::fs::canonicalize(&out) {
+                Ok(resolved) => {
+                    let relative = resolved
+                        .strip_prefix(root)
+                        .map_err(|_| MaterializeError::UnsafeTargetPath)?;
+                    let relative = relative.to_string_lossy().replace('\\', "/");
+                    if crate::floor::has_ignored_segment(&relative)
+                        || crate::policy::is_shared_with_me_path(&relative)
+                    {
+                        return Err(MaterializeError::UnsafeTargetPath);
+                    }
+                    out = resolved;
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => return Err(MaterializeError::io(&out, &err)),
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let relative = out
+            .strip_prefix(root)
+            .map_err(|_| MaterializeError::UnsafeTargetPath)?;
+        if is_excluded_file(&relative.to_string_lossy().replace('\\', "/")) {
+            return Err(MaterializeError::UnsafeTargetPath);
+        }
     }
     Ok(out)
 }
@@ -2896,14 +2925,95 @@ mod tests {
     }
 
     #[test]
+    fn fullwidth_names_remain_writable() {
+        let scratch = Scratch::new("fullwidth");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        let directory = root.join(".ＤＯＨＣ");
+        std::fs::create_dir(&directory).unwrap();
+        let target = resolve_target(&root, ".ＤＯＨＣ/notes.md").unwrap();
+        std::fs::write(&target, b"ordinary content").unwrap();
+        assert_eq!(
+            std::fs::read(directory.join("notes.md")).unwrap(),
+            b"ordinary content"
+        );
+    }
+
+    #[test]
+    fn file_suffix_exclusions_do_not_exclude_ordinary_directories() {
+        let scratch = Scratch::new("ordinary-ancestor");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        for name in ["notes.conflict", "ledger.db-wal"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            assert!(resolve_target(&root, &format!("{name}/readme.md")).is_ok());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_existing_hashed_short_names_before_admitting_them() {
+        use std::os::windows::process::CommandExt;
+        fn short_name(root: &Path, name: &str) -> String {
+            let output = std::process::Command::new("cmd")
+                .args(["/d", "/c"])
+                .raw_arg(format!("for %I in ({name}) do @echo %~snxI"))
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+        let scratch = Scratch::new("short-name");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        let mut checked_hashed_alias = false;
+        for index in 0..12 {
+            let name = format!(".dohc-write-{index}");
+            std::fs::create_dir(scratch.root.join(&name)).unwrap();
+            let alias = short_name(&scratch.root, &name);
+            if alias == name || crate::floor::has_ignored_segment(&alias) {
+                continue;
+            }
+            assert!(scratch.root.join(&alias).is_dir(), "{alias}");
+            assert!(
+                matches!(
+                    resolve_target(&root, &format!("{alias}/injected.md")),
+                    Err(MaterializeError::UnsafeTargetPath)
+                ),
+                "{alias}"
+            );
+            checked_hashed_alias = true;
+        }
+        for index in 0..5 {
+            std::fs::create_dir(scratch.root.join(format!("shared-prefix-{index}"))).unwrap();
+        }
+        std::fs::create_dir(scratch.root.join("shared-with-me")).unwrap();
+        let alias = short_name(&scratch.root, "shared-with-me");
+        assert!(
+            matches!(
+                resolve_target(&root, &format!("{alias}/injected.md")),
+                Err(MaterializeError::UnsafeTargetPath)
+            ),
+            "{alias}"
+        );
+        eprintln!(
+            "Checked hashed scratch alias: {checked_hashed_alias}; shared mount alias: {alias}"
+        );
+        if !checked_hashed_alias {
+            eprintln!("NTFS hashed short names were not generated on this test volume");
+        }
+    }
+
+    #[test]
     fn ordinary_writes_refuse_reserved_case_variants() {
         for name in [
             ".DOHC",
             ".Dohc",
             ".dohc",
-            ".ＤＯＨＣ",
+            ".do‍hc",
             ".GIT",
             "NODE_MODULES",
+            "GIT~1",
+            "NODE_M~1",
+            "DOHC~1",
         ] {
             let scratch = Scratch::new("reserved-case");
             let mut store = EngineStore::open(&scratch.db(), 1).expect("store");

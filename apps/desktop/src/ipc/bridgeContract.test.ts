@@ -177,7 +177,7 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
 
 it.each(["linux", "darwin", "win32"] as const)("ignores reserved activity paths on %s", (platform) => {
-  for (const name of [".dohc", ".DOHC", ".Dohc", ".ＤＯＨＣ", ".GIT", "NODE_MODULES"]) {
+  for (const name of [".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES"]) {
     expect(activityPathsAffectWorkspaceListing([`${name}/engine/private.md`], platform)).toBe(false);
   }
   expect(activityPathsAffectWorkspaceListing(["my-dohc/notes.md"], platform)).toBe(true);

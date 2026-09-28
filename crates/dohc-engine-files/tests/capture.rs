@@ -152,14 +152,18 @@ fn capture_ignores_reserved_case_variants() {
         ".DOHC",
         ".Dohc",
         ".dohc",
-        ".ＤＯＨＣ",
+        ".do‍hc",
         ".GIT",
         "NODE_MODULES",
+        "GIT~1",
+        "NODE_M~1",
+        "DOHC~1",
     ] {
         let ws = Scratch::new();
         ws.write(&format!("{name}/engine/private.md"), b"private");
         ws.write(&format!("nested/{name}/private.md"), b"private");
         ws.write("my-dohc/notes.md", b"ordinary");
+        ws.write(".ＤＯＨＣ/notes.md", b"ordinary");
         let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
         let mut controller = ReconcileController::new();
         let plan = completed(
@@ -169,7 +173,11 @@ fn capture_ignores_reserved_case_variants() {
         );
         let mut sink = IdempotentSink::default();
         apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("capture");
-        assert_eq!(sink.calls, ["my-dohc/notes.md"], "{name}");
+        assert_eq!(
+            sink.calls,
+            [".ＤＯＨＣ/notes.md", "my-dohc/notes.md"],
+            "{name}"
+        );
     }
 }
 

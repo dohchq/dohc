@@ -12,5 +12,6 @@ export function pathCollisionKey(path: string): string {
 // Lower, upper, then lower again, so every spelling of a letter lands on one
 // form: "ẞ", "ß" and "ss" all become "ss", and "ς" and "σ" become one sigma.
 function componentKey(name: string): string {
-  return foldPathSegment(name).replace(/[. ]+$/u, "");
+  const compatible = name.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase();
+  return foldPathSegment(compatible).replace(/[. ]+$/u, "");
 }
