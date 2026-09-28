@@ -576,7 +576,7 @@ export interface SyncRelayStorage {
   markNotices(input: import("./notices").MarkNoticesInput): string[];
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
   pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
-  readAutomationHost(input: {workspaceId: string; ownerUserId: string}): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  readAutomationHost(input: import("./automationHosts").AutomationHostReadInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   checkInAutomationComputer(input: import("./automationHosts").AutomationHostCheckInInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   chooseAutomationHost(input: import("./automationHosts").AutomationHostChooseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   releaseAutomationHost(input: import("./automationHosts").AutomationHostReleaseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;

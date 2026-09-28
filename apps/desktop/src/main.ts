@@ -3407,7 +3407,7 @@ const automationHosts = createAutomationHosts({
       window.webContents.send(CHANNELS.scheduleHostChanged, workspaceId);
     }
   },
-  startedHere: (workspaceId, startAfterMs) => automationScheduler.startedHere(workspaceId, startAfterMs),
+  startedHere: (workspaceId, startAfterMs, floorMs) => automationScheduler.startedHere(workspaceId, startAfterMs, floorMs),
   hostChanged: (workspaceId) => collectionAutomationsOf(workspaceId)?.hostChanged(),
   // The release waits until the engine here claims no more Group messages,
   // and carries what it decided so the next host claims each one once.

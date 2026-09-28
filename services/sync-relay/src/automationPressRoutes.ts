@@ -1,7 +1,6 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import {
   AUTOMATION_DEFINITION_HASH_PATTERN,
-  AUTOMATION_INSTALL_ID_MAX_CHARS,
   AUTOMATION_PRESS_ERROR_MAX_CHARS,
   AUTOMATION_PRESS_ID_MAX_CHARS,
   AUTOMATION_PRESS_MAX_BODY_BYTES,
@@ -9,6 +8,7 @@ import {
   type AutomationPressOutcome,
   type RelayAutomationPressList,
 } from "@dohc/workspace-contracts/relay";
+import { computerInstallId } from "./automationHostRoutes";
 import { namedCollectionEditGrant } from "./collectionEditGrant";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
@@ -139,7 +139,7 @@ export function createAutomationPressRoutes(input: {
     if (route.action === "list") {
       if (request.method !== "GET") throw relayError("method_not_allowed");
       const url = new URL(request.url);
-      const installId = line(url.searchParams.get("installId"), "installId", AUTOMATION_INSTALL_ID_MAX_CHARS);
+      const installId = computerInstallId(url.searchParams.get("installId"));
       const waitMs = Math.min(waitParameter(url.searchParams.get("waitMs")), AUTOMATION_PRESS_MAX_WAIT_MS);
       const scope = { workspaceId, ownerUserId, installId };
       // Only the running host waits; any other computer hears at once that there is nothing for it.
@@ -156,7 +156,7 @@ export function createAutomationPressRoutes(input: {
     if (request.method !== "POST") throw relayError("method_not_allowed");
     if (!rateLimiters.host.allow(ownerUserId, nowMs())) throw relayError("automation_press_rate_limited");
     const body = await readBody(request);
-    const installId = line(body.installId, "installId", AUTOMATION_INSTALL_ID_MAX_CHARS);
+    const installId = computerInstallId(body.installId);
     if (route.action === "accept") {
       const ids = body.hostPressIds;
       if (!Array.isArray(ids) || ids.length === 0 || ids.length > AUTOMATION_PRESS_LIST_LIMIT) {

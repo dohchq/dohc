@@ -8,6 +8,7 @@ import type {
   ListCollectionAutomationsResult,
   ListAutomationTargetsResult,
   RetryCollectionAutomationResult,
+  ScheduleHostComputer,
   ScheduleHostResult,
   UndoCollectionAutomationRunResult,
   WriteCollectionAutomationsPayload,
@@ -584,9 +585,9 @@ describe("a schedule's next run", () => {
   }).format(ms);
   const tomorrow = `Next run ${localTime(Date.UTC(2026, 8, 26, 9))}`;
   const computers = [
-    { installId: "me", label: "DESKTOP-1", lastSeenMs: NOW, thisComputer: true },
-    { installId: "laptop", label: "Ice's laptop", lastSeenMs: NOW - 86_400_000, thisComputer: false },
-  ];
+    { installId: "me", kind: "computer", label: "DESKTOP-1", lastSeenMs: NOW, thisComputer: true },
+    { installId: "laptop", kind: "computer", label: "Ice's laptop", lastSeenMs: NOW - 86_400_000, thisComputer: false },
+  ] satisfies ScheduleHostComputer[];
   const relay = (hostInstallId: string | null, handoverFrom: string | null = null): ScheduleHostResult =>
     ({ kind: "relay", generation: 3, hostInstallId, handoverFrom, computers });
 
