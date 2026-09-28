@@ -322,15 +322,12 @@ async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn text_and_binary_writes_publish_through_materialization() {
+async fn text_write_enqueues_no_materialization_and_binary_write_enqueues_one() {
     let (scratch, transport, handle) = fixture("materialize").await;
-    let text = call(&transport, &handle, 2, "versionedText.write", json!({
-        "versionId": "main", "path": "plain.md", "text": "published", "origin": "api", "publish": true, "requestId": "plain-1",
-    })).await;
-    assert_eq!(text["materializeOutcome"], "applied");
-    assert_eq!(
-        std::fs::read_to_string(scratch.path().join("plain.md")).unwrap(),
-        "published"
+    write(&transport, &handle, 2, "plain.md", "db only", "plain-1").await;
+    assert!(
+        !scratch.path().join("plain.md").exists(),
+        "enqueue text materialization or omit binary materialization -> moment/disk assertions fail."
     );
     let binary = call(
         &transport,
@@ -349,6 +346,19 @@ async fn text_and_binary_writes_publish_through_materialization() {
     assert_eq!(
         std::fs::read(scratch.path().join("asset.bin")).expect("binary"),
         [1, 2, 3, 4]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_text_write_materializes_to_disk() {
+    let (scratch, transport, handle) = fixture("text-publish").await;
+    let text = call(&transport, &handle, 2, "versionedText.write", json!({
+        "versionId": "main", "path": "plain.md", "text": "published", "origin": "api", "publish": true, "requestId": "plain-1",
+    })).await;
+    assert_eq!(text["materializeOutcome"], "applied");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("plain.md")).unwrap(),
+        "published"
     );
 }
 
@@ -3766,7 +3776,7 @@ async fn request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn moment_id_collision_rejects_different_payload_and_replays_exact_payload() {
     let (_scratch, transport, handle) = fixture("moment-id").await;
-    let params = json!({ "versionId": "main", "path": "moment.md", "text": "same", "origin": "api", "momentId": "fixed-moment", "requestId": "stable-moment-write" });
+    let params = json!({ "versionId": "main", "path": "moment.md", "text": "same", "origin": "api", "momentId": "fixed-moment" });
     call(
         &transport,
         &handle,
