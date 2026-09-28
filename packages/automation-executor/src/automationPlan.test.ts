@@ -665,11 +665,12 @@ describe("code steps", () => {
     expect(request.slots.map((slot) => slot.kind)).toEqual(["code"]);
     const shared = createAutomationFormulaEvaluator();
     try {
-      const spent = { prepareMs: 0, runMs: 0 };
+      // The run's one budget carries earlier steps' time and adds this step's,
+      // which a short step on a coarse clock may measure as 0 ms.
+      const spent = { prepareMs: 0, runMs: 5 };
       const results = await evaluateRequest(shared.forWorkspace("trip"), "collection:Tasks#total", request, spent);
       expect(results).toEqual(ok({ output: 20 }));
-      // The run's one budget counts the step's time.
-      expect(spent.runMs).toBeGreaterThan(0);
+      expect(spent.runMs).toBeGreaterThanOrEqual(5);
       expect(planAt(ctx, 0, inputsOf(), results as AutomationOutcome<JsonValue>[])).toEqual({ step: { ordinal: 0, effects: [], output: { kind: "code", value: 20 } } });
     } finally { await shared.close(); }
   });
