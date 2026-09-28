@@ -160,7 +160,7 @@ type EditingState =
   | { mode: "create"; kind: "file" | "folder"; parentPath: string }
   | { mode: "rename"; path: string; isFolder: boolean };
 
-type VisibleRow = FlatRow & {
+export type VisibleRow = FlatRow & {
   kind: WorkspaceFileEntry["kind"] | null;
   positionInSet: number;
   setSize: number;
@@ -308,8 +308,9 @@ function rangeAroundIndex(index: number, itemCount: number): VirtualRange {
 }
 
 // Memoized row: primitives + stable callbacks only, so a selection change
-// re-renders the rows whose state changed, not the whole tree.
-const TreeRow = memo(function TreeRow(props: {
+// re-renders the rows whose state changed, not the whole tree. Exported for
+// the states page, which shows it in each of its states.
+export const TreeRow = memo(function TreeRow(props: {
   row: VisibleRow;
   // The engine lists this folder as a collection, so a row click opens its
   // views. Exposed as data-collection so tests can gate on the state before

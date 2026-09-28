@@ -992,6 +992,17 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   }
 });
 
+test("path folding data and fixtures select Rust and their TypeScript drift checks", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  for (const file of [
+    "crates/dohc-engine-files/src/pathFoldData.json",
+    "crates/dohc-engine-files/src/pathFoldFixtures.json",
+    "packages/workspace-contracts/src/pathFoldData.json",
+  ]) {
+    assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
+  }
+});
+
 test("gate selection includes the old path of committed, staged, and unstaged renames", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-gate-rename-"));
   const git = (args) => execFileSync("git", [

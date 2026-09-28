@@ -177,25 +177,25 @@ describe("WorkspaceFileListingCache", () => {
       workspaceId: "ws-a",
       paths: [".GIT/file.md"],
     });
-    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-2.md"));
+    await expect(read("ws-a")).resolves.toEqual(cachedListing("ws-a-1.md"));
 
     cache.invalidate({
       workspaceId: "ws-a",
       paths: [".dohc/engine/index", "pkg/node_modules/x.js"],
     });
-    await expect(read("ws-a")).resolves.toEqual(cachedListing("ws-a-2.md"));
+    await expect(read("ws-a")).resolves.toEqual(cachedListing("ws-a-1.md"));
 
     cache.invalidate({
       workspaceId: "ws-a",
       paths: [".dohc/engine/index", "notes/new.md"],
     });
-    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-3.md"));
+    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-2.md"));
     cache.invalidate({ workspaceId: "ws-a" });
-    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-4.md"));
+    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-3.md"));
     expect(loads.get("ws-b")).toBe(1);
 
     cache.invalidate({});
-    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-5.md"));
+    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-4.md"));
     await expect(read("ws-b")).resolves.toEqual(listing("ws-b-2.md"));
   });
 

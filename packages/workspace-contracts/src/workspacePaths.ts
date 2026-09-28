@@ -1,3 +1,5 @@
+import { foldPathSegment, isIgnoredPathSegment, isReserved83Alias } from "./pathFloor";
+
 // POSIX absolute, Windows drive-qualified (C:\ or C:/), or UNC (\\server).
 function isAbsolutePathLike(path: string): boolean {
   return (
@@ -18,23 +20,6 @@ export function stripWindowsAliasSuffix(segment: string): string {
   return segment.replace(/[. ]+$/, "");
 }
 
-// On Windows an 8.3 short-name alias resolves to its long form, so `DOHC~1`
-// addresses `.dohc` and `SHARED~1` addresses `shared-with-me`. A reserved guard
-// that only compared literal segments would let those aliases through. This
-// detects a short-name-shaped segment whose expansion could be `stem` (the 8.3
-// base of a reserved name): Windows keeps `base + "~" + digits` within 8 chars,
-// shrinking the base as the collision index grows, so the alias prefix is the
-// stem truncated to that width. Platform-independent on purpose — a reservation
-// bypass must never depend on the guard running on the OS that expands aliases.
-function isReserved83Alias(segment: string, stem: string): boolean {
-  const match = /^([a-z0-9]{1,8})~(\d+)$/i.exec(segment);
-  if (!match) return false;
-  const baseLen = Math.min(stem.length, 7 - match[2].length);
-  return baseLen >= 1 && match[1].toUpperCase() === stem.slice(0, baseLen);
-}
-
-const DOHC_SHORT_NAME_STEM = "DOHC"; // 8.3 base of `.dohc`
-const SHARED_WITH_ME_SHORT_NAME_STEM = "SHARED"; // 8.3 base of `shared-with-me`
 
 // Case-insensitive: on default macOS/Windows filesystems .DOHC aliases .dohc,
 // so a case-sensitive guard would let writes overwrite dohc metadata. Reserved
@@ -48,10 +33,10 @@ const SHARED_WITH_ME_SHORT_NAME_STEM = "SHARED"; // 8.3 base of `shared-with-me`
 export function isDohcMetadataPath(relativePath: string): boolean {
   return relativePath
     .replaceAll("\\", "/")
-    .toLowerCase()
     .split("/")
+    .map(foldPathSegment)
     .map(stripWindowsAliasSuffix)
-    .some((segment) => segment === ".dohc" || isReserved83Alias(segment, DOHC_SHORT_NAME_STEM));
+    .some((segment) => segment === ".dohc" || isReserved83Alias(segment, ".dohc"));
 }
 
 // The top-level shared-with-me projection: share mounts materialize there,
@@ -60,8 +45,8 @@ export function isDohcMetadataPath(relativePath: string): boolean {
 // validation (validateUserReadPath) allows it while every write surface
 // refuses it.
 export function isSharedWithMePath(relativePath: string): boolean {
-  const first = relativePath.replaceAll("\\", "/").toLowerCase().split("/").map(stripWindowsAliasSuffix)[0] ?? "";
-  return first === "shared-with-me" || isReserved83Alias(first, SHARED_WITH_ME_SHORT_NAME_STEM);
+  const first = relativePath.replaceAll("\\", "/").split("/").map(foldPathSegment).map(stripWindowsAliasSuffix)[0] ?? "";
+  return first === "shared-with-me" || isReserved83Alias(first, "shared-with-me");
 }
 
 export function isReservedPath(relativePath: string): boolean {
@@ -74,27 +59,13 @@ export function isReservedPath(relativePath: string): boolean {
 // The `.dohc-write-*` prefix is reserved for visible-directory atomic staging:
 // it can briefly exist beside user files, but scanners/watchers must treat it
 // as dohc noise, never a workspace artifact.
-const IGNORED_SEGMENTS = new Set([".dohc", ".git", "node_modules"]);
-const IGNORED_FILE_PREFIXES = [".dohc-write-"];
-
-// Rust's capture floor compares every path segment after platform-specific
-// normalization: Win32 folds case and strips trailing dot/space aliases;
-// every other host compares the on-disk name exactly. Callers pass the host
-// explicitly because this predicate runs in main and the sandboxed renderer.
+// Capture folds reserved names on every host. Only Windows strips trailing
+// dot/space aliases from on-disk names.
 export function hasEngineIgnoredSegment(
   relativePath: string,
-  platform: NodeJS.Platform,
+  platform: string,
 ): boolean {
-  return relativePath.split("/").some((rawSegment) => {
-    const segment =
-      platform === "win32"
-        ? stripWindowsAliasSuffix(rawSegment).toLowerCase()
-        : rawSegment;
-    return (
-      IGNORED_SEGMENTS.has(segment) ||
-      IGNORED_FILE_PREFIXES.some((prefix) => segment.startsWith(prefix))
-    );
-  });
+  return relativePath.split("/").some((segment) => isIgnoredPathSegment(segment, platform === "win32"));
 }
 
 export function hasIgnoredSegment(path: string): boolean {
@@ -166,7 +137,7 @@ export function validateUserWritePath(
 // (Check A runs first).
 export function validateUserMaterializePath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean; platform: NodeJS.Platform },
+  options: { allowIgnoredSegments?: boolean; platform: string },
 ): WritePathValidation {
   return validateWorkspacePath(relativePath, {
     allowIgnoredSegments: options.allowIgnoredSegments,
@@ -187,7 +158,7 @@ export function validateUserMaterializePath(
 // reads accept it. The caller names the platform whose disk it reads.
 export function validateUserReadPath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean; platform: NodeJS.Platform },
+  options: { allowIgnoredSegments?: boolean; platform: string },
 ): WritePathValidation {
   return validateWorkspacePath(relativePath, {
     allowIgnoredSegments: options.allowIgnoredSegments,
@@ -261,4 +232,3 @@ function validateWorkspacePath(
   }
   return { ok: true, normalized };
 }
-
