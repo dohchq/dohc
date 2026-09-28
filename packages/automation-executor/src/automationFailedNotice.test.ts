@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { isNoticeBody, isNoticeLine, NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
-import { automationFailedNotice, type AutomationFailure } from "./automationFailedNotice";
+import { automationFailedElsewhereBody, automationFailedNotice, FAILED_ELSEWHERE_BODY, type AutomationFailure } from "./automationFailedNotice";
 
 const failure = (overrides: Partial<AutomationFailure> = {}): AutomationFailure => ({
   automationId: "collection:Projects/Tasks#stamp",
   claimId: "atc_1",
+  neverStarted: false,
   chainStopped: false,
   error: "ana@dohc.test cannot edit Budget.",
   updatedAtMs: 5_000,
@@ -27,10 +28,26 @@ describe("a failed run's notice", () => {
   });
 
   it("offers no run for a chain stop, which never ran, and says so", () => {
-    const notice = automationFailedNotice({ workspaceId: "ws", computer: laptop, failure: failure({ chainStopped: true, error: "chain-stopped", generation: 2 }), name: null });
+    const stopped = failure({ neverStarted: true, chainStopped: true, error: "chain-stopped", generation: 2 });
+    const notice = automationFailedNotice({ workspaceId: "ws", computer: laptop, failure: stopped, name: null });
+    const why = '"stamp" did not run. dohc stops a chain after automations and agents start each other 4 times in a row. Check which automations start each other.';
     expect(notice.title).toBe("An automation chain stopped");
-    expect(notice.body).toBe('2 failures so far. dohc stops a chain of automations after 4 steps, so "stamp" did not run. It ran on Ice\'s laptop.');
+    expect(notice.body).toBe(`2 failures so far. ${why} This happened on Ice's laptop.`);
+    expect(notice.target).toEqual({ automation: "collection:Projects/Tasks#stamp", path: "Projects/Tasks/automations.yaml" });
+    // Everyone else reads why, without the computer, and no promise that someone can try it again.
+    expect(automationFailedElsewhereBody(stopped, null)).toBe(why);
+  });
+
+  it("keeps the reason of a run too large to claim, and offers no run, since none can start it", () => {
+    const reason = "This change was too large for dohc to start automations for every record. Change fewer records at a time.";
+    const unclaimed = failure({ neverStarted: true, error: reason });
+    const notice = automationFailedNotice({ workspaceId: "ws", computer: laptop, failure: unclaimed, name: "Stamp the finish date" });
+    expect(notice.title).toBe('Automation "Stamp the finish date" failed');
+    expect(notice.body).toBe(`${reason} This happened on Ice's laptop.`);
     expect(notice.target.run).toBeUndefined();
+    expect(automationFailedElsewhereBody(unclaimed, null)).toBe("It could not start on another person's computer, so no one can try it again.");
+    // A run that started and failed can run again only where it ran.
+    expect(automationFailedElsewhereBody(failure(), null)).toBe(FAILED_ELSEWHERE_BODY);
   });
 
   it("keeps a long error and name within what the relay takes", () => {

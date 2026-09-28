@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
+import type { AutomationTimeSpent, JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type {
   CollectionGetRecordParams,
@@ -11,7 +11,12 @@ import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
+  codeChangesOf,
+  codeFilesOf,
+  codeRecordKey,
+  codeStepOrdinals,
   definitionHash,
+  evaluateRequest,
   evaluationRequest,
   filterValue,
   FIND_OVERFLOW_ERROR,
@@ -25,7 +30,9 @@ import {
   runRecordOf,
   scheduleDueAt,
   stepKey,
+  stepsInOrder,
   triggerMatches,
+  type CodeChange,
   type PlannedEffect,
   type PlannedField,
   type PlannedStep,
@@ -143,6 +150,13 @@ export interface CollectionAutomationRunDependencies {
   isCollection(path: string): boolean;
   /** Whether a folder keeps its records in a dataset (it holds dataset.json). */
   isDatasetCollection(path: string): Promise<boolean>;
+  /**
+   * The fields a Collection's schema defines, or why they cannot be read;
+   * null when the Collection has no schema, so any field is its own.
+   */
+  collectionFields(path: string): Promise<ReadonlySet<string> | { problem: string } | null>;
+  /** A code file a step runs, as text; null when it does not exist. */
+  readCode(path: string): Promise<{ text: string; truncated: boolean } | null>;
   /** The name a formula's `person` shows for the person who pressed a button. */
   personName(userId: string): string;
   evaluator: AutomationFormulaEvaluator;
@@ -157,8 +171,9 @@ export interface CollectionAutomationRunDependencies {
   /** A message's whole body, for one whose claim carried it truncated; null when the engine is unavailable. */
   readMessageBody(messageId: string): Promise<string | null>;
   /**
-   * Keeps a verdict for each person a formula named, as for any step, and
-   * says which of them wait for a current editor to allow them.
+   * Keeps a verdict for each person a formula named and each Collection a
+   * code step named, as for any step, and says which of them wait for a
+   * current editor to allow them.
    */
   recipientVerdicts(input: {
     automationId: string;
@@ -167,13 +182,17 @@ export interface CollectionAutomationRunDependencies {
   }): Promise<Array<"allowed" | "held" | "stopped">>;
 }
 
-/** A person a formula named, with what the roster says about reaching them. */
+/**
+ * A person a formula named, or a Collection a code step named, with what the
+ * roster says about reaching it. `id` is the person's user id or the
+ * Collection's path.
+ */
 interface RecipientReach {
   /** The step's place in the automation. */
   step: number;
-  userId: string;
+  id: string;
   name: string;
-  action: "post" | "notify";
+  action: "post" | "notify" | "change";
   reach: StepReach;
 }
 
@@ -228,6 +247,18 @@ const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A Collection as reach and messages name it, from its workspace path. */
+const collectionNamed = (path: string): ReachCollection => ({ path, name: path.split("/").at(-1) ?? path });
+
+/** Why a step cannot read or change a Collection's records through this executor, or null. */
+async function targetProblem(dependencies: CollectionAutomationRunDependencies, target: ReachCollection): Promise<string | null> {
+  // A dataset's records change only through its approved operations.
+  if (await dependencies.isDatasetCollection(target.path)) {
+    return `Automations cannot use ${target.name} yet, because its records change only through its Collection actions.`;
+  }
+  return dependencies.isCollection(target.path) ? null : `dohc cannot find the Collection ${target.path}.`;
 }
 
 export type ClaimRuns =
@@ -345,8 +376,8 @@ export async function runCollectionAutomation(
   if (groupChanged !== null) return groupChanged;
   // Reach (ADR 0012), before anything is read. The targets are in the file,
   // so the check needs only the roster.
-  const steps = reachStepsOf(automation, collection, (path) => ({ path, name: path.split("/").at(-1) ?? path }), chat);
-  for (const verdict of checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps })) {
+  const steps = reachStepsOf(automation, collection, collectionNamed, chat);
+  for (const verdict of checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps })) {
     if (!verdict.allowed) return failed(verdict.reason);
   }
   const targets = new Map<string, ReachCollection>();
@@ -354,15 +385,18 @@ export async function runCollectionAutomation(
     if (step.kind === "change-records" || step.kind === "find-records") targets.set(step.collection.path, step.collection);
   }
   for (const target of targets.values()) {
-    // A dataset's records change only through its approved operations.
-    if (await dependencies.isDatasetCollection(target.path)) {
-      return failed(`Automations cannot use ${target.name} yet, because its records change only through its Collection actions.`);
-    }
-    if (!dependencies.isCollection(target.path)) return failed(`dohc cannot find the Collection ${target.path}.`);
+    const problem = await targetProblem(dependencies, target);
+    if (problem !== null) return failed(problem);
   }
 
   let run = current?.plan ? current : null;
   const resumed = run !== null;
+  // The file names no Collection a code step changes, so a saved plan's
+  // are checked again here, as the file's are above.
+  if (run !== null) {
+    const checked = await checkCodeTargets(dependencies, input, savedCodeTargets(automation, run));
+    if (checked !== null) return checked;
+  }
   // A new plan's keys and added record ids come from the definition and the
   // claim's run, never from what history kept: a start-over is a new run, so
   // the engine takes its writes as new, and a crash requeue keeps the run,
@@ -428,13 +462,15 @@ export async function checkPlannedMessages(
     }
     return [];
   });
-  const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps: messages.map(({ step }) => step) });
+  const verdicts = checkAutomationReach(roster, {
+    id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: messages.map(({ step }) => step),
+  });
   const recipients: RecipientReach[] = [];
   for (const [index, { ordinal, effect }] of messages.entries()) {
     if (effect.kind === "message" && effect.byFormula && effect.to.kind === "direct-message") {
-      recipients.push({ step: ordinal, userId: effect.to.userId, name: effect.name, action: "post", reach: verdicts[index]! });
+      recipients.push({ step: ordinal, id: effect.to.userId, name: effect.name, action: "post", reach: verdicts[index]! });
     } else if (effect.kind === "notice" && effect.byFormula) {
-      recipients.push({ step: ordinal, userId: effect.notice.recipientUserId, name: effect.name, action: "notify", reach: verdicts[index]! });
+      recipients.push({ step: ordinal, id: effect.notice.recipientUserId, name: effect.name, action: "notify", reach: verdicts[index]! });
     }
   }
   // Kept before anything fails, so a stop is remembered for the next run.
@@ -462,12 +498,14 @@ export async function evaluateFindValues(
   inputs: FindValueInputs,
   finds: ReadonlyArray<{ ordinal: number; values: readonly FindValue[] }>,
   nowMs: number,
+  /** The run's evaluator time, which its later requests go on counting. */
+  spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 },
 ): Promise<{ values: Map<string, JsonValue>; failed: Map<number, { error: string; timedOut: boolean }> } | { outcome: CollectionAutomationRunOutcome }> {
   const request = findValuesRequest(inputs, finds, nowMs);
   const values = new Map<string, JsonValue>();
   const failedFinds = new Map<number, { error: string; timedOut: boolean }>();
   if (request.formulas.length === 0) return { values, failed: failedFinds };
-  const results = await evaluator.evaluate(inputs.claim.automationId, request.scope, request.formulas);
+  const results = await evaluator.evaluate(inputs.claim.automationId, request.scope, request.formulas, spent);
   if (results === "busy") return { outcome: { kind: "wait", reason: "busy" } };
   for (const [position, { ordinal, index }] of request.slots.entries()) {
     const result = results[position];
@@ -505,6 +543,8 @@ async function plan(
   // Formulas read `now` as the time of the change, or a schedule's due
   // time, so every attempt plans the same values.
   const nowMs = scheduleDueAt(claim) ?? claim.createdAtMs;
+  // One evaluator budget for the whole run: its Finds' values, then its formulas and code.
+  const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
   const read = await dependencies.withReads(async (reads) => {
     let record: RunRecord | null = null;
     // A claim with no record (a message or a schedule) reads none.
@@ -525,7 +565,7 @@ async function plan(
     }
     const finds = findsOf(automation);
     const computed = await evaluateFindValues(dependencies.evaluator, { automation, claim, record, message, person },
-      finds.map(({ ordinal, query }) => ({ ordinal, values: query.match === "all" ? [] : [query.value] })), nowMs);
+      finds.map(({ ordinal, query }) => ({ ordinal, values: query.match === "all" ? [] : [query.value] })), nowMs, spent);
     if ("outcome" in computed) return { removed: false, stopped: computed.outcome } as const;
     const found = new Map<number, RunRecord[]>();
     const unreadFinds = new Map(computed.failed);
@@ -556,11 +596,18 @@ async function plan(
   if (read.stopped !== null) return stop(read.stopped);
   const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, unreadFinds: read.unreadFinds, message, chat, person };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
+  const codeFiles = await readCodeFiles(dependencies, automation, claim.collectionPath);
+  if (typeof codeFiles === "string") return stop(failed(codeFiles));
+  inputs.codeFiles = codeFiles;
   const request = evaluationRequest(inputs, nowMs);
-  const results = request.formulas.length === 0
-    ? []
-    : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
+  const results = await evaluateRequest(dependencies.evaluator, claim.automationId, request, spent);
   if (results === "busy") return stop({ kind: "wait", reason: "busy" });
+  const changes = codeChangesOf(request, results, claim.collectionPath);
+  if (!("problem" in changes) && changes.length > 0) {
+    const records = await codeRecords(dependencies, input, changes);
+    if ("outcome" in records) return stop(records.outcome);
+    inputs.codeRecords = records.records;
+  }
   // Only the conversations of the people the formulas named are read.
   const named = formulaPeople(request, results);
   if (named.length > 0) {
@@ -573,6 +620,113 @@ async function plan(
   if (planned.kind === "skip") return stop({ kind: "skipped" });
   if (planned.kind === "failed") return stop(failed(planned.error, planned.timedOut));
   return { kind: "plan", steps: planned.steps };
+}
+
+/** The text of each code file the steps run, by the path its step names, or why one cannot run. */
+export async function readCodeFiles(
+  dependencies: Pick<CollectionAutomationRunDependencies, "readCode">,
+  automation: Automation,
+  collectionPath: string,
+): Promise<Map<string, string> | string> {
+  const files = new Map<string, string>();
+  for (const { ordinal, step } of stepsInOrder(automation)) {
+    if (step.kind !== "run-file" || files.has(step.file)) continue;
+    const path = `${collectionPath}/${step.file}`;
+    const read = await dependencies.readCode(path);
+    if (read === null) return `Step ${ordinal + 1} runs ${path}, and dohc cannot find that file.`;
+    if (read.truncated) return `Step ${ordinal + 1} runs ${path}, which is too large to run.`;
+    files.set(step.file, read.text);
+  }
+  return files;
+}
+
+/** A Collection a code step changes records in, and the fields it sets there. */
+type CodeTarget = { ordinal: number; collection: string; fields: readonly string[] };
+
+/** The Collections the code steps of a saved plan change records in. */
+function savedCodeTargets(automation: Automation, run: StoredRun): CodeTarget[] {
+  const code = codeStepOrdinals(automation);
+  return (run.plan ?? []).filter((step) => code.has(step.ordinal)).flatMap(({ ordinal, effects }) => effects.flatMap((effect): CodeTarget[] => {
+    if (effect.kind === "add") return [{ ordinal, collection: effect.collectionPath, fields: effect.fields.map(({ field }) => field) }];
+    if (effect.kind === "set" && !("addedBy" in effect.target)) {
+      return [{ ordinal, collection: effect.target.collectionPath, fields: effect.fields.map(({ field }) => field) }];
+    }
+    return [];
+  }));
+}
+
+/**
+ * Checks each Collection and field the code steps change, as a Set fields
+ * or Add record step's are checked on every attempt, or answers why the run
+ * cannot go on. Reach (ADR 0012) applies to what the code named: nobody
+ * reaches more by writing code. Each code step keeps a verdict for each
+ * Collection it named, as for a person a formula named, before anything
+ * fails. So a stop is remembered, and removing an editor never switches on
+ * a change they could not make.
+ */
+async function checkCodeTargets(
+  dependencies: CollectionAutomationRunDependencies,
+  input: CollectionAutomationRunInput,
+  targets: readonly CodeTarget[],
+): Promise<CollectionAutomationRunOutcome | null> {
+  const { automation, collection, roster } = input;
+  const named = new Map<string, { step: number; target: ReachCollection }>();
+  for (const { ordinal, collection: path } of targets) named.set(JSON.stringify([ordinal, path]), { step: ordinal, target: collectionNamed(path) });
+  if (named.size === 0) return null;
+  const verdicts = checkAutomationReach(roster, {
+    id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path),
+    steps: [...named.values()].map(({ target }): ReachStep => ({ kind: "change-records", collection: target })),
+  });
+  const recipients = [...named.values()].map(({ step, target }, index): RecipientReach => ({
+    step, id: target.path, name: target.name, action: "change", reach: verdicts[index]!,
+  }));
+  const kept = await dependencies.recipientVerdicts({ automationId: input.claim.automationId, definitionHash: definitionHash(automation), recipients });
+  const stop = (step: number, name: string, reason: string) => failed(`The code in step ${step + 1} changes records in ${name}. ${reason}`);
+  for (const { step, name, reach } of recipients) {
+    if (!reach.allowed) return stop(step, name, reach.reason);
+  }
+  if (kept.includes("held")) return { kind: "wait", reason: "held" };
+  for (const { step, target } of named.values()) {
+    const problem = await targetProblem(dependencies, target);
+    if (problem !== null) return stop(step, target.name, problem);
+    const fields = await dependencies.collectionFields(target.path);
+    if (fields === null) continue;
+    if ("problem" in fields) return stop(step, target.name, fields.problem);
+    for (const change of targets) {
+      if (change.ordinal !== step || change.collection !== target.path) continue;
+      const missing = change.fields.find((field) => !fields.has(field));
+      if (missing !== undefined) return failed(`The code in step ${step + 1} sets ${missing}, which is not a field in ${target.name}.`);
+    }
+  }
+  return null;
+}
+
+/**
+ * Checks what the code steps change, then reads each record they change. A
+ * record that is not in its Collection is left out, and the plan says so.
+ */
+async function codeRecords(
+  dependencies: CollectionAutomationRunDependencies,
+  input: CollectionAutomationRunInput,
+  changes: readonly CodeChange[],
+): Promise<{ records: Map<string, RunRecord> } | { outcome: CollectionAutomationRunOutcome }> {
+  const checked = await checkCodeTargets(dependencies, input, changes.map(({ ordinal, collection, fields }) => ({ ordinal, collection, fields: Object.keys(fields) })));
+  if (checked !== null) return { outcome: checked };
+  const records = new Map<string, RunRecord>();
+  const read = await dependencies.withReads(async (reads) => {
+    for (const change of changes) {
+      if (change.action !== "change" || change.id === null) continue;
+      const key = codeRecordKey(change.collection, change.id);
+      if (records.has(key)) continue;
+      try {
+        records.set(key, runRecordOf((await reads.getCollectionRecord({ collectionPath: change.collection, recordId: change.id, historyLimit: 1 })).record));
+      } catch (error) {
+        if (!(error instanceof Error && error.message === RECORD_NOT_FOUND)) throw error;
+      }
+    }
+    return records;
+  });
+  return read === null ? { outcome: { kind: "wait", reason: "engine" } } : { records: read };
 }
 
 /**
@@ -767,7 +921,7 @@ async function applyEffect(
     // The record's id comes from the claim and step, so an earlier attempt's
     // record is found again instead of added twice. When the engine gave the
     // file another id, the one this run recorded is the one to find.
-    const known = [...run.created].reverse().find((entry) => entry.ordinal === ordinal);
+    const known = run.created.find((entry) => entry.planned === effect.recordId);
     const created = await dependencies.withRecordWrites(signal, (edit) =>
       edit.create({
         collectionPath: effect.collectionPath,
@@ -778,9 +932,9 @@ async function applyEffect(
     );
     if (!known || known.recordId !== created.recordId || known.path !== created.path) {
       // Saved before its fields, so a failed seed resumes on this record.
-      const entry = { ordinal, recordId: created.recordId, path: created.path };
+      const entry = { ordinal, planned: effect.recordId, recordId: created.recordId, path: created.path };
       await dependencies.store.recordCreated(run, entry);
-      run.created = [...run.created.filter((existing) => existing.ordinal !== ordinal), entry];
+      run.created = [...run.created.filter((existing) => existing.planned !== effect.recordId), entry];
     }
     const fields = effect.fields.map(({ field, value }) => ({ field, before: null, after: value }));
     const writes: RunWrite[] = [{ kind: "created", recordId: created.recordId, path: created.path }];

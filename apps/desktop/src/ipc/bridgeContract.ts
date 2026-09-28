@@ -4634,7 +4634,7 @@ export const ConfirmCollectionAutomationStepPayload = z.object({
   definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
   step: z.string().min(1).max(512),
   seq: z.number().int().nonnegative(),
-  // A person a formula named, whose hold this is.
+  // A person a formula named, or a Collection a code step named, whose hold this is.
   recipient: z.string().min(1).max(1_024).optional(),
 });
 export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;

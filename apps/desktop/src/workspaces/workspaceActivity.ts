@@ -613,6 +613,13 @@ export function createWorkspaceActivity(
     return state.entry?.agentRun?.depth ?? 0;
   }
 
+  // The agent run holding the slot, as a local app's invocation is
+  // attributed to it: its chain depth, or null with no run.
+  function agentRun(state: WorkspaceActivityState): { depth: number } | null {
+    const run = state.entry?.agentRun;
+    return run ? { depth: run.depth } : null;
+  }
+
   // Registers engine-originated disk writes (restore flows, future engine
   // API/MCP writes) so the watcher's engine capture does not re-record them.
   // Returns null when the workspace has no active engine capture — callers
@@ -684,6 +691,7 @@ export function createWorkspaceActivity(
     clearAgentRun,
     hasAgentRun,
     agentRunDepth,
+    agentRun,
     engineCaptureFor,
     workspaceRootPath,
     registerExpectedEngineEvents,

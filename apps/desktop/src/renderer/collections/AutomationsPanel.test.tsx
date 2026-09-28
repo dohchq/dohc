@@ -63,7 +63,7 @@ function read(automations: ValidAutomationSummary[]): ListCollectionAutomationsR
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
 const run = (overrides: Partial<Run>): Run => ({
   claimId: "atc_1", state: "done", error: null, createdAtMs: Date.now(), updatedAtMs: Date.now(),
-  trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, chainStopped: false, undone: false, ...overrides,
+  trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, ...overrides,
 });
 
 function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean; roundTripWrites?: boolean } = {}) {
@@ -762,16 +762,22 @@ describe("an automation's runs", () => {
     claimId: "atc_failed", state: "failed", error: "ana@dohc.test cannot edit Budget",
     writes: [{ kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Finished on", before: null, after: "2026-09-25" }],
   });
-  const stopped = run({ claimId: "atc_stopped", state: "failed", error: "chain-stopped", chainStopped: true });
+  const stopped = run({ claimId: "atc_stopped", state: "failed", error: "chain-stopped", neverStarted: true, chainStopped: true });
+  const TOO_LARGE = "This change was too large for dohc to start automations for every record. Change fewer records at a time.";
+  const unclaimed = run({ claimId: "atc_unclaimed", state: "failed", error: TOO_LARGE, neverStarted: true });
 
-  it("opens from a notice, offers Try again except for a chain stop, and confirms a changed automation first", async () => {
-    const { bridge } = makeBridge(read([summary(stamp, { lastRun: { state: "failed", atMs: Date.now() } })]), [failed, stopped]);
+  it("opens from a notice, offers Try again except for a run that never started, and confirms a changed automation first", async () => {
+    const { bridge } = makeBridge(read([summary(stamp, { lastRun: { state: "failed", atMs: Date.now() } })]), [failed, stopped, unclaimed]);
     bridge.retryCollectionAutomation.mockResolvedValueOnce({ status: "definition-changed", repeatsMessages: false });
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
 
     const failedRow = await screen.findByTestId("automation-run-atc_failed");
     expect(failedRow.textContent).toContain("ana@dohc.test cannot edit Budget.");
     expect(within(screen.getByTestId("automation-run-atc_stopped")).queryByRole("button", { name: "Try again" })).toBeNull();
+    // A change too large to claim keeps its own reason, and none can start it.
+    const unclaimedRow = screen.getByTestId("automation-run-atc_unclaimed");
+    expect(unclaimedRow.textContent).toContain(TOO_LARGE);
+    expect(within(unclaimedRow).queryByRole("button", { name: "Try again" })).toBeNull();
 
     await userEvent.click(within(failedRow).getByRole("button", { name: "Try again" }));
     expect(bridge.retryCollectionAutomation).toHaveBeenLastCalledWith({
@@ -945,6 +951,28 @@ describe("the builder", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1));
     expect(written[0]!.automations).toEqual([{ ...edited, if: "record.Points == -5" }]);
+  });
+
+  it("shows a code step's code, opens the file a step runs, and keeps both steps as the file wrote them", async () => {
+    const code = "const total = record => record.Count * 2;\nreturn { output: total(ctx.record) };";
+    const coded: Automation = { ...stamp, do: [...stamp.do, { kind: "run", code, as: "total" }, { kind: "run-file", file: "scripts/notify.js", as: null }] };
+    const { written } = makeBridge(read([summary(coded)]));
+    const onOpenFile = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onOpenFile={onOpenFile} />);
+    await openBuilder(user);
+
+    expect(within(screen.getByTestId("builder-step-1")).getByText("Run code")).toBeTruthy();
+    expect(screen.getByLabelText("Step 2, code").textContent).toBe(code);
+    const file = screen.getByTestId("builder-step-2");
+    expect(within(file).getByText("scripts/notify.js")).toBeTruthy();
+    await user.click(within(file).getByRole("button", { name: "Open file" }));
+    expect(onOpenFile).toHaveBeenCalledWith("Tasks/scripts/notify.js");
+
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations).toEqual([{ ...coded, name: "Stamp the finish date!" }]);
   });
 
   it("shows a formula's syntax error beside it and does not save until it is fixed", async () => {
