@@ -725,10 +725,37 @@ describe("Collection automations", () => {
       `${claim.claimId}/${hash}-1/0/${task.id}/Finished on`,
       `${claim.claimId}/${hash}-1/0/${task.id}/Note`,
     ]);
-    expect(w.journaled[0]).toMatchObject({
-      actorOriginId: "collection:Tasks#stamp",
-      attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1 },
-    });
+    // Nobody is known to have made the change, so the run's writes name nobody.
+    expect(w.journaled[0]).toMatchObject({ actorOriginId: "collection:Tasks#stamp" });
+    expect(w.journaled[0]?.attribution).toEqual({ actorKind: "automation", depth: 1 });
+  });
+
+  it("gives a record change's person to formulas and to the run's own writes", async () => {
+    const note = "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: '=person == null ? \"nobody\" : person.name'}}]\n";
+    const w = await world({ automations: { Tasks: note } });
+    const typed = w.addRecord("Tasks", "typed", { Status: "Done" });
+    const byAgent = w.addRecord("Tasks", "agent", { Status: "Done" });
+    const byFile = w.addRecord("Tasks", "file", { Status: "Done" });
+    const named = { kind: "named" as const, userId: "user-ana", grantId: "grant-ana", grantGeneration: 1 };
+    const claims = [
+      w.claim("collection:Tasks#note", typed, { actorKind: "human", onBehalfOf: "user-ice" }),
+      // An agent's change names the person it works for; the agent stays the actor.
+      w.claim("collection:Tasks#note", byAgent, { authorOriginId: "dohc-mcp", actorKind: "agent", onBehalfOf: "user-ice" }),
+      // A file another program wrote names nobody.
+      w.claim("collection:Tasks#note", byFile, { actorKind: null, onBehalfOf: null }),
+      // The engine names a collaborator whose live edit the relay accepted.
+      w.claim("collection:Tasks#note", w.addRecord("Tasks", "shared", { Status: "Done" }), { actorKind: null, onBehalfOf: "user-ana", sharedAuthor: named }),
+    ];
+    await w.executor.open();
+    for (const claim of claims) await w.settledClaim(claim);
+    expect(claims.map((claim) => claim.state)).toEqual(["done", "done", "done", "done"]);
+    expect([typed, byAgent, byFile].map((record) => w.fieldsOf(record).Note)).toEqual(["Ice", "Ice", "nobody"]);
+    expect(w.journaled.map((entry) => entry.attribution)).toEqual([
+      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1 },
+      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1 },
+      { actorKind: "automation", depth: 1 },
+      { actorKind: "automation", onBehalfOf: "user-ana", depth: 1 },
+    ]);
   });
 
   it("reads a Collection's automations again when a relay pull writes them, with no watcher batch", async () => {
@@ -1247,7 +1274,7 @@ describe("Collection automations", () => {
     // The automation creates the file as the moment's author, so the added
     // record's claim carries the automation and never triggers itself.
     expect(w.authored).toEqual([{ path: added.path, author: {
-      kind: "automation", automationId: "collection:Tasks#sweep", onBehalfOf: "local", depth: 1,
+      kind: "automation", automationId: "collection:Tasks#sweep", depth: 1,
     } }]);
     const [run] = await w.executor.runs("collection:Tasks#sweep");
     expect(run!.writes).toContainEqual({ kind: "field", recordId: sibling.id, path: sibling.path, field: "Points", before: 5, after: 10 });
@@ -3613,11 +3640,16 @@ describe("Collection automations that a Group message starts", () => {
   it("runs for a Group message with the message and its author in its formulas", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     const claim = messageClaim(w);
+    claim.change = { ...claim.change, onBehalfOf: "user-ana" };
     await w.executor.open();
     await w.settledClaim(claim);
 
     expect(claim.state).toBe("done");
     expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
+    // The record it adds is made for the message's author, so its claims name them.
+    expect(w.authored.map((entry) => entry.author)).toEqual([
+      { kind: "automation", automationId: "collection:Tasks#task", onBehalfOf: "user-ana", depth: 1 },
+    ]);
   });
 
   it("finds the record a message names with a formula, and changes it", async () => {

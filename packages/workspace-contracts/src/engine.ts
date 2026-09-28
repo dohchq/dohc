@@ -166,10 +166,9 @@ export type MomentAuthor =
   | LinkMomentAuthor
   | AutomationMomentAuthor;
 
-// Local file writes require a principal even when historical attribution has none.
-export type MomentWriteAuthor = (AgentMomentAuthor | AutomationMomentAuthor) & {
-  onBehalfOf: string;
-};
+// A local agent write names the person the agent works for. An automation
+// names its run's person, and none when its run has none.
+export type MomentWriteAuthor = (AgentMomentAuthor & { onBehalfOf: string }) | AutomationMomentAuthor;
 
 type VersionedFileContentKind = "text" | "binary";
 
@@ -1548,10 +1547,11 @@ export type ChangeAuthor =
   // running, never from a request. automationId is the engine subscription
   // id ("collection:<collection path>#<automation id>"), and depth is the
   // write's automation-chain depth: one greater than its trigger's.
+  // onBehalfOf is the run's person, left out when it has none.
   | {
       kind: "automation";
       automationId: string;
-      onBehalfOf: string;
+      onBehalfOf?: string;
       depth: number;
     }
   | { kind: "local"; label: NonEmptyLocalAuthorLabel };

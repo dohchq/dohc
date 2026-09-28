@@ -2802,7 +2802,10 @@ impl ChangeActorKind {
 }
 
 /// Declared write provenance beside `author_origin_id`: the actor kind, the
-/// principal it acted for, and its automation-chain depth. Optional
+/// person it acted for, and its automation-chain depth. The person is an
+/// account id, or a signed-out computer's installation id: the person
+/// typing, the person an agent works for, or the person whose change
+/// started an automation. Optional
 /// provenance, never a second authority — the storage and permission
 /// boundaries stay identical with or without it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -110,6 +110,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     startCliServer: vi.fn(async (input) => { options = input; return handle; }),
     stateDir: () => "state",
     localUserDisplayName: () => "Local name",
+    localPersonId: () => "person-local",
     notifyRenderer: vi.fn(),
     syncSharedChannelsForChatTarget: vi.fn(async () => undefined),
     chatDispatchService: { scanWorkspace: vi.fn(async () => undefined) },

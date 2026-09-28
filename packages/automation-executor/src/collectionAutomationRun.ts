@@ -524,6 +524,16 @@ export async function evaluateFindValues(
   return { values, failed: failedFinds };
 }
 
+/**
+ * The person a run acts for: who pressed its button, wrote its Group
+ * message, or made the record change or had an agent or automation make it.
+ * Null when nobody is known, as for a schedule, an Edit share link's change,
+ * or a file another program wrote.
+ */
+export function claimPerson(claim: AutomationClaim): string | null {
+  return claim.change.kind === "schedule" ? null : claim.change.onBehalfOf;
+}
+
 async function plan(
   dependencies: CollectionAutomationRunDependencies,
   input: CollectionAutomationRunInput,
@@ -538,8 +548,9 @@ async function plan(
     if ("outcome" in got) return stop(got.outcome);
     message = got.message;
   }
-  const pressedBy = claim.change.kind === "button" ? claim.change.onBehalfOf : null;
-  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
+  // A Group message's formulas name its author from the message itself.
+  const personId = claim.change.kind === "message" ? null : claimPerson(claim);
+  const person = personId === null ? null : { id: personId, name: dependencies.personName(personId) };
   // Formulas read `now` as the time of the change, or a schedule's due
   // time, so every attempt plans the same values.
   const nowMs = scheduleDueAt(claim) ?? claim.createdAtMs;
@@ -785,11 +796,13 @@ async function applyPlan(
   chat: ChatDirectory | null,
 ): Promise<CollectionAutomationRunOutcome> {
   const { claim, signal } = input;
+  // The run's writes carry its person on, so a change they cause names the
+  // same person, and a run with nobody names nobody.
+  const personId = claimPerson(claim);
   const author: ChangeAuthor = {
     kind: "automation",
     automationId: claim.automationId,
-    // The origin computer runs automations for its own workspace owner.
-    onBehalfOf: "local",
+    ...(personId === null ? {} : { onBehalfOf: personId }),
     depth: claim.depth + 1,
   };
   const effects = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));

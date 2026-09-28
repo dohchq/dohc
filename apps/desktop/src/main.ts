@@ -2150,6 +2150,7 @@ const activity = {
 // launches its own copy via the Settings config snippet.
 const agentIntegration = createAgentIntegration({
   workspaceIds: () => workspaceAuthorities.workspaceIds(),
+  localPersonId: localUserId,
   acquire: (workspaceId) => {
     const lease = requireWorkspaceAuthority(workspaceId);
     const workspace = canonicalWorkspaceFor(lease);
@@ -3000,7 +3001,7 @@ const chatDispatchService = createChatDispatchService({
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
       const workspaceId = workspace.workspaceId;
       if (run) {
-      if (!(await activity.claimAgentRun(workspaceId, run,
+      if (!(await activity.claimAgentRun(workspaceId, { ...run, onBehalfOf: localUserId() },
             lease.binding.canonicalRootPath,
           ))) {
         throw new Error("Another agent run is already active in this workspace.");
@@ -3691,7 +3692,7 @@ function createCollectionAutomationsFor(
       return await withOrderedWorkspaceTextPath(rootPath, path, async () => {
         try {
           await capture.writeAuthoredTextFile(join(rootPath, path), text,
-            { kind: "automation", automationId, onBehalfOf: "local", depth: 1 }, { expectedContentHash });
+            { kind: "automation", automationId, depth: 1 }, { expectedContentHash });
           return { status: "written" as const };
         } catch (error) {
           if (error instanceof AuthoredTextChangedError) return { status: "conflict" as const };
@@ -3981,6 +3982,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   startCliServer,
   stateDir,
   localUserDisplayName,
+  localPersonId: localUserId,
   notifyRenderer,
   syncSharedChannelsForChatTarget,
   chatDispatchService,
@@ -3988,6 +3990,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
 });
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
+  localPersonId: localUserId,
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
   acquireWorkspace: (workspaceId) => {
@@ -4996,7 +4999,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent",
+    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     namedAuthorLabel: (workspaceId, author) => rosterAuthorLabel(findWorkspace(workspaceId)?.shareRoster, author),
     automationAuthor, notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
@@ -5332,7 +5335,7 @@ function registerIpcHandlers(): void {
     // run's agent's, so the removed record's claims carry the run's depth.
     undoAcceptedResponse:(workspace,input)=>{
       const depth=activity.agentRunDepth(workspace.workspaceId);
-      return undoAcceptedResponse(workspace,input,depth>0?{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth}:undefined);
+      return undoAcceptedResponse(workspace,input,depth>0?{kind:"agent",agentId:"dohc-mcp",onBehalfOf:localUserId(),depth}:undefined);
     },
   });
   ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
