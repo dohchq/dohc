@@ -238,7 +238,7 @@ export function registerAutomationButtonsIpc<
       const states = await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation) =>
         shareViewIsPresent(operation.workspace.shareView)
           ? buttons.map(({ table }) => sharedDatasetButtonState(description, table))
-          : await operation.state.collectionAutomations.datasetButtons(input.datasetId, buttons, description));
+          : await operation.state.collectionAutomations.datasetButtons(input.datasetId, buttons, (id) => id === input.datasetId ? Promise.resolve(description) : dependencies.describeDataset(event.sender, input.workspaceId, id)));
       return { buttons: buttons.map((button, index) => ({ ...button, state: states[index]! })) };
     }
     assertCollectionPath(input.collectionPath);
@@ -262,7 +262,7 @@ export function registerAutomationButtonsIpc<
         }
         return await operation.state.collectionAutomations.pressDataset(
           { datasetId: input.datasetId, table: input.table, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy, by: caller.by, confirmed: input.confirmed ?? [] },
-          description, watch);
+          (id) => id === input.datasetId ? Promise.resolve(description) : caller.describeDataset(id), watch);
       });
       return pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed;
     }
@@ -336,14 +336,14 @@ export function registerAutomationButtonsIpc<
     if (table === undefined) throw new Error(`${field} is not a button in ${nameOf(collectionPath)}.`);
     if (!(await caller.withOperation((operation) => operation.state.collectionAutomations.datasetPressed(pressId)))) {
       const [state] = await caller.withOperation((operation) =>
-        operation.state.collectionAutomations.datasetButtons(datasetId, [{ field, table }], description));
+        operation.state.collectionAutomations.datasetButtons(datasetId, [{ field, table }], (id) => id === datasetId ? Promise.resolve(description) : caller.describeDataset(id)));
       if (state === undefined || state.kind !== "ready") throw new Error(state?.reason ?? `${field} did not start.`);
       const unconfirmed = (state.irreversible ?? []).filter((action) => !input.confirm.includes(action.name));
       if (unconfirmed.length > 0) return { confirm: unconfirmed };
     }
     return await press(
       { workspaceId, datasetId, table, field, recordId, pressId, confirmed: [...input.confirm] },
-      { ...caller, describeDataset: async () => description },
+      { ...caller, describeDataset: (id) => id === datasetId ? Promise.resolve(description) : caller.describeDataset(id) },
     );
   }
 

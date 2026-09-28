@@ -58,6 +58,7 @@ const EffectSchema = z.union([
   }),
   z.object({
     kind: z.literal("dataset-edit"),
+    collectionPath: z.string().optional(),
     rules: DatasetRulesSchema,
     operationId: z.string(),
     tableId: z.string(),
@@ -67,6 +68,7 @@ const EffectSchema = z.union([
   }),
   z.object({
     kind: z.literal("dataset-create"),
+    collectionPath: z.string().optional(),
     rules: DatasetRulesSchema,
     operationId: z.string(),
     tableId: z.string(),
@@ -135,6 +137,7 @@ const StepSchema = z.object({
   effects: z.array(EffectSchema),
   output: OutputSchema.optional(),
   collections: z.array(CollectionRefSchema).optional(),
+  destinations: z.array(z.object({ path: z.string(), rules: DatasetRulesSchema.nullable() })).optional(),
 });
 const WriteSchema = z.union([
   z.object({
@@ -193,8 +196,8 @@ const WriteSchema = z.union([
     // The reverse action the rules named when this one ran; Undo runs that one or none.
     reverseOperationId: z.string().optional(),
   }),
-  z.object({ kind: z.literal("dataset-kept"), recordId: DatasetRecordIdSchema, fieldId: z.string(), field: z.string(), planned: JsonValueSchema, current: JsonValueSchema }),
-  z.object({ kind: z.literal("dataset-skipped"), recordId: DatasetRecordIdSchema, reason: z.string() }),
+  z.object({ kind: z.literal("dataset-kept"), datasetId: z.string(), tableId: z.string(), recordId: DatasetRecordIdSchema, fieldId: z.string(), field: z.string(), planned: JsonValueSchema, current: JsonValueSchema }),
+  z.object({ kind: z.literal("dataset-skipped"), datasetId: z.string(), tableId: z.string(), recordId: DatasetRecordIdSchema, reason: z.string() }),
   // A post or direct message the automation wrote, and where it went.
   z.object({ kind: z.literal("message"), messageId: z.string(), name: z.string() }),
   // A notice the automation sent, and to whom.
@@ -319,6 +322,7 @@ export type DatasetUndoRequest = z.infer<typeof UndoRequestSchema>;
 export type DatasetUndoCall = z.infer<typeof UndoCallSchema>;
 /** One planned step: its effects, on document records or on dataset records, and its result. */
 export interface StoredStep {
+  destinations?: Array<{ path: string; rules: { datasetId: string; revision: number; revisionSha256: string } | null }>;
   ordinal: number;
   effects: Array<PlannedEffect | DatasetEffect>;
   output?: StepOutput;

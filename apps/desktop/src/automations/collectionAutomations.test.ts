@@ -837,12 +837,12 @@ describe("Collection automations", () => {
   });
 
   it("reads a Collection's automations again when a relay pull writes them, with no watcher batch", async () => {
-    const w = await world({ automations: { Tasks: BUMP } });
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
     await w.executor.open();
     await w.until(() => w.subscriptions.has(TASKS));
 
     // A collaborator's direct write removes the automation (ADR 0013).
-    await w.writeAutomations("Tasks", "version: 1\nautomations: []\n");
+    await w.writeAutomations("Tasks", "  []\n");
     w.executor.handlePulledPaths(["Tasks/notes.md"]);
     // A read queued after the pull sees the index the pull left.
     const unchanged = await w.executor.automationsIn("Tasks");
@@ -1384,7 +1384,7 @@ describe("Collection automations", () => {
       id: "settle", name: "Settle", enabled: true, when: { kind: "record-added", table: null }, if: null,
       do: [{ kind: "invoke", operation: "tasks.settle", input: [] }],
     };
-    await expect(w.executor.draftCannotRun("Tasks", draft)).resolves.toMatch(/cannot name a table or a Collection action/u);
+    await expect(w.executor.draftCannotRun("Tasks", draft)).resolves.toBe("Only a dataset Collection has actions.");
     await expect(w.executor.draftCannotRun("Tasks", { ...draft, do: [{ kind: "set", values: [{ field: "Points", value: { kind: "literal", value: 1 } }], records: null, operation: null }] }))
       .resolves.toBeNull();
     // A code file is looked for, not read: one the folder has is not named.
@@ -1562,7 +1562,9 @@ describe("Collection automations", () => {
       await w.settledClaim(claim);
       expect(claim).toMatchObject({
         state: "failed",
-        error: `${code ? "The code in step 1 changes records in Donations. " : ""}Automations cannot use Donations yet, because its records change only through its Collection actions.`,
+        error: code
+          ? "The code in step 1 changes records in Donations. Automations cannot use Donations yet, because its records change only through its Collection actions."
+          : "Name the approved operation step 1 uses, such as donations.create.",
       });
       expect(w.authored).toEqual([]);
     } finally {
@@ -2233,6 +2235,7 @@ describe("Collection automations", () => {
       trashed.push(path);
       for (const [id, record] of w.records) if (record.path === path) w.records.delete(id);
     };
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, trash))
       .resolves.toEqual({ status: "undone", reverted: 1, removed: 1, changedSince: 1, missing: 0, kept: 0, irreversible: 0, actions: 0, deleted: 0, keptChanged: 0, gone: 0, actionsReversed: 0 });
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "theirs" });
@@ -2969,7 +2972,7 @@ describe("Collection automations", () => {
     const claim = w.claim("collection:Tasks#act", w.addRecord("Tasks", "one", { Status: "Done" }));
     await w.executor.open();
     await w.settledClaim(claim);
-    expect(claim).toMatchObject({ state: "failed", error: expect.stringMatching(/cannot name a table or a Collection action/) });
+    expect(claim).toMatchObject({ state: "failed", error: "Only a dataset Collection has actions." });
     expect(w.journaled).toEqual([]);
   });
 
@@ -4894,7 +4897,7 @@ describe("code steps", () => {
     w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Tasks"])] });
     await w.makeExecutor().open();
     await w.settledClaim(claim);
-    expect(claim).toMatchObject({ state: "failed", error: "ana@dohc.test cannot edit Log." });
+    expect(claim).toMatchObject({ state: "failed", error: "The code in step 1 changes records in Log. ana@dohc.test cannot edit Log." });
     expect([...w.records.values()].filter((record) => record.collection === "Log")).toEqual([]);
   });
 

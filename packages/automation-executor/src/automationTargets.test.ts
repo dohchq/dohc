@@ -135,3 +135,17 @@ describe("automation destinations", () => {
     expect(await w.targets.resolve("Tasks")).toMatchObject({ kind: "problem", code: "invalid-schema", problem: "dohc cannot read Tasks/collection.yaml." });
   });
 });
+
+it("reuses descriptors until the indexed metadata revision changes", async () => {
+  const w = workspace();
+  let generation = 1;
+  const targets = createAutomationTargets({ ...w.dependencies, revisionOf: () => generation });
+  const target = await targets.resolve("Budget");
+  if (target.kind === "problem") throw new Error("fixture");
+  await targets.validate!(target);
+  await targets.validate!(target);
+  expect(w.requests).toEqual(["Budget/dataset.json"]);
+  w.files.set("Budget/dataset.json", JSON.stringify({ datasetId: "replacement" }));
+  generation += 1;
+  await expect(targets.validate!(target)).rejects.toThrow("No approval");
+});

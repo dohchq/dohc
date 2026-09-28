@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  rename,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -134,7 +140,7 @@ globalThis.operations["invoices.release"] = (ctx, input) => {
 };
 `;
 
-async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean; storeFails?: boolean; operations?: string; descriptor?: string;
+async function world(options: { documents?: boolean; roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean; storeFails?: boolean; operations?: string; descriptor?: string;
   agentRun?: () => LocalDatasetAgent | null;
   onMessage?: (message: AutomationChatMessage) => Promise<void>;
   onFailure?: (report: AutomationFailureReport) => Promise<void>;
@@ -222,6 +228,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const records = async () => ((await host.query({ ...rules, operationId: LIST, input: { limit: 100 }, idempotencyKey: "read" })).result as
     { rows: Array<{ id: string; version: number; values: Record<string, JsonValue> }> }).rows;
 
+  const documents = new Map<string, { id: string; path: string; status: string }>();
+  let documentPath = "Log";
   // Group subscriptions the executor asks the engine for.
   const subscribed: unknown[] = [];
   // The Group subscriptions the executor last asked the engine to watch.
@@ -234,7 +242,15 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   // How many claims the engine has served.
   let served = 0;
   const engine = {
-    listCollections: async () => ({ collections: options.documentCollection ? [{ path: options.documentCollection, objectId: options.documentCollection, status: "valid", reasons: [] }] : [] }),
+    listCollections: async () => ({ collections: [
+      ...(options.documents ? [{ objectId: "Log", path: documentPath, status: "valid", reasons: [] }] : []),
+      ...(options.documentCollection ? [{ path: options.documentCollection, objectId: options.documentCollection, status: "valid", reasons: [] }] : []),
+    ] }),
+    getCollectionRecord: async ({ collectionPath, recordId }: { collectionPath: string; recordId: string }) => {
+      const record = documents.get(recordId);
+      if (collectionPath !== documentPath || record === undefined) throw new Error("collection-record-not-found");
+      return { collection: { path: documentPath, status: "valid", reasons: [] }, record: { id: record.id, path: record.path, conflicted: false, values: [{ field: "Status", value: record.status, validation: { status: "untyped" }, resolvedRelations: [] }] }, history: [], nextBeforeHistoryId: null };
+    },
     subscribeAutomation: async (input: unknown) => { subscribed.push(input); },
     releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
     watchAutomationGroups: async (input: { subscriptions: unknown[] }) => { watched.splice(0, watched.length, ...input.subscriptions); return { needsHandover: false }; },
@@ -344,7 +360,22 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
       write: async (_signal, message) => { await options.onMessage?.(message); messages.push(message); wake(); },
     },
     withEngine: async (work) => await work(engine),
-    withRecordWrites: async () => { throw new Error("Dataset runs write through their own operations."); },
+    withRecordWrites: async (_signal, work) => {
+      if (!options.documents) throw new Error("Dataset runs write through their own operations.");
+      return work({
+        create: async ({ recordId, collectionPath, name }) => {
+          if (collectionPath !== documentPath) throw new Error("Wrong Collection.");
+          documents.set(recordId, { id: recordId, path: documentPath + "/" + name + ".md", status: "" });
+          return { recordId, path: documents.get(recordId)!.path };
+        },
+        setFields: async ({ recordPath, fields }) => {
+          const record = [...documents.values()].find((record) => record.path === recordPath)!;
+          const before = record.status;
+          record.status = String(fields.Status);
+          return { replaced: { Status: before || null }, kept: {} };
+        },
+      });
+    },
     readText: async (path) => {
       try {
         const text = await readFile(join(root, path), "utf8");
@@ -415,7 +446,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   });
   makeExecutor();
   return {
-    host, root, rules, approved, create, edit, record, records, until, errors, opened, subscribed, watched, writeAutomations, makeExecutor, settled, waiting, messages, notices, failureReports,
+    host, root, adapter, documents, rules, approved, create, edit, record, records, until, errors, opened, subscribed, watched, writeAutomations, makeExecutor, settled, waiting, messages, notices, failureReports,
     expiries: () => expiries,
     engineClaims, engineFailures, engineRetries, setEngineReadable: (readable: boolean) => { engineReadable = readable; },
     served: () => served,
@@ -441,11 +472,24 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     fixStore: () => { storeFails = false; },
     failNextMetadata: (failure: NonNullable<typeof metadataFailure>) => { metadataFailure = failure; },
     afterNextSave: (hook: () => void) => { afterSave = hook; },
+    moveDocuments: async (path: string) => {
+      await rename(join(root, documentPath), join(root, path));
+      for (const record of documents.values()) record.path = path + record.path.slice(documentPath.length);
+      documentPath = path;
+    },
     moveToServer: () => { unpressable = "This Collection moved to a server, so its buttons can't run here."; },
   };
 }
 
 describe("Collection automations on a dataset", () => {
+  it("reports a missing trigger field instead of showing an automation that cannot subscribe as runnable", async () => {
+    const f = await world();
+    await f.writeAutomations(closePaid().replace("field-changed: Paid", "field-changed: Missing"));
+    await f.executor.open();
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: "Invoices has no field named Missing." }] });
+    await f.executor.dispose();
+  });
+
   it("runs a change's automation on a dataset whose operations someone wrote, from the change's facts alone", async () => {
     const f = await world({ operations: AUTHORED_OPERATIONS });
     await f.writeAutomations(closePaid("      - notify: 'Invoice {record.id} paid, was {previous.Paid}'\n        to: [user-owner]\n"));
@@ -693,7 +737,7 @@ describe("Collection automations on a dataset", () => {
     const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
     expect(run!.replans).toEqual([expect.objectContaining({ effect: 0, replan: 1, fields: [expect.objectContaining({ fieldId: STATUS })] })]);
     expect(run!.applied[0]!.writes).toEqual([
-      { kind: "dataset-kept", recordId: invoice, fieldId: NOTES, field: "Notes", planned: "Closed by automation", current: "someone else" },
+      { kind: "dataset-kept", datasetId: definition.datasetId, tableId: TABLE, recordId: invoice, fieldId: NOTES, field: "Notes", planned: "Closed by automation", current: "someone else" },
       expect.objectContaining({ kind: "dataset-edit", fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Open and paid" }] }),
     ]);
     await f.executor.dispose();
@@ -825,7 +869,7 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
-  it.each(["unavailable", "generated", "grants"] as const)("keeps dataset identity and reports a pending claim when index metadata fails: %s", async (failure) => {
+  it.each(["unavailable", "generated", "grants"] as const)("keeps dataset identity and releases a pending claim when index metadata fails: %s", async (failure) => {
     const f = await world();
     await f.executor.open();
     await f.executor.dispose();
@@ -835,11 +879,14 @@ describe("Collection automations on a dataset", () => {
     f.failNextMetadata(failure);
     f.makeExecutor();
     await f.executor.open();
-    await f.until(() => f.failureReports.length === 1);
+    await f.until(() => f.claims()[0]?.state === "pending" && f.errors.length > 0);
+    expect(f.failureReports).toEqual([]);
     expect(f.errors).toContainEqual({ context: `read dataset ${definition.datasetId}'s operations`, error: expect.any(Error) });
-    expect(f.claims()).toMatchObject([{ state: "failed" }]);
+    expect(f.claims()).toMatchObject([{ state: "pending" }]);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     await expect(f.executor.datasetIn("Budget")).resolves.toBe(definition.datasetId);
+    f.executor.datasetsChanged();
+    await f.until(() => f.claims()[0]?.state === "done");
     await f.executor.dispose();
   });
 
@@ -1356,13 +1403,13 @@ ${step}`;
   const owner = (f: Awaited<ReturnType<typeof world>>) => f.host.describe(definition.datasetId);
   const press = (f: Awaited<ReturnType<typeof world>>, input: { recordId: string; pressId: string; pressedBy?: string; field?: string; confirmed?: string[] }, description = owner(f)) =>
     f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, by: { kind: "human" }, confirmed: [], ...input, recordId: JSON.stringify(input.recordId) },
-      description, () => undefined);
+      async () => description, () => undefined);
 
   it("runs a press on a dataset whose operations someone wrote, calling none of them for its own checks", async () => {
     const f = await world({ operations: AUTHORED_OPERATIONS });
     await f.writeAutomations(markPaid("      - notify: 'Invoice {record.id} was pressed'\n        to: [user-owner]\n"));
     await f.executor.open();
-    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (owner(f))))
       .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION }]);
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     const pressed = await press(f, { recordId: invoice, pressId: pressId(12) });
@@ -1392,7 +1439,7 @@ ${step}`;
     await f.writeAutomations(markPaid(settle) + watchStatus);
     await f.executor.open();
     // The button says which action it runs that dohc cannot undo, so it can ask first.
-    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (owner(f))))
       .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION, irreversible: [{ name: "invoices.settle", label: "Settle" }] }]);
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     // A press that did not agree to Settle is refused: the button would run what nobody was told of.
@@ -1416,7 +1463,7 @@ ${step}`;
     await f.writeAutomations(markPaid(hold + settle));
     await f.executor.open();
     // Only Settle has no reverse, so only Settle is named before a press.
-    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (owner(f))))
       .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION, irreversible: [{ name: "invoices.settle", label: "Settle" }] }]);
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     const pressed = await press(f, { recordId: invoice, pressId: pressId(23), confirmed: ["invoices.settle"] });
@@ -1560,7 +1607,7 @@ ${step}`;
     const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
     await f.writeAutomations(markPaid("      - invoke: invoices.hold\n        input:\n          id: '=record.id'\n"));
     await f.executor.open();
-    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (owner(f))))
       .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION }]);
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     const pressed = await press(f, { recordId: invoice, pressId: pressId(24) });
@@ -1628,14 +1675,14 @@ ${step}`;
     const f = await world();
     await f.writeAutomations(markPaid());
     await f.executor.open();
-    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (owner(f))))
       .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION }]);
     // A button watches nothing; its presses claim.
     expect(f.host.automations.subscriptions()).toEqual([]);
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     const watched: string[] = [];
     const pressed = await f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(invoice), pressId: pressId(1), pressedBy: PRESSER, by: { kind: "human" }, confirmed: [] },
-      owner(f), (claimId) => watched.push(claimId));
+      async () => owner(f), (claimId) => watched.push(claimId));
     if (pressed.busy) throw new Error("The press ran.");
     expect(pressed.settled).toBeNull();
     expect(watched).toEqual([pressed.claimId]);
@@ -1665,7 +1712,7 @@ ${step}`;
     const { id: other } = await f.create({ [STATUS]: "Open" });
     const agent = (depth: number) => ({ kind: "agent" as const, originId: "dohc-mcp", depth });
     const input = { datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, confirmed: [] };
-    const pressed = await f.executor.pressDataset({ ...input, recordId: JSON.stringify(invoice), pressId: pressId(1), by: agent(2) }, owner(f), () => undefined);
+    const pressed = await f.executor.pressDataset({ ...input, recordId: JSON.stringify(invoice), pressId: pressId(1), by: agent(2) }, async () => owner(f), () => undefined);
     if (pressed.busy) throw new Error("The press ran.");
     await f.until(() => f.settled.length === 1);
     expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([expect.objectContaining({ depth: 2, actor: { kind: "owner", userId: PRESSER, agent: { depth: 2 } } })]);
@@ -1673,7 +1720,7 @@ ${step}`;
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: BUTTON_AUTOMATION, depth: 3 } });
     expect(await f.executor.run(BUTTON_AUTOMATION, pressed.claimId)).toMatchObject({ trigger: { kind: "button", by: "agent", depth: 2 } });
     const reports = f.failureReports.length;
-    const stopped = await f.executor.pressDataset({ ...input, recordId: JSON.stringify(other), pressId: pressId(2), by: agent(4) }, owner(f), () => undefined);
+    const stopped = await f.executor.pressDataset({ ...input, recordId: JSON.stringify(other), pressId: pressId(2), by: agent(4) }, async () => owner(f), () => undefined);
     expect(stopped).toMatchObject({ busy: false, settled: { outcome: "failed", error: "This press did not run. dohc stops a chain after automations and agents start each other 4 times in a row. Check which automations start each other." } });
     // The stop is a failure the owner hears about, without waiting for another change.
     await f.until(() => f.failureReports.length > reports);
@@ -1694,10 +1741,10 @@ ${step}`;
     // A description of another dataset grants nothing here.
     for (const description of [only(LIST), only(LIST, EDIT), only(STATUS_ONLY), { ...described, datasetId: id(99) }]) {
       await expect(press(f, { recordId: invoice, pressId: pressId(2) }, description)).rejects.toThrow(refusal);
-      expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], description)).toEqual([{ kind: "disabled", reason: refusal }]);
+      expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (description))).toEqual([{ kind: "disabled", reason: refusal }]);
     }
     await expect(f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: "not json", pressId: pressId(3), pressedBy: PRESSER, by: { kind: "human" }, confirmed: [] },
-      described, () => undefined)).rejects.toThrow("This record is not in Invoices.");
+      async () => described, () => undefined)).rejects.toThrow("This record is not in Invoices.");
     // A record the table does not hold gets no claim.
     await expect(press(f, { recordId: "missing", pressId: pressId(3) })).rejects.toThrow("This record is no longer in Invoices.");
     expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
@@ -1714,7 +1761,7 @@ ${step}`;
     const only = (...operationIds: string[]) => ({ ...described, operations: described.operations.filter((operation) => operationIds.includes(operation.operationId)) });
     const refusal = "Only people who can edit Invoices can use this button.";
     for (const description of [only(LIST, STATUS_ONLY), only(LIST, STATUS_ONLY, EDIT)]) {
-      expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], description)).toEqual([{ kind: "disabled", reason: refusal }]);
+      expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (description))).toEqual([{ kind: "disabled", reason: refusal }]);
       await expect(press(f, { recordId: invoice, pressId: pressId(2) }, description)).rejects.toThrow(refusal);
     }
     expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
@@ -1733,11 +1780,11 @@ ${step}`;
     const reason = "Budget has no approved operation named invoices.refund.";
     const summary = await f.executor.automationsIn("Budget");
     expect(summary.status === "read" && summary.automations[0]?.valid && summary.automations[0].cannotRun).toBe(reason);
-    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f))).toEqual([{ kind: "disabled", reason }]);
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (owner(f)))).toEqual([{ kind: "disabled", reason }]);
     await expect(press(f, { recordId: invoice, pressId: pressId(11) })).rejects.toThrow(reason);
     // Someone who cannot edit the table still learns only that.
     const reader = { ...owner(f), operations: owner(f).operations.filter((operation) => operation.operationId === LIST) };
-    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], reader))
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (reader)))
       .toEqual([{ kind: "disabled", reason: "Only people who can edit Invoices can use this button." }]);
     expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
     await f.executor.dispose();
@@ -1813,7 +1860,7 @@ ${step}`;
     const { id: invoice } = await f.create({});
     f.moveToServer();
     const moved = "This Collection moved to a server, so its buttons can't run here.";
-    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], async () => (owner(f))))
       .toEqual([{ kind: "disabled", reason: moved }]);
     await expect(press(f, { recordId: invoice, pressId: pressId(10) })).rejects.toThrow(moved);
     expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
@@ -1905,13 +1952,16 @@ describe("dataset automation claims in both ledgers", () => {
     const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
     const [ledgerRun] = (await store.runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
     // An engine run from when Budget kept its records in documents.
-    await store.save({ ...ledgerRun!, claimId: "atc_document", rules: null, applied: [{ ordinal: 0, writes: [
+    await store.save({ ...ledgerRun!, claimId: "atc_document", rules: null, steps: [{ ordinal: 0, effects: [{
+      kind: "set", target: { recordId: "rec_one", path: "Budget/one.md", collectionPath: "Budget" },
+      fields: [{ field: "Status", before: "Open", after: "Closed" }],
+    }] }], applied: [{ ordinal: 0, writes: [
       { kind: "field", recordId: "rec_one", path: "Budget/one.md", field: "Status", before: "Open", after: "Closed" },
     ] }] });
     f.engineClaims.push(engineClaim("atc_document", "done", 1));
     const trash = async () => { throw new Error("Nothing moves to the trash."); };
     expect(await f.executor.undo({ automationId: AUTOMATION, claimId: "atc_document", deletes: null }, trash)).toEqual({
-      status: "refused", reason: "This run ran before this Collection changed how it keeps its records, so dohc cannot undo it.",
+      status: "refused", reason: DATASET_UNDO_RULES_CHANGED,
     });
     expect((await store.runsOf(AUTOMATION, "atc_document")).runs.map((run) => run.undo)).toEqual([null]);
     await f.executor.dispose();
@@ -2356,7 +2406,7 @@ describe("dataset agent wakes", () => {
     if (when.startsWith("button")) {
       const { id: invoice } = await f.create({});
       const pressed = await f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(invoice),
-        pressId: id(91), pressedBy: "user-owner", by: { kind: "human" }, confirmed: [] }, f.host.describe(definition.datasetId), () => undefined);
+        pressId: id(91), pressedBy: "user-owner", by: { kind: "human" }, confirmed: [] }, async (datasetId) => f.host.describe(datasetId), () => undefined);
       expect(pressed.busy).toBe(false);
       await f.until(() => f.host.automations.claims(ASK).claims[0]?.state === "done");
       expect(f.engineClaims).toEqual([]);
@@ -2865,4 +2915,172 @@ describe("code steps on a dataset", () => {
     expect((await f.record(invoice))?.values[NOTES]).toBe("draft");
     await f.executor.dispose();
   });
+});
+
+it("adds, finds and sets another approved dataset without automations, through the real host", async () => {
+  const f = await world();
+  const other = generateDatasetSources({ ...definition, datasetId: id(200), name: "Other", schemaPath: "Other/schema.sql", operationsPath: "Other/operations.js" });
+  for (const [path, text] of Object.entries(other.files)) { await mkdir(dirname(join(f.root, path)), { recursive: true }); await writeFile(join(f.root, path), text); }
+  const prepared = await f.host.prepare({ descriptorPath: "Other/dataset.json", adapter: f.adapter });
+  const approved = await f.host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
+  const rules = { datasetId: other.definition.datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
+  await f.writeAutomations(closePaid(`      - add-record: {Status: Open}
+        collection: Other
+        operation: invoices.create
+        as: added
+      - set: {Status: Closed}
+        records: added
+        operation: invoices.status
+      - find: record.Status == "Closed"
+        collection: Other
+        operation: invoices.list
+        as: found
+      - set: {Status: Found}
+        records: found
+        operation: invoices.status
+`));
+  await f.executor.open();
+  const { id: invoice } = await f.create({});
+  await f.edit(invoice, { [PAID]: true });
+  await f.until(() => f.claims()[0]?.state === "done" || f.claims()[0]?.state === "failed");
+  expect(f.claims()[0]?.state).toBe("done");
+  const result = await f.host.query({ ...rules, operationId: LIST, input: { limit: 50 }, idempotencyKey: "verify" });
+  expect(result.result).toMatchObject({ rows: [{ values: { [STATUS]: "Found", [PAID]: false } }] });
+  expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+  await f.executor.dispose();
+});
+
+it("routes Undo to document writes when the source is a dataset, even after its definition is deleted", async () => {
+  const f = await world({ documents: true });
+  await f.writeAutomations(closePaid('      - add-record: {Status: Added}\n        collection: Log\n'));
+  await f.executor.open();
+  const { id: invoice } = await f.create({});
+  await f.edit(invoice, { [PAID]: true });
+  await f.until(() => f.claims()[0]?.state === "done" || f.claims()[0]?.state === "failed");
+  expect(f.claims()[0]?.state).toBe("done");
+  expect(f.documents.size).toBe(1);
+  await f.writeAutomations("");
+  const undone = await f.executor.undo({ deletes: null, automationId: AUTOMATION, claimId: f.claims()[0]!.claimId }, async (path) => {
+    for (const [id, record] of f.documents) if (record.path === path) f.documents.delete(id);
+  });
+  expect(undone).toMatchObject({ status: "undone", removed: 1 });
+  expect(f.documents.size).toBe(0);
+  await f.executor.dispose();
+});
+
+it("lists and confirms a held cross-Collection step after its editor leaves", async () => {
+  const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+  const f = await world({ documents: true, roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
+  await f.writeAutomations(closePaid('      - add-record: {Status: Added}\n        collection: Log\n'));
+  await f.executor.open();
+  await f.executor.automationsIn("Budget");
+  f.setRoster(OWNER);
+  f.executor.rosterChanged();
+  await f.until(() => f.executor.holds().some((hold) => hold.action === "change"));
+  const { id: invoice } = await f.create({});
+  await f.edit(invoice, { [PAID]: true });
+  await f.until(() => f.claims()[0]?.state === "pending");
+  for (const hold of f.executor.holds()) expect(await f.executor.confirmReach(hold)).toBe("confirmed");
+  await f.until(() => f.claims()[0]?.state === "done" || f.claims()[0]?.state === "failed");
+  expect(f.claims()[0]?.state).toBe("done");
+  expect(f.documents.size).toBe(1);
+  await f.executor.dispose();
+});
+
+it("runs a document source's code and dataset writes through the real host", async () => {
+  const f = await world({ documents: true });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: copy
+    name: Copy
+    when: record-added
+    do:
+      - run: "return { output: ctx.record.Status };"
+        as: priorStatus
+      - add-record: {Status: '=priorStatus'}
+        collection: Budget
+        operation: invoices.create
+        as: added
+      - set: {Status: From document}
+        records: added
+        operation: invoices.status
+`);
+  f.documents.set("document", { id: "document", path: "Log/document.md", status: "Original" });
+  await f.executor.open();
+  const claim: AutomationClaim = { ...engineClaim("document-copy", "pending", Date.now(), "collection:Log#copy"),
+    collectionPath: "Log", recordId: "document", trigger: { historyId: 1 },
+    change: { kind: "added", authorOriginId: null, actorKind: "human", onBehalfOf: "document-author",
+      sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 } };
+  f.engineClaims.push(claim);
+  f.executor.notifyClaimed();
+  await f.until(() => claim.state === "done" || claim.state === "failed");
+  expect(claim.state).toBe("done");
+  expect(await f.records()).toMatchObject([{ values: { [STATUS]: "From document" } }]);
+  expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({
+    automation: { automationId: "collection:Log#copy", depth: 1 },
+  });
+  await f.executor.dispose();
+});
+
+it("resumes a saved cross-Collection Add after its document destination moves", async () => {
+  const f = await world({ documents: true });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await f.writeAutomations(closePaid(`      - add-record: {Status: Added}
+        collection: Log
+        as: added
+      - set: {Status: Resumed}
+        records: added
+`));
+  await f.executor.open();
+  let closed: Promise<void> | undefined;
+  f.afterNextSave(() => { closed = f.executor.close(); });
+  const invoice = await f.create({});
+  await f.edit(invoice.id, { [PAID]: true });
+  await f.until(() => closed !== undefined);
+  await closed;
+  await f.moveDocuments("Moved");
+  await f.executor.open();
+  await f.until(() => f.claims()[0]?.state === "done" || f.claims()[0]?.state === "failed");
+  expect(f.claims()[0]?.state).toBe("done");
+  expect([...f.documents.values()]).toEqual([expect.objectContaining({ path: expect.stringMatching(/^Moved\//), status: "Resumed" })]);
+  await f.executor.dispose();
+});
+
+it("refuses a viewer who can write only the source button table when its automation writes another dataset", async () => {
+  const f = await world();
+  const other = generateDatasetSources({ ...definition, datasetId: id(200), name: "Other",
+    schemaPath: "Other/schema.sql", operationsPath: "Other/operations.js" });
+  for (const [path, text] of Object.entries(other.files)) {
+    await mkdir(dirname(join(f.root, path)), { recursive: true });
+    await writeFile(join(f.root, path), text);
+  }
+  const prepared = await f.host.prepare({ descriptorPath: "Other/dataset.json", adapter: f.adapter });
+  await f.host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
+  await f.writeAutomations(`  - id: cross-button
+    name: Cross button
+    when:
+      button: Mark paid
+    do:
+      - add-record: {Status: Crossed}
+        collection: Other
+        operation: invoices.create
+`);
+  await f.executor.open();
+  const record = await f.create({});
+  const described: string[] = [];
+  const viewer = async (datasetId: string) => {
+    described.push(datasetId);
+    const description = f.host.describe(datasetId);
+    return { ...description, operations: description.operations.filter((operation) =>
+      datasetId === definition.datasetId ? [LIST, STATUS_ONLY].includes(operation.operationId) : operation.readOnly) };
+  };
+  await expect(f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid",
+    recordId: JSON.stringify(record.id), pressId: id(201), pressedBy: "viewer", by: { kind: "human" }, confirmed: [] },
+    viewer, () => undefined)).rejects.toThrow("Only people who can edit Invoices can use this button.");
+  expect(described.sort()).toEqual([definition.datasetId, other.definition.datasetId].sort());
+  expect(f.host.automations.claims(`collection:${BUDGET}#cross-button`).claims).toEqual([]);
+  await f.executor.dispose();
 });

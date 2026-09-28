@@ -419,7 +419,7 @@ describe("undo of a dataset run", () => {
     const records = { b: { version: 1, values: {} }, c: { version: 1, values: {} } };
     const { host, sent } = recordsHost(records, { rules: twoDeletes });
     const runs = [runOf("h-1", 1, [created("b", [REMOVE, ARCHIVE]), created("c", [REMOVE, ARCHIVE])])];
-    const key = JSON.stringify([TABLE, ...[REMOVE, ARCHIVE].sort()]);
+    const key = JSON.stringify([definition.datasetId, TABLE, ...[REMOVE, ARCHIVE].sort()]);
     expect(await preview(host, runs)).toEqual(shown({
       deletes: 2,
       choices: [{ key, table: "Invoices", records: 2, operations: [{ operationId: REMOVE, label: "Delete invoice" }, { operationId: ARCHIVE, label: "Archive invoice" }] }],

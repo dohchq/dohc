@@ -2140,8 +2140,8 @@ describe("an automation's runs", () => {
       { kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", expectedVersion: 1, version: 2,
         fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] },
       { kind: "dataset-created", rules, operationId: "create", tableId: "table-1", recordId: "invoice-2", version: 1, deletes: [] },
-      { kind: "dataset-kept", recordId: "invoice-3", fieldId: "status", field: "Status", planned: "Closed", current: "Pending" },
-      { kind: "dataset-skipped", recordId: "invoice-4", reason: "The record was removed" },
+      { kind: "dataset-kept", datasetId: "data", tableId: "table", recordId: "invoice-3", fieldId: "status", field: "Status", planned: "Closed", current: "Pending" },
+      { kind: "dataset-skipped", datasetId: "data", tableId: "table", recordId: "invoice-4", reason: "The record was removed" },
     ] })]);
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
     const row = await screen.findByTestId("automation-run-atc_1");

@@ -1,3 +1,5 @@
+import type { RunSource } from "./automationRecordBackend";
+import { coordinateSourceRun } from "./automationStepRun";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AutomationTimeSpent, JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
@@ -20,16 +22,8 @@ import {
   conditionsRequest,
   definitionHash,
   evaluateRequest,
-  findOverflowError,
-  findQueryOf,
-  MAX_FOUND_RECORDS,
-  parseCollectionAutomationId,
-  reachStepsOf,
   runRecordOf,
-  scheduleDueAt,
   stepKey,
-  stepsInOrder,
-  bindingsIn,
   triggerMatches,
   type CodeChange,
   type PlannedEffect,
@@ -40,7 +34,6 @@ import {
 } from "./automationPlan";
 import { checkAutomationReach, type ReachCollection, type ReachRoster, type ReachStep, type StepReach } from "./automationReach";
 import {
-  chatNeedsOf,
   NoticeNotSentError,
   type AutomationChatMessage,
   type AutomationNotice,
@@ -48,7 +41,12 @@ import {
   type ChatNeeds,
 } from "./automationChat";
 import type { AutomationRunStore, RunWrite, StoredRun, StoredStep } from "./automationRunStore";
-import { KEPT_CHANGING_ERROR, runSteps, StepRecordChanged, unfinishedStep, type EffectMode, type StepBackend } from "./automationStepRun";
+import {
+  KEPT_CHANGING_ERROR,
+  unfinishedStep,
+  type EffectMode,
+  type StepBackend,
+} from "./automationStepRun";
 
 // One run of one claim: check reach, check the trigger and its conditions,
 // then run the steps in order (automationStepRun.ts). The executor settles
@@ -139,6 +137,9 @@ export interface CollectionRecordWrites {
 }
 
 export interface CollectionAutomationRunDependencies {
+  withHost?: import("./datasetAutomationRun").DatasetAutomationRunDependencies["withHost"];
+  cachedRoster?(): Promise<ReachRoster>;
+  checkReach?(steps: readonly ReachStep[], roster: Exclude<ReachRoster, { kind: "unknown" }>): Promise<boolean>;
   targets: AutomationTargets;
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
@@ -353,95 +354,7 @@ export async function runCollectionAutomation(
   dependencies: CollectionAutomationRunDependencies,
   input: CollectionAutomationRunInput,
 ): Promise<CollectionAutomationRunOutcome> {
-  const { claim, automation, collection, roster } = input;
-  const { store } = dependencies;
-  const saved = await savedRunOf(store, claim, automation);
-  if ("outcome" in saved) return saved.outcome;
-  const { current } = saved;
-  // A run that started while the Collection kept its records in a dataset
-  // wrote them there; it never goes on as document writes.
-  if (current !== null && current.rules !== null) return failed(RULES_CHANGED_ERROR);
-  const liveTargets = dependencies.targets;
-  const resolved = new Map<string, Promise<TargetResolution>>();
-  dependencies = { ...dependencies, targets: { resolve: (path) => {
-    let target = resolved.get(path);
-    if (target === undefined) {
-      target = liveTargets.resolve(path);
-      resolved.set(path, target);
-    }
-    return target;
-  } } };
-
-  // Where the automation's messages go, found once for the reach check and
-  // the steps.
-  let chat: ChatDirectory | null = null;
-  if (readsChats(automation)) {
-    chat = await dependencies.chat.directory(roster, chatNeedsOf([automation]));
-    if (chat === null) return { kind: "wait", reason: "engine" };
-  }
-  const groupChanged = groupChangedOutcome(automation, claim, chat, current !== null);
-  if (groupChanged !== null) return groupChanged;
-  // Reach (ADR 0012), before anything is read. The targets are in the file,
-  // so the check needs only the roster.
-  const steps = reachStepsOf(automation, collection, collectionNamed, chat);
-  for (const verdict of checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps })) {
-    if (!verdict.allowed) return failed(verdict.reason);
-  }
-  // Saved steps write where they planned, followed to where those
-  // Collections are now, and checked there on every resume.
-  if (current !== null) {
-    const followed = await followCollections(dependencies, input, current, true);
-    if (followed !== null) return followed;
-  }
-  // The Collections the file names for steps not saved yet must still be
-  // ones this executor can use; a saved step's were followed above.
-  const savedSteps = new Set(current?.steps.map((step) => step.ordinal));
-  for (const target of fileTargets(automation, collection, savedSteps)) {
-    const problem = targetProblem(await dependencies.targets.resolve(target.path));
-    if (problem !== null) return failed(problem);
-  }
-
-  // The file names no Collection a code step changes, so the step an
-  // earlier attempt left part way has its checked again here, as the file's
-  // are above.
-  const unfinished = current === null ? null : unfinishedStep(current);
-  if (unfinished !== null) {
-    const checked = await checkCodeTargets(dependencies, input, savedCodeTargets(automation, unfinished));
-    if (checked !== null) return checked;
-  }
-  let message: RunContext["message"] = null;
-  if (claim.change.kind === "message") {
-    const got = await groupMessage(dependencies, claim, automation, chat);
-    if ("outcome" in got) return got.outcome;
-    message = got.message;
-  }
-  // A Group message's formulas name its author from the message itself.
-  const personId = claim.change.kind === "message" ? null : claimPerson(claim);
-  // A new run's keys and added record ids come from the definition and the
-  // claim's run, never from what history kept: a start-over is a new run, so
-  // the engine takes its writes as new, and a crash requeue keeps the run,
-  // so it replays the same keys. A resumed run keeps its own seed.
-  const run = current ?? newRun(claim, automation, `${definitionHash(automation)}-${claim.run}`, dependencies.nowMs());
-  const ctx: RunContext = {
-    automation,
-    // A claim made before its Collection moved runs where the Collection is now.
-    claim: { ...claim, collectionPath: collection.path },
-    message,
-    person: personId === null ? null : { id: personId, name: dependencies.personName(personId) },
-    chat,
-    // Formulas read `now` as the time of the change, or a schedule's due
-    // time, so every attempt reads the same.
-    nowMs: scheduleDueAt(claim) ?? claim.createdAtMs,
-    key: { claimId: claim.claimId, hash: run.keySeed },
-  };
-  const backend = documentBackend(dependencies, input, ctx, liveTargets);
-  // One evaluator budget for the whole attempt: its conditions, then every step.
-  const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
-  if (current === null) {
-    const started = await startRun(dependencies.evaluator, backend, ctx, spent);
-    if (started !== null) return input.stopped.aborted ? stopped : started;
-  }
-  return await runSteps(dependencies, backend, { ...input, claimRun: claim.run }, ctx, run, current !== null, spent);
+  return coordinateSourceRun(dependencies, input, documentSource(dependencies, input));
 }
 
 /**
@@ -458,7 +371,6 @@ export async function startRun(
   const { automation, claim } = ctx;
   const read = await backend.step(async (reads) => ({ record: await reads.trigger() }));
   if (read === null) return { kind: "wait", reason: "engine" };
-  if (read === "moved") return { kind: "wait", reason: "moved" };
   if (read === "changed") return failed(KEPT_CHANGING_ERROR);
   const { record } = read;
   // The record was removed before its automation ran.
@@ -530,7 +442,7 @@ export async function checkPlannedMessages(
 }
 
 /** A document record by its id, or null when it left the Collection. */
-async function readDocumentRecord(reads: CollectionAutomationReads, collectionPath: string, recordId: string): Promise<RunRecord | null> {
+export async function readDocumentRecord(reads: CollectionAutomationReads, collectionPath: string, recordId: string): Promise<RunRecord | null> {
   try {
     return runRecordOf((await reads.getCollectionRecord({ collectionPath, recordId, historyLimit: 1 })).record);
   } catch (error) {
@@ -547,131 +459,6 @@ async function readDocumentRecord(reads: CollectionAutomationReads, collectionPa
  */
 export function claimPerson(claim: AutomationClaim): string | null {
   return claim.change.kind === "schedule" ? null : claim.change.onBehalfOf;
-}
-
-/**
- * How a document Collection's run reads and writes: through the engine,
- * which answers each read with the writes of the steps before it, since each
- * write settles before it returns.
- */
-function documentBackend(dependencies: CollectionAutomationRunDependencies, input: CollectionAutomationRunInput, ctx: RunContext, liveTargets: AutomationTargets): StepBackend {
-  const { automation, signal } = input;
-  // The claim as the steps read it: where its Collection is now.
-  const claim = { ...input.claim, collectionPath: ctx.claim.collectionPath };
-  const home = parseCollectionAutomationId(claim.automationId)?.collectionId ?? null;
-  const ordered = new Map(stepsInOrder(automation).map(({ ordinal, step }) => [ordinal, step]));
-  // The Collection the Find or Add record step at `ordinal` reads or adds to.
-  const collectionOf = (ordinal: number) => {
-    const step = ordered.get(ordinal);
-    return (step && (step.kind === "find" || step.kind === "add-record") ? step.collection : null) ?? claim.collectionPath;
-  };
-  // The run's writes carry its person on, so a change they cause names the
-  // same person, and a run with nobody names nobody.
-  const personId = claimPerson(claim);
-  const author: ChangeAuthor = {
-    kind: "automation",
-    automationId: claim.automationId,
-    ...(personId === null ? {} : { onBehalfOf: personId }),
-    depth: claim.depth + 1,
-  };
-  return {
-    async step(work) {
-      return await dependencies.withReads(async (reads) => {
-        const homePath = home === null ? null : dependencies.collectionPathOf(home);
-        if (homePath === null) throw new Error("This automation's Collection is gone.");
-        if (homePath !== input.collection.path) return "moved" as const;
-        // Each record the step read, by Collection and id, so one step sees
-        // one version of it however many ways it reads it.
-        const seen = new Map<string, RunRecord>();
-        const remember = (collectionPath: string, record: RunRecord) => {
-          const key = JSON.stringify([collectionPath, record.id]);
-          const earlier = seen.get(key);
-          if (earlier === undefined) {
-            seen.set(key, record);
-            return record;
-          }
-          if (!isDeepStrictEqual(earlier.values, record.values)) throw new StepRecordChanged();
-          return earlier;
-        };
-        const read = async (collectionPath: string, recordId: string) => {
-          const earlier = seen.get(JSON.stringify([collectionPath, recordId]));
-          if (earlier !== undefined) return earlier;
-          const problem = targetProblem(await dependencies.targets.resolve(collectionPath));
-          if (problem !== null) throw new Error(problem);
-          const record = await readDocumentRecord(reads, collectionPath, recordId);
-          return record === null ? null : remember(collectionPath, record);
-        };
-        try {
-          return await work({
-            trigger: async () => (claim.change.kind === "removed" || claim.recordId === null ? null : await read(claim.collectionPath, claim.recordId)),
-            async bound(ordinal, refs) {
-              const records: RunRecord[] = [];
-              for (const ref of refs) {
-                // A record lives directly in its Collection's folder, which a move of the Collection carries.
-                const record = await read(posix.dirname(ref.path), ref.id);
-                if (record !== null) records.push(record);
-              }
-              return records;
-            },
-            findValues(ordinal) {
-              const step = ordered.get(ordinal);
-              const query = step?.kind === "find" ? findQueryOf(step.condition) : { problem: "" };
-              return "problem" in query || query.match === "all" ? [] : [query.value];
-            },
-            async find(ordinal, values) {
-              const step = ordered.get(ordinal);
-              const query = step?.kind === "find" ? findQueryOf(step.condition) : null;
-              if (query === null || "problem" in query) throw new Error(query?.problem ?? `Step ${ordinal + 1} is not a Find.`);
-              const problem = targetProblem(await dependencies.targets.resolve(collectionOf(ordinal)));
-              if (problem !== null) throw new Error(problem);
-              const result = await reads.queryCollectionRecords({
-                collectionPath: collectionOf(ordinal),
-                ...(query.match === "all" ? {} : { filter: { field: query.field, operator: query.operator, value: values[0] ?? null } }),
-                limit: MAX_FOUND_RECORDS,
-              });
-              // Never bind a partial page.
-              return result.nextCursor !== null ? { problem: findOverflowError(ordinal) } : result.records.map((record) => remember(collectionOf(ordinal), runRecordOf(record)));
-            },
-            codeRecords: (changes) => codeRecords(dependencies, input, read, changes),
-            // A record's Collection is the folder it is in, wherever the file last named it.
-            effects: (_ordinal, planned) => planned.map((effect) => (effect.kind === "set"
-              ? { ...effect, target: { ...effect.target, collectionPath: posix.dirname(effect.target.path) } }
-              : effect)),
-          });
-        } catch (error) {
-          if (error instanceof StepRecordChanged) return "changed" as const;
-          throw error;
-        }
-      });
-    },
-    collectionsOf: (step) => collectionsOf(dependencies, [step]),
-    added(run, ordinal) {
-      const created = run.applied.find((entry) => entry.ordinal === ordinal)?.writes.find((write) => write.kind === "created");
-      return created?.kind === "created" ? { id: created.recordId, path: created.path } : null;
-    },
-    async apply(run, planned, place, chat) {
-      // Another Collection the steps write moved: followed, and checked there.
-      const followed = await followCollections(dependencies, input, run, false);
-      if (followed !== null) return { outcome: followed };
-      const effect = run.steps.find((step) => step.ordinal === place.ordinal)?.effects[place.part] ?? planned;
-      // The automation's own Collection moved since the run was checked: who
-      // can edit it, and where a relayed press may run, are decided again
-      // before it writes, just before each effect starts.
-      const homePath = home === null ? null : dependencies.collectionPathOf(home);
-      if (homePath === null) return { outcome: failed("This automation's Collection is gone.") };
-      if (homePath !== input.collection.path) return { outcome: { kind: "wait", reason: "moved" } };
-      // Only a dataset Collection's run plans dataset effects.
-      if (effect.kind !== "set" && effect.kind !== "add" && effect.kind !== "message" && effect.kind !== "notice" && effect.kind !== "wake" && effect.kind !== "invoke") {
-        return { outcome: failed(UNREADABLE_RUN_ERROR) };
-      }
-      if (effect.kind === "set" || effect.kind === "add") {
-        const path = effect.kind === "set" ? effect.target.collectionPath : effect.collectionPath;
-        const problem = targetProblem(await liveTargets.resolve(path));
-        if (problem !== null) return { outcome: failed(problem) };
-      }
-      return await applyEffect(dependencies, { run, author, signal, ordinal: place.ordinal, automationName: automation.name, depth: claim.depth + 1, chat }, effect, place.mode);
-    },
-  };
 }
 
 /** A Collection a code step changes records in, and the fields it sets there. */
@@ -830,7 +617,7 @@ function fieldWrites(
   return writes;
 }
 
-async function applyEffect(
+export async function applyDocumentEffect(
   dependencies: CollectionAutomationRunDependencies,
   context: {
     run: StoredRun;
@@ -957,74 +744,6 @@ export async function applyChatEffect(
 }
 
 /**
- * The Collections the file names for the steps not in `saved`: those a Find
- * reads, an Add record adds to, or a Set changes the records of, as reach
- * counts them.
- */
-function fileTargets(automation: Automation, collection: ReachCollection, saved: ReadonlySet<number>): ReachCollection[] {
-  const bindings = bindingsIn(automation);
-  const targets = new Map<string, ReachCollection>();
-  for (const { ordinal, step } of stepsInOrder(automation)) {
-    if (saved.has(ordinal)) continue;
-    const path = step.kind === "find" || step.kind === "add-record" ? step.collection
-      : step.kind === "set" && step.records !== null ? (bindings.get(step.records)?.collection ?? null)
-      : step.kind === "set" || step.kind === "run" || step.kind === "run-file" ? null
-      : undefined;
-    if (path === undefined) continue;
-    const target = path === null ? collection : collectionNamed(path);
-    targets.set(target.path, target);
-  }
-  return [...targets.values()];
-}
-
-/** Each document Collection the steps write, with its Collection id. */
-function collectionsOf(
-  dependencies: Pick<CollectionAutomationRunDependencies, "collectionIdOf">,
-  steps: readonly StoredStep[],
-): StoredRun["collections"] {
-  const paths = new Set<string>();
-  for (const { effects } of steps) {
-    for (const effect of effects) {
-      if (effect.kind === "add") paths.add(effect.collectionPath);
-      if (effect.kind === "set") paths.add(effect.target.collectionPath);
-    }
-  }
-  return [...paths].flatMap((path) => {
-    const collectionId = dependencies.collectionIdOf(path);
-    return collectionId === null ? [] : [{ collectionId, path }];
-  });
-}
-
-/**
- * Moves a saved run to where the Collections its plan writes are now, and
- * checks them there as a new plan's targets are checked: each still a
- * document Collection that everyone who can edit the automation can change.
- * `always` checks them even when none moved, as a resume must. Saves a run
- * that moved. Answers the outcome that stops the run, or null.
- */
-async function followCollections(
-  dependencies: CollectionAutomationRunDependencies,
-  input: Pick<CollectionAutomationRunInput, "automation" | "collection" | "roster">,
-  run: StoredRun,
-  always: boolean,
-): Promise<CollectionAutomationRunOutcome | null> {
-  const { moved, lost } = rebaseRun(run, (collectionId) => dependencies.collectionPathOf(collectionId));
-  if (lost) return failed(LOST_COLLECTION_ERROR);
-  if (!moved && !always) return null;
-  const targets = run.collections.map(({ path }): ReachCollection => ({ path, name: posix.basename(path) }));
-  const steps = targets.map((target): ReachStep => ({ kind: "change-records", collection: target }));
-  for (const verdict of checkAutomationReach(input.roster, { id: input.automation.id, collection: input.collection, codeFiles: [], steps })) {
-    if (!verdict.allowed) return failed(verdict.reason);
-  }
-  for (const target of targets) {
-    const problem = targetProblem(await dependencies.targets.resolve(target.path));
-    if (problem !== null) return failed(problem);
-  }
-  if (moved) await dependencies.store.save(run);
-  return null;
-}
-
-/**
  * Moves a saved run's paths to where its Collections are now, found by
  * their Collection ids. A record lives directly in its Collection's folder,
  * so a record path moves with its folder. `lost` says a Collection the run
@@ -1049,8 +768,11 @@ export function rebaseRun(run: StoredRun, collectionPathOf: (collectionId: strin
   };
   run.steps = run.steps.map((step) => ({
     ...step,
+    ...(step.destinations ? { destinations: step.destinations.map((target) => ({ ...target, path: folder(target.path) })) } : {}),
+    ...(step.collections ? { collections: step.collections.map((target) => ({ ...target, path: folder(target.path) })) } : {}),
     effects: step.effects.map((effect) => {
       if (effect.kind === "add") return { ...effect, collectionPath: folder(effect.collectionPath) };
+      if (effect.kind === "dataset-edit" || effect.kind === "dataset-create") return effect.collectionPath === undefined ? effect : { ...effect, collectionPath: folder(effect.collectionPath) };
       if (effect.kind !== "set") return effect;
       return { ...effect, target: { ...effect.target, collectionPath: folder(effect.target.collectionPath), path: record(effect.target.path) } };
     }),
@@ -1063,4 +785,25 @@ export function rebaseRun(run: StoredRun, collectionPathOf: (collectionId: strin
   }));
   run.created = run.created.map((entry) => ({ ...entry, path: record(entry.path) }));
   return { moved: true, lost };
+}
+
+function documentSource(dependencies: CollectionAutomationRunDependencies, input: CollectionAutomationRunInput): RunSource {
+  const { claim, collection } = input;
+  return {
+    kind: "document", engineClaim: claim, personId: claim.change.kind === "message" ? null : claimPerson(claim),
+    writeAuthorId: claimPerson(claim),
+    decode: () => ({ ...claim, collectionPath: collection.path }),
+    validate: async (_inventory, run) => {
+      const unfinished = run === null ? null : unfinishedStep(run);
+      return unfinished === null ? null : checkCodeTargets(dependencies, input, savedCodeTargets(input.automation, unfinished));
+    },
+    checkEffect: async (effect, ordinal, roster) => {
+      const targets = savedCodeTargets(input.automation, { ordinal, effects: [effect] });
+      return checkCodeTargets(dependencies, { ...input, roster }, targets);
+    },
+    reads: ({ document }) => ({
+      trigger: () => claim.change.kind === "removed" || claim.recordId === null ? Promise.resolve(null) : document(collection.path, claim.recordId),
+      codeRecords: (changes) => codeRecords(dependencies, input, document, changes),
+    }),
+  };
 }

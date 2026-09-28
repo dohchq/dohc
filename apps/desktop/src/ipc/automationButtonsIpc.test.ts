@@ -57,12 +57,12 @@ function fixture(options: {
       if (!pressed.busy && pressed.settled === null) watch(pressed.claimId, options.waiting ?? null);
       return pressed;
     }),
-    datasetButtons: vi.fn(async (_datasetId: string, buttons: ReadonlyArray<{ field: string }>, _description: DatasetDescription) =>
+    datasetButtons: vi.fn(async (_datasetId: string, buttons: ReadonlyArray<{ field: string }>, _describe: Parameters<CollectionAutomations["datasetButtons"]>[2]) =>
       buttons.map(({ field }) => options.datasetState ??
         ({ kind: "ready", automationId: `collection:Billing#${field}`, ...(options.irreversible ? { irreversible: options.irreversible } : {}) }))),
     datasetPressed: vi.fn(async (_pressId: string) => options.remembered ?? false),
     datasetIn: vi.fn(async (_collectionPath: string) => options.datasetIn ?? null),
-    pressDataset: vi.fn(async (_input: unknown, _description: DatasetDescription, watch: (claimId: string, waiting: "roster" | "held" | "busy" | null) => void) => {
+    pressDataset: vi.fn(async (_input: unknown, _describe: Parameters<CollectionAutomations["pressDataset"]>[1], watch: (claimId: string, waiting: "roster" | "held" | "busy" | null) => void) => {
       const pressed = options.pressed ?? { busy: false as const, claimId: "a".repeat(64), settled: null };
       if (!pressed.busy && pressed.settled === null) watch(pressed.claimId, options.waiting ?? null);
       return pressed;
@@ -72,10 +72,10 @@ function fixture(options: {
   const relayPress = vi.fn(async (_operation: unknown, _input: { pressId: string; automationId: string; recordId: string }) => undefined);
   const invoice: CollectionRecord = { id: "rec_invoice12", path: "Invoices/12.md", conflicted: false, values: [] };
   const recordAt = vi.fn(async (_operation: unknown, path: string) => (path === "Invoices/12.md" ? { collectionPath: "Invoices", record: invoice } : null));
-  const describeDataset = vi.fn(async (): Promise<DatasetDescription> => {
+  const describeDataset = vi.fn(async (_sender: FakeWindow, _workspaceId: string, datasetId: string): Promise<DatasetDescription> => {
     const definition = JSON.parse(dataset) as { operations: DatasetDescription["operations"] };
     return {
-      datasetId: id(1), name: "Billing", revision: 1, revisionSha256: "a".repeat(64),
+      datasetId, name: "Billing", revision: 1, revisionSha256: "a".repeat(64),
       tables: Object.entries(options.buttons ?? { Invoices: [] }).map(([name, buttons], table) => ({ tableId: table === 0 ? id(2) : id(20 + table), name, fields: [
         { fieldId: id(3 + table * 100), name: "ID", type: "text", required: true, unique: true },
         ...buttons.map((button, index) => ({ fieldId: id(9 + table * 100 + index), name: button, type: "button" as const })),
@@ -123,11 +123,25 @@ function fixture(options: {
     {
       by,
       withOperation: async (work) => await work(operation()),
-      describeDataset: async () => await describeDataset(),
+      describeDataset: async (datasetId) => await describeDataset(window, WORKSPACE_ID, datasetId),
       watch: (_claimId, waiting) => { waits.push(waiting); },
     },
   );
   return { call, press, callDataset, pressDataset, named, waits, executor, buttonFields, relayPress, describeDataset, window, pressWindows, invoice };
+}
+
+async function expectCallerDescriptions(
+  f: ReturnType<typeof fixture>, describe: Parameters<CollectionAutomations["pressDataset"]>[1],
+) {
+  const calls = f.describeDataset.mock.calls.length;
+  const sourceCall = f.describeDataset.mock.calls.findLastIndex(([, , datasetId]) => datasetId === id(1));
+  const source = await f.describeDataset.mock.results[sourceCall]!.value;
+  await expect(describe(id(1))).resolves.toBe(source);
+  expect(f.describeDataset).toHaveBeenCalledTimes(calls);
+  const destination = { ...source, datasetId: id(50), operations: [] };
+  f.describeDataset.mockResolvedValueOnce(destination);
+  await expect(describe(id(50))).resolves.toBe(destination);
+  expect(f.describeDataset).toHaveBeenLastCalledWith(f.window, WORKSPACE_ID, id(50));
 }
 
 const PAID_FILE = "version: 1\nautomations:\n  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n";
@@ -274,9 +288,14 @@ describe("pressing a button", () => {
     expect(f.describeDataset).toHaveBeenCalledWith(f.window, WORKSPACE_ID, id(1));
     expect(f.executor.pressDataset).toHaveBeenCalledWith(
       { datasetId: id(1), table: "Invoices", field: "Mark paid", recordId: "12", pressId: PRESS_ID, pressedBy: "user-main", by: { kind: "human" }, confirmed: [] },
-      expect.objectContaining({ operations: [expect.objectContaining({ name: "list" }), expect.objectContaining({ name: "add" })] }),
+      expect.any(Function),
       expect.any(Function),
     );
+    const describe = f.executor.pressDataset.mock.calls[0]![1];
+    await expect(describe(id(1))).resolves.toMatchObject({
+      operations: [expect.objectContaining({ name: "list" }), expect.objectContaining({ name: "add" })],
+    });
+    await expectCallerDescriptions(f, describe);
     // The pressing window hears how the run settles.
     f.pressWindows.settled(WORKSPACE_ID, { claimId, outcome: "done", error: null });
     expect(f.window.sent).toEqual([{ channel: CHANNELS.automationRunSettled, payload: { workspaceId: WORKSPACE_ID, claimId, outcome: "done", error: null } }]);
@@ -303,7 +322,8 @@ describe("pressing a button", () => {
     expect(f.describeDataset).toHaveBeenCalledTimes(1);
     expect(f.executor.datasetButtons).toHaveBeenCalledWith(id(1),
       [{ field: "Mark paid", table: "Invoices" }, { field: "Refund", table: "Invoices" }, { field: "Mark paid", table: "Customers" }],
-      expect.objectContaining({ datasetId: id(1) }));
+      expect.any(Function));
+    await expectCallerDescriptions(f, f.executor.datasetButtons.mock.calls[0]![2]);
     // The document rule is not what answers a dataset.
     expect(f.buttonFields).not.toHaveBeenCalled();
   });
@@ -353,9 +373,11 @@ describe("pressing a button by its Collection's folder, as the CLI does", () => 
     // The executor checks the names again against the automation it runs.
     expect(f.executor.pressDataset).toHaveBeenCalledWith(
       { datasetId: id(1), table: "Invoices", field: "Mark paid", recordId: "12", pressId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u), pressedBy: "user-main", by: { kind: "human" }, confirmed: ["sendInvoice", "charge"] },
-      expect.objectContaining({ datasetId: id(1) }),
+      expect.any(Function),
       expect.any(Function),
     );
+    await expectCallerDescriptions(f, f.executor.datasetButtons.mock.calls.at(-1)![2]);
+    await expectCallerDescriptions(f, f.executor.pressDataset.mock.calls[0]![1]);
     expect(f.executor.press).not.toHaveBeenCalled();
   });
 
