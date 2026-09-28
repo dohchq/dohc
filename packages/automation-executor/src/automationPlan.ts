@@ -211,7 +211,7 @@ const candidateField = (node: Expression) => propertyName(node, isName("record")
 const triggerField = (node: Expression) =>
   propertyName(node, (inner) => propertyName(inner, isName("trigger")) === "record");
 
-function findValue(node: Expression): Extract<FindQuery, { match: "field" }>["value"] | null {
+function findValue(node: Expression): FindValue | null {
   if (node.type === "Literal") {
     const { value } = node;
     return value === null || typeof value === "string" || typeof value === "boolean" ||
@@ -256,8 +256,11 @@ export function findQueryOf(condition: string): FindQuery | { problem: string } 
   return { problem: FIND_SHAPE };
 }
 
+/** What a Find compares a field with. */
+export type FindValue = Extract<FindQuery, { match: "field" }>["value"];
+
 /** A Find condition on a dataset as a read's equality filters: every field it checks, with its value. */
-export type DatasetFindFilter = { field: string; value: Extract<FindQuery, { match: "field" }>["value"] };
+export type DatasetFindFilter = { field: string; value: FindValue };
 
 const DATASET_FIND_SHAPE =
   'This Collection needs a Find that checks fields with ==. Use a condition such as record.Status == "Doing" && record.Paid == false.';
@@ -318,17 +321,34 @@ export function unsupportedReason(automation: Automation): string | null {
   }
   return shapeProblem(automation, (condition) => {
     const query = findQueryOf(condition);
-    return "problem" in query ? query.problem : null;
+    if ("problem" in query) return query;
+    return query.match === "all" ? [] : [query.value];
   });
 }
 
 /**
- * Why no executor can run an automation of this shape yet, whatever its
- * Collection keeps: its trigger, its steps, and its limits. `findProblem`
- * reads a Find condition the way the Collection's records can be queried.
+ * Why a Find cannot compare with the trigger record: a schedule or a Group
+ * message starts the automation, and neither has one. Null for a trigger
+ * that has a record.
  */
-export function shapeProblem(automation: Automation, findProblem: (condition: string) => string | null): string | null {
-  const scheduled = automation.when.kind === "schedule";
+function noTriggerRecord(trigger: AutomationTrigger): string | null {
+  const starter = trigger.kind === "schedule" ? "A schedule" : trigger.kind === "group-message" ? "A Group message" : null;
+  return starter === null
+    ? null
+    : `${starter} starts this automation, so a Find cannot compare with trigger.record. Compare with a value instead.`;
+}
+
+/**
+ * Why no executor can run an automation of this shape yet, whatever its
+ * Collection keeps: its trigger, its steps, and its limits. `findValues`
+ * reads a Find condition the way the Collection's records can be queried,
+ * and gives each value the Find compares a field with.
+ */
+export function shapeProblem(
+  automation: Automation,
+  findValues: (condition: string) => readonly FindValue[] | { problem: string },
+): string | null {
+  const recordless = noTriggerRecord(automation.when);
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   let finds = 0;
@@ -354,14 +374,9 @@ export function shapeProblem(automation: Automation, findProblem: (condition: st
       case "find": {
         finds += 1;
         formulas += 1;
-        const problem = findProblem(step.condition);
-        if (problem !== null) return problem;
-        if (scheduled) {
-          const query = findQueryOf(step.condition);
-          if (!("problem" in query) && query.match === "field" && query.value.kind === "trigger-field") {
-            return "A scheduled automation has no trigger record, so a Find cannot compare with trigger.record.";
-          }
-        }
+        const values = findValues(step.condition);
+        if ("problem" in values) return values.problem;
+        if (recordless !== null && values.some((value) => value.kind === "trigger-field")) return recordless;
         break;
       }
       case "if":

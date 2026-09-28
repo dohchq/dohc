@@ -468,6 +468,34 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
+  it("skips a record change claimed before its automation changed to start on a schedule, without a failure", async () => {
+    const f = await world({ roster: UNKNOWN });
+    await f.executor.open();
+    const { id: invoice } = await f.create({});
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "pending");
+    await f.writeAutomations(`  - id: close-paid
+    name: Close paid invoices
+    when: {schedule: day, timezone: UTC}
+    do:
+      - find: record.Paid == true
+        as: paid
+        operation: invoices.list
+      - set:
+          Status: Closed
+        records: paid
+        operation: invoices.status
+`);
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
+    await f.until(async () => JSON.stringify(await f.executor.automationsIn("Budget")).includes("schedule"));
+    f.setRoster(OWNER);
+    f.executor.rosterChanged();
+    await f.until(() => f.claims()[0]?.state === "done");
+    expect(f.host.automations.failures()).toEqual([]);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+
   it("pins each step to a reversible operation with the fewest extra fields when the panel saves", async () => {
     const f = await world();
     await f.executor.open();

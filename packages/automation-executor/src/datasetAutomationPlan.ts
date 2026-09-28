@@ -51,12 +51,13 @@ export interface DatasetRules {
 
 /** Each step's operation and table, and the read that finds the trigger record. */
 export interface DatasetSteps {
-  table: DatasetTable;
   /**
-   * The read the trigger record comes from. Null for a record-removed
-   * trigger, and on a dataset whose operations someone wrote.
+   * The table the trigger watches, and the read its record comes from. The
+   * read is null for a record-removed trigger, and on a dataset whose
+   * operations someone wrote. A schedule or a Group message has no trigger
+   * record, so no trigger table either.
    */
-  triggerRead: DatasetOperation | null;
+  trigger: { table: DatasetTable; read: DatasetOperation | null } | null;
   steps: ReadonlyMap<number, { operation: DatasetOperation; table: DatasetTable }>;
   finds: ReadonlyMap<number, DatasetFindFilter[]>;
   /** For each Set step, the read that shows its record again after someone changed it. */
@@ -133,12 +134,17 @@ function resolve(
   pin: false | ((step: RecordStep) => boolean),
 ): { steps: DatasetSteps; pinned: Map<number, string> } | { problem: string } {
   const trigger = automation.when;
-  if (!("table" in trigger)) return { problem: "Automations on dataset Collections start only from a record change or a button." };
-  const table = datasetTableNamed(definition, trigger.table);
-  if (table === undefined) {
-    return { problem: trigger.table === null
-      ? `${definition.name} has several tables. Name the one this automation watches.`
-      : `${definition.name} has no table named ${trigger.table}.` };
+  // A schedule or a Group message has no trigger record, so its steps take
+  // their tables from their operations.
+  let table: DatasetTable | null = null;
+  if ("table" in trigger) {
+    const named = datasetTableNamed(definition, trigger.table);
+    if (named === undefined) {
+      return { problem: trigger.table === null
+        ? `${definition.name} has several tables. Name the one this automation watches.`
+        : `${definition.name} has no table named ${trigger.table}.` };
+    }
+    table = named;
   }
   const ordered = stepsInOrder(automation);
   const bindings = new Map<string, number>();
@@ -179,7 +185,7 @@ function resolve(
       names = step.values.map((entry) => entry.field);
       const bound = step.records === null ? null : bindings.get(step.records);
       const target = bound === undefined || bound === null ? table : steps.get(bound)?.table;
-      if (target === undefined) return `Step ${ordinal + 1} changes records that no earlier step found or added.`;
+      if (target === undefined || target === null) return `Step ${ordinal + 1} changes records that no earlier step found or added.`;
       tables = [target];
     }
     const fitting = candidates(definition, tables, kind, names);
@@ -187,9 +193,12 @@ function resolve(
     let chosen = named !== undefined && fitting.includes(named) ? named : undefined;
     // Pinning never moves an Add record to another table: it stays in its
     // operation's table, or the trigger's when it names none, which is the
-    // table the ⚡ panel built it in. With no fit there, a person names one.
-    const home = step.kind === "add-record" ? (named?.tableId ?? table.tableId) : null;
-    if (chosen === undefined && pin && pin(step)) chosen = fitting.find((operation) => home === null || operation.tableId === home);
+    // table the ⚡ panel built it in. A trigger with no table leaves the
+    // dataset's only table. With no fit there, a person names one.
+    const home = step.kind === "add-record" ? (named ?? table ?? datasetTableNamed(definition, null))?.tableId : null;
+    if (chosen === undefined && pin && pin(step) && home !== undefined) {
+      chosen = fitting.find((operation) => home === null || operation.tableId === home);
+    }
     if (chosen === undefined) {
       if (tables.length === 1) {
         const missing = fieldIds(tables[0]!, names);
@@ -228,7 +237,7 @@ function resolve(
   // The trigger record is read through the widest read that shows the
   // fields its Set steps change, so formulas see as much of it as they can.
   let triggerRead: DatasetOperation | null = null;
-  if (trigger.kind !== "record-removed" && generated) {
+  if (table !== null && trigger.kind !== "record-removed" && generated) {
     const names = setOn.get("trigger") ?? [];
     const reads = candidates(definition, [table], "read", names);
     triggerRead = reads.sort((left, right) => right.fieldIds.length - left.fieldIds.length || left.name.localeCompare(right.name))[0] ?? null;
@@ -243,7 +252,7 @@ function resolve(
     const reader = source ?? candidates(definition, [own.table], "read", step.values.map((entry) => entry.field))[0];
     if (reader) rereads.set(ordinal, reader);
   }
-  return { steps: { table, triggerRead, steps, finds, rereads }, pinned };
+  return { steps: { trigger: table === null ? null : { table, read: triggerRead }, steps, finds, rereads }, pinned };
 }
 
 const GENERATED_ONLY = (name: string) =>
@@ -278,7 +287,7 @@ export function datasetAutomationProblem(automation: Automation, dataset: Datase
   }
   const shape = shapeProblem(automation, (condition) => {
     const filters = datasetFindOf(condition);
-    return "problem" in filters ? filters.problem : null;
+    return "problem" in filters ? filters : filters.map((filter) => filter.value);
   });
   if (shape !== null) return shape;
   const resolved = resolve(automation, dataset, false);
@@ -301,9 +310,9 @@ export function datasetStepsOf(automation: Automation, rules: DatasetRules): Dat
 
 // Each operation a run can call, once each: the trigger record's read, each
 // step's operation, and each read that checks a record again.
-function invokedOperations({ triggerRead, steps, rereads }: DatasetSteps): DatasetOperation[] {
+function invokedOperations({ trigger, steps, rereads }: DatasetSteps): DatasetOperation[] {
   const operations = new Map<string, DatasetOperation>();
-  for (const operation of [triggerRead, ...[...steps.values()].map((step) => step.operation), ...rereads.values()]) {
+  for (const operation of [trigger?.read ?? null, ...[...steps.values()].map((step) => step.operation), ...rereads.values()]) {
     if (operation !== null) operations.set(operation.operationId, operation);
   }
   return [...operations.values()];
@@ -374,8 +383,10 @@ export function datasetButtonOf(automation: Automation, definition: DatasetDefin
  * while every editor can read it; a field that becomes readable because an
  * editor left waits for a current editor's confirmation, like a step. A
  * button holds no value, so formulas never see one. The chats come first so
- * a schema change cannot move their places. An automation whose operations
- * do not resolve runs nothing, so it has no steps to check.
+ * a schema change cannot move their places. Null for an automation whose
+ * operations do not resolve, since it runs nothing reach could vouch for.
+ * One that uses no table, such as a schedule that only notifies, reaches
+ * only its chats.
  */
 export function datasetReachSteps(
   automation: Automation,
@@ -383,13 +394,14 @@ export function datasetReachSteps(
   rules: DatasetRules,
   grants: ReachDatasetGrants,
   chat: ChatDirectory | null,
-): ReachStep[] {
+): ReachStep[] | null {
   const { definition } = rules;
   const resolved = resolve(automation, rules, false);
-  if ("problem" in resolved) return [];
-  const { table, steps } = resolved.steps;
+  if ("problem" in resolved) return null;
+  const { trigger, steps } = resolved.steps;
   const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, access: operation.access });
-  const tables = new Map([[table.tableId, table], ...[...steps.values()].map((step) => [step.table.tableId, step.table] as const)]);
+  const tables = new Map([...(trigger === null ? [] : [trigger.table]), ...[...steps.values()].map((step) => step.table)]
+    .map((table) => [table.tableId, table] as const));
   const reads = definition.operations.filter((operation) => operation.kind === "read");
   return [
     ...chatReachStepsOf(automation, chat),

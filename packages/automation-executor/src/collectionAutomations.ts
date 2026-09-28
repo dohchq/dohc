@@ -2437,7 +2437,7 @@ export class CollectionAutomations {
     const collection = collectionNamed(collectionPath);
     const dataset = this.datasets.get(collectionPath);
     return dataset !== undefined
-      ? datasetReachSteps(automation, collection, dataset, dataset.grants, this.chat)
+      ? (datasetReachSteps(automation, collection, dataset, dataset.grants, this.chat) ?? [])
       : reachStepsOf(automation, collection, collectionNamed, this.chat);
   }
 
@@ -2993,6 +2993,12 @@ export class CollectionAutomations {
       // The automation is gone or off, so its subscription is stale.
       if (id !== null && !this.isSubscribed(held)) void this.enqueue(() => this.dropStaleSubscription(held));
       return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: async () => undefined };
+    }
+    // A record change or a press on a dataset cannot start an automation
+    // that now starts on a schedule or a Group message, as a document's
+    // change that no longer matches its trigger starts nothing.
+    if (held.source === "dataset" && !("table" in automation.when)) {
+      return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: () => this.markSettled(claim, automation) };
     }
     // A relayed press runs only the automation its presser saw.
     const bound = held.source === "engine" ? boundDefinition(held.claim) : null;
