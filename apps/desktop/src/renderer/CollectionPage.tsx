@@ -520,6 +520,7 @@ export function CollectionPage({
       onClose={closeAutomations}
       onOpenFile={onOpenFile}
       onOpenScheduleSettings={onOpenScheduleSettings}
+      onOpenFields={() => setFieldsOpen(true)}
       onError={onError}
       onNotice={onNotice}
     />

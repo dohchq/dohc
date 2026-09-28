@@ -42,7 +42,10 @@ import {
 } from "./automationSentence";
 
 // The builder: When, Only if, and Do, with choices instead of formulas, and
-// a formula wherever a person wants one. An If holds its own Do and
+// a formula wherever a person wants one. A trigger watches a record, a
+// button, or, in the file only for now, a schedule or a Group; in a
+// dataset it watches one table, whose fields Only if and Set fields offer.
+// An If holds its own Do and
 // Otherwise steps, which edit like the automation's. Steps the builder
 // cannot edit yet, such as Find, stay as they are and read as their
 // sentence; the file edits them. Save runs the file contract's check through main first,
@@ -64,10 +67,11 @@ const formulaClass = `${inputClass} font-mono text-[12px]`;
 
 const TRIGGER_LABELS = {
   "field-changed": "A field changes",
-  "record-changed": "Any field changes",
+  "record-changed": "A record changes",
   "record-added": "A record is added",
   "record-removed": "A record is removed",
   "starts-matching": "A record starts to match",
+  button: "Someone clicks a button",
 } as const;
 type BuilderTrigger = keyof typeof TRIGGER_LABELS;
 
@@ -155,7 +159,7 @@ function FieldSelect(props: {
         {listed || props.value === "" ? null : <option value={props.value}>{props.value}</option>}
         {(props.fields ?? []).map((field) => <option key={field.name} value={field.name}>{field.name}</option>)}
       </select>
-      {known ? null : (
+      {known || props.problem !== null ? null : (
         <StatusLine tone="warning" icon={AlertTriangle} label="Not a field">
           {props.value} is not a field in {props.collection}.
         </StatusLine>
@@ -374,6 +378,153 @@ function ActionValueInput(props: {
   );
 }
 
+type ConditionMode = "always" | "rows" | "formula";
+interface ConditionEntry { key: number; row: ConditionRow }
+/**
+ * A condition as the builder edits it: Always, rows that must all hold, or a
+ * formula. `saved` is the rows the file's expression read as, and that
+ * expression, which the rows write while nobody has changed them.
+ */
+interface ConditionDraft {
+  mode: ConditionMode;
+  formula: string;
+  rows: ConditionEntry[];
+  saved: { rows: ConditionEntry[]; expression: string } | null;
+}
+
+/** What a new comparison with `field` starts from: unchecked for a checkbox, as its control shows. */
+const comparedValue = (field: FieldDefinition | undefined): ConditionRow["value"] => (field?.type === "checkbox" ? false : "");
+
+/**
+ * A condition: rows of field comparisons that must all hold, or a formula.
+ * Only if can also be Always; what a record starts to match cannot.
+ */
+function ConditionEditor(props: {
+  /** Which condition this is, which names its controls. */
+  part: "condition" | "match";
+  condition: ConditionDraft;
+  /** What the rows write, which a switch to Formula starts from. */
+  expression: string | null;
+  fields: readonly FieldDefinition[];
+  collection: string;
+  /** The key of the whole condition's problem; a row's is this key, "/", and the row's key. */
+  problemKey: string;
+  problem: (key: string) => Shown;
+  newRow: () => ConditionEntry;
+  focusAfter: (key: string, change: () => void) => void;
+  onChange: (change: (current: ConditionDraft) => ConditionDraft) => void;
+}) {
+  const { part, condition, problem, onChange } = props;
+  const only = part === "condition";
+  const name = only ? "Condition" : "Match condition";
+  return (
+    <>
+      <select
+        aria-label={only ? "Condition" : "Match"}
+        data-focus={`${part}-mode`}
+        value={condition.mode}
+        onChange={(event) => {
+          const mode = event.target.value as ConditionMode;
+          onChange((current) => ({
+            ...current,
+            mode,
+            // A formula starts from what the rows said.
+            formula: mode === "formula" && current.mode === "rows" ? (props.expression ?? "") : current.formula,
+            rows: mode === "rows" && current.rows.length === 0 ? [props.newRow()] : current.rows,
+          }));
+        }}
+        className={selectClass}
+      >
+        {only ? <option value="always">Always</option> : null}
+        <option value="rows">Fields match</option>
+        <option value="formula">Formula</option>
+      </select>
+      {condition.mode === "rows" ? (
+        <>
+          {condition.rows.map(({ key, row }, index) => {
+            const field = props.fields.find((candidate) => candidate.name === row.field);
+            const replace = (next: ConditionRow) =>
+              onChange((current) => ({ ...current, rows: current.rows.map((entry) => (entry.key === key ? { key, row: next } : entry)) }));
+            return (
+              <div key={key} className="flex items-start gap-1">
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <FieldSelect
+                    label={`${name} ${index + 1}, field`}
+                    fields={props.fields}
+                    value={row.field}
+                    collection={props.collection}
+                    focusKey={`${part}-${key}-first`}
+                    problem={problem(`${props.problemKey}/${key}/field`)}
+                    onChange={(next) => replace({ ...row, field: next, value: comparedValue(props.fields.find((candidate) => candidate.name === next)) })}
+                  />
+                  <select
+                    aria-label={`${name} ${index + 1}, comparison`}
+                    value={row.operator}
+                    onChange={(event) => replace({ ...row, operator: event.target.value as ConditionOperator })}
+                    className={selectClass}
+                  >
+                    {Object.entries(OPERATOR_LABELS).map(([operator, label]) => (
+                      <option key={operator} value={operator}>{label}</option>
+                    ))}
+                  </select>
+                  <LiteralInput
+                    label={`${name} ${index + 1}, value`}
+                    type={field?.type ?? null}
+                    options={field?.type === "select" || field?.type === "multi-select" ? field.options : []}
+                    text={row.value === null ? "" : String(row.value)}
+                    problem={problem(`${props.problemKey}/${key}`)}
+                    onChange={(value) => replace({
+                      ...row,
+                      value: value.kind === "literal" && !Array.isArray(value.value) ? value.value : null,
+                    })}
+                  />
+                  <Problem shown={problem(`${props.problemKey}/${key}`)} />
+                </div>
+                <IconButton
+                  aria-label={`Remove ${name.toLowerCase()} ${index + 1}`}
+                  title="Remove"
+                  data-focus={`${part}-${key}-remove`}
+                  onClick={() => {
+                    const neighbor = condition.rows[index + 1] ?? condition.rows[index - 1];
+                    props.focusAfter(neighbor ? `${part}-${neighbor.key}-remove` : `${part}-mode`, () => onChange((current) => {
+                      const rows = current.rows.filter((entry) => entry.key !== key);
+                      return { ...current, rows, mode: rows.length === 0 && only ? "always" : current.mode };
+                    }));
+                  }}
+                >
+                  <Trash2 size={13} aria-hidden />
+                </IconButton>
+              </div>
+            );
+          })}
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1 self-start"
+            onClick={() => {
+              const entry = props.newRow();
+              props.focusAfter(`${part}-${entry.key}-first`, () => onChange((current) => ({ ...current, rows: [...current.rows, entry] })));
+            }}
+          >
+            <Plus size={12} aria-hidden />
+            Add condition
+          </SecondaryButton>
+        </>
+      ) : condition.mode === "formula" ? (
+        <input
+          aria-label={only ? "Condition formula" : "Condition to match"}
+          value={condition.formula}
+          spellCheck={false}
+          placeholder={only ? 'record.Priority == "High"' : 'record.Status == "Blocked"'}
+          onChange={(event) => onChange((current) => ({ ...current, formula: event.target.value }))}
+          className={formulaClass}
+          {...invalid(problem(props.problemKey))}
+        />
+      ) : null}
+      <Problem shown={problem(props.problemKey)} />
+    </>
+  );
+}
+
 function ToValue({ children }: { children: ReactNode }) {
   return (
     <div className="flex items-start gap-1.5">
@@ -382,6 +533,9 @@ function ToValue({ children }: { children: ReactNode }) {
     </div>
   );
 }
+
+/** A field a step can set or a condition can read: any but a Button field. */
+const holdsValue = (field: FieldDefinition) => field.type !== "button";
 
 // A step or row keeps its key while the draft changes, so React keeps its
 // controls and focus can follow it.
@@ -476,8 +630,10 @@ function placeOf(
   if (head === "name") return { key: "name", name: null };
   if (head === "if") return { key: "if", name: null };
   if (head === "when") {
-    const key = option === "to" ? "when/to" : option === "field-changed" ? "when/field" : option === "starts-matching" ? "when/condition" : "when";
-    return { key, name: null };
+    const keys: Partial<Record<string, string>> = {
+      to: "when/to", "field-changed": "when/field", "starts-matching": "when/condition", "record-changed": "when/fields", button: "when/button",
+    };
+    return { key: keys[option ?? ""] ?? "when", name: null };
   }
   if (head !== "do") return { key: "save", name: null };
   let list = entries;
@@ -518,14 +674,26 @@ function verdictOf(places: readonly number[], reach: Reach | null): string | nul
   return null;
 }
 
-/** A trigger of `kind`, watching the table the current one names, or else `own`: this Collection's dataset table, or null. */
-function triggerFor(kind: BuilderTrigger, current: AutomationTrigger, fields: readonly FieldDefinition[], own: string | null): AutomationTrigger {
+/**
+ * A trigger of `kind`, watching the table the current one names, or else
+ * `own`: this Collection's dataset table, or null. A new one watches the
+ * first of `fields`, or of `buttons`.
+ */
+function triggerFor(
+  kind: BuilderTrigger,
+  current: AutomationTrigger,
+  fields: readonly FieldDefinition[],
+  buttons: readonly FieldDefinition[],
+  own: string | null,
+): AutomationTrigger {
   const table = "table" in current && current.table !== null ? current.table : own;
   switch (kind) {
     case "field-changed":
       return current.kind === "field-changed" ? current : { kind, field: fields[0]?.name ?? "", to: null, table };
     case "record-changed":
-      return { kind, fields: null, table };
+      return current.kind === "record-changed" ? current : { kind, fields: null, table };
+    case "button":
+      return current.kind === "button" ? current : { kind, field: buttons[0]?.name ?? "", table };
     case "starts-matching":
       return current.kind === "starts-matching" ? current : { kind, condition: "", table };
     default:
@@ -535,7 +703,6 @@ function triggerFor(kind: BuilderTrigger, current: AutomationTrigger, fields: re
 
 /** The trigger kind the builder edits, or null when only the file can. */
 function builderTriggerOf(trigger: AutomationTrigger): BuilderTrigger | null {
-  if (trigger.kind === "record-changed") return trigger.fields === null ? trigger.kind : null;
   return trigger.kind in TRIGGER_LABELS ? (trigger.kind as BuilderTrigger) : null;
 }
 
@@ -553,27 +720,35 @@ function editableStep(step: AutomationStep, table: AutomationTable | null): SetS
 
 const BRANCH_LABELS: Record<Branch, string> = { do: "Do", otherwise: "Otherwise" };
 
-type ConditionMode = "always" | "rows" | "formula";
-interface ConditionEntry { key: number; row: ConditionRow }
+/** A condition's draft: rows when rows wrote it, else a formula; Always when there is none. */
+function conditionDraftOf(expression: string | null): ConditionDraft {
+  const read = expression === null ? [] : (conditionRows(expression) ?? []);
+  const rows = read.map((row) => ({ key: newKey(), row }));
+  return {
+    mode: expression === null ? "always" : rows.length > 0 ? "rows" : "formula",
+    formula: expression ?? "",
+    rows,
+    saved: expression === null || rows.length === 0 ? null : { rows, expression },
+  };
+}
 
 /** What the builder's controls hold, which the automation is built from. */
 interface Draft {
   name: string;
   when: AutomationTrigger;
-  conditionMode: ConditionMode;
-  conditionFormula: string;
-  rows: ConditionEntry[];
+  /** Only if. */
+  condition: ConditionDraft;
+  /** What a record starts to match. While that trigger is chosen, its condition is built from this. */
+  matching: ConditionDraft;
   steps: StepEntry[];
 }
 
 function draftOf(automation: Automation, reach: Reach | null): Draft {
-  const rows = automation.if === null ? [] : (conditionRows(automation.if) ?? []);
   return {
     name: automation.name,
     when: automation.when,
-    conditionMode: automation.if === null ? "always" : rows.length > 0 ? "rows" : "formula",
-    conditionFormula: automation.if ?? "",
-    rows: rows.map((row) => ({ key: newKey(), row })),
+    condition: conditionDraftOf(automation.if),
+    matching: conditionDraftOf(automation.when.kind === "starts-matching" ? automation.when.condition : null),
     steps: entriesOf(automation.do, reach, automation.when.kind === "group-message" ? 1 : 0),
   };
 }
@@ -607,6 +782,8 @@ export function AutomationBuilder(props: {
   onCancel: () => void;
   /** Opens a workspace file: the automations file, or a file a code step runs. */
   onOpenFile: (path: string) => void;
+  /** Opens the dialog that adds fields, such as a Button field; undefined where this person cannot. */
+  onOpenFields?: () => void;
   onError: ErrorReport;
 }) {
   const { workspaceId, collectionPath, table, onError } = props;
@@ -617,7 +794,7 @@ export function AutomationBuilder(props: {
   const [checking, setChecking] = useState(false);
   const [saveChosen, setSaveChosen] = useState(false);
   const [targets, setTargets] = useState<Target[] | null>(null);
-  const [schemas, setSchemas] = useState(() => new Map<string, readonly FieldDefinition[]>([[collectionPath, props.fields]]));
+  const [schemas, setSchemas] = useState(() => new Map<string, readonly FieldDefinition[]>([[collectionPath, props.fields.filter(holdsValue)]]));
   const [checked, setChecked] = useState<{
     key: string;
     diagnostics: AutomationDiagnostic[];
@@ -643,23 +820,42 @@ export function AutomationBuilder(props: {
 
   // A dataset table is the Collection a person sees, so it goes by the table's name.
   const own = table?.name ?? collectionName(collectionPath);
-  const typeOf = (collection: string, field: string): CollectionFieldType | null =>
-    schemas.get(collection)?.find((candidate) => candidate.name === field)?.type ?? null;
+  // The table the trigger watches, whose record Only if reads and Set fields changes.
+  const watchedBy = (trigger: AutomationTrigger) => (table !== null && "table" in trigger && trigger.table !== null ? trigger.table : own);
+  const watched = watchedBy(draft.when);
+  // A trigger moved to another table keeps names that table may lack, and
+  // main cannot check a dataset's fields, so those names must change first.
+  // On the table it was saved on, or a new one started on, a missing field only warns.
+  const moved = watched !== watchedBy(props.baseline.when);
+  const watchedFields = table === null ? props.fields : (table.tables.get(watched) ?? []);
+  const recordFields = watchedFields.filter(holdsValue);
+  const buttonFields = watchedFields.filter((field) => !holdsValue(field));
+  const typeIn = (fields: readonly FieldDefinition[] | null, field: string): CollectionFieldType | null =>
+    fields?.find((candidate) => candidate.name === field)?.type ?? null;
   const targetOf = (step: AutomationStep) =>
     step.kind === "add-record" ? (step.collection ?? collectionPath) : collectionPath;
+  /** The fields a step's rows name: the added record's, or the trigger record's. Null while they load. */
+  const fieldsOf = (step: AutomationStep) => (step.kind === "add-record" ? (schemas.get(targetOf(step)) ?? null) : recordFields);
   // Number fields hold typed text in the draft; the automation holds numbers.
-  const numbered = (collection: string, values: readonly Row[]): FieldValue[] =>
+  const numbered = (fields: readonly FieldDefinition[] | null, values: readonly Row[]): FieldValue[] =>
     values.map(({ value: entry }) => {
       if (entry.value.kind !== "literal") return entry;
-      const value = numberValue(typeOf(collection, entry.field), entry.value.value);
+      const value = numberValue(typeIn(fields, entry.field), entry.value.value);
       return value === undefined ? entry : { field: entry.field, value: { kind: "literal", value } };
     });
-  const rowValue = (row: ConditionRow) => numberValue(typeOf(collectionPath, row.field), row.value) ?? row.value;
-  const when = draft.when.kind === "field-changed" && draft.when.to?.kind === "literal"
+  const rowValue = (row: ConditionRow) => numberValue(typeIn(recordFields, row.field), row.value) ?? row.value;
+  // Rows nobody changed write the file's expression back as it was, such as "2" compared as text.
+  const conditionOf = (condition: ConditionDraft): string | null =>
+    condition.mode === "always" ? null
+      : condition.mode === "formula" ? condition.formula
+      : condition.rows === condition.saved?.rows ? condition.saved.expression
+      : conditionFormula(condition.rows.map(({ row }) => ({ ...row, value: rowValue(row) })));
+  const when: AutomationTrigger = draft.when.kind === "field-changed" && draft.when.to?.kind === "literal"
     ? {
         ...draft.when,
-        to: { kind: "literal" as const, value: numberValue(typeOf(collectionPath, draft.when.field), draft.when.to.value) ?? draft.when.to.value },
+        to: { kind: "literal" as const, value: numberValue(typeIn(recordFields, draft.when.field), draft.when.to.value) ?? draft.when.to.value },
       }
+    : draft.when.kind === "starts-matching" ? { ...draft.when, condition: conditionOf(draft.matching) ?? "" }
     : draft.when;
   const stepOf = ({ step, rows, branches }: StepEntry): AutomationStep => {
     if (step.kind === "if" && branches !== null) return { ...step, do: branches.do.map(stepOf), otherwise: branches.otherwise.map(stepOf) };
@@ -668,17 +864,13 @@ export function AutomationBuilder(props: {
     const editable = editableStep(step, table);
     // A step nobody edited stays as the file holds it, such as a number field's "001".
     if (editable === null || JSON.stringify(rows.map(({ value }) => value)) === JSON.stringify(editable.values)) return step;
-    return { ...editable, values: numbered(targetOf(step), rows) };
+    return { ...editable, values: numbered(fieldsOf(step), rows) };
   };
   const automation: Automation = {
     ...props.automation,
     name: draft.name,
     when,
-    if: draft.conditionMode === "always"
-      ? null
-      : draft.conditionMode === "rows"
-        ? conditionFormula(draft.rows.map(({ row }) => ({ ...row, value: rowValue(row) })))
-        : draft.conditionFormula,
+    if: conditionOf(draft.condition),
     do: draft.steps.map(stepOf),
   };
   const ordered = entriesInOrder(draft.steps);
@@ -729,7 +921,7 @@ export function AutomationBuilder(props: {
       void bridge()
         .getCollection({ workspaceId, collectionPath: path })
         .then((result) => {
-          if (scope.isCurrent(epoch)) setSchemas((current) => new Map(current).set(path, result.schema.fields));
+          if (scope.isCurrent(epoch)) setSchemas((current) => new Map(current).set(path, result.schema.fields.filter(holdsValue)));
         })
         .catch((error: unknown) => {
           if (scope.isCurrent(epoch)) onError(`dohc could not read the fields of ${collectionName(path)}.`, error);
@@ -763,17 +955,42 @@ export function AutomationBuilder(props: {
   const formulaProblem = (key: string, expression: string) => {
     if (expression.trim() === "") problems.set(key, "Write a formula.");
   };
+  // Fields a record-changed trigger names that its table lacks, which stay chosen until someone clears them.
+  const missingFields = draft.when.kind === "record-changed"
+    ? (draft.when.fields ?? []).filter((name) => !recordFields.some((field) => field.name === name))
+    : [];
+  // What Chosen fields lists, in the order it keeps them.
+  const fieldChoices = [...missingFields, ...recordFields.map((field) => field.name)];
+  const lacks = (fields: readonly FieldDefinition[], name: string) => moved && name !== "" && !fields.some((field) => field.name === name);
+  const notAField = (name: string) => `${name} is not a field in ${watched}. Choose a field.`;
   if (automation.when.kind === "field-changed") {
     if (automation.when.field === "") problems.set("when/field", "Choose a field.");
+    else if (lacks(recordFields, automation.when.field)) problems.set("when/field", notAField(automation.when.field));
     if (automation.when.to?.kind === "formula") formulaProblem("when/to", automation.when.to.expression);
   }
-  if (automation.when.kind === "starts-matching") formulaProblem("when/condition", automation.when.condition);
-  if (automation.if !== null && draft.conditionMode === "formula") formulaProblem("if", automation.if);
-  draft.rows.forEach(({ key, row }) => {
-    if (typeOf(collectionPath, row.field) === "number" && typeof rowValue(row) !== "number") {
-      problems.set(`if/${key}`, "Enter a number.");
+  if (automation.when.kind === "record-changed" && automation.when.fields?.length === 0) problems.set("when/fields", "Choose at least one field.");
+  const lost = moved ? missingFields : [];
+  if (lost.length > 0) {
+    problems.set("when/fields", `${lost.join(", ")} ${lost.length === 1 ? "is not a field" : "are not fields"} in ${watched}. Clear ${lost.length === 1 ? "it" : "them"}.`);
+  }
+  if (automation.when.kind === "button" && automation.when.field === "") problems.set("when/button", "Choose a button.");
+  else if (automation.when.kind === "button" && lacks(buttonFields, automation.when.field)) {
+    problems.set("when/button", `${automation.when.field} is not a button in ${watched}. Choose a button.`);
+  }
+  const conditionProblems = (condition: ConditionDraft, key: string) => {
+    if (condition.mode === "formula") formulaProblem(key, condition.formula);
+    if (condition.mode !== "rows") return;
+    if (condition.rows.length === 0) problems.set(key, "Add a condition.");
+    for (const { key: entry, row } of condition.rows) {
+      if (row.field === "") problems.set(`${key}/${entry}`, "Choose a field.");
+      else if (lacks(recordFields, row.field)) problems.set(`${key}/${entry}/field`, notAField(row.field));
+      else if (typeIn(recordFields, row.field) === "number" && row.value !== null && typeof rowValue(row) !== "number") {
+        problems.set(`${key}/${entry}`, "Enter a number.");
+      }
     }
-  });
+  };
+  conditionProblems(draft.condition, "if");
+  if (automation.when.kind === "starts-matching") conditionProblems(draft.matching, "when/condition");
   if (draft.steps.length === 0) problems.set(listProblem("do"), "Add a step.");
   for (const { entry: { key, step, rows, branches } } of ordered) {
     if (branches !== null && branches.do.length === 0) problems.set(listProblem(`${key}/do`), "Add a step.");
@@ -795,13 +1012,14 @@ export function AutomationBuilder(props: {
       problems.set(`step-${key}`, "A removed record has no fields to set. Choose another trigger, or remove this step.");
     }
     const seen = new Set<string>();
-    const collection = targetOf(step);
+    const fields = fieldsOf(step);
     rows.forEach(({ key: row, value: entry }) => {
       if (entry.field === "") problems.set(`row-${row}/field`, "Choose a field.");
+      else if (editable.kind === "set" && lacks(recordFields, entry.field)) problems.set(`row-${row}/field`, notAField(entry.field));
       else if (seen.has(entry.field)) problems.set(`row-${row}/field`, `${entry.field} is in this step twice.`);
       seen.add(entry.field);
       if (entry.value.kind === "formula") formulaProblem(`row-${row}/value`, entry.value.expression);
-      if (entry.value.kind === "literal" && typeOf(collection, entry.field) === "number" &&
+      if (entry.value.kind === "literal" && typeIn(fields, entry.field) === "number" &&
         numberValue("number", entry.value.value) === undefined) {
         problems.set(`row-${row}/value`, "Enter a number.");
       }
@@ -895,7 +1113,7 @@ export function AutomationBuilder(props: {
     focusAfter(`step-${entry.key}-first`, () => setSteps(id, (current) => [...current, entry]));
   };
   const setRows = (key: number, rows: Row[]) => setStep(key, (entry) => ({ ...entry, rows }));
-  const newCondition = (): ConditionEntry => ({ key: newKey(), row: { field: props.fields[0]?.name ?? "", operator: "is", value: "" } });
+  const newCondition = (): ConditionEntry => ({ key: newKey(), row: { field: recordFields[0]?.name ?? "", operator: "is", value: comparedValue(recordFields[0]) } });
 
   /** One step: its controls, or its sentence where the builder cannot edit it yet. */
   const stepItem = ({ entry, list, listId, index, number }: (typeof ordered)[number]): ReactNode => {
@@ -909,7 +1127,7 @@ export function AutomationBuilder(props: {
     const targetStopped = step.kind === "add-record" && targetPath !== collectionPath
       ? (targets?.find((target) => target.path === targetPath)?.stopped ?? null)
       : null;
-    const fields = schemas.get(targetPath) ?? null;
+    const fields = fieldsOf(step);
     return (
       <div key={key} data-step data-testid={`builder-step-${number - 1}`} className={listId === "do" ? "rounded-lg border border-line bg-bg p-2" : "py-0.5"}>
         <div className="mb-1.5 flex items-center gap-1">
@@ -1102,7 +1320,7 @@ export function AutomationBuilder(props: {
                       label={`Step ${number}, field ${rowIndex + 1}`}
                       fields={fields}
                       value={row.field}
-                      collection={targetPath === collectionPath ? own : collectionName(targetPath)}
+                      collection={step.kind === "set" ? watched : targetPath === collectionPath ? own : collectionName(targetPath)}
                       focusKey={rowIndex === 0 && editable.kind === "set" ? `step-${key}-first` : `row-${rowKey}-first`}
                       problem={problem(`row-${rowKey}/field`)}
                       onChange={(next) => replace({
@@ -1245,26 +1463,47 @@ export function AutomationBuilder(props: {
           <select
             aria-label="Trigger"
             value={builderTrigger ?? ""}
-            onChange={(event) => setWhen(triggerFor(event.target.value as BuilderTrigger, draft.when, props.fields, table?.name ?? null))}
+            onChange={(event) => {
+              const kind = event.target.value as BuilderTrigger;
+              setDraft((current) => ({
+                ...current,
+                when: triggerFor(kind, current.when, recordFields, buttonFields, table?.name ?? null),
+                // A record starts to match rows, until someone writes a formula.
+                matching: kind === "starts-matching" && current.matching.mode === "always"
+                  ? { mode: "rows", formula: "", rows: [newCondition()], saved: null }
+                  : current.matching,
+              }));
+            }}
             className={selectClass}
           >
             {builderTrigger === null ? <option value="" disabled>{sentenceText(triggerParts(trigger))}</option> : null}
             {Object.entries(TRIGGER_LABELS).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}
           </select>
+          {table !== null && "table" in trigger && table.tables.size > 1 ? (
+            <select
+              aria-label="Table"
+              value={watched}
+              onChange={(event) => setWhen({ ...trigger, table: event.target.value })}
+              className={selectClass}
+            >
+              {table.tables.has(watched) ? null : <option value={watched}>{watched}</option>}
+              {[...table.tables.keys()].map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          ) : null}
           {trigger.kind === "field-changed" ? (
             <>
               <FieldSelect
                 label="Field that changes"
-                fields={props.fields}
+                fields={recordFields}
                 value={trigger.field}
-                collection={own}
+                collection={watched}
                 problem={problem("when/field")}
                 onChange={(field) => setWhen({ kind: "field-changed", field, to: null, table: trigger.table })}
               />
               <ToValue>
                 <ValueInput
                   label="Changes to"
-                  field={props.fields.find((field) => field.name === trigger.field)}
+                  field={recordFields.find((field) => field.name === trigger.field)}
                   value={trigger.to}
                   allowAny
                   problem={problem("when/to")}
@@ -1272,18 +1511,77 @@ export function AutomationBuilder(props: {
                 />
               </ToValue>
             </>
-          ) : trigger.kind === "starts-matching" ? (
+          ) : trigger.kind === "record-changed" ? (
             <>
-              <input
-                aria-label="Condition to match"
-                value={trigger.condition}
-                spellCheck={false}
-                placeholder='record.Status == "Blocked"'
-                onChange={(event) => setWhen({ ...trigger, condition: event.target.value })}
-                className={formulaClass}
-                {...invalid(problem("when/condition"))}
-              />
-              <Problem shown={problem("when/condition")} />
+              <select
+                aria-label="Which fields"
+                value={trigger.fields === null ? "any" : "chosen"}
+                onChange={(event) => setWhen({ ...trigger, fields: event.target.value === "any" ? null : [] })}
+                className={selectClass}
+                // With no field to check, the problem belongs to this choice.
+                {...(fieldChoices.length === 0 ? invalid(problem("when/fields")) : {})}
+              >
+                <option value="any">Any field</option>
+                <option value="chosen">Chosen fields</option>
+              </select>
+              {trigger.fields !== null ? (
+                <div role="group" aria-label="Fields that change" className="flex flex-col gap-0.5 rounded-md border border-line bg-bg px-2 py-1">
+                  {fieldChoices.map((name) => (
+                    <label key={name} className="flex items-center gap-1.5 text-[13px] text-ink">
+                      <input
+                        type="checkbox"
+                        checked={trigger.fields!.includes(name)}
+                        onChange={(event) => {
+                          const chosen = trigger.fields ?? [];
+                          setWhen({ ...trigger, fields: fieldChoices.filter((candidate) => (candidate === name ? event.target.checked : chosen.includes(candidate))) });
+                        }}
+                        {...invalid(problem("when/fields"))}
+                      />
+                      {name}
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+              {missingFields.length > 0 && problem("when/fields") === null ? (
+                <StatusLine tone="warning" icon={AlertTriangle} label="Not a field">
+                  {missingFields.join(", ")} {missingFields.length === 1 ? "is not a field" : "are not fields"} in {watched}.
+                </StatusLine>
+              ) : null}
+              <Problem shown={problem("when/fields")} />
+            </>
+          ) : trigger.kind === "starts-matching" ? (
+            <ConditionEditor
+              part="match"
+              condition={draft.matching}
+              expression={conditionOf(draft.matching)}
+              fields={recordFields}
+              collection={watched}
+              problemKey="when/condition"
+              problem={problem}
+              newRow={newCondition}
+              focusAfter={focusAfter}
+              onChange={(change) => setDraft((current) => ({ ...current, matching: change(current.matching) }))}
+            />
+          ) : trigger.kind === "button" ? (
+            <>
+              {buttonFields.length > 0 || trigger.field !== "" ? (
+                <FieldSelect
+                  label="Button"
+                  fields={buttonFields}
+                  value={trigger.field}
+                  collection={watched}
+                  problem={problem("when/button")}
+                  onChange={(field) => setWhen({ ...trigger, field })}
+                />
+              ) : <Problem shown={problem("when/button")} />}
+              {buttonFields.length === 0 ? (
+                <StatusLine tone="muted" icon={Info} label="No button">
+                  <p className="m-0">{watched} has no Button field. Add one, then choose it here.</p>
+                  {props.onOpenFields && watched === own ? (
+                    <SecondaryButton size="compact" className="mt-1" onClick={props.onOpenFields}>Edit fields</SecondaryButton>
+                  ) : null}
+                </StatusLine>
+              ) : null}
             </>
           ) : null}
           <Problem shown={problem("when")} />
@@ -1291,108 +1589,18 @@ export function AutomationBuilder(props: {
 
         <section aria-label="Only if" className="flex flex-col gap-1.5">
           <SectionLabel>Only if</SectionLabel>
-          <select
-            aria-label="Condition"
-            data-focus="condition-mode"
-            value={draft.conditionMode}
-            onChange={(event) => {
-              const mode = event.target.value as ConditionMode;
-              setDraft((current) => ({
-                ...current,
-                conditionMode: mode,
-                // A formula starts from what the rows said.
-                conditionFormula: mode === "formula" && current.conditionMode === "rows" ? (automation.if ?? "") : current.conditionFormula,
-                rows: mode === "rows" && current.rows.length === 0 ? [newCondition()] : current.rows,
-              }));
-            }}
-            className={selectClass}
-          >
-            <option value="always">Always</option>
-            <option value="rows">Fields match</option>
-            <option value="formula">Formula</option>
-          </select>
-          {draft.conditionMode === "rows" ? (
-            <>
-              {draft.rows.map(({ key, row }, index) => {
-                const field = props.fields.find((candidate) => candidate.name === row.field);
-                const replace = (next: ConditionRow) =>
-                  setDraft((current) => ({ ...current, rows: current.rows.map((entry) => (entry.key === key ? { key, row: next } : entry)) }));
-                return (
-                  <div key={key} className="flex items-start gap-1">
-                    <div className="flex min-w-0 flex-1 flex-col gap-1">
-                      <FieldSelect
-                        label={`Condition ${index + 1}, field`}
-                        fields={props.fields}
-                        value={row.field}
-                        collection={own}
-                        focusKey={`condition-${key}-first`}
-                        problem={null}
-                        onChange={(name) => replace({ ...row, field: name, value: "" })}
-                      />
-                      <select
-                        aria-label={`Condition ${index + 1}, comparison`}
-                        value={row.operator}
-                        onChange={(event) => replace({ ...row, operator: event.target.value as ConditionOperator })}
-                        className={selectClass}
-                      >
-                        {Object.entries(OPERATOR_LABELS).map(([operator, label]) => (
-                          <option key={operator} value={operator}>{label}</option>
-                        ))}
-                      </select>
-                      <LiteralInput
-                        label={`Condition ${index + 1}, value`}
-                        type={field?.type ?? null}
-                        options={field?.type === "select" || field?.type === "multi-select" ? field.options : []}
-                        text={row.value === null ? "" : String(row.value)}
-                        problem={problem(`if/${key}`)}
-                        onChange={(value) => replace({
-                          ...row,
-                          value: value.kind === "literal" && !Array.isArray(value.value) ? value.value : null,
-                        })}
-                      />
-                      <Problem shown={problem(`if/${key}`)} />
-                    </div>
-                    <IconButton
-                      aria-label={`Remove condition ${index + 1}`}
-                      title="Remove"
-                      data-focus={`condition-${key}-remove`}
-                      onClick={() => {
-                        const neighbor = draft.rows[index + 1] ?? draft.rows[index - 1];
-                        focusAfter(neighbor ? `condition-${neighbor.key}-remove` : "condition-mode", () => setDraft((current) => {
-                          const rows = current.rows.filter((entry) => entry.key !== key);
-                          return { ...current, rows, conditionMode: rows.length === 0 ? "always" : current.conditionMode };
-                        }));
-                      }}
-                    >
-                      <Trash2 size={13} aria-hidden />
-                    </IconButton>
-                  </div>
-                );
-              })}
-              <SecondaryButton
-                size="compact"
-                className="flex items-center gap-1 self-start"
-                onClick={() => {
-                  const entry = newCondition();
-                  focusAfter(`condition-${entry.key}-first`, () => setDraft((current) => ({ ...current, rows: [...current.rows, entry] })));
-                }}
-              >
-                <Plus size={12} aria-hidden />
-                Add condition
-              </SecondaryButton>
-            </>
-          ) : draft.conditionMode === "formula" ? (
-            <input
-              aria-label="Condition formula"
-              value={draft.conditionFormula}
-              spellCheck={false}
-              placeholder='record.Priority == "High"'
-              onChange={(event) => setDraft((current) => ({ ...current, conditionFormula: event.target.value }))}
-              className={formulaClass}
-              {...invalid(problem("if"))}
-            />
-          ) : null}
-          <Problem shown={problem("if")} />
+          <ConditionEditor
+            part="condition"
+            condition={draft.condition}
+            expression={automation.if}
+            fields={recordFields}
+            collection={watched}
+            problemKey="if"
+            problem={problem}
+            newRow={newCondition}
+            focusAfter={focusAfter}
+            onChange={(change) => setDraft((current) => ({ ...current, condition: change(current.condition) }))}
+          />
         </section>
 
         <section aria-label="Do" className="flex flex-col gap-2">
