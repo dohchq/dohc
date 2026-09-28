@@ -21,6 +21,8 @@ import type {
 } from "../ipc/bridgeContract";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { CollectionPage, DRAIN_RECORD_LIMIT, type CollectionPageProps } from "./CollectionPage";
+import { CustomizeContext } from "./settings/customize";
+import { documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
 import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import {
   beginCollectionWriteOperation,
@@ -314,6 +316,14 @@ function renderPage(
 }
 
 describe("CollectionPage", () => {
+  it("names a newer Collection file and asks to update dohc", async () => {
+    const bridge = makeBridge([]);
+    bridge.getCollection.mockResolvedValue({ path: "tasks", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }],
+      schema: { name: null, description: null, fields: [], views: [] }, recordCount: 0 });
+    renderPage(bridge);
+    expect(await screen.findByText("tasks/collection.yaml uses a newer version. Update dohc to read this file.")).toBeDefined();
+    expect(screen.queryByTestId("collection-page")).toBeNull();
+  });
   it("binds the store executor to the query bridge call and renders records", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")]);
     renderPage(bridge);
@@ -349,6 +359,37 @@ describe("CollectionPage", () => {
 
     fireEvent.click(screen.getByTestId("collection-new-record"));
     expect(onNewRecord).toHaveBeenCalledExactlyOnceWith("tasks");
+  });
+
+  it("names the Collection's files from Customize… and hands them to the agent", async () => {
+    const bridge = makeBridge([]);
+    const ask = vi.fn();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <CustomizeContext.Provider value={{ customize: vi.fn(), askAgent: { ready: true, ask, setUp: vi.fn() } }}>
+        {pageWithHost(() => undefined, () => undefined)}
+      </CustomizeContext.Provider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Collection actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Customize…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Customize Tasks" });
+    expect(within(dialog).getByText("tasks/collection.yaml")).toBeDefined();
+    expect(within(dialog).getByText("tasks/automations.yaml")).toBeDefined();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Ask my agent" }));
+    expect(ask).toHaveBeenCalledExactlyOnceWith({
+      kind: "collection", name: "Tasks", files: documentCollectionFiles("tasks"),
+    });
+    expect(screen.queryByRole("dialog", { name: "Customize Tasks" })).toBeNull();
+
+    // Escape returns focus to the menu's button.
+    const trigger = screen.getByRole("button", { name: "Collection actions" });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Customize…" }));
+    await screen.findByRole("dialog", { name: "Customize Tasks" });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Customize Tasks" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("counts the Collection's automations in the header and docks the ⚡ panel beside the view", async () => {

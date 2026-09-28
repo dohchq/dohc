@@ -1,3 +1,4 @@
+import { nameSlug, isPortableNamePath } from "@dohc/workspace-contracts/names";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DATASET_MAX_FIELDS, datasetColumnFields, type DatasetColumnField, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
@@ -57,7 +58,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
       .flatMap(action => (target ? datasetColumnFields(target) : []).filter(label => ["text", "number", "select"].includes(label.type) && action.fieldIds.includes(label.fieldId) &&
         action.fieldIds.every(id => id === relation.fieldId || id === label.fieldId)).map(label => ({ action, label })));
   }
-  const [appRoot, setAppRoot] = useState(`${dataset.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-form`);
+  const [appRoot, setAppRoot] = useState(`${nameSlug(dataset.name) || "collection"}-form`);
   const [title, setTitle] = useState(dataset.name);
   const [pending, setPending] = useState(false);
   const [invalid, setInvalid] = useState<string | null>(null);
@@ -111,7 +112,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
   function submit(): void {
     if (!create || locked.current) return;
     const root = appRoot.trim(), formTitle = title.trim();
-    if (!isShareablePath(root) || !/^[A-Za-z0-9_@./-]+$/.test(root) || root.length > 900) { if (sourceFolder.current) { sourceFolder.current.open = true; sourceFolder.current.querySelector("input")?.focus(); } setInvalid("Choose a workspace folder for the form."); return; }
+    if (!isShareablePath(root) || !isPortableNamePath(root, 900)) { if (sourceFolder.current) { sourceFolder.current.open = true; sourceFolder.current.querySelector("input")?.focus(); } setInvalid("Choose a workspace folder for the form."); return; }
     if (!formTitle || formTitle.length > 200 || /[\u0000-\u001f\u007f]/u.test(formTitle)) { setInvalid("Use a form title with 1 to 200 characters."); return; }
     if (!selected.length || selected.length > DATASET_MAX_FIELDS) { setInvalid(`Show 1 to ${DATASET_MAX_FIELDS} fields on the form.`); return; }
     if (required.some(field => !selected.includes(field.fieldId))) { setInvalid("Show every required field on the form."); return; }

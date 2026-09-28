@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
-import { createPressWindows, registerAutomationButtonsIpc } from "./automationButtonsIpc";
+import { createPressWindows, registerAutomationButtonsIpc, type NamedPress, type PressCaller } from "./automationButtonsIpc";
 import { CHANNELS } from "./channels";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -37,6 +37,14 @@ function fixture(options: {
   described?: string[];
   /** Each described table's Button fields, by table name. */
   buttons?: Record<string, string[]>;
+  /** The dataset a Collection folder holds, when it is one. */
+  datasetIn?: string;
+  /** The actions a dataset button runs that dohc cannot undo. */
+  irreversible?: Array<{ name: string; label: string }>;
+  /** A dataset button's state other than ready. */
+  datasetState?: { kind: "disabled"; reason: string };
+  /** The dataset ledger remembers the press. */
+  remembered?: boolean;
 } = {}) {
   const handlers = new Map<string, (event: { sender: FakeWindow }, payload: unknown) => unknown>();
   const window = new FakeWindow();
@@ -50,7 +58,10 @@ function fixture(options: {
       return pressed;
     }),
     datasetButtons: vi.fn(async (_datasetId: string, buttons: ReadonlyArray<{ field: string }>, _description: DatasetDescription) =>
-      buttons.map(({ field }) => ({ kind: "ready", automationId: `collection:Billing#${field}` }))),
+      buttons.map(({ field }) => options.datasetState ??
+        ({ kind: "ready", automationId: `collection:Billing#${field}`, ...(options.irreversible ? { irreversible: options.irreversible } : {}) }))),
+    datasetPressed: vi.fn(async (_pressId: string) => options.remembered ?? false),
+    datasetIn: vi.fn(async (_collectionPath: string) => options.datasetIn ?? null),
     pressDataset: vi.fn(async (_input: unknown, _description: DatasetDescription, watch: (claimId: string, waiting: "roster" | "held" | "busy" | null) => void) => {
       const pressed = options.pressed ?? { busy: false as const, claimId: "a".repeat(64), settled: null };
       if (!pressed.busy && pressed.settled === null) watch(pressed.claimId, options.waiting ?? null);
@@ -72,16 +83,18 @@ function fixture(options: {
       operations: definition.operations.filter((operation) => (options.described ?? []).includes(operation.name)),
     };
   });
-  registerAutomationButtonsIpc<FakeWindow, { sender: FakeWindow }, {
+  type Operation = {
     workspace: { workspaceId: string; rootPath: string; shareView?: unknown };
     state: { collectionAutomations: CollectionAutomations };
-  }>({
+  };
+  const operation = (): Operation => ({
+    workspace: { workspaceId: WORKSPACE_ID, rootPath: "/workspace", ...(options.shareView === undefined ? {} : { shareView: options.shareView }) },
+    state: { collectionAutomations: executor as unknown as CollectionAutomations },
+  });
+  const presses = registerAutomationButtonsIpc<FakeWindow, { sender: FakeWindow }, Operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
-    withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work({
-      workspace: { workspaceId: WORKSPACE_ID, rootPath: "/workspace", ...(options.shareView === undefined ? {} : { shareView: options.shareView }) },
-      state: { collectionAutomations: executor as unknown as CollectionAutomations },
-    }),
+    withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work(operation()),
     readText: async (_root, path) => {
       const text = options.files?.[path];
       return text === undefined ? null : { text, truncated: false, contentHash: "hash" };
@@ -102,7 +115,18 @@ function fixture(options: {
     handlers.get(channel)!({ sender: window }, { workspaceId: WORKSPACE_ID, datasetId: id(1), ...payload });
   const pressDataset = (payload: Record<string, unknown> = {}) =>
     callDataset(CHANNELS.pressAutomationButton, { table: "Invoices", field: "Mark paid", recordId: "12", pressId: PRESS_ID, ...payload });
-  return { call, press, callDataset, pressDataset, executor, buttonFields, relayPress, describeDataset, window, pressWindows, invoice };
+  // A press by Collection folder, as the CLI sends it, with no window to tell.
+  const waits: Array<string | null> = [];
+  const named = (input: Partial<NamedPress> = {}, by: PressCaller<Operation>["by"] = { kind: "human" }) => presses.pressNamed(
+    { workspaceId: WORKSPACE_ID, collectionPath: "Invoices", field: "Mark paid", recordId: "12", confirm: [], pressKey: "key-1", ...input },
+    {
+      by,
+      withOperation: async (work) => await work(operation()),
+      describeDataset: async () => await describeDataset(),
+      watch: (_claimId, waiting) => { waits.push(waiting); },
+    },
+  );
+  return { call, press, callDataset, pressDataset, named, waits, executor, buttonFields, relayPress, describeDataset, window, pressWindows, invoice };
 }
 
 const PAID_FILE = "version: 1\nautomations:\n  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n";
@@ -174,7 +198,7 @@ describe("pressing a button", () => {
     await expect(f.press({ pressedBy: "user-someone-else" })).rejects.toThrow();
     await expect(f.press()).resolves.toEqual({ busy: false, claimId: "atc_press", settled: null });
     expect(f.executor.press).toHaveBeenCalledWith(
-      { collectionPath: "Invoices", field: "Mark paid", recordId: "Invoices/12.md", pressId: PRESS_ID, pressedBy: "user-main" },
+      { collectionPath: "Invoices", field: "Mark paid", recordId: "Invoices/12.md", pressId: PRESS_ID, pressedBy: "user-main", by: { kind: "human" } },
       expect.any(Function),
       expect.any(Function),
     );
@@ -248,7 +272,7 @@ describe("pressing a button", () => {
     await expect(f.pressDataset({ recordId: "12" })).resolves.toEqual({ busy: false, claimId, settled: null });
     expect(f.describeDataset).toHaveBeenCalledWith(f.window, WORKSPACE_ID, id(1));
     expect(f.executor.pressDataset).toHaveBeenCalledWith(
-      { datasetId: id(1), table: "Invoices", field: "Mark paid", recordId: "12", pressId: PRESS_ID, pressedBy: "user-main", confirmed: [] },
+      { datasetId: id(1), table: "Invoices", field: "Mark paid", recordId: "12", pressId: PRESS_ID, pressedBy: "user-main", by: { kind: "human" }, confirmed: [] },
       expect.objectContaining({ operations: [expect.objectContaining({ name: "list" }), expect.objectContaining({ name: "add" })] }),
       expect.any(Function),
     );
@@ -300,6 +324,108 @@ describe("pressing a button", () => {
       expect(f.executor.datasetButtons).not.toHaveBeenCalled();
       expect(f.buttonFields).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("pressing a button by its Collection's folder, as the CLI does", () => {
+  it("presses a document Collection's button through the same press, and tells the caller why the run waits", async () => {
+    const f = fixture({ waiting: "roster" });
+    await expect(f.named({ recordId: "rec_invoice12" })).resolves.toEqual({ busy: false, claimId: "atc_press", settled: null });
+    expect(f.executor.press).toHaveBeenCalledWith(
+      { collectionPath: "Invoices", field: "Mark paid", recordId: "rec_invoice12", pressId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u), pressedBy: "user-main", by: { kind: "human" } },
+      expect.any(Function),
+      expect.any(Function),
+    );
+    expect(f.waits).toEqual(["roster"]);
+    // No window pressed, so none hears the run.
+    expect(f.window.sent).toEqual([]);
+    await expect(f.named({ collectionPath: "shared-with-me/Invoices" })).rejects.toThrow("is not a Collection in this workspace");
+  });
+
+  it("asks before a dataset press runs an action dohc cannot undo, and runs only the actions confirmed by name", async () => {
+    const irreversible = [{ name: "sendInvoice", label: "Send invoice" }, { name: "charge", label: "Charge card" }];
+    const f = fixture({ datasetIn: id(1), described: ["list", "add"], buttons: { Invoices: ["Mark paid"] }, irreversible });
+    await expect(f.named()).resolves.toEqual({ confirm: irreversible });
+    await expect(f.named({ confirm: ["sendInvoice"] })).resolves.toEqual({ confirm: [irreversible[1]] });
+    expect(f.executor.pressDataset).not.toHaveBeenCalled();
+    await expect(f.named({ confirm: ["sendInvoice", "charge"] })).resolves.toEqual({ busy: false, claimId: "a".repeat(64), settled: null });
+    // The executor checks the names again against the automation it runs.
+    expect(f.executor.pressDataset).toHaveBeenCalledWith(
+      { datasetId: id(1), table: "Invoices", field: "Mark paid", recordId: "12", pressId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u), pressedBy: "user-main", by: { kind: "human" }, confirmed: ["sendInvoice", "charge"] },
+      expect.objectContaining({ datasetId: id(1) }),
+      expect.any(Function),
+    );
+    expect(f.executor.press).not.toHaveBeenCalled();
+  });
+
+  it("finds a dataset button's table, and asks for it only when two tables have the button", async () => {
+    const one = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"], Payments: [] } });
+    await expect(one.named()).resolves.toMatchObject({ busy: false });
+    expect(one.executor.datasetButtons).toHaveBeenCalledWith(id(1), [{ field: "Mark paid", table: "Invoices" }], expect.anything());
+    const two = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"], Payments: ["Mark paid"] } });
+    await expect(two.named()).rejects.toThrow("Mark paid is a button in more than one table of Invoices. Name the table.");
+    await expect(two.named({ table: "Payments" })).resolves.toMatchObject({ busy: false });
+    await expect(two.named({ field: "Refund" })).rejects.toThrow("Refund is not a button in Invoices.");
+  });
+
+  it("answers a press sent again with its first run, whatever changed in the button since", async () => {
+    const irreversible = [{ name: "sendInvoice", label: "Send invoice" }];
+    const changed = [
+      { datasetState: { kind: "disabled" as const, reason: "Mark paid is switched off." } },
+      { irreversible },
+      // Renamed since: the resend names the table it pressed in.
+      { buttons: { Invoices: ["Mark as paid"] } },
+    ];
+    for (const since of changed) {
+      const f = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"] }, remembered: true, ...since });
+      await expect(f.named({ table: "Invoices" })).resolves.toEqual({ busy: false, claimId: "a".repeat(64), settled: null });
+      expect(f.executor.datasetButtons).not.toHaveBeenCalled();
+      expect(f.executor.pressDataset).toHaveBeenCalledWith(expect.objectContaining({ table: "Invoices", field: "Mark paid", pressId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u) }), expect.anything(), expect.any(Function));
+    }
+    // A new press of a switched-off button is refused with its reason.
+    const off = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"] }, datasetState: changed[0]!.datasetState });
+    await expect(off.named()).rejects.toThrow("Mark paid is switched off.");
+    expect(off.executor.pressDataset).not.toHaveBeenCalled();
+  });
+
+  it("names a press by its key, its Collection, and the Collection's kind, so the key never spans two ledgers", async () => {
+    const idOf = (call: unknown[] | undefined) => (call?.[0] as { pressId: string }).pressId;
+    const document = fixture();
+    await document.named();
+    await document.named();
+    await document.named({ pressKey: "key-2" });
+    const [first, again, other] = document.executor.press.mock.calls.map(idOf);
+    expect(again).toBe(first);
+    expect(other).not.toBe(first);
+    // The same key on the same folder, once it holds a dataset, is a new press in the dataset's ledger.
+    const dataset = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"] } });
+    await dataset.named();
+    expect(idOf(dataset.executor.pressDataset.mock.calls[0])).not.toBe(first);
+    expect(dataset.executor.datasetPressed).toHaveBeenCalledWith(idOf(dataset.executor.pressDataset.mock.calls[0]));
+  });
+
+  it("presses as the agent the caller names, at its run's depth, for main's person, on both kinds of Collection", async () => {
+    const agent = { kind: "agent" as const, originId: "dohc-mcp", depth: 2 };
+    const document = fixture();
+    await document.named({ recordId: "rec_invoice12" }, agent);
+    expect(document.executor.press).toHaveBeenCalledWith(
+      expect.objectContaining({ pressedBy: "user-main", by: agent }), expect.any(Function), expect.any(Function));
+    const dataset = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"] } });
+    await dataset.named({}, agent);
+    expect(dataset.executor.pressDataset).toHaveBeenCalledWith(
+      expect.objectContaining({ pressedBy: "user-main", by: agent }), expect.anything(), expect.any(Function));
+  });
+
+  it("relays a shared view's press of a document button as the app does, without this computer's executor", async () => {
+    const f = fixture({ datasetIn: id(1), shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": PAID_FILE } });
+    await expect(f.named({ recordId: "rec_invoice12" })).resolves.toEqual({ busy: false, relayed: true });
+    expect(f.relayPress).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ pressId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u), recordId: "rec_invoice12" }));
+    expect(f.executor.datasetIn).not.toHaveBeenCalled();
+    expect(f.executor.press).not.toHaveBeenCalled();
+    // Less than Edit on the Collection refuses, as the app's button does.
+    const view = fixture({ shareView: editShare(["Invoices"], "view"), files: { "Invoices/automations.yaml": PAID_FILE } });
+    await expect(view.named()).rejects.toThrow("Only people who can edit Invoices can use this button.");
+    expect(view.relayPress).not.toHaveBeenCalled();
   });
 });
 

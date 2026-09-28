@@ -13,6 +13,11 @@ import {
   ListRelaySharesResult,
   RelayShareReceivedRow,
   RevokeRelaySharePayload,
+  RevokeRelayShareResult,
+  RelayShareRevokeResponse,
+  RelayShareUndoResponse,
+  UndoRelaySharePayload,
+  UndoRelayShareResult,
   AddRelayShareLinkPayload,
   AddRelayShareLinkResult,
   AppendRelayShareDiscussionPayload,
@@ -105,7 +110,7 @@ interface RelayShareRequest {
     path: string,
     init: RequestInit | undefined,
     options: { retainNotFound: true },
-  ): Promise<{ kind: "success"; body: Result } | { kind: "missing" }>;
+  ): Promise<{ kind: "success"; body: Result } | { kind: "missing"; removed: boolean }>;
 }
 
 export function registerRelaySharesIpcHandlers<
@@ -144,6 +149,9 @@ export function registerRelaySharesIpcHandlers<
   >;
   // A grant changed on the relay. Null when the change names no workspace.
   sharesChanged(workspaceId: string | null): void;
+  // An authenticated account listing, applied to this machine's received
+  // shares so a share the owner restored resumes.
+  reconcileReceivedShares(listing: unknown): void;
 }): void {
   const {
     registerHandler,
@@ -158,6 +166,7 @@ export function registerRelaySharesIpcHandlers<
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
     sharesChanged,
+    reconcileReceivedShares,
   } = dependencies;
   const ownerRelayShareHandler = createOwnerRelayShareHandler<
     Sender,
@@ -360,10 +369,17 @@ export function registerRelaySharesIpcHandlers<
 
   registerHandler(CHANNELS.listRelayShares, async (event) => {
     assertTrustedSender(event);
-    const result = await relayShareJson<{
-      granted: Array<Record<string, unknown>>;
-      received?: Array<Record<string, unknown>>;
-    }>("/sync/shares");
+    await warmCredentialCache();
+    const capturedGeneration = currentCredentialGeneration();
+    const result = await awaitCredentialGeneration({
+      capturedGeneration, currentGeneration: currentCredentialGeneration,
+      run: () => relayShareJson<{
+        granted: Array<Record<string, unknown>>;
+        received?: Array<Record<string, unknown>>;
+        removed?: unknown;
+      }>("/sync/shares"),
+    });
+    reconcileReceivedShares(result);
     const relayUrl = currentCredentials()?.relayUrl;
     const withCode = (row: Record<string, unknown>) => ({
       ...row,
@@ -377,7 +393,7 @@ export function registerRelaySharesIpcHandlers<
     const lanes = pathShareLanes(result);
     const granted = lanes.granted.map(withCode);
     const received = lanes.received.map(withCode);
-    return ListRelaySharesResult.parse({ granted, received });
+    return ListRelaySharesResult.parse({ granted, received, removed: result.removed });
   });
 
   registerHandler(CHANNELS.getRelayReceivedShare, async (event, payload) => {
@@ -398,7 +414,10 @@ export function registerRelaySharesIpcHandlers<
         ),
     });
     if (result.kind === "missing") {
-      return GetRelayReceivedShareResult.parse({ found: false });
+      if (!result.removed) return GetRelayReceivedShareResult.parse({ found: false });
+      return GetRelayReceivedShareResult.parse({
+        found: false, removed: { message: "The owner removed your access." },
+      });
     }
     const body = result.body;
     const received = RelayShareReceivedRow.parse({
@@ -419,14 +438,39 @@ export function registerRelaySharesIpcHandlers<
   registerHandler(CHANNELS.revokeRelayShare, async (event, payload) => {
     assertTrustedSender(event);
     const input = RevokeRelaySharePayload.parse(payload);
-    await relayShareJson(
+    const relayResult = await relayShareJson<unknown>(
       `/sync/shares/${encodeURIComponent(input.shareId)}/revoke`,
       {
         method: "POST",
       },
     );
     sharesChanged(null);
-    return undefined;
+    const parsed = RelayShareRevokeResponse.safeParse(relayResult);
+    if (!parsed.success) {
+      throw new Error(relayShareErrorCopy(500, null));
+    }
+    return RevokeRelayShareResult.parse({ undo: parsed.data.undo });
+  });
+
+  // Restores what a removal ended, from the receipt the removal returned.
+  // The same account transport as the removal, so the Undo on a notice works
+  // after the dialog that removed it has closed and names no workspace.
+  registerHandler(CHANNELS.undoRelayShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = UndoRelaySharePayload.parse(payload);
+    const relayResult = await relayShareJson<unknown>(
+      `/sync/shares/${encodeURIComponent(input.shareId)}/undo`,
+      {
+        method: "POST",
+        body: JSON.stringify({ undoId: input.undoId }),
+      },
+    );
+    sharesChanged(null);
+    const parsed = RelayShareUndoResponse.safeParse(relayResult);
+    if (!parsed.success || parsed.data.shareId !== input.shareId) {
+      throw new Error(relayShareErrorCopy(500, null));
+    }
+    return UndoRelayShareResult.parse({ shareId: parsed.data.shareId });
   });
 
   registerHandler(CHANNELS.createRelayShareLink, async (event, payload) => {
@@ -658,7 +702,7 @@ export function registerRelaySharesIpcHandlers<
         if (!ended.success) {
           throw new Error(relayShareErrorCopy(500, null));
         }
-        return RevokeRelayShareLinkResult.parse({ outcome: "ended" });
+        return RevokeRelayShareLinkResult.parse({ outcome: "ended", undo: ended.data.undo });
       },
     );
   });
@@ -1048,6 +1092,7 @@ export function registerRelaySharesIpcHandlers<
           status: parsed.data.status,
           revokedAtMs: parsed.data.revokedAtMs,
           parentGrantId: parsed.data.parentGrantId,
+          undo: parsed.data.undo,
         });
       },
       assertOriginalWorkspace,

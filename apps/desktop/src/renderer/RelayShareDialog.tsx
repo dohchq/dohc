@@ -1,6 +1,7 @@
 import { Share2, X } from "lucide-react";
 import { useState } from "react";
 import { EmailShareForm } from "./EmailShareForm";
+import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { IconButton } from "./ui/controls";
 import { useRelayShareLinkPane } from "./useRelayShareLinkPane";
 
@@ -14,6 +15,8 @@ export function RelayShareDialog(props: {
   workspaceId: string;
   target: RelayShareTarget;
   onClose: () => void;
+  // Ending a link or a person's access: the shell shows the notice and its Undo.
+  shareRemovals?: ShareRemovalNotices;
 }) {
   const [shareWith, setShareWith] = useState<ShareWith>("email");
   const linkPane = useRelayShareLinkPane({
@@ -21,6 +24,7 @@ export function RelayShareDialog(props: {
     target: props.target,
     visible: shareWith === "link",
     onClose: props.onClose,
+    ...(props.shareRemovals ? { shareRemovals: props.shareRemovals } : {}),
   });
 
   const subject =

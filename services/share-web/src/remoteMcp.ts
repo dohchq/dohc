@@ -1,6 +1,8 @@
 import { createMcpHandler, McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { readBoundedJson } from "@dohc/service-http";
+import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
+import {relayLinkRefusal} from "./linkRefusal";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, relayVersionRefusal } from "./relayVersion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
@@ -72,12 +74,14 @@ const text = (value: unknown): CallToolResult => {
 const error = (message: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: message }] });
 const json = async (response: Response, signal: AbortSignal): Promise<unknown> => {
   if (!response.ok) {
+    const value = await readBoundedJson(response, 4096, signal).catch(() => null);
     const refusal = response.status === RELAY_VERSION_REFUSAL_STATUS
-      ? relayVersionRefusal(await readBoundedJson(response, 4096, signal).catch(() => null))
+      ? relayVersionRefusal(value)
       : null;
     await response.body?.cancel().catch(() => undefined);
     if (refusal) throw new RelayVersionRefusalError(refusal);
-    throw new Error(`Share link request failed (${response.status}).`);
+    const code = parseLinkRefusal(value, response.status);
+    throw new Error(code ? LINK_REFUSALS[code].error : "not found");
   }
   return readBoundedJson(response, 1024 * 1024, signal);
 };
@@ -95,7 +99,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
   }, async () => {
     try {
       return text(await jsonResponse(await options.request("/api/view/current")));
-    } catch (e) { return error(String(e)); }
+    } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   server.registerTool("dohc_list_changes", {
     description: "List changes to files in this shared link, oldest first. since is a log cursor, not a timestamp: pass nextCursor from this tool or from dohc_list_files to read only later changes. If epochLogFloor is above your since, earlier changes are gone, so start again from dohc_list_files. dohc_read_file reads an afterBlobSha256 while its file is still in the share.",
@@ -104,29 +108,28 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
     try {
       const page = linkLogSchema.parse(await jsonResponse(await options.request(`/api/view/log?${new URLSearchParams({since: String(since ?? 0), limit: String(limit ?? 100)})}`)));
       return text({ok: true, changes: page.ops.flatMap(op => linkChange(op) ?? []), nextCursor: page.nextCursor, hasMore: page.hasMore, epochLogFloor: page.epochLogFloor});
-    } catch (e) { return error(String(e)); }
+    } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   server.registerTool("dohc_read_file", {
     description: "Read up to 256 KiB of settled file content using a hash from dohc_list_files, or an afterBlobSha256 from dohc_list_changes to read an earlier revision of a file still in the share. Markdown may lag the live document. Binary files are base64 encoded. An earlier revision has no contentKind here, so it is returned as UTF-8 when its bytes decode and as base64 otherwise; use the contentKind from dohc_list_changes.",
     inputSchema: z.object({ blobSha256: z.string().regex(/^[0-9a-f]{64}$/) }),
   }, async ({ blobSha256 }) => {
     try {
+      const response = await options.request(`/api/view/blob/${blobSha256}`);
+      if (!response.ok) {await json(response, options.signal); return error("not found");}
+      const bytes = await boundedBytes(response, 256 * 1024, options.signal);
       const inventory = fileInventorySchema.parse(await jsonResponse(await options.request("/api/view/current")));
       const files = inventory.files.filter(file => file.blobSha256 === blobSha256);
-      const response = await options.request(`/api/view/blob/${blobSha256}`);
-      if (response.status === 404) {await response.body?.cancel(); return error("No file in the share has this content now or in its history. Deleting a file or moving it out of the share withdraws its history, so list files or changes again.");}
-      if (!response.ok) {await response.body?.cancel(); return error(`Share link request failed (${response.status}).`);}
-      const bytes = await boundedBytes(response, 256 * 1024, options.signal);
       if (files.some(file => file.contentKind === "binary")) return text({ok: true, source: "settled", encoding: "base64", content: bytes.toString("base64")});
       try {return text({ok: true, source: "settled", encoding: "utf8", content: new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes)});}
       catch {return text({ok: true, source: "settled", encoding: "base64", content: bytes.toString("base64")});}
-    } catch (e) { return error(String(e)); }
+    } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   server.registerTool("dohc_read_discussion", {
     description: "Read the discussion attached to this shared link.", inputSchema: z.object({ cursor: z.string().optional(), limit: z.number().int().positive().max(100).optional() }),
   }, async ({ cursor, limit }) => {
     try { const query = new URLSearchParams(); if (cursor) query.set("cursor", cursor); if (limit) query.set("limit", String(limit)); return text(await jsonResponse(await options.request(`/api/view/discussion?${query}`))); }
-    catch (e) { return error(String(e)); }
+    catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   if (metadata.access === "comment" || metadata.access === "edit") server.registerTool("dohc_post_discussion", {
     description: "Post a discussion message to this shared link when its permissions allow comments.",
@@ -134,7 +137,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
   }, async ({ body, idempotencyKey, claimedName }) => {
     try {
       return text(await jsonResponse(await options.request("/api/view/discussion", { method: "POST", body: JSON.stringify({ body, idempotencyKey, ...(claimedName ? { claimedName } : {}) }) })));
-    } catch (e) { return error(String(e)); }
+    } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   const selector = metadata.effectiveSelector as {versionId?: string | null} | undefined;
   if (metadata.access === "edit" && selector?.versionId === null && options.linkLive && options.liveLimits) {
@@ -154,9 +157,15 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
 }
 
 export async function serveRemoteMcp(request: Request, options: RemoteOptions): Promise<{ body: BodyInit | null; status: number; headers: Headers }> {
-  const metadata = await json(await options.request("/api/view/meta"), options.signal) as Record<string, unknown>;
-  if (metadata.ok !== true) throw new Error("Share is unavailable.");
   const parsedBody = request.method === "POST" ? await readBoundedJson(request, 32 * 1024, options.signal) : undefined;
+  const metadataResponse = await options.request("/api/view/meta");
+  if (!metadataResponse.ok) {
+    const result = await relayLinkRefusal(metadataResponse, options.signal);
+    await metadataResponse.body?.cancel().catch(() => {});
+    return {body: result.body, status: result.status, headers: result.headers};
+  }
+  const metadata = await json(metadataResponse, options.signal) as Record<string, unknown>;
+  if (metadata.ok !== true) throw new Error("Share is unavailable.");
   if (parsedBody && typeof parsedBody === "object" && "method" in parsedBody && parsedBody.method === "subscriptions/listen") {
     const result = Response.json({jsonrpc: "2.0", id: "id" in parsedBody ? parsedBody.id : null, error: {code: -32601, message: "This endpoint does not offer subscriptions."}});
     return {body: result.body, status: result.status, headers: result.headers};

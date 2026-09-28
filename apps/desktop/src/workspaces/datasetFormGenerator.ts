@@ -1,3 +1,4 @@
+import { isPortableNamePath } from "@dohc/workspace-contracts/names";
 import { DATASET_MAX_FIELDS, datasetColumnFields, parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
@@ -17,7 +18,7 @@ export interface DatasetFormInput {
 /** Generates a consumer app. The caller obtains the revision from the approved host catalog. */
 export function generateDatasetFormSources(input: DatasetFormInput): { files: Record<string, string> } {
   const revision = parseDatasetRevision(input.approvedRevision);
-  if (!isShareablePath(input.appRoot) || !/^[A-Za-z0-9_@./-]+$/.test(input.appRoot) || input.appRoot.length > 900) {
+  if (!isShareablePath(input.appRoot) || !isPortableNamePath(input.appRoot, 900)) {
     throw new Error("Choose a workspace folder for the form app.");
   }
   const table = revision.definition.tables.find(table => table.tableId === input.tableId);
@@ -75,7 +76,7 @@ export function generateDatasetFormSources(input: DatasetFormInput): { files: Re
   const frontend = generateDatasetFormFrontend({ title, operation: operation.name, fields });
   return { files: {
     ...frontend,
-    "dohc.json": JSON.stringify({ type: "site", title }, null, 2) + "\n",
-    "app.publish.json": JSON.stringify({ entryPath: "frontend.js", inputs: ["frontend.js", "frontend.css"], packageMap: {}, dataset: binding }, null, 2) + "\n",
+    "dohc.json": JSON.stringify({ version: 1, type: "site", title }, null, 2) + "\n",
+    "app.publish.json": JSON.stringify({ version: 1, entryPath: "frontend.js", inputs: ["frontend.js", "frontend.css"], packageMap: {}, dataset: binding }, null, 2) + "\n",
   } };
 }

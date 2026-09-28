@@ -13,6 +13,13 @@ import { readWorkspacePackages, selectJavaScript } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
+export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
+  const command = [process.execPath, ["apps/desktop/scripts/run-playwright.mjs", ...args]];
+  return platform === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY
+    ? ["xvfb-run", ["-a", command[0], ...command[1]]]
+    : command;
+}
+
 function treeState() {
   return readTreeState(
     (command) => { try { return git(command.split(" ").slice(1)); } catch { return null; } },
@@ -204,6 +211,7 @@ export async function verify(args) {
     startSource = await measure("source-fingerprints:start", () => ({ ...(native ? {engine: sourceFingerprint("engine")} : {}), desktop: sourceFingerprint("desktop") }));
     await cancellation.checkpoint();
     if (mode === "pr" && (gates.js || gates.rust)) await step("install", ...pnpm(["install", "--frozen-lockfile"]));
+    if (needs.desktop) await step("electron-install", process.execPath, ["apps/desktop/scripts/ensure-electron-installed.mjs"]);
     report.doctor = await measure("doctor", () => doctor({engine: native, desktop: needs.desktop, browser: Boolean(proofs.accounts || proofs.desktop)})); save();
     await cancellation.checkpoint();
     if (report.doctor.checks.some((check) => check.state === "FAIL")) throw new Error("Preflight failed. Read result.json and run pnpm setup:worktree.");
@@ -244,7 +252,7 @@ export async function verify(args) {
       // Keep package groups under this owner so cancellation finishes their
       // escalation before database cleanup, without a competing parent timer.
       await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
-        () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages }));
+        () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages, testFiles: javascript.testFiles }));
       if (proofs.selfHostNative) {
         const nativeOutput = join(output, "self-host-native");
         mkdirSync(nativeOutput, {recursive: true});
@@ -267,7 +275,7 @@ export async function verify(args) {
     if (proofs.desktop) {
       const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", mode === "pr" ? "@verification-smoke|@self-host-onboarding" : "@verification-smoke"];
       const jsonReport = join(output, "playwright.json");
-      await step("desktop", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { ...desktopEnvironment, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
+      await step("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env: desktopEnvironment }), { ...desktopEnvironment, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
       const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
       report.desktop = desktopReport.stats;
       report.desktopProofs = passedSpecTitles(desktopReport.suites);

@@ -210,6 +210,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
                 "automationId": "collection:x#y",
                 "recordId": "r",
                 "pressedBy": "u",
+                "by": { "kind": "human" },
             }),
         ),
         (
@@ -1497,6 +1498,7 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
         "automationId": PAY,
         "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
         "pressedBy": "user:ada",
+        "by": { "kind": "human" },
         "nowMs": 100,
     });
     let answer = call(
@@ -1539,6 +1541,7 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
             "automationId": PAY,
             "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
             "pressedBy": "user:bo",
+            "by": { "kind": "human" },
         }),
     )
     .await;
@@ -1557,10 +1560,62 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
             "automationId": "collection:triage",
             "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
             "pressedBy": "user:ada",
+            "by": { "kind": "human" },
         }),
     )
     .await;
     assert_eq!(not_collection.code, ErrorCode::InvalidParams);
+
+    // An agent presses for the person at its run's depth, named as the agent.
+    let agent = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.press",
+        json!({
+            "pressId": "press-agent",
+            "automationId": PAY,
+            "recordId": "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "pressedBy": "user:ada",
+            "by": { "kind": "agent", "originId": "dohc-mcp", "depth": 2 },
+        }),
+    )
+    .await;
+    assert_eq!(agent["claim"]["depth"], json!(2));
+    assert_eq!(
+        agent["claim"]["change"],
+        json!({
+            "kind": "button",
+            "authorOriginId": "dohc-mcp",
+            "actorKind": "agent",
+            "onBehalfOf": "user:ada",
+        })
+    );
+    // A press names who made it; an automation never presses.
+    for by in [
+        json!(null),
+        json!({ "kind": "automation" }),
+        json!({ "kind": "agent", "depth": 1 }),
+        json!({ "kind": "human", "originId": "dohc-mcp", "depth": 4 }),
+        json!({ "kind": "agent", "originId": "dohc-mcp", "depth": 1, "userId": "user:bo" }),
+    ] {
+        let refused = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "automations.press",
+            json!({
+                "pressId": "press-bad",
+                "automationId": PAY,
+                "recordId": "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "pressedBy": "user:ada",
+                "by": by,
+            }),
+        )
+        .await;
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+    }
+    claimed_events(&mut notices);
 
     let started = call(
         &transport,

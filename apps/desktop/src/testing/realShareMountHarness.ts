@@ -128,6 +128,7 @@ export function createRealShareMountHarness(input: {
     relayShareErrorCopy: unexpected,
     relayShareDiscussionActivityPolls: createPresencePollRegistry(),
     sharesChanged: unexpected,
+    reconcileReceivedShares: unexpected,
   });
   return {
     workspace,

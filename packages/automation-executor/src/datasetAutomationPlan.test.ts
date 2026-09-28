@@ -3,7 +3,18 @@ import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contrac
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { chatDirectoryOf } from "./automationChat";
 import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
-import { DATASET_WAKE_NEEDS_BUTTON, datasetAutomationProblem, datasetIrreversibleActions, datasetEffectKey, datasetOperationsOf, datasetReachSteps, datasetStepsOf, pinDatasetOperations } from "./datasetAutomationPlan";
+import {
+  DATASET_WAKE_NEEDS_BUTTON,
+  datasetAutomationProblem,
+  datasetEffectKey,
+  datasetFieldWritesOf,
+  datasetIrreversibleActions,
+  datasetOperationsOf,
+  datasetReachSteps,
+  datasetStepsOf,
+  pinDatasetOperations,
+  type DatasetRules,
+} from "./datasetAutomationPlan";
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 const TABLE = id(2), STATUS = id(4), NOTES = id(5), FINISHED = id(6);
@@ -28,6 +39,16 @@ const definition: DatasetDefinition = {
 };
 const generated = { definition, generated: true };
 const authored = { definition, generated: false };
+const REFUNDS = id(20), REFUND_STATUS = id(21);
+const twoTables: DatasetDefinition = {
+  ...definition,
+  tables: [...definition.tables, { tableId: REFUNDS, name: "Refunds", sqlName: "refunds", primaryKey: "id", fields: [
+    { fieldId: id(22), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+    { fieldId: REFUND_STATUS, name: "Status", sqlColumn: "status", type: "text", required: true, unique: false },
+  ] }],
+  // refunds.create fits Status with no extra field; invoices.create has Notes too.
+  operations: [...definition.operations, { ...operation(23, "refunds.create", "create", [REFUND_STATUS]), tableId: REFUNDS }],
+};
 
 function automation(steps: string, when = "field-changed: Status"): Automation {
   const parsed = parseAutomationsFile(`version: 1\nautomations:\n  - id: a\n    name: A\n    when:\n      ${when}\n    do:\n${steps}`);
@@ -36,12 +57,6 @@ function automation(steps: string, when = "field-changed: Status"): Automation {
 }
 
 describe("dataset automation steps", () => {
-  it("refuses Group-message triggers on datasets", () => {
-    const fromMessage = automation("      - add-record:\n          Status: New\n        operation: invoices.create\n", "group-message: Team");
-    expect(datasetSubscriptionFor(fromMessage, definition))
-      .toEqual({ problem: "This Collection's automations cannot start from Group messages. Choose a record change as the trigger." });
-  });
-
   // Each chat step alone, then inside an If, then in its otherwise branch.
   const everywhere = (chat: Automation["do"], base: Automation["do"]) => [chat, [{ kind: "if" as const, if: "true", do: chat, otherwise: [] }],
     [{ kind: "if" as const, if: "false", do: base, otherwise: chat }]];
@@ -56,7 +71,13 @@ describe("dataset automation steps", () => {
     for (const steps of everywhere(chat, base.do)) expect(datasetAutomationProblem({ ...base, do: steps }, generated)).toBeNull();
   });
 
-  it("wakes an agent only from a button, since a commit does not say whether a person or an agent made it", () => {
+  it("claims no ledger subscription for a schedule or a Group message, which the engine claims", () => {
+    for (const when of ["{schedule: day, timezone: UTC}", "group-message: Team"]) {
+      expect(datasetSubscriptionFor(automation("      - notify: Check\n        to: [user_ana]\n", when), definition)).toBeNull();
+    }
+  });
+
+  it("wakes an agent from a button, a schedule, or a Group message, since a commit does not say whether a person or an agent made it", () => {
     const wake = automation("      - wake-agent: Review this\n        person: user_ana\n").do;
     const changed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
     for (const steps of everywhere(wake, changed.do)) {
@@ -64,6 +85,10 @@ describe("dataset automation steps", () => {
     }
     const pressed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n", "button: Ask");
     for (const steps of everywhere(wake, pressed.do)) expect(datasetAutomationProblem({ ...pressed, do: steps }, generated)).toBeNull();
+    for (const when of ["{schedule: day, timezone: UTC}", "group-message: Team"]) {
+      const started = automation("      - notify: Done\n        to: [user_ana]\n", when);
+      for (const steps of everywhere(wake, started.do)) expect(datasetAutomationProblem({ ...started, do: steps }, generated)).toBeNull();
+    }
   });
 
   it("says which approved operation a step lacks, in the words the step card shows", () => {
@@ -100,10 +125,10 @@ describe("dataset automation steps", () => {
 
   it("does not read the trigger record, or ask for a read, on a dataset whose operations someone wrote", () => {
     const posting = automation("      - post: 'Invoice {record.id} changed'\n        group: Team\n");
-    expect(datasetStepsOf(posting, authored).triggerRead).toBeNull();
-    expect(datasetStepsOf(posting, generated).triggerRead?.name).toBe("invoices.list");
+    expect(datasetStepsOf(posting, authored).trigger?.read).toBeNull();
+    expect(datasetStepsOf(posting, generated).trigger?.read?.name).toBe("invoices.list");
     expect(datasetOperationsOf(posting, authored)).toEqual([]);
-    const steps = datasetReachSteps(posting, { path: "Budget", name: "Budget" }, authored, { workspaceId: "workspace", grants: [] }, null);
+    const steps = datasetReachSteps(posting, { path: "Budget", name: "Budget" }, authored, { workspaceId: "workspace", grants: [] }, null)!;
     expect(steps.some((step) => step.kind === "dataset-operation")).toBe(false);
     expect(() => datasetStepsOf(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), authored)).toThrow(/Set fields, Add record, and Find/);
   });
@@ -128,7 +153,7 @@ describe("dataset automation steps", () => {
       .toBe("invoices.edit is an approved edit, not an action. Use a step that changes fields for it.");
     // The action is an operation the run calls: reach checks it, and a presser must hold it.
     expect(datasetOperationsOf(invoking, authored)).toEqual(["invoices.markPaid"]);
-    const steps = datasetReachSteps(invoking, { path: "Budget", name: "Budget" }, authored, { workspaceId: "workspace", grants: [] }, null);
+    const steps = datasetReachSteps(invoking, { path: "Budget", name: "Budget" }, authored, { workspaceId: "workspace", grants: [] }, null)!;
     expect(steps.flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : [])).toEqual(["invoices.markPaid"]);
     expect(datasetStepsOf(invoking, authored).steps.get(0)?.operation.name).toBe("invoices.markPaid");
   });
@@ -151,16 +176,6 @@ describe("dataset automation steps", () => {
   });
 
   it("pins an Add record only to a create in its own table, and names another table's that fits", () => {
-    const REFUNDS = id(20), REFUND_STATUS = id(21);
-    const twoTables: DatasetDefinition = {
-      ...definition,
-      tables: [...definition.tables, { tableId: REFUNDS, name: "Refunds", sqlName: "refunds", primaryKey: "id", fields: [
-        { fieldId: id(22), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
-        { fieldId: REFUND_STATUS, name: "Status", sqlColumn: "status", type: "text", required: true, unique: false },
-      ] }],
-      // refunds.create fits Status with no extra field; invoices.create has Notes too.
-      operations: [...definition.operations, { ...operation(23, "refunds.create", "create", [REFUND_STATUS]), tableId: REFUNDS }],
-    };
     const add = (table: string, step = "Status: New", operationName = "") =>
       automation(`      - add-record:\n          ${step}\n${operationName ? `        operation: ${operationName}\n` : ""}`, `field-changed: Status\n      table: ${table}`);
     const pinnedOf = (built: Automation) => pinDatasetOperations(built, { definition: twoTables, generated: true }).do[0];
@@ -188,6 +203,11 @@ describe("dataset automation steps", () => {
       { field: "Status", value: { kind: "literal", value: "Open" } },
       { field: "Notes", value: { kind: "trigger-field", field: "Notes" } },
     ]);
+    expect(datasetFindOf('record.Notes == message.body.slice(6) && record.Status == "Open"')).toEqual([
+      { field: "Notes", value: { kind: "formula", expression: "message.body.slice(6)" } },
+      { field: "Status", value: { kind: "literal", value: "Open" } },
+    ]);
+    expect(datasetFindOf("record.Notes == record.Status")).toHaveProperty("problem");
     expect(datasetFindOf('record.Status == "Open" || record.Notes == ""')).toHaveProperty("problem");
     expect(datasetFindOf('contains(record.Notes, "x")')).toHaveProperty("problem");
   });
@@ -210,7 +230,7 @@ describe("dataset automation steps", () => {
         records: added
         operation: invoices.edit
 `, "record-removed: null");
-    const steps = datasetReachSteps(addThenSet, { path: "Budget", name: "Budget" }, generated, { workspaceId: "workspace", grants: [] }, null);
+    const steps = datasetReachSteps(addThenSet, { path: "Budget", name: "Budget" }, generated, { workspaceId: "workspace", grants: [] }, null)!;
     // No trigger record to read: the create, the edit, and the read that checks the added record again.
     expect(steps.flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : [])).toEqual(["invoices.create", "invoices.edit", "invoices.list"]);
     expect(steps.flatMap((step) => step.kind === "dataset-field" ? [step.field.name] : [])).toEqual(["ID", "Status", "Notes", "Finished on"]);
@@ -232,7 +252,7 @@ describe("dataset automation steps", () => {
       - wake-agent: Look
         person: user-owner
 `, "button: Ask");
-    const steps = datasetReachSteps(telling, { path: "Budget", name: "Budget" }, generated, { workspaceId: "workspace", grants: [] }, chat);
+    const steps = datasetReachSteps(telling, { path: "Budget", name: "Budget" }, generated, { workspaceId: "workspace", grants: [] }, chat)!;
     // A person a formula names is checked once the formula has run.
     expect(steps.slice(0, 3)).toEqual([
       { kind: "post", group: { channelWireId: "team-wire", name: "Team" } },
@@ -240,5 +260,84 @@ describe("dataset automation steps", () => {
       { kind: "personal", person: { userId: "user-owner", name: "you" } },
     ]);
     expect(steps.slice(3).every((step) => step.kind === "dataset-operation" || step.kind === "dataset-field")).toBe(true);
+  });
+});
+
+describe("dataset automations with no trigger record", () => {
+  const SCHEDULE = "{schedule: day, timezone: UTC}";
+  const GROUP = "{group-message: Team}";
+  const grants = { workspaceId: "workspace", grants: [] };
+  const budget = { path: "Budget", name: "Budget" };
+  // A two-table dataset whose Refunds can be read and changed too.
+  const refunds: DatasetDefinition = {
+    ...twoTables,
+    operations: [
+      ...twoTables.operations,
+      { ...operation(24, "refunds.list", "read", [REFUND_STATUS]), tableId: REFUNDS },
+      { ...operation(25, "refunds.edit", "edit", [REFUND_STATUS], true), tableId: REFUNDS },
+    ],
+  };
+  const closeRefunds = `      - find: record.Status == "Open"
+        as: open
+        operation: refunds.list
+      - set:
+          Status: Closed
+        records: open
+        operation: refunds.edit
+`;
+
+  it.each([SCHEDULE, GROUP])("resolves each step's table from its operation, and reaches only those tables: %s", (when) => {
+    const sweep = automation(closeRefunds, when);
+    expect(datasetAutomationProblem(sweep, { definition: refunds, generated: true })).toBeNull();
+    expect(datasetFieldWritesOf(sweep, { definition: refunds, generated: true })).toEqual([{ table: "Refunds", field: "Status" }]);
+    const steps = datasetReachSteps(sweep, budget, { definition: refunds, generated: true }, grants, null)!;
+    expect(steps.flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : [])).toEqual(["refunds.list", "refunds.edit"]);
+    expect(steps.flatMap((step) => step.kind === "dataset-field" ? [step.field.fieldId] : [])).toEqual([id(22), REFUND_STATUS]);
+  });
+
+  it("reaches only its chats when it uses no table, and nothing when a formula names the person", () => {
+    const told = automation("      - notify: Done\n        to: ['=message.authorUserId']\n", GROUP);
+    expect(datasetAutomationProblem(told, generated)).toBeNull();
+    expect(datasetReachSteps(told, budget, generated, grants, null)).toEqual([
+      { kind: "read-group", group: { channelWireId: null, name: "Team" } },
+    ]);
+    const reminded = automation("      - notify: Check the invoices\n        to: ['=\"user_ana\"']\n", SCHEDULE);
+    expect(datasetReachSteps(reminded, budget, generated, grants, null)).toEqual([]);
+    // One whose operations do not resolve has no steps reach could vouch for.
+    const gone = automation("      - add-record:\n          Status: New\n        operation: invoices.gone\n", SCHEDULE);
+    expect(datasetReachSteps(gone, budget, generated, grants, null)).toBeNull();
+  });
+
+  it.each([SCHEDULE, GROUP])("runs an action, and refuses an input that uses trigger.record: %s", (when) => {
+    const invoking = (input: string) => automation(`      - invoke: invoices.markPaid
+        input:
+          note: '${input}'
+`, when);
+    const actions: DatasetRules = { definition: { ...definition, operations: [...definition.operations,
+      { ...operation(30, "invoices.markPaid", "action", [STATUS]) }] }, generated: false };
+    expect(datasetAutomationProblem(invoking("=message.body"), actions)).toBeNull();
+    // A formula that does not parse fails when it runs, as on any trigger.
+    expect(datasetAutomationProblem(invoking("=message.body + "), actions)).toBeNull();
+    expect(datasetAutomationProblem(invoking("=trigger.record.Status + \"\""), actions))
+      .toMatch(/^A (schedule|Group message) starts this automation, so an action's input cannot use trigger\.record\./);
+    expect(datasetReachSteps(invoking("Paid"), budget, actions, grants, null)!
+      .flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : [])).toEqual(["invoices.markPaid"]);
+  });
+
+  it("adds records with no operation named only when the dataset has one table", () => {
+    const add = (definitionOf: DatasetDefinition) =>
+      pinDatasetOperations(automation("      - add-record:\n          Status: New\n", SCHEDULE), { definition: definitionOf, generated: true }).do[0];
+    expect(add(definition)).toMatchObject({ kind: "add-record", operation: "invoices.create" });
+    expect(add(twoTables)).toMatchObject({ kind: "add-record", operation: null });
+  });
+
+  it.each([SCHEDULE, GROUP])("refuses a Find that compares with the trigger record, joined terms included: %s", (when) => {
+    const find = (condition: string) => automation(`      - find: '${condition}'\n        as: same\n        operation: invoices.list\n`, when);
+    expect(datasetAutomationProblem(find('record.Status == "Open" && record.Notes == ""'), generated)).toBeNull();
+    for (const condition of ["record.Status == trigger.record.Status", 'record.Notes == "" && record.Status == trigger.record.Status']) {
+      expect(datasetAutomationProblem(find(condition), generated)).toMatch(/starts this automation, so a Find cannot compare with trigger.record./);
+    }
+    // A record change has one to compare with.
+    expect(datasetAutomationProblem({ ...find("record.Status == trigger.record.Status"), when: { kind: "record-added", table: null } }, generated)).toBeNull();
   });
 });

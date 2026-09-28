@@ -19,6 +19,7 @@ import {
 } from "../../../services/sync-relay/src/storage.js";
 import { initializeRelayDeployment, openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
+import { liveJournalCheckpointDue } from "../../../services/sync-relay/src/storage/liveJournalCheckpoint.js";
 
 export const policy = {
   maxStructVisits: 1_000_000,
@@ -234,9 +235,7 @@ export function registered(
       suffix: cut.cut.suffix.map((row) => row.bytes),
       candidate: captured,
     });
-    const due =
-      cut.cut.suffixCount + 1 === 4095 ||
-      cut.cut.suffixBytes + captured.byteLength >= 20_971_520;
+    const due = liveJournalCheckpointDue(cut.cut.suffixCount + 1, cut.cut.suffixBytes + captured.byteLength);
     const state =
       validation.kind === "accepted" && due
         ? (() => {

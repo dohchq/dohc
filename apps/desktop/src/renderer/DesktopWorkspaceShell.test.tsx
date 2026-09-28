@@ -69,6 +69,7 @@ import type {
   ReadShareProposalChangesResult,
   ReadShareProposalFileContentResult,
   SettleShareProposalPayload,
+  UndoRelaySharePayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
   PushShareDirectWritesResult,
@@ -555,10 +556,15 @@ function makeBaseBridge(
       shareCode: "dohc-share:relay-share-1:http://relay.test",
       recipientEmail: "friend@dohc.test",
     })),
-    listRelayShares: vi.fn(async () => ({ granted: [], received: [] })),
+    listRelayShares: vi.fn(async () => ({ granted: [], received: [], removed: [] })),
     retryShareHandoff: vi.fn(async () => undefined),
     dismissShareHandoff: vi.fn(async () => undefined),
-    revokeRelayShare: vi.fn(async () => undefined),
+    revokeRelayShare: vi.fn(async () => ({
+      undo: { undoId: "undo-1", expiresAtMs: Date.now() + 600_000 },
+    })),
+    undoRelayShare: vi.fn(async (payload: UndoRelaySharePayload) => ({
+      shareId: payload.shareId,
+    })),
     // Share changes. Typed to the contract, not to these empty
     // defaults: the review and submit tests drive real rows through them.
     listShareProposals: vi.fn(
@@ -5461,7 +5467,7 @@ describe("ui-state merge-on-load", () => {
       listChatChannelShares: vi.fn(async () => ({
         joined: [],
         sessionKey: "session-a",
-        relay: { state: "answered" as const, granted: [], received: [] },
+        relay: { state: "answered" as const, granted: [], received: [], removed: [] },
       })),
       presencePublish: vi.fn(async () => ({
         ok: true as const,
@@ -5595,7 +5601,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = Object.assign(chatsPageBridge(CHATS_PAGE_STATE), {
       listChatChannelShares: vi.fn(async () => ({
         joined: [], sessionKey: null,
-        relay: { state: "answered" as const, granted: [], received: [] },
+        relay: { state: "answered" as const, granted: [], received: [], removed: [] },
       })),
     });
     vi.stubGlobal("dohcDesktop", bridge);
@@ -14536,7 +14542,7 @@ describe("chats panel (right side)", () => {
       ],
       fileThreads: [],
     });
-    Object.assign(bridge, { listChatChannelShares: vi.fn(async () => ({ joined: [], sessionKey: null, relay: { state: "answered", granted: [], received: [] } })) });
+    Object.assign(bridge, { listChatChannelShares: vi.fn(async () => ({ joined: [], sessionKey: null, relay: { state: "answered", granted: [], received: [], removed: [] } })) });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -15182,6 +15188,72 @@ describe("settings entry points", () => {
   });
 });
 
+describe("customize", () => {
+  it("opens the sidebar's settings from its menu, and Add an app here… opens Apps", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByRole("button", { name: "Sidebar actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Customize…" }));
+    const row = await screen.findByTestId("settings-row-sidebar");
+    expect(row.dataset.highlighted).toBe("true");
+    await waitFor(() => expect(document.activeElement).toBe(row));
+    await user.click(screen.getByLabelText("Close settings"));
+
+    await user.click(screen.getByRole("button", { name: "Sidebar actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Add an app here…" }));
+    // The rail marks Apps at once; its view loads on its own clock.
+    expect(screen.getByTestId("activity-sites").getAttribute("aria-current")).toBe("page");
+  });
+
+  it("hands a Chats setting to the person's agent in the agent's chat", async () => {
+    const agentChannel: ChatChannelRecord = {
+      id: "channel-agent", name: "Agent", slug: "agent", kind: "agent",
+      createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0,
+    };
+    // Share answers unlock the channel's composer; without them it fails closed.
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      listChatChannelShares: vi.fn(async () => ({
+        joined: [], sessionKey: null,
+        relay: { state: "answered" as const, granted: [], received: [] },
+      })),
+    });
+    bridge.listChatChannels = vi.fn(async () => ({ channels: [agentChannel], fileThreads: [] }));
+    const user = userEvent.setup();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<DesktopWorkspaceShell
+      workspace={WORKSPACE}
+      workspaces={[WORKSPACE]}
+      {...shellBootstrapProps(bridge)}
+      userSettings={{ source: "stored", settings: {
+        ...DEFAULT_USER_SETTINGS,
+        profile: { agentName: "Nova" },
+        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled: true, command: "node agent.mjs" },
+      } }}
+      onSwitchWorkspace={() => {}}
+    />);
+
+    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
+    await user.click(await screen.findByRole("button", { name: "Chats actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Customize…" }));
+    const row = await screen.findByTestId("settings-row-your-color");
+    expect(row.dataset.highlighted).toBe("true");
+    await user.click(await within(row).findByRole("button", { name: "Ask my agent" }));
+
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    expect(await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(agentChannel.id)}`)).toBeTruthy();
+    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-new-thread-composer");
+    await waitFor(() => expect(composer.value).toBe([
+      'Change my dohc chat colors settings. They are the "appearance.yourColor" and "appearance.yourAgentColor" keys in my dohc settings file, /state/dohc-settings.json.',
+      "dohc applies the file when it is saved.",
+      "What I want: ",
+    ].join("\n")));
+    expect(document.activeElement).toBe(composer);
+    expect(composer.selectionStart).toBe(composer.value.length);
+  });
+});
+
 describe("owner live documents", () => {
   const LIVE_ROW = {
     path: "notes/today.md",
@@ -15560,6 +15632,65 @@ describe("owner live documents", () => {
 
     await openCloudSettings(user);
     expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+  });
+
+  // Ending a share is reversible for 10 minutes, so the notice carries Undo.
+  // The shell holds it: it works after Settings closes, from the toast and
+  // from the Notices row the toast leaves behind.
+  it("offers Undo for an ended share on the toast and in Notices after Settings closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listRelayShares = vi.fn().mockResolvedValue({
+      granted: [
+        {
+          shareId: "share-1",
+          workspaceId: WORKSPACE.workspaceId,
+          recipientUserId: "friend",
+          recipientEmail: "friend@dohc.test",
+          selector: { paths: ["docs"], versionId: null },
+          access: "view",
+          grantId: "grant-1",
+          generation: 1,
+          createdAtMs: 1000,
+          revokedAtMs: null,
+          shareCode: "dohc-share:share-1:http://relay.test",
+        },
+      ],
+      received: [],
+      removed: [],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await openCloudSettings(user);
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    await user.click(screen.getByTestId("shared-by-me-revoke"));
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(toast.textContent).toContain(
+      "Ended the share of docs with friend@dohc.test. You can undo this for 10 minutes.",
+    );
+    expect(within(toast).getByRole("button", { name: "Undo" })).toBeTruthy();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+
+    // Closing the toast keeps the row, and the row keeps the Undo.
+    await user.click(screen.getByRole("button", { name: "Dismiss workspace notice" }));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(notices.textContent).toContain("Ended the share of docs with friend@dohc.test.");
+    await user.click(within(notices).getByRole("button", { name: "Undo" }));
+
+    await waitFor(() =>
+      expect(bridge.undoRelayShare).toHaveBeenCalledWith({ shareId: "share-1", undoId: "undo-1" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(
+        "Restored the share of docs with friend@dohc.test.",
+      ),
+    );
+    // The Undo row ran once and is gone.
+    expect(screen.queryByText(/You can undo this for 10 minutes/)).toBeNull();
   });
 });
 
@@ -16662,6 +16793,7 @@ describe("workbench render cost", () => {
             state: "answered" as const,
             granted: [],
             received: [],
+            removed: [],
           },
         })),
         listChannelThreads: vi.fn(async () => ({

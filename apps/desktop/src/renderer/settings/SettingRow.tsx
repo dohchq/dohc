@@ -9,11 +9,20 @@ export function SettingRow(props: {
   modified?: boolean;
   onReset?: () => void;
   testId?: string;
+  // The row a Customize… command opened Settings for. Settings focuses it.
+  highlighted?: boolean;
+  // Under the description, such as the way to ask your agent.
+  aside?: ReactNode;
 }) {
   return (
     <div
       data-testid={props.testId}
-      className="grid min-h-16 grid-cols-[minmax(0,1fr)_minmax(220px,auto)] gap-4 border-b border-line py-3 last:border-b-0 max-[720px]:grid-cols-1"
+      {...(props.highlighted
+        ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
+        : {})}
+      className={`grid min-h-16 grid-cols-[minmax(0,1fr)_minmax(220px,auto)] gap-4 border-b border-line py-3 last:border-b-0 max-[720px]:grid-cols-1 ${
+        props.highlighted ? "-mx-3 rounded-lg bg-selected px-3" : ""
+      }`}
     >
       <div className="min-w-0">
         <div className="flex items-center gap-2">
@@ -29,6 +38,7 @@ export function SettingRow(props: {
             {props.description}
           </p>
         ) : null}
+        {props.aside ? <div className="mt-2">{props.aside}</div> : null}
       </div>
       <div className="flex min-w-0 items-center justify-end gap-2 max-[720px]:justify-start">
         {props.children}

@@ -11,6 +11,7 @@ test("stages a captured React app that the production compiler can build", async
   const root = await mkdtemp(join(tmpdir(), "dohc-trip-poll-example-"));
   t.after(() => rm(root, {recursive: true, force: true}));
   const {appRoot, declaration} = await stageTripPoll(root);
+  assert.equal(declaration.version, 1);
   await assert.rejects(stageTripPoll(root), /already exists/);
   const inputs = await Promise.all(declaration.inputs.map(async path => {
     const bytes = await readFile(join(appRoot, path)); return {path, bytes, sha256: createHash("sha256").update(bytes).digest("hex")};

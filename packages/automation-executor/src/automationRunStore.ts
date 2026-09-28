@@ -213,6 +213,7 @@ const StoredRunSchema = z.object({
   replans: z.array(ReplanSchema),
   undoRequests: z.array(UndoRequestSchema),
   readableFields: z.array(z.string()).nullable(),
+  datasetId: z.string().min(1).nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
   settled: z.boolean(),
@@ -271,6 +272,12 @@ export interface StoredRun {
    * Collection. A run resumes only while every one of them is still readable.
    */
   readableFields: string[] | null;
+  /**
+   * The dataset a dataset Collection's plan read and writes, or null for a
+   * document Collection. A plan resumes only while its Collection keeps
+   * that dataset.
+   */
+  datasetId: string | null;
   /** A person chose to run the claim again from the start under a newer definition. */
   superseded: boolean;
   /**
