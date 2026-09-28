@@ -387,6 +387,10 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
           )
           .run(revokedAtMs, grant.grantId);
       }
+      storage.db.prepare(`DELETE FROM sync_relay_share_labels WHERE share_id = ?
+        AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
+          WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
+        .run(grant.shareId, grant.shareId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   }
 
@@ -582,6 +586,7 @@ export function insertShare(storage: StorageContext, share: SyncRelayShareRow): 
         share.selectorJson,
         Math.trunc(share.createdAtMs),
       );
+    if (share.labels) storage.setShareLabels(share.shareId, share.labels, share.createdAtMs);
   }
 
 export function insertLinkCredential(storage: StorageContext, credential: SyncRelayLinkCredentialRow): void {
@@ -974,6 +979,7 @@ export function revokeShareInTransaction(storage: StorageContext, shareId: strin
         .prepare("SELECT 1 AS present FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
       if (existing === undefined) return false;
+      storage.db.prepare("DELETE FROM sync_relay_share_labels WHERE share_id = ?").run(shareId);
       const revoked = storage.db
         .prepare(
           `UPDATE sync_relay_share_grants

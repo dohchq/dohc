@@ -126,7 +126,7 @@ function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
 
 async function computer(
   signedIn: NoticeAccount | null,
-  options: { directory?: string; outboxPostLimit?: number; installId?: string } = {},
+  options: { directory?: string; outboxPostLimit?: number; installId?: string; refusalNotices?: Parameters<typeof createNoticeStore>[0]["refusalNotices"]; dismissRefusal?: Parameters<typeof createNoticeStore>[0]["dismissRefusal"] } = {},
 ): Promise<Computer> {
   const state: Computer = {
     directory: options.directory ?? await createTestScratch("notices-"),
@@ -157,6 +157,8 @@ async function computer(
     installId: () => options.installId ?? "install-a",
     onChanged: () => { state.changes += 1; },
     nowMs: () => clock,
+    refusalNotices: options.refusalNotices,
+    dismissRefusal: options.dismissRefusal,
     ...(options.outboxPostLimit === undefined ? {} : { outboxPostLimit: options.outboxPostLimit }),
   });
   return state;
@@ -922,7 +924,7 @@ describe("notices for another person", () => {
     await ana.store.sync();
     expect(await titles(ana)).toEqual([
       "account:Stamp the finish date failed (read)",
-      "account:Name owner shared trip with you",
+      "account:Name owner (owner@dohc.test) shared a folder or file with you",
     ]);
 
     await expect(owner.store.postNotice({ ...failed, noticeId: "x", target: { path: "budget" } }))
@@ -962,6 +964,170 @@ describe("notices for another person", () => {
   }, 60_000);
 });
 
+it("rebuilds refusal Notices from the engine and keeps read marks across restart", async () => {
+  let pending = [{ noticeId: "sync-refusal-a", originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    reason: "plaintext projection exceeds limit", document: { versionId: "main", path: "doc.md",
+      objectId: "object-a", lineageClaimId: "inactive", conflictId: "review" } }];
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: pending}];
+  let failDismiss = false;
+  const dismissRefusal = async (workspaceId: string, noticeId: string) => {
+    expect(workspaceId).toBe(WORKSPACE);
+    if (failDismiss) throw new Error("engine unavailable");
+    pending = pending.filter(row => row.noticeId !== noticeId);
+  };
+  const first = await computer(null, {refusalNotices, dismissRefusal});
+  const [notice] = (await first.store.list()).notices;
+  expect(notice).toMatchObject({kind: "sync-refusal", workspaceId: WORKSPACE, target: {path: "doc.md"}});
+  expect(notice!.body).toContain("Open its conflict and choose a copy.");
+  expect(notice!.detail).toContain("Object: object-a\nLineage: inactive");
+  await first.store.mark([notice!], "read", null);
+  clock += 365 * 24 * 60 * 60_000;
+  const restarted = await computer(null, {directory: first.directory, refusalNotices, dismissRefusal});
+  expect((await restarted.store.list()).notices[0]!.readAtMs).not.toBeNull();
+  failDismiss = true;
+  await expect(restarted.store.mark([notice!], "dismissed", null)).rejects.toThrow("engine unavailable");
+  expect((await restarted.store.list()).notices).toHaveLength(1);
+  failDismiss = false;
+  await restarted.store.mark([notice!], "dismissed", null);
+  const again = await computer(null, {directory: first.directory, refusalNotices, dismissRefusal});
+  expect((await again.store.list()).notices).toEqual([]);
+});
+
+it("lists engine refusals without the local row limit and removes resolved rows", async () => {
+  let pending = Array.from({length: 1_001}, (_, index) => ({noticeId: `sync-refusal-${index}`,
+    originId: "peer", originSeq: index, refusalCoordinates: [{ originId: "peer", originSeq: index }], reason: "Review this file", document: null}));
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: pending}];
+  const first = await computer(null, {refusalNotices});
+  expect((await first.store.list()).notices).toHaveLength(1_001);
+  await first.store.postNotice(notice());
+  expect((await first.store.list()).notices).toHaveLength(1_002);
+  pending = [];
+  expect((await first.store.list()).notices).toHaveLength(1);
+});
+
+it("recovers engine Notices even if the desktop file was lost", async () => {
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: [{noticeId: "sync-refusal-a",
+    originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }], reason: "Review this file", document: null}]}];
+  const first = await computer(null, {refusalNotices});
+  expect((await first.store.list()).notices).toHaveLength(1);
+  const fresh = await computer(null, {refusalNotices});
+  expect((await fresh.store.list()).notices).toHaveLength(1);
+});
+
+it("keeps a queued refusal dismissal hidden when applying it fails, then retries", async () => {
+  const pending = [{ noticeId: "queued-refusal", originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    reason: "Review this file", document: null }];
+  let open = true;
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: open ? pending : null }];
+  const dismissRefusal = vi.fn(async () => {});
+  const first = await computer(null, { refusalNotices, dismissRefusal });
+  const [row] = (await first.store.list()).notices;
+  open = false;
+  await first.store.mark([row!], "dismissed", null);
+  open = true;
+  dismissRefusal.mockRejectedValueOnce(new Error("engine unavailable"));
+  await first.store.refreshRefusals(WORKSPACE);
+  expect((await first.store.list()).notices).toEqual([]);
+  expect(dismissRefusal).toHaveBeenCalledTimes(3);
+});
+
+it.each([undefined, []])("rejects a refusal dismissal without shown coordinates: %s", async (refusalCoordinates) => {
+  const dismissRefusal = vi.fn(async () => {});
+  const first = await computer(null, { dismissRefusal, refusalNotices: async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "refusal", originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    reason: "Review this file", document: null,
+  }] }] });
+  const [shown] = (await first.store.list()).notices;
+  await expect(first.store.mark([{ ...shown!, refusalCoordinates }], "dismissed", null))
+    .rejects.toThrow("The engine could not dismiss this Notice. Try again.");
+  expect(dismissRefusal).not.toHaveBeenCalled();
+  expect((await first.store.list()).notices).toHaveLength(1);
+});
+
+it("hides a failed queued dismissal when the newer refusal resolves", async () => {
+  const firstCoordinate = { originId: "peer", originSeq: 1 };
+  const secondCoordinate = { originId: "peer", originSeq: 2 };
+  let coordinates = [firstCoordinate];
+  let open = true;
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: open ? [{
+    noticeId: "refusal", ...coordinates[coordinates.length - 1]!, refusalCoordinates: coordinates,
+    reason: "Review this file", document: null,
+  }] : null }];
+  const dismissRefusal = vi.fn(async () => { if (open) throw new Error("engine unavailable"); });
+  const first = await computer(null, { refusalNotices, dismissRefusal });
+  const [shown] = (await first.store.list()).notices;
+  open = false;
+  await first.store.mark([shown!], "dismissed", null);
+  coordinates = [firstCoordinate, secondCoordinate];
+  open = true;
+  expect((await first.store.list()).notices[0]?.refusalCoordinates).toEqual([secondCoordinate]);
+  coordinates = [firstCoordinate];
+  expect((await first.store.list()).notices).toEqual([]);
+  const restarted = await computer(null, { directory: first.directory, refusalNotices, dismissRefusal });
+  expect((await restarted.store.list()).notices).toEqual([]);
+  expect(dismissRefusal.mock.calls).toEqual(Array.from({ length: 4 }, () => [WORKSPACE, "refusal", [firstCoordinate]]));
+});
+
+it("keeps a refusal read when its snapshot only loses coordinates", async () => {
+  let coordinates = [{ originId: "peer", originSeq: 1 }, { originId: "peer", originSeq: 2 }];
+  const first = await computer(null, { refusalNotices: async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "refusal", originId: "peer", originSeq: 2, refusalCoordinates: coordinates,
+    reason: "Review this file", document: null,
+  }] }] });
+  const [shown] = (await first.store.list()).notices;
+  await first.store.mark([shown!], "read", null);
+  coordinates = [coordinates[1]!];
+  expect((await first.store.list()).notices[0]?.readAtMs).not.toBeNull();
+});
+
+it("keeps unavailable workspace refusals while refreshing other workspaces", async () => {
+  const refusal = (noticeId: string) => ({ noticeId, originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    reason: "Review this file", document: null });
+  let pending: Awaited<ReturnType<NonNullable<Parameters<typeof createNoticeStore>[0]["refusalNotices"]>>> = [
+    { workspaceId: WORKSPACE, notices: [refusal("sync-refusal-a")] },
+    { workspaceId: "unavailable", notices: [refusal("sync-refusal-b")] },
+  ];
+  const refusalNotices = async () => pending;
+  const first = await computer(null, { refusalNotices });
+  await first.store.postNotice(notice());
+  const cached = (await first.store.list()).notices.find(row => row.noticeId === "sync-refusal-b")!;
+  await first.store.mark([cached], "read", null);
+  pending = [
+    { workspaceId: WORKSPACE, notices: [refusal("sync-refusal-c")] },
+    { workspaceId: "unavailable", notices: null },
+  ];
+  const restarted = await computer(null, { directory: first.directory, refusalNotices });
+  const rows = (await restarted.store.list()).notices;
+  expect(rows.map(row => row.noticeId).sort()).toEqual(["agent-run:1", "sync-refusal-b", "sync-refusal-c"]);
+  expect(rows.find(row => row.noticeId === "sync-refusal-b")!.readAtMs).not.toBeNull();
+  pending = pending.map(row => ({ ...row, notices: [] }));
+  expect((await restarted.store.list()).notices.map(row => row.noticeId)).toEqual(["agent-run:1"]);
+});
+
+it("lists cached, local, and account Notices when the refusal reader fails", async () => {
+  const server = await relay();
+  let failRead = false;
+  const first = await computer(account(server, "owner"), {
+    refusalNotices: async () => {
+      if (failRead) throw new Error("engine unavailable");
+      return [{ workspaceId: WORKSPACE, notices: [{ noticeId: "sync-refusal-cached", originId: "peer",
+        originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }], reason: "Review this file", document: null }] }];
+    },
+  });
+  await first.store.postNotice(notice());
+  await first.store.sync();
+  await first.store.list();
+  failRead = true;
+  first.reach.clear();
+  await first.store.postNotice(notice({ noticeId: "local-notice" }));
+  const rows = (await first.store.list()).notices;
+  expect(rows).toHaveLength(3);
+  expect(rows).toEqual(expect.arrayContaining([
+    expect.objectContaining({ noticeId: "agent-run:1", store: "account" }),
+    expect.objectContaining({ noticeId: "local-notice", store: "local" }),
+    expect.objectContaining({ noticeId: "sync-refusal-cached", store: "local" }),
+  ]));
+});
 
 describe("automation notices reach the people involved", () => {
   const AUTOMATION = "collection:object-tasks#stamp";

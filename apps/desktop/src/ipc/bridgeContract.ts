@@ -281,6 +281,8 @@ export const WorkspaceSummary = z.object({
       // live-share action (refresh, dismiss) is addressed by share id, so a
       // marker that cannot name itself cannot be presented as a live share.
       shareId: OPAQUE_ID.optional(),
+      subjectName: z.string().max(320).nullable().optional(),
+      sharerName: z.string().max(320).nullable().optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
       // The pinned level. Absent only when `damaged` says the stored
       // grant could not be read. The banner states the level; it never
@@ -3257,6 +3259,8 @@ const RelayShareDamagedState = z.object({
 });
 
 const RelayShareGrantedRowBase = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   // The workspace coordinate. This device need not have that workspace in
   // its local registry.
@@ -3283,6 +3287,8 @@ export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 // relay deliberately omits the granter's workspace id; the selector and
 // granter identity are all a recipient ever sees.
 const RelayShareReceivedRowBase = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   granterEmail: EMAIL_STRING.nullable(),
   genericChatWritable: z.boolean(),
@@ -4349,6 +4355,8 @@ export const ChatChannelShareGrantRow = z.object({
 export type ChatChannelShareGrantRow = z.infer<typeof ChatChannelShareGrantRow>;
 
 export const ChatChannelShareReceivedRow = z.object({
+  subjectName: z.string().max(320).nullable().optional(),
+  sharerName: z.string().max(320).nullable().optional(),
   shareId: OPAQUE_ID,
   channelWireId: CHANNEL_WIRE_ID,
   access: ChatShareAccess,
@@ -5496,8 +5504,11 @@ export const NoticeTargetShape = z.object({
   automation: NOTICE_TARGET_FIELD,
   run: NOTICE_TARGET_FIELD,
 });
+export const RefusalCoordinate = z.object({ originId: z.string(), originSeq: z.number().int() });
+export type RefusalCoordinate = z.infer<typeof RefusalCoordinate>;
 export const NoticeRow = z.object({
   store: NoticeStoreName,
+  refusalCoordinates: z.array(RefusalCoordinate).optional(),
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
   kind: z.string().min(1).max(64),
   // A local row names this computer's workspace. An account row names the
@@ -5508,6 +5519,7 @@ export const NoticeRow = z.object({
   senderLabel: codePoints(1, NOTICE_SENDER_LABEL_MAX_CHARS).nullable(),
   title: codePoints(1, NOTICE_TITLE_MAX_CHARS),
   body: codePoints(0, NOTICE_BODY_MAX_CHARS),
+  detail: z.string().max(262_144).optional(),
   // Null once the person can no longer open what the notice pointed at.
   target: NoticeTargetShape.nullable(),
   createdAtMs: z.number().int().nonnegative(),
@@ -5519,6 +5531,7 @@ export const NoticeRow = z.object({
 export type NoticeRow = z.infer<typeof NoticeRow>;
 export const NoticeRef = z.object({
   store: NoticeStoreName,
+  refusalCoordinates: NoticeRow.shape.refusalCoordinates,
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
 });
 export type NoticeRef = z.infer<typeof NoticeRef>;

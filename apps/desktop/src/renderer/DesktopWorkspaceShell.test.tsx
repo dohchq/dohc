@@ -14,7 +14,6 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import "./CollectionPage";
 import * as Y from "yjs";
-import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 // Collection dependencies read these observers during module evaluation.
 // Preload them before tests so an unfinished import cannot clean up a later test's globals.
@@ -34,71 +33,25 @@ import {
 } from "../ipc/bridgeContract";
 
 import type {
-  SitePackageInfo,
   AgentRunStatusResult,
-  ReadCrashReportResult,
-  ListCollectionAutomationRunsResult,
-  ListCollectionAutomationsResult,
-  RetryCollectionAutomationResult,
   ChatChannelRecord,
-  DismissShareSkipsPayload,
-  MountShareResult,
-  GetRelayReceivedShareResult,
-  DmRecord,
   EngineMomentRecord,
-  FileChatThreadRecord,
-  ImportWorkspaceFilesResult,
   ListEngineMomentsResponse,
   ListEngineMomentsResult,
-  ListFileChatsResult,
-  ListMyShareChangesResult,
-  ListShareProposalsResult,
-  FindAutomationCollectionPayload,
-  FindAutomationCollectionResult,
-  GetCollectionResult,
-  ListCollectionsPayload,
-  ListCollectionsResult,
-  ListOwnerLiveDocumentsPayload,
-  ListOwnerLiveRefusalsPayload,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
-  OwnerLiveDocumentActionPayload,
   OwnerLiveDocumentsResult,
-  OwnerLiveRefusalsResult,
-  RetryOwnerLiveSharePayload,
-  QueryCollectionRecordsResult,
-  ListWorkspaceVersionsResult,
-  ReadShareProposalChangesResult,
-  ReadShareProposalFileContentResult,
-  SettleShareProposalPayload,
-  UndoRelaySharePayload,
-  SettleShareProposalResult,
-  SubmitShareChangesResult,
-  PushShareDirectWritesResult,
-  ShareDirectWritesPushedEvent,
-  WithdrawShareChangesResult,
   McpConfigResult,
   NoticeRow,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
   RebuildEngineStoreResult,
   RefreshSharedViewResult,
-  StartAgentRunResult,
   SwitchWorkspaceVersionResult,
-  SyncDmsPayload,
   SyncDmsResult,
   SyncStatusResult,
-  TryInVersionStateResult,
-  ShowExplorerMenuResult,
-  ShowWorkbenchMenuResult,
-  UpdateStateEvent,
   EngineYDocSaveStateEvent,
-  MenuCommand,
-  SearchResultsEvent,
   WriteWorkspaceTextPayload,
-  WriteWorkspaceTextResult,
-  WorkspaceActivityEvent,
-  WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
@@ -124,14 +77,8 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
   versionCompareTabPath,
-  VIEW_IDS,
 } from "./workbench/workbenchState";
-import {
-  captureOrphanedDraft,
-  resetOrphanedDrafts,
-  useAllOrphanedDrafts,
-} from "./orphanedDrafts";
-import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
+import { captureOrphanedDraft } from "./orphanedDrafts";
 import {
   CollectionFieldWriteHost,
   abandonPendingCollectionFieldWrites,
@@ -140,14 +87,35 @@ import {
   discardCollectionFieldWrite,
   enqueueCollectionFieldWrite,
   hasPendingCollectionFieldWrites,
-  resetCollectionFieldWritesForTests,
 } from "./collections/recordFieldWrites";
-import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
-import { forgetSyncFailureNoticesForTests } from "./shell/useSyncFailureNotice";
-import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
 import { deferred } from "../testing/deferred";
+import {
+  GlobalRecoveryList,
+  WORKSPACE,
+  OTHER_WORKSPACE,
+  SYNC_STATUS,
+  READY_UPDATE_STATE,
+  STORED_STATE,
+  storedStateWithTabs,
+  storedTabs,
+  isFileOpenStartMark,
+  DM_GRAPH_NODE,
+  CANONICAL_DM,
+  dmSyncResult,
+  recordDocUpdate,
+  makeBridge,
+  renderShell,
+  enterMarkdownSource,
+  holdHistory,
+  sourceEditorText,
+  shellBootstrapProps,
+  SHARE_STATUS,
+  SHARE_VIEW,
+  makeShareBridge,
+  settleShareView,
+} from "./DesktopWorkspaceShell.testHarness";
 
 // Real implementations, spied (the chatFileMentions precedent): FileInspector
 // derives its document key on every render, and every explorer surface names
@@ -155,773 +123,6 @@ import { deferred } from "../testing/deferred";
 // and the tree actually re-rendered across a shell render.
 vi.mock("./documentVersionKey", { spy: true });
 vi.mock("./path", { spy: true });
-
-// The close dialog's list, standing on its own: the guard subscribes and hands
-// the rows down, so a test of the LIST needs the same one-line subscriber.
-function GlobalRecoveryList() {
-  return <RecoveryList rows={useAllOrphanedDrafts()} showWorkspace />;
-}
-
-const WORKSPACE: Workspace = {
-  workspaceId: "ws-shell-test",
-  rootPath: "/home/sam/dohc/personal",
-  kind: "personal",
-  mode: "local-first",
-};
-
-const OTHER_WORKSPACE: Workspace = {
-  ...WORKSPACE,
-  workspaceId: "ws-shell-other",
-  rootPath: "/home/sam/dohc/other",
-};
-
-const SYNC_STATUS: SyncStatusResult = {
-  state: "synced",
-  pendingChangeCount: 0,
-  lastSyncedAtMs: null,
-  // Required on the contract: every status states whether
-  // the recorder failed to build, whether the workspace is a shared view,
-  // and whether the engine refused the workspace's data store.
-  historyRecordingUnavailable: false,
-  historyShareView: false,
-  liveSessionsGeneration: 0,
-};
-
-const IDLE_UPDATE_STATE: UpdateStateEvent = {
-  status: "idle",
-  message: "Updates have not been checked yet.",
-  currentVersion: "1.2.3",
-  channel: "latest",
-  canCheck: true,
-  canInstall: false,
-};
-
-const READY_UPDATE_STATE: UpdateStateEvent = {
-  status: "ready",
-  message: "Update 1.2.4 is ready. Restart dohc to apply it.",
-  currentVersion: "1.2.3",
-  channel: "latest",
-  canCheck: false,
-  canInstall: true,
-  version: "1.2.4",
-};
-
-const STORED_STATE: WorkspaceUiState = {
-  version: 3,
-  activeView: "explorer",
-  sidebarVisible: true,
-  sidebarWidth: 320,
-  editorGroups: [
-    { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 1 },
-  ],
-  activeEditorGroup: "primary",
-  chatsVisible: true,
-  chatsWidth: 360,
-};
-
-function storedStateWithTabs(
-  tabs: string[],
-  activeTab: string | null = tabs[0] ?? null,
-): WorkspaceUiState {
-  return {
-    ...STORED_STATE,
-    editorGroups: [{ id: "primary", tabs, activeTab, size: 1 }],
-    activeEditorGroup: "primary",
-  };
-}
-
-function storedTabs(state: WorkspaceUiState): string[] {
-  return state.editorGroups.flatMap((group) => group.tabs);
-}
-
-function isFileOpenStartMark(name: string): boolean {
-  return name.startsWith("file-open-start:");
-}
-
-// One canonical DM, as the graph node a click starts a navigation from and as
-// the record syncDms answers with.
-const DM_GRAPH_NODE = {
-  path: "chat-thread:dm-thread",
-  kind: "chat-thread" as const,
-  threadId: "dm-thread",
-  channelId: "dm-local",
-  channelWireId: "dm-wire",
-  channelName: "alice@example.com",
-  channelKind: "dm" as const,
-  title: "Direct message",
-  incoming: 1,
-  outgoing: 0,
-};
-
-const CANONICAL_DM: DmRecord = {
-  channelId: "dm-local",
-  channelWireId: "dm-wire",
-  name: "alice@example.com",
-  peerLabel: "Alice",
-  role: "owner",
-  shareId: null,
-  threadId: "dm-thread",
-  unreadCount: 1,
-  connected: true,
-};
-
-function dmSyncResult(
-  dms: DmRecord[] = [],
-  available = true,
-): SyncDmsResult {
-  return { available, dms, pending: [], declined: [], failed: false };
-}
-
-Element.prototype.scrollIntoView = vi.fn();
-
-const originalSetPointerCapture = Object.getOwnPropertyDescriptor(
-  Element.prototype,
-  "setPointerCapture",
-);
-const originalHasPointerCapture = Object.getOwnPropertyDescriptor(
-  Element.prototype,
-  "hasPointerCapture",
-);
-const originalElementFromPoint = Object.getOwnPropertyDescriptor(
-  document,
-  "elementFromPoint",
-);
-
-function restoreProperty(
-  target: object,
-  key: PropertyKey,
-  descriptor: PropertyDescriptor | undefined,
-): void {
-  if (descriptor) {
-    Object.defineProperty(target, key, descriptor);
-  } else {
-    Reflect.deleteProperty(target, key);
-  }
-}
-
-// The dirty-draft test types into the real markdown editor, which needs the
-// same two globals jsdom lacks that FileInspector.test.tsx stubs.
-vi.stubGlobal(
-  "ResizeObserver",
-  class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  },
-);
-for (const method of ["getClientRects", "getBoundingClientRect"] as const) {
-  Object.defineProperty(Range.prototype, method, {
-    configurable: true,
-    value: () =>
-      method === "getClientRects"
-        ? []
-        : {
-            bottom: 0,
-            height: 0,
-            left: 0,
-            right: 0,
-            top: 0,
-            width: 0,
-            x: 0,
-            y: 0,
-            toJSON: () => {},
-          },
-  });
-}
-
-// A record file's live document as the engine serves it: the frontmatter map
-// carries the record's id, which the write queue verifies before applying.
-function recordDocUpdate(recordId: string): Uint8Array {
-  const doc = new Y.Doc();
-  doc.getMap("frontmatter").set("id", recordId);
-  return Y.encodeStateAsUpdate(doc);
-}
-
-function makeBaseBridge(
-  uiStatePromise: Promise<WorkspaceUiState | null>,
-  platform: NodeJS.Platform = "linux",
-) {
-  const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
-  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
-  const crashReportCallbacks = new Set<() => void>();
-  let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
-  let menuCallback: ((command: MenuCommand) => void) | null = null;
-  return {
-    platform,
-    emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
-      for (const callback of [...activityCallbacks]) callback(event);
-    },
-    workspaceActivitySubscriberCount: () => activityCallbacks.size,
-    emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
-    getWorkspaceUiState: vi.fn(() => uiStatePromise),
-    // The shell re-reads the registry to pick up a share's durable skip
-    // record. Default: a workspace with nothing skipped.
-    getWorkspaceRegistry: vi.fn(
-      async (): Promise<{ workspaces: unknown[] }> => ({ workspaces: [] }),
-    ),
-    setWorkspaceUiState: vi.fn(
-      async (_payload: { workspaceId: string; state: WorkspaceUiState }) => undefined,
-    ),
-    listWorkspaceFiles: vi.fn(
-      async (
-        _payload: ListWorkspaceFilesPayload,
-      ): Promise<ListWorkspaceFilesResult> => ({
-        files: [
-          { path: "a.md", kind: "file" },
-          { path: "b.md", kind: "file" },
-        ],
-        folders: [],
-      }),
-    ),
-    openWorkspace: vi.fn(async () => SYNC_STATUS),
-    getSyncStatus: vi.fn(async () => SYNC_STATUS),
-    // Owner live documents and the live-delivery retry command. Typed to the
-    // contracts, not to these empty defaults: the live-document tests swap in
-    // real rows and real refusals.
-    listOwnerLiveDocuments: vi.fn(
-      async (
-        _payload: ListOwnerLiveDocumentsPayload,
-      ): Promise<OwnerLiveDocumentsResult> => ({
-        documents: [],
-        nextCursor: null,
-      }),
-    ),
-    listOwnerLiveRefusals: vi.fn(
-      async (
-        _payload: ListOwnerLiveRefusalsPayload,
-      ): Promise<OwnerLiveRefusalsResult> => ({
-        refusals: [],
-        nextCursor: null,
-      }),
-    ),
-    retryOwnerLiveShare: vi.fn(
-      async (_payload: RetryOwnerLiveSharePayload): Promise<void> => undefined,
-    ),
-    stopOwnerLiveDocument: vi.fn(
-      async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
-    ),
-    resumeOwnerLiveDocument: vi.fn(
-      async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
-    ),
-    retryOwnerLiveDelivery: vi.fn(
-      async (_payload: { workspaceId: string }): Promise<void> => undefined,
-    ),
-    retryCloudSync: vi.fn(
-      async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
-    ),
-    // The refused-store rebuild. Typed to the contract, not to this
-    // default: the recovery tests swap in the no-clobber refusal.
-    rebuildEngineStore: vi.fn(
-      async (): Promise<RebuildEngineStoreResult> => ({
-        outcome: "moved",
-      }),
-    ),
-    // Typed to the contract, not to this idle default: a freshness test drives
-    // a real running agent through it.
-    getAgentRunStatus: vi.fn(
-      async (): Promise<AgentRunStatusResult> => ({
-        mcpEnabled: false,
-        activeRun: null,
-        lastRun: null,
-      }),
-    ),
-    getMcpConfig: vi.fn(async (): Promise<McpConfigResult> => ({
-      command: "dohc-mcp",
-      args: ["--workspace", WORKSPACE.rootPath, "--home", "/tmp/dohc-home"],
-      workspacePath: WORKSPACE.rootPath,
-      home: "/tmp/dohc-home",
-    })),
-    // The Settings agent toggle reaches these. Typed to the contract, because
-    // a test that drives the toggle has to be able to swap them.
-    startAgentRun: vi.fn(
-      async (): Promise<StartAgentRunResult> => ({
-        id: "run-1",
-        startedAt: 1,
-        agentId: "agent-1",
-        onBehalfOf: "ice",
-        status: "running",
-      }),
-    ),
-    endAgentRun: vi.fn(async (): Promise<void> => undefined),
-    getUserSettings: vi.fn(async () => ({
-      settings: DEFAULT_USER_SETTINGS,
-      source: "default" as const,
-    })),
-    setUserSettings: vi.fn(async (payload: { settings: typeof DEFAULT_USER_SETTINGS }) => ({
-      settings: payload.settings,
-      source: "stored" as const,
-    })),
-    resetUserSettings: vi.fn(async () => ({
-      settings: DEFAULT_USER_SETTINGS,
-      source: "stored" as const,
-    })),
-    getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
-    openUserSettingsFile: vi.fn(async () => undefined),
-    getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
-      settings: DEFAULT_WORKSPACE_SETTINGS,
-      source: "stored" as const,
-    })),
-    setWorkspaceSettings: vi.fn(
-      async (payload: { settings: typeof DEFAULT_WORKSPACE_SETTINGS }) => ({
-        settings: payload.settings,
-        source: "stored" as const,
-      }),
-    ),
-    resetWorkspaceSettings: vi.fn(async () => ({
-      settings: DEFAULT_WORKSPACE_SETTINGS,
-      source: "stored" as const,
-    })),
-    writeClipboardText: vi.fn(async () => undefined),
-    setTitlebarTheme: vi.fn(async () => undefined),
-    onUserSettingsChanged: vi.fn(() => () => {}),
-    onChatDispatchNotices: vi.fn(() => () => {}),
-    registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
-    dismissChatDispatchNotice: vi.fn(async () => {}),
-    stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
-      settings: {
-        ...DEFAULT_USER_SETTINGS,
-        appearance: {
-          ...DEFAULT_USER_SETTINGS.appearance,
-          zoomLevel: payload.step === "in" ? 1 : payload.step === "out" ? -1 : 0,
-        },
-      },
-      source: "stored" as const,
-    })),
-    detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
-    readWorkspaceText: vi.fn(async (_payload: ReadWorkspaceTextPayload) => ({
-      text: "# Doc\n",
-      truncated: false as const,
-      contentHash: "a".repeat(64),
-    })),
-    // The linked-mentions panel bails without this, and its chat-mention read
-    // is an ENGINE CAPTURE call — so a fake that omits it makes every
-    // no-call pin on that read pass for the wrong reason.
-    getBacklinks: vi.fn(async () => ({ sources: [] as never[] })),
-    listChatFileMentions: vi.fn(async () => ({ mentions: [] as never[] })),
-    // Typed to the payload the shell really sends: `includeChatMentions` is
-    // the flag that decides whether main runs this read through
-    // requireEngineCapture, so a pin on it has to be able to read it back.
-    readWorkspaceGraph: vi.fn(async (_payload: {
-      workspaceId: string;
-      includeChatMentions?: boolean;
-    }) => ({
-      nodes: [
-        { path: "a.md", title: "A", incoming: 0, outgoing: 1 },
-        { path: "b.md", title: "B", incoming: 1, outgoing: 0 },
-      ],
-      edges: [{ source: "a.md", target: "b.md", kind: "wikilink" as const }],
-      unresolvedLinks: 0,
-      scannedFileCount: 2,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    })),
-    writeWorkspaceText: vi.fn(
-      async (_payload: WriteWorkspaceTextPayload): Promise<WriteWorkspaceTextResult> => ({
-        status: "written",
-        contentHash: "a".repeat(64),
-      }),
-    ),
-    createWorkspaceFile: vi.fn(async (payload: { relativePath: string }) => ({
-      path: payload.relativePath,
-    })),
-    createWorkspaceFolder: vi.fn(async (payload: { relativePath: string }) => ({
-      path: payload.relativePath,
-    })),
-    importWorkspaceFiles: vi.fn(
-      async (): Promise<ImportWorkspaceFilesResult> => ({
-        imported: ["imported.md"],
-        skipped: 0,
-      }),
-    ),
-    exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
-    showExplorerMenu: vi.fn(async (): Promise<ShowExplorerMenuResult> => null),
-    showWorkbenchMenu: vi.fn(async (): Promise<ShowWorkbenchMenuResult> => null),
-    getUpdateState: vi.fn(async () => IDLE_UPDATE_STATE),
-    checkForUpdates: vi.fn(async () => ({
-      checked: true,
-      state: READY_UPDATE_STATE,
-    })),
-    installUpdate: vi.fn(async () => ({
-      accepted: true,
-      state: READY_UPDATE_STATE,
-    })),
-    getDroppedFilePaths: vi.fn(() => []),
-    cloudStatus: vi.fn(async () => ({
-      connected: true,
-      email: "me@dohc.test",
-      serverUrl: "https://cloud.dohc.test",
-      workspaceSynced: true,
-    })),
-    createRelayShare: vi.fn(async () => ({
-      shareId: "relay-share-1",
-      grantId: "relay-grant-1",
-      shareCode: "dohc-share:relay-share-1:http://relay.test",
-      recipientEmail: "friend@dohc.test",
-    })),
-    listRelayShares: vi.fn(async () => ({ granted: [], received: [], removed: [] })),
-    retryShareHandoff: vi.fn(async () => undefined),
-    dismissShareHandoff: vi.fn(async () => undefined),
-    revokeRelayShare: vi.fn(async () => ({
-      undo: { undoId: "undo-1", expiresAtMs: Date.now() + 600_000 },
-    })),
-    undoRelayShare: vi.fn(async (payload: UndoRelaySharePayload) => ({
-      shareId: payload.shareId,
-    })),
-    // Share changes. Typed to the contract, not to these empty
-    // defaults: the review and submit tests drive real rows through them.
-    listShareProposals: vi.fn(
-      async (): Promise<ListShareProposalsResult> => ({ proposals: [] }),
-    ),
-    readShareProposalChanges: vi.fn(
-      async (): Promise<ReadShareProposalChangesResult> => ({
-        proposedByEmail: "friend@dohc.test",
-        files: [
-          {
-            opIndex: 0,
-            path: "docs/plan.md",
-            operation: "write",
-            drifted: false,
-            afterByteLength: 4,
-          },
-        ],
-      }),
-    ),
-    readShareProposalFileContent: vi.fn(
-      async (): Promise<ReadShareProposalFileContentResult> => ({
-        currentText: "one\n",
-        incomingText: "two\n",
-      }),
-    ),
-    settleShareProposal: vi.fn(
-      async (
-        _payload: SettleShareProposalPayload,
-      ): Promise<SettleShareProposalResult> => ({ state: "accepted" }),
-    ),
-    listMyShareChanges: vi.fn(
-      async (): Promise<ListMyShareChangesResult> => ({ proposals: [] }),
-    ),
-    submitShareChanges: vi.fn(
-      async (): Promise<SubmitShareChangesResult> => ({
-        ok: true,
-        submitted: 2,
-        capturedLocalChanges: 0,
-        skippedOutsideShare: 0,
-        morePending: false,
-      }),
-    ),
-    withdrawShareChanges: vi.fn(
-      async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
-    ),
-    pushShareDirectWrites: vi.fn(
-      async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [] }),
-    ),
-    emitShareDirectWritesPushed: (event: ShareDirectWritesPushedEvent) => {
-      for (const callback of [...directWritesPushedCallbacks]) callback(event);
-    },
-    onShareDirectWritesPushed: vi.fn(
-      (listener: (event: ShareDirectWritesPushedEvent) => void) => {
-        directWritesPushedCallbacks.add(listener);
-        return () => directWritesPushedCallbacks.delete(listener);
-      },
-    ),
-    pickWorkspaceRoot: vi.fn(async () => null),
-    getRelayReceivedShare: vi.fn(
-      async (): Promise<GetRelayReceivedShareResult> => ({ found: false }),
-    ),
-    getDefaultShareRoot: vi.fn(
-      async ({ shareId }: { shareId: string }) => `/home/sam/dohc/shared/${shareId}`,
-    ),
-    // Typed to the contract so a test that adds a share can answer it.
-    mountShare: vi.fn(async (): Promise<MountShareResult> => {
-      throw new Error("not used in shell tests");
-    }),
-    openSharedView: vi.fn(async () => {
-      throw new Error("not used in shell tests");
-    }),
-    // Typed to the contract, not to this one default: a test that drives a
-    // real pull ("updated") must be able to swap the implementation.
-    dismissShareSkips: vi.fn(
-      async (_payload: DismissShareSkipsPayload): Promise<void> => undefined,
-    ),
-    refreshSharedView: vi.fn(
-      async (): Promise<RefreshSharedViewResult> => ({
-        ok: true,
-        status: "unchanged",
-        changedPaths: 0,
-        excludedPaths: [],
-        unjournalablePaths: [],
-        refusedOps: 0,
-        refusedDetail: null,
-      }),
-    ),
-    onWorkspaceActivity: vi.fn(
-      (callback: (event: WorkspaceActivityEvent) => void) => {
-        activityCallbacks.add(callback);
-        return () => {
-          activityCallbacks.delete(callback);
-        };
-      },
-    ),
-    onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
-    onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
-      menuCallback = callback;
-      return () => {
-        menuCallback = null;
-      };
-    }),
-    retryAutomationNotice: vi.fn(
-      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
-    ),
-    listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
-    resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
-    revealAutomationHolds: vi.fn(async () => undefined),
-    onAutomationRunSettled: vi.fn(() => () => undefined),
-    onAutomationRunWaiting: vi.fn(() => () => undefined),
-    listAutomationButtons: vi.fn(async () => ({ buttons: [] })),
-    listRecordButtons: vi.fn(async () => ({ record: null })),
-    onAutomationHoldsChanged: vi.fn(() => () => undefined),
-    onCollectionAutomationsChanged: vi.fn(() => () => undefined),
-    listCollectionAutomations: vi.fn(
-      async (): Promise<ListCollectionAutomationsResult> => ({ status: "missing" }),
-    ),
-    findAutomationCollection: vi.fn(async (_payload: FindAutomationCollectionPayload): Promise<FindAutomationCollectionResult> => ({ status: "missing" })),
-    listCollectionAutomationRuns: vi.fn(
-      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [], next: null }),
-    ),
-    retryCollectionAutomation: vi.fn(
-      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
-    ),
-    onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
-    readCrashReport: vi.fn(
-      async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
-        report: null,
-        sendTo: null,
-      }),
-    ),
-    dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
-    sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
-    emitCrashReportChanged: () => {
-      for (const callback of [...crashReportCallbacks]) callback();
-    },
-    onCrashReportChanged: vi.fn((listener: () => void) => {
-      crashReportCallbacks.add(listener);
-      return () => crashReportCallbacks.delete(listener);
-    }),
-    emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
-    onUpdateState: vi.fn(() => () => {}),
-    // Content search (E5.0): the shell subscribes on mount.
-    onSearchResults: vi.fn((callback: (batch: SearchResultsEvent) => void) => {
-      searchCallback = callback;
-      return () => {
-        searchCallback = null;
-      };
-    }),
-    searchWorkspace: vi.fn(async (_payload: WorkspaceSearchPayload) => ({
-      status: "accepted" as const,
-    })),
-    cancelWorkspaceSearch: vi.fn(async () => undefined),
-  };
-}
-
-// Every workspace has the engine, so every bridge answers the engine
-// surfaces: collections, history, versions, chats. Typed to the contracts so
-// a test that drives real rows can swap an implementation in.
-function makeBridge(
-  uiStatePromise: Promise<WorkspaceUiState | null>,
-  platform: NodeJS.Platform = "linux",
-) {
-  const bridge = makeBaseBridge(uiStatePromise, platform);
-  return Object.assign(bridge, {
-    // Collections: the flagged shell lists collections on
-    // ready and on activity. Typed to the contract; the collection tests
-    // swap in real rows.
-    listCollections: vi.fn(
-      async (_payload: ListCollectionsPayload): Promise<ListCollectionsResult> => ({
-        collections: [],
-      }),
-    ),
-    dataset: vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
-      if (request.action === "list") return { kind: "list", datasets: [], nextCursor: null };
-      throw new Error(`Unexpected dataset action in shell fixture: ${request.action}`);
-    }),
-    getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
-      path: "tasks",
-      objectId: "object-test",
-      status: "valid",
-      reasons: [],
-      schema: { name: null, description: null, fields: [], views: [] },
-      recordCount: 0,
-    })),
-    queryCollectionRecords: vi.fn(
-      async (): Promise<QueryCollectionRecordsResult> => ({
-        collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
-        records: [],
-        groups: null,
-        nextCursor: null,
-      }),
-    ),
-    // Typed to the contract, not to this empty default: a test that drives
-    // real pages must be able to swap the implementation.
-    listEngineMoments: vi.fn(
-      async (): Promise<ListEngineMomentsResponse> => ({
-        moments: [],
-        nextBeforeMomentOrder: null,
-        latestMomentOrder: 0,
-        activeVersionId: "main",
-        protectedTruncated: false,
-      }),
-    ),
-    // Typed to the contract, not to these empty defaults: the freshness tests
-    // drive a real review card and a real version switch through them.
-    getTryInVersionState: vi.fn(
-      async (): Promise<TryInVersionStateResult> => ({ state: null }),
-    ),
-    dismissTryInVersionReview: vi.fn(async (): Promise<void> => undefined),
-    switchWorkspaceVersion: vi.fn(
-      async (): Promise<SwitchWorkspaceVersionResult> => ({
-        activeVersionId: "main",
-        changedFileCount: 0,
-      }),
-    ),
-    // Typed to the contract as well: a workspace with only Main is this
-    // default, not the shape every test is allowed to report.
-    listWorkspaceVersions: vi.fn(
-      async (): Promise<ListWorkspaceVersionsResult> => ({
-        versions: [
-          {
-            id: "main",
-            name: "Main",
-            kind: "main",
-            createdAtMs: 0,
-            canMergeIntoMain: false,
-          },
-        ],
-        activeVersionId: "main",
-      }),
-    ),
-    // Typed to the contract as well: the moment-diff page mounts on it, and
-    // a shared view's bridge overrides it with main's refusal.
-    readEngineMoment: vi.fn(
-      async (): Promise<ReadEngineMomentResult> => ({ moment: null }),
-    ),
-    listChatChannels: vi.fn(
-      async (): Promise<{
-        channels: ChatChannelRecord[];
-        fileThreads: FileChatThreadRecord[];
-      }> => ({ channels: [], fileThreads: [] }),
-    ),
-    listChannelThreads: vi.fn(async () => ({ threads: [] })),
-    listPersonalChatFeed: vi.fn(async () => ({ items: [], nextCursor: null })),
-    listChatChannelShares: vi.fn(async () => {
-      // Sharing is optional; ChatsView downgrades a rejection to "none".
-      throw new Error("sharing unavailable in shell tests");
-    }),
-    syncDms: vi.fn(
-      async (_payload: SyncDmsPayload): Promise<SyncDmsResult> =>
-        dmSyncResult([], false),
-    ),
-    // A fresh revision per read preserves the pre-gating contract for this
-    // suite: every open-DM tick reloads. A test exercising the revision gate
-    // itself overrides this with a stable value.
-    getChatThreadRevision: vi.fn(
-      (() => {
-        let revision = 0;
-        return async () => ({ revision: ++revision });
-      })(),
-    ),
-    listFileChats: vi.fn(
-      async (): Promise<ListFileChatsResult> => ({ fileObjectId: null, threads: [] }),
-    ),
-  });
-}
-
-function renderShell(
-  bridge: ReturnType<typeof makeBridge>,
-  workspace: Workspace = WORKSPACE,
-  workspaces: Workspace[] = [workspace],
-) {
-  vi.stubGlobal("dohcDesktop", bridge);
-  // The host rides outside the shell, exactly as main.tsx mounts it: the
-  // collection write queue must keep landing accepted edits while the keyed
-  // shell remounts.
-  return render(
-    <>
-      <CollectionFieldWriteHost />
-      <DesktopWorkspaceShell
-        workspace={workspace}
-        workspaces={workspaces}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />
-    </>,
-  );
-}
-
-async function enterMarkdownSource(
-  user: ReturnType<typeof userEvent.setup>,
-  scope: HTMLElement = document.body,
-): Promise<HTMLElement> {
-  const shell = await screen.findByTestId("workspace-shell");
-  await waitFor(() => expect(shell.dataset.ready).toBe("true"));
-
-  const queries = within(scope);
-  const currentSource = queries
-    .queryByTestId("markdown-editor")
-    ?.querySelector<HTMLElement>(".cm-content");
-  if (currentSource?.getAttribute("contenteditable") === "true") {
-    return currentSource;
-  }
-
-  const toggle = (await queries.findByTestId(
-    "markdown-edit-toggle",
-  )) as HTMLButtonElement;
-  await waitFor(() => expect(toggle.disabled).toBe(false));
-
-  // The label names the next surface: Edit (read) -> Source (WYSIWYG) ->
-  // WYSIWYG (source).
-  if (toggle.textContent === "Edit") {
-    await user.click(toggle);
-    await waitFor(() => expect(toggle.textContent).toBe("Source"));
-  }
-  if (toggle.textContent === "Source") {
-    await user.click(toggle);
-  } else {
-    expect(toggle.textContent).toBe("WYSIWYG");
-  }
-  return await waitFor(() => {
-    const content = queries
-      .getByTestId("markdown-editor")
-      .querySelector<HTMLElement>(".cm-content");
-    expect(content?.getAttribute("contenteditable")).toBe("true");
-    return content!;
-  });
-}
-
-// A history page that never lands. The editor-boundary suites measure draft
-// flushes and editor identity across renames, deletes, and close-all; the
-// first history commit bumps the inspector's refresh key, which is a
-// different behavior with its own tests.
-function holdHistory(bridge: ReturnType<typeof makeBridge>) {
-  bridge.listEngineMoments = vi.fn(() => new Promise<never>(() => {}));
-  return bridge;
-}
-
-function sourceEditorText(editor: HTMLElement): string {
-  return Array.from(editor.querySelectorAll<HTMLElement>(".cm-line"), (line) =>
-    line.textContent ?? "",
-  ).join("\n");
-}
-
-function shellBootstrapProps(bridge: ReturnType<typeof makeBridge>) {
-  return {
-    userSettings: {
-      settings: DEFAULT_USER_SETTINGS,
-      source: "default" as const,
-    },
-    refreshWorkspaceRegistry: async () =>
-      (await bridge.getWorkspaceRegistry()).workspaces as Workspace[],
-  };
-}
 
 describe("workspace share handoff placement", () => {
   it("uses the existing overlay and dismisses it without a payload or mutation", async () => {
@@ -1031,39 +232,6 @@ describe("adding a share to this workspace", () => {
   );
 });
 
-describe("workspace manager route", () => {
-  it("shows a failed manager open in the shell error with a retry", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    vi.stubGlobal("dohcDesktop", bridge);
-    const onManageWorkspaces = vi
-      .fn<() => Promise<void>>()
-      .mockRejectedValueOnce(
-        new Error("Error invoking remote method 'desktop:open-workspace-manager': Error: No display."),
-      )
-      .mockResolvedValueOnce(undefined);
-    const user = userEvent.setup();
-    render(
-      <DesktopWorkspaceShell
-        workspace={WORKSPACE}
-        workspaces={[WORKSPACE]}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-        onManageWorkspaces={onManageWorkspaces}
-      />,
-    );
-    await user.click(await screen.findByTestId("workspace-switcher"));
-    await user.click(screen.getByTestId("workspace-switcher-manage"));
-
-    const banner = await screen.findByTestId("workspace-shell-error");
-    expect(banner.textContent).toContain("Couldn't open the workspace manager.");
-    expect(banner.textContent).toContain("No display.");
-
-    await user.click(screen.getByTestId("workspace-shell-error-retry"));
-    expect(onManageWorkspaces).toHaveBeenCalledTimes(2);
-    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
-  });
-});
-
 describe("workspace switch performance timeline", () => {
   it("reuses the bootstrap agent-status read for initial history", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -1133,100 +301,6 @@ describe("direct message workspace picker", () => {
     ]);
     expect(screen.queryByText("shared-view")).toBeNull();
   });
-});
-
-// The status a real shared view carries (capture === null, share cause) and
-// the workspace identity that rides the capture decision.
-const SHARE_STATUS = {
-  ...SYNC_STATUS,
-  historyShareView: true,
-};
-const SHARE_VIEW: Workspace = {
-  ...WORKSPACE,
-  shareView: {
-    shareId: "share-1",
-    granterEmail: "granter@dohc.test",
-    access: "view",
-  },
-};
-
-// A bridge that answers the way MAIN answers for a shared view: the capture
-// gate short-circuits, so requireEngineCapture has no capture and every
-// capture-backed call is refused. A fake that resolved these would model more than main can do, and
-// every no-call pin below would pass even after the fix was reverted.
-//
-// `listFileChats` is the one that answers: main resolves a chat
-// scope from the share instead of a capture, so the per-file chat surface is
-// served at every level. A fake that still refused it would model less than
-// main can do, and every pin written against it would certify fiction.
-function makeShareBridge(
-  uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null),
-) {
-  const bridge = makeBridge(uiState);
-  bridge.openWorkspace = vi.fn(async () => SHARE_STATUS);
-  bridge.getSyncStatus = vi.fn(async () => SHARE_STATUS);
-  bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
-    throw new Error("Versions are not enabled for this workspace.");
-  });
-  bridge.readEngineMoment = vi.fn(async (): Promise<never> => {
-    throw new Error("Engine history is not enabled for this workspace.");
-  });
-  // The granter's review channel is workspace-scoped and owner-only: main
-  // refuses it for a share view. A fake that answered it would model more
-  // than main can do, and the no-call pin below would pass after a revert.
-  bridge.listShareProposals.mockRejectedValue(
-    new Error("A shared view cannot review changes."),
-  );
-  for (const call of [
-    "listChatChannels",
-    "listChannelThreads",
-    "listChatFileMentions",
-    "syncDms",
-  ] as const) {
-    bridge[call].mockRejectedValue(
-      new Error("Chats are not enabled for this workspace."),
-    );
-  }
-  bridge.listFileChats.mockResolvedValue({
-    fileObjectId: "share-object-1",
-    threads: [],
-  });
-  return bridge;
-}
-
-// Flushes the shell's mount effects for a shared view, whose capture-backed
-// surfaces are hidden, so a no-call pin below is asserted after the shell
-// had its chance to call.
-async function settleShareView() {
-  await act(async () => {});
-}
-
-afterEach(async () => {
-  cleanup();
-  restoreProperty(
-    Element.prototype,
-    "setPointerCapture",
-    originalSetPointerCapture,
-  );
-  restoreProperty(
-    Element.prototype,
-    "hasPointerCapture",
-    originalHasPointerCapture,
-  );
-  restoreProperty(document, "elementFromPoint", originalElementFromPoint);
-  await disposeEngineDocLeasesForTests();
-  resetSharedLocalDocumentsForTests();
-  vi.unstubAllGlobals();
-  vi.clearAllMocks();
-  // The set-aside drafts live in a module store on purpose; tests
-  // that seed it must not leak into each other.
-  resetOrphanedDrafts();
-  // The collection write queue is module state on purpose too — a pending
-  // head left by one test must not open sessions inside the next.
-  resetCollectionFieldWritesForTests();
-  // What a sync failure already showed is module state too, so it holds
-  // across the shell's remounts.
-  forgetSyncFailureNoticesForTests();
 });
 
 describe("global letter shortcut ownership", () => {
@@ -7794,13 +6868,14 @@ describe("shared view banner", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "sam@dohc.test",
+        sharerName: "IT Security",
         access: "view",
       },
     });
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+      "Shared view from IT Security (sam@dohc.test) — read-only. Ask sam@dohc.test for changes.",
     );
     expect(banner.textContent).not.toContain("You can chat about");
   });
@@ -7942,7 +7017,7 @@ describe("shared view banner", () => {
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from another dohc user. Markdown edits save to the live host. Other file changes need their acceptance.",
+      "Shared view from the owner. Markdown edits save to the live host. Other file changes need their acceptance.",
     );
   });
 
@@ -8709,6 +7784,30 @@ describe("notices sent to you", () => {
       </>,
     );
   }
+
+  it("keeps a newer refusal after an older shell dismissal finishes", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const shown: NoticeRow = { ...MENTION, store: "local", kind: "sync-refusal", noticeId: "refusal",
+      body: "A change needs review", refusalCoordinates: [{ originId: "peer", originSeq: 1 }] };
+    const dismissed = deferred<void>();
+    const notices = { ...sentNotices([shown]), dismiss: vi.fn(() => dismissed.promise) };
+    const view = renderWithNotices(bridge, { sentNotices: notices });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("notice-refusal-dismiss"));
+    expect(notices.dismiss).toHaveBeenCalledWith(shown);
+    const newer = { ...shown, body: "A newer change needs review",
+      refusalCoordinates: [{ originId: "peer", originSeq: 2 }] };
+    view.rerender(<>
+      <CollectionFieldWriteHost />
+      <DesktopWorkspaceShell workspace={WORKSPACE} workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}}
+        sentNotices={{ ...notices, notices: [newer] }} />
+    </>);
+    expect((await screen.findByTestId("notice-refusal")).textContent).toContain(newer.body);
+    await act(async () => dismissed.resolve());
+    expect(screen.getByTestId("notice-refusal").textContent).toContain(newer.body);
+  });
 
   it("opens a notice's file in this workspace and marks it read", async () => {
     const user = userEvent.setup();
@@ -14499,188 +13598,6 @@ describe("open editors", () => {
   });
 });
 
-describe("chats panel (right side)", () => {
-  it("toggles from the titlebar and hides entirely when collapsed", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    // Hidden by default (VS Code secondary-sidebar grammar).
-    await screen.findByText("a.md");
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("activity-chats")).toBeNull();
-
-    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
-
-    await user.click(screen.getByTestId("chats-panel-collapse"));
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    // Collapsed means gone — no 36px stub squatting on the right edge.
-    expect(screen.queryByTestId("history-restore")).toBeNull();
-
-    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
-  });
-
-  it("opens a clicked channel in the Chats tab and keeps the panel as the navigator", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listChatChannels.mockResolvedValue({
-      channels: [
-        {
-          id: "channel-1",
-          name: "General",
-          slug: "general",
-          kind: "channel" as const,
-          createdAtMs: 1_700_000_000_000,
-          updatedAtMs: 1_700_000_000_000,
-          threadCount: 0,
-          unreadCount: 0,
-        },
-        {
-          id: "channel-2",
-          name: "random",
-          slug: "random",
-          kind: "channel" as const,
-          createdAtMs: 1_700_000_000_001,
-          updatedAtMs: 1_700_000_000_001,
-          threadCount: 0,
-          unreadCount: 0,
-        },
-      ],
-      fileThreads: [],
-    });
-    Object.assign(bridge, { listChatChannelShares: vi.fn(async () => ({ joined: [], sessionKey: null, relay: { state: "answered", granted: [], received: [], removed: [] } })) });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
-    const panel = await screen.findByTestId("chats-panel");
-    const channelButtons = await within(panel).findAllByTestId("chats-channel");
-    expect(channelButtons).toHaveLength(2);
-    await user.click(channelButtons[0]!);
-
-    // The panel is a navigator: the channel opens in the Chats tab and the
-    // panel keeps its list.
-    const tab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`);
-    expect(tab.dataset.active).toBe("true");
-    expect(tab.textContent).toContain("#General");
-    const channelView = await screen.findByTestId("chats-channel-view");
-    expect(channelView.dataset.variant).toBe("page");
-    expect(within(channelView).queryByRole("button", { name: "Back" })).toBeNull();
-    fireEvent.keyDown(channelView, { key: "Escape" });
-    expect(screen.getByTestId("chats-channel-view")).toBe(channelView);
-    expect(document.querySelector('main [data-testid="chats-view"]')).toBeNull();
-    expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
-    expect(within(panel).getAllByTestId("chats-channel")).toHaveLength(2);
-    expect(bridge.listChannelThreads).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId,
-      channelId: "channel-1",
-    });
-
-    await user.type(screen.getByTestId("chats-new-thread-composer"), "General draft");
-    await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
-    await waitFor(() => {
-      expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
-    });
-    expect(tab.textContent).toContain("#General");
-    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-2")}`).textContent).toContain("#random");
-    expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
-    expect(bridge.listChannelThreads).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId,
-      channelId: "channel-2",
-    });
-    await user.type(screen.getByTestId("chats-new-thread-composer"), "Random draft");
-    await user.click(within(panel).getByTestId("chats-feed-link"));
-    await screen.findByTestId("chats-personal-feed");
-    expect(screen.getByTestId("tab-dohc://chats").textContent).toContain("Home");
-    await user.click(within(panel).getAllByTestId("chats-channel")[0]!);
-    await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("General draft"));
-    await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
-    await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("Random draft"));
-    expect(screen.getAllByTestId(/^tab-dohc:\/\/chats/)).toHaveLength(3);
-
-  });
-
-  it("restores the stored width and can be resized from its left edge", async () => {
-    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
-      configurable: true,
-      value: vi.fn(),
-    });
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    renderShell(bridge);
-
-    const panel = await screen.findByTestId("chats-panel");
-    expect(panel.style.width).toBe("360px");
-    Object.defineProperty(panel, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({
-        x: 640,
-        y: 0,
-        left: 640,
-        top: 0,
-        right: 1000,
-        bottom: 800,
-        width: 360,
-        height: 800,
-        toJSON: () => {},
-      }),
-    });
-
-    const handle = screen.getByTestId("chats-panel-resize");
-    fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 100, pointerId: 1 });
-
-    await waitFor(() => {
-      expect(panel.style.width).toBe("900px");
-    });
-  });
-
-  it("exposes the chats resize separator to keyboard users", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    renderShell(bridge);
-
-    const panel = await screen.findByTestId("chats-panel");
-    const handle = screen.getByTestId("chats-panel-resize");
-    expect(handle.tabIndex).toBe(0);
-    expect(handle.getAttribute("aria-valuemin")).toBe("240");
-    expect(handle.getAttribute("aria-valuemax")).toBe("2400");
-    expect(handle.getAttribute("aria-valuenow")).toBe("360");
-
-    fireEvent.keyDown(handle, { key: "ArrowLeft" });
-    await waitFor(() => expect(panel.style.width).toBe("376px"));
-    expect(handle.getAttribute("aria-valuenow")).toBe("376");
-
-    fireEvent.keyDown(handle, { key: "ArrowRight" });
-    await waitFor(() => expect(panel.style.width).toBe("360px"));
-
-    fireEvent.keyDown(handle, { key: "PageUp" });
-    await waitFor(() => expect(panel.style.width).toBe("488px"));
-    fireEvent.keyDown(handle, { key: "PageDown" });
-    await waitFor(() => expect(panel.style.width).toBe("360px"));
-    fireEvent.keyDown(handle, { key: "Home" });
-    await waitFor(() => expect(panel.style.width).toBe("240px"));
-    expect(handle.getAttribute("aria-valuenow")).toBe("240");
-    fireEvent.keyDown(handle, { key: "End" });
-    await waitFor(() => expect(panel.style.width).toBe("2400px"));
-    expect(handle.getAttribute("aria-valuenow")).toBe("2400");
-  });
-
-  it("the 'This file' tab shows the active file's chats surface", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
-    await screen.findByTestId("chats-panel");
-    await user.click(screen.getByTestId("chats-panel-tab-file"));
-
-    // No file open yet: the linked-chats surface says so honestly.
-    expect(
-      (await screen.findByTestId("linked-chats-empty")).textContent,
-    ).toContain("No file open");
-  });
-});
-
 describe("file transfers", () => {
   it("keeps file import and workspace zip export as separate commands", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -15099,54 +14016,6 @@ describe("native workbench context menus", () => {
         groupId: "primary",
       });
     });
-  });
-
-  it("routes workspace status context menu commands to panel actions", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("open-history");
-    renderShell(bridge);
-
-    // The title bar carries the workspace name the removed bottom bar showed,
-    // and the status context menu opens from that name.
-    const workspaceLabel = await screen.findByTestId("status-workspace");
-    expect(workspaceLabel.textContent).toBe("personal");
-    fireEvent.contextMenu(workspaceLabel);
-
-    await waitFor(() => {
-      expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
-        workspaceId: "ws-shell-test",
-        context: "status",
-      });
-    });
-    // The command lands: the History view becomes the active rail entry.
-    await waitFor(() => {
-      expect(
-        screen.getByTestId("activity-history").getAttribute("aria-current"),
-      ).toBe("page");
-    });
-  });
-
-  it("routes workspace status update commands to the updater bridge", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("install-update");
-
-    renderShell(bridge);
-
-    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
-
-    await waitFor(() => {
-      expect(bridge.installUpdate).toHaveBeenCalledOnce();
-    });
-  });
-
-  it("opens settings from the workspace status context menu", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("settings");
-    renderShell(bridge);
-
-    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
-
-    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 });
 
@@ -16936,173 +15805,5 @@ describe("workbench render cost", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-});
-
-describe("apps pinned to the sidebar", () => {
-  it("opens a view hidden from the rail from a command, and moves off it only when the rail changes", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    const withSidebar = (hidden: typeof VIEW_IDS[number][], zoomLevel = 0) => ({
-      settings: {
-        ...DEFAULT_USER_SETTINGS,
-        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel },
-        sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden },
-      },
-      source: "stored" as const,
-    });
-    vi.stubGlobal("dohcDesktop", bridge);
-    const shellWith = (userSettings: ReturnType<typeof withSidebar>) => (
-      <DesktopWorkspaceShell
-        workspace={WORKSPACE}
-        workspaces={[WORKSPACE]}
-        {...shellBootstrapProps(bridge)}
-        userSettings={userSettings}
-        onSwitchWorkspace={() => {}}
-      />
-    );
-    const view = render(shellWith(withSidebar(["history"])));
-    const shell = await screen.findByTestId("workspace-shell");
-    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
-    expect(screen.queryByTestId("activity-history")).toBeNull();
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(await within(await screen.findByTestId("command-palette")).findByText("View: History"));
-    const panel = await screen.findByTestId("side-panel");
-    expect(within(panel).getByText("History")).toBeTruthy();
-
-    // Another settings change, or hiding another view, leaves it open.
-    view.rerender(shellWith(withSidebar(["history"], 1)));
-    await act(async () => { await Promise.resolve(); });
-    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
-    view.rerender(shellWith(withSidebar(["history", "explorer"])));
-    await act(async () => { await Promise.resolve(); });
-    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
-
-    // Hiding the selected view is what moves the selection, to the first
-    // view on the rail.
-    await user.click(screen.getByTestId("activity-search"));
-    await waitFor(() =>
-      expect(within(screen.getByTestId("side-panel")).getByText("Search")).toBeTruthy());
-    view.rerender(shellWith(withSidebar(["history", "explorer", "search"])));
-    await waitFor(() =>
-      expect(within(screen.getByTestId("side-panel")).getByText("Graph")).toBeTruthy());
-  });
-
-  it("never opens a hidden view, even when the sidebar is toggled back on", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    const settings = {
-      ...DEFAULT_USER_SETTINGS,
-      sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden: [...VIEW_IDS] },
-    };
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(
-      <DesktopWorkspaceShell
-        workspace={WORKSPACE}
-        workspaces={[WORKSPACE]}
-        {...shellBootstrapProps(bridge)}
-        userSettings={{ settings, source: "stored" }}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-    const shell = await screen.findByTestId("workspace-shell");
-    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
-    for (const view of VIEW_IDS) expect(screen.queryByTestId(`activity-${view}`)).toBeNull();
-    expect(screen.queryByTestId("side-panel")).toBeNull();
-
-    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
-    await act(async () => { await Promise.resolve(); });
-    expect(screen.queryByTestId("side-panel")).toBeNull();
-    expect(screen.queryByTestId("file-tree")).toBeNull();
-  });
-
-  it("opens a pinned app in the side panel inside the preview's sandbox, and unpins it from its menu", async () => {
-    const user = userEvent.setup();
-    const site: SitePackageInfo = {
-      root: "apps/trip",
-      title: "Trip planner",
-      kind: "static",
-      confidence: "high",
-      entryPath: "apps/trip/index.html",
-      configPath: null,
-      packagePath: null,
-      packageManager: null,
-      scripts: {},
-      configuredScripts: {},
-      configuredPreviewMode: null,
-      configuredBuildOutput: null,
-      buildOutputs: [],
-      sourceFiles: ["apps/trip/index.html"],
-      shareManifest: { ok: true, manifest: { entryPath: "apps/trip/index.html", assets: [] } },
-      diagnostics: [],
-      authority: { kind: "workspace" },
-    };
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      getSitePackage: vi.fn(async () => site),
-      startSitePreview: vi.fn(async () => ({
-        siteRoot: "apps/trip",
-        mode: "static" as const,
-        url: "http://127.0.0.1:49152/",
-        logs: [],
-        exited: false,
-        generation: 1,
-      })),
-      stopSitePreview: vi.fn(async () => undefined),
-      onSitePreviewReplaced: vi.fn(() => () => undefined),
-      getSitePreviewLogs: vi.fn(async () => ({ logs: [], exited: false })),
-      setAppPinned: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "stored" as const })),
-    });
-    bridge.showWorkbenchMenu.mockResolvedValue("unpin-app");
-    const settings = {
-      ...DEFAULT_USER_SETTINGS,
-      sidebar: {
-        ...DEFAULT_USER_SETTINGS.sidebar,
-        hidden: ["graph" as const],
-        pinnedApps: { [WORKSPACE.workspaceId]: ["apps/trip"] },
-      },
-    };
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(
-      <DesktopWorkspaceShell
-        workspace={WORKSPACE}
-        workspaces={[WORKSPACE]}
-        {...shellBootstrapProps(bridge)}
-        userSettings={{ settings, source: "stored" }}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-
-    const shell = await screen.findByTestId("workspace-shell");
-    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
-    expect(screen.queryByTestId("activity-graph")).toBeNull();
-    // The pin carries its app's title once dohc has read the app.
-    const pinned = await screen.findByRole("button", { name: "Trip planner" });
-    await user.click(pinned);
-
-    const panel = screen.getByTestId("side-panel");
-    const frame = await within(panel).findByTestId("site-preview-frame");
-    expect(frame.getAttribute("sandbox")).toBe("allow-forms allow-same-origin allow-scripts");
-    expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
-    expect(bridge.startSitePreview).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId,
-      siteRoot: "apps/trip",
-      mode: "static",
-      holderId: expect.any(String),
-      restart: false,
-    });
-
-    fireEvent.contextMenu(pinned);
-    await waitFor(() =>
-      expect(bridge.setAppPinned).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        appRoot: "apps/trip",
-        pinned: false,
-      }),
-    );
-    expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId,
-      context: "pinned-app",
-      path: "apps/trip",
-    });
   });
 });

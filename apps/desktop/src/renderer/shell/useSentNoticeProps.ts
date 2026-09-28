@@ -71,12 +71,12 @@ export function useSentNoticeProps(input: {
     [workspaceId, workspaces],
   );
   const rows = useMemo(
-    () => (sentNotices?.notices ?? []).map(describe),
-    [describe, sentNotices?.notices],
+    () => (sentNotices?.notices ?? []).filter(notice => notice.kind !== "sync-refusal" || notice.workspaceId !== workspaceId).map(describe),
+    [describe, sentNotices?.notices, workspaceId],
   );
   const toast = useMemo(
-    () => (sentNotices?.toast ? describe(sentNotices.toast) : null),
-    [describe, sentNotices?.toast],
+    () => (sentNotices?.toast && (sentNotices.toast.kind !== "sync-refusal" || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
+    [describe, sentNotices?.toast, workspaceId],
   );
 
   // A list main could not read is a failure with a way to ask again.

@@ -2,6 +2,7 @@ import { asRecord } from "@dohc/workspace-core/records";
 export type ShareAccess = "view" | "comment" | "edit";
 
 export interface ViewMeta {
+  subjectName?: string | null;
   access: ShareAccess;
   effectiveSelector: {
     paths: string[];

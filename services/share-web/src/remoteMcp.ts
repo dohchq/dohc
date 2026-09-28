@@ -124,7 +124,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
   const server = new McpServer({ name: "dohc-share", version: "0.1.0" }, { capabilities: { tools: {} } });
   server.registerTool("dohc_share_status", { description: "Read the current share permissions and release state.", inputSchema: z.object({}) }, async () => {
     const summary = shareLinkSummary(metadata, Boolean(options.linkLive && options.liveLimits));
-    return text({ ...metadata, summary: `${summary.permissions} ${summary.included} ${summary.history}` });
+    return text({ ...metadata, summary: `${summary.subject}. ${summary.permissions} ${summary.included} ${summary.history}` });
   });
   server.registerTool("dohc_list_files", {
     description: "List files visible through this shared link. Paths are relative to the share.",
