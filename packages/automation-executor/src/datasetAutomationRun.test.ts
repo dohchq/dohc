@@ -23,6 +23,7 @@ import {
 import { definitionDigest, definitionHash, stepKey } from "./automationPlan";
 import type { ReachRoster, RosterGrant } from "./automationReach";
 import { createAutomationRunStore } from "./automationRunStore";
+import { GROUP_CHANGED_ERROR } from "./collectionAutomationRun";
 import { datasetEffectKey } from "./datasetAutomationPlan";
 import {
   ACCESS_NARROWED_ERROR,
@@ -89,6 +90,7 @@ const sendsNothing = {
   },
   postNotice: async () => { throw new Error("This automation notifies nobody."); },
   recipientVerdicts: async () => { throw new Error("This automation names nobody by formula."); },
+  readMessageBody: async () => { throw new Error("No Group message starts this automation."); },
 };
 
 function host(script: { resolves: () => boolean; edit: (input: DatasetInvocation) => Promise<JsonValue> }) {
@@ -128,6 +130,7 @@ function chatSpy(script: { write?: (message: AutomationChatMessage) => void; not
     },
     postNotice: async (notice: AutomationNotice) => { notices.push(notice); script.notice?.(notice); },
     recipientVerdicts: async (input: { recipients: readonly unknown[] }) => input.recipients.map(() => "allowed" as const),
+    readMessageBody: async () => { throw new Error("No Group message starts this automation."); },
   };
   return { messages, notices, dependencies };
 }
@@ -254,6 +257,43 @@ describe("a due time on a dataset", () => {
       roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "skipped" });
     expect(script.sent).toEqual([]);
+  });
+});
+
+describe("a Group message on a dataset", () => {
+  it("stops a planned run before it sends more once the Group it watches is another one", async () => {
+    const heard = automationFrom(`  - id: heard
+    name: Heard
+    when: {group-message: Team}
+    do:
+      - notify: Heard
+        to: [user-owner]
+      - notify: Heard again
+        to: [user-owner]
+`);
+    const claim: AutomationClaim = {
+      claimId: "atc_message", automationId: "collection:Budget#heard", trigger: { key: "message:m1" }, recordId: null, collectionPath: "Budget",
+      depth: 0, state: "running", attempts: 1, run: 1, createdAtMs: 5, updatedAtMs: 5,
+      change: {
+        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, fields: [], fieldsOmitted: 0,
+        message: { id: "m1", threadId: "t1", groupId: TEAM.id, lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 5, body: "Hi", authorUserId: "user-ana" },
+      },
+    };
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const stop = new AbortController();
+    const spy = chatSpy({ notice: () => { stop.abort(); throw new Error("The workspace closed."); } });
+    const attempt = async (channels: ChatDirectoryChannel[], stopped: AbortSignal) => await runWithRoster(
+      { withHost: async (work) => await work(host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } }).surface),
+        evaluator: { evaluate: async () => [{ ok: true as const, value: "Heard" }, { ok: true as const, value: "Heard again" }] }, store, nowMs: () => 1,
+        personName: (userId) => userId, ...spy.dependencies, chat: { ...spy.dependencies.chat, directory: async (roster) => chatDirectoryOf(channels, roster) } },
+      { held: { source: "engine", claim, datasetId: definition.datasetId }, automation: heard, collection: { path: "Budget", name: "Budget" },
+        roster: { kind: "owner", ownerUserId: "user-owner", grants: [] }, signal: new AbortController().signal, stopped });
+    expect(await attempt([TEAM], stop.signal)).toEqual({ kind: "wait", reason: "stopped" });
+    expect(spy.notices).toHaveLength(1);
+    // Team is now another Group with the same name.
+    expect(await attempt([{ ...TEAM, id: "team-2", wireId: "team-2-wire" }], new AbortController().signal))
+      .toEqual({ kind: "failed", error: GROUP_CHANGED_ERROR, timedOut: false });
+    expect(spy.notices).toHaveLength(1);
   });
 });
 

@@ -118,8 +118,8 @@ const DATASET_FILE_NAME = "dataset.json";
 const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml", DATASET_FILE_NAME]);
 const KEPT_ANOTHER_WAY_UNDO = "This run ran before this Collection changed how it keeps its records, so dohc cannot undo it.";
 const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so its automations cannot run.";
-// A dataset's records are kept on one computer, and its schedules run only there.
-const DATASET_SCHEDULES_ELSEWHERE = "Schedules run on another computer, but this Collection's records are kept on this one. Choose this computer under Schedules run on in Settings.";
+// A dataset's records are kept on one computer, and its schedules and Group messages run only there.
+const DATASET_TRIGGERS_ELSEWHERE = "Schedules and Group messages run on another computer, but this Collection's records are kept on this one. Choose this computer under Schedules run on in Settings.";
 
 const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
 // A workspace that synced before, or that has no record of whether it did,
@@ -649,7 +649,7 @@ type HeldClaim = { source: "engine"; claim: AutomationClaim } | { source: "datas
 /**
  * How a held claim runs: through the dataset its Collection keeps, or as a
  * document Collection's engine claim. An engine claim in a dataset
- * Collection is a due time, and runs through the dataset.
+ * Collection is a due time or a Group message, and runs through the dataset.
  */
 function runnerOf(held: HeldClaim, datasetId: string | undefined): { kind: "dataset"; held: DatasetRunClaim } | { kind: "document"; claim: AutomationClaim } {
   if (held.source === "dataset") return { kind: "dataset", held };
@@ -896,7 +896,7 @@ export class CollectionAutomations {
       await this.reconcile(false);
       // An edited or removed automation's held steps leave the notices.
       this.publishHolds();
-      // A descriptor fixed or removed: its waiting due times look again.
+      // A descriptor fixed or removed: its waiting due times and messages look again.
       this.wakeDatasetWaits((path) => folders.has(path));
     })
       // A new or changed step gets its verdict now, while the people who
@@ -951,9 +951,9 @@ export class CollectionAutomations {
   }
 
   /**
-   * Wakes each due time that waited for its dataset in a Collection `wake`
-   * accepts, so the next drain looks again: it runs once the dataset is
-   * indexed, and settles once the folder holds no dataset.
+   * Wakes each due time or message that waited for its dataset in a
+   * Collection `wake` accepts, so the next drain looks again: it runs once
+   * the dataset is indexed, and settles once the folder holds no dataset.
    */
   private wakeDatasetWaits(wake: (path: string) => boolean): void {
     const woken = [...this.datasetWaits].filter(([, path]) => wake(path));
@@ -1181,7 +1181,7 @@ export class CollectionAutomations {
       unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
     const roster = await this.options.cachedRoster();
     const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
-    // Only the computer that keeps a dataset can run its schedules.
+    // Only the computer that keeps a dataset can run its schedules and Group messages.
     const keptHereOnly = hostCanRun && this.datasets.has(collectionPath) && (await this.options.groupHost()) === null;
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
@@ -1209,7 +1209,7 @@ export class CollectionAutomations {
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
       const cannotRun = unsupported(automation) ?? this.groupProblem(automation) ?? (hostCanRun
-        ? (keptHereOnly && automation.when.kind === "schedule" ? DATASET_SCHEDULES_ELSEWHERE : null)
+        ? (keptHereOnly && (automation.when.kind === "schedule" || automation.when.kind === "group-message") ? DATASET_TRIGGERS_ELSEWHERE : null)
         : automation.when.kind === "schedule" ? SCHEDULES_NEED_SYNC
         : automation.when.kind === "group-message" ? GROUP_MESSAGES_NEED_SYNC
         : null);
@@ -2627,8 +2627,9 @@ export class CollectionAutomations {
   private desiredSubscriptions(): Map<string, StoredSubscription> {
     const desired = new Map<string, StoredSubscription>();
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
-      if (!automation.enabled || this.datasets.has(collectionPath)) continue;
+      if (!automation.enabled) continue;
       const trigger = automation.when;
+      // The engine claims a Group message for either kind of Collection.
       if (trigger.kind === "group-message") {
         if (!this.groupTriggersHere) continue;
         const group = this.groups?.group(trigger.group);
@@ -2638,6 +2639,8 @@ export class CollectionAutomations {
         });
         continue;
       }
+      // A dataset's record changes claim in its own ledger.
+      if (this.datasets.has(collectionPath)) continue;
       const subscription = subscriptionFor(trigger);
       if (subscription !== null) desired.set(automationId, { automationId, path: collectionPath, ...subscription });
     }
@@ -3087,17 +3090,17 @@ export class CollectionAutomations {
     // roster lists cannot bring a step from an editor the roster lacks.
     const automation = id ? this.definitionFor(id) : null;
     const definition = id ? this.datasets.get(id.collectionPath)?.definition : undefined;
-    // A due time names only its Collection, of either kind.
-    const dueTime = held.source === "engine" && held.claim.change.kind === "schedule";
+    // A due time or a Group message names only its Collection, of either kind.
+    const recordless = held.source === "engine" && (held.claim.change.kind === "schedule" || held.claim.change.kind === "message");
     // An engine claim's change is in a document Collection, and not in a
     // Collection inside this one, which the subscription's path also covers.
     // A dataset claim's change is in the dataset this Collection keeps.
     const inCollection = id !== null && (held.source === "engine"
-      ? held.claim.collectionPath === id.collectionPath && (definition === undefined || dueTime)
+      ? held.claim.collectionPath === id.collectionPath && (definition === undefined || recordless)
       : definition?.datasetId === held.claim.datasetId);
-    // A due time for a dataset whose host has not opened, or whose store
-    // failed to open, waits for the dataset instead of being lost.
-    if (dueTime && id !== null && automation === null && !this.collections.has(id.collectionPath) && !this.datasets.has(id.collectionPath) &&
+    // A due time or a message for a dataset whose host has not opened, or
+    // whose store failed to open, waits for the dataset instead of being lost.
+    if (recordless && id !== null && automation === null && !this.collections.has(id.collectionPath) && !this.datasets.has(id.collectionPath) &&
       await this.options.pathExists(`${id.collectionPath}/${DATASET_FILE_NAME}`)) {
       this.datasetWaits.set(claim.claimId, id.collectionPath);
       void this.enqueue(() => this.indexDatasets(true))

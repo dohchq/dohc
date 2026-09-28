@@ -204,6 +204,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
 
   // Group subscriptions the executor asks the engine for.
   const subscribed: unknown[] = [];
+  // The Group subscriptions the executor last asked the engine to watch.
+  const watched: unknown[] = [];
   // Claims the engine holds for this Collection's automations, as a schedule or a Group message makes them.
   const engineClaims: AutomationClaim[] = [];
   const engineFailures: Array<Omit<AutomationFailure, "datasetInstance">> = [];
@@ -215,7 +217,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     listCollections: async () => ({ collections: [] }),
     subscribeAutomation: async (input: unknown) => { subscribed.push(input); },
     releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
-    watchAutomationGroups: async () => ({ needsHandover: false }),
+    watchAutomationGroups: async (input: { subscriptions: unknown[] }) => { watched.splice(0, watched.length, ...input.subscriptions); return { needsHandover: false }; },
     // Serves the oldest pending claim, as the engine drains its queue.
     claimNextAutomation: async () => {
       const next = engineClaims.filter((claim) => claim.state === "pending").sort((left, right) => left.createdAtMs - right.createdAtMs)[0];
@@ -276,7 +278,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
     groupMessagesSkipped: async () => undefined,
     requestHost: async () => undefined,
-    readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
+    readMessageBody: async () => { throw new Error("These test messages carry their whole body."); },
     postNotice: async (notice) => { notices.push(notice); wake(); },
     chat: {
       directory: async (current) => chatDirectoryOf([TEAM], current),
@@ -332,7 +334,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   });
   makeExecutor();
   return {
-    host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor, settled, waiting, messages, notices, failureReports,
+    host, root, rules, create, edit, record, records, until, errors, opened, subscribed, watched, writeAutomations, makeExecutor, settled, waiting, messages, notices, failureReports,
     engineClaims, engineFailures, engineRetries, setEngineReadable: (readable: boolean) => { engineReadable = readable; },
     served: () => served,
     get executor() { return executor!; },
@@ -722,20 +724,6 @@ describe("Collection automations on a dataset", () => {
     await f.executor.open();
     expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: DATASET_WAKE_NEEDS_BUTTON }] });
     expect(f.host.automations.subscriptions()).toEqual([]);
-    await f.executor.dispose();
-  });
-
-  it("gives a dataset automation that a Group message starts no subscription", async () => {
-    const f = await world({ groups: true });
-    await f.writeAutomations("  - id: from-team\n    name: From Team\n    when:\n      group-message: Team\n    do:\n" +
-      "      - add-record:\n          Status: New\n        operation: invoices.create\n");
-    await f.executor.open();
-    expect(await f.executor.automationsIn("Budget")).toMatchObject({ status: "read", automations: [
-      expect.objectContaining({ cannotRun: "This Collection's automations cannot start from Group messages. Choose a record change as the trigger." }),
-    ] });
-    expect(f.subscribed).toEqual([]);
-    expect(f.host.automations.subscriptions()).toEqual([]);
-    expect(f.errors).toEqual([]);
     await f.executor.dispose();
   });
 
@@ -1566,7 +1554,7 @@ ${steps}`;
     const elsewhere = await world();
     await elsewhere.writeAutomations(sweep(closeFound));
     await elsewhere.executor.open();
-    expect(await elsewhere.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: expect.stringMatching(/^Schedules run on another computer/) }] });
+    expect(await elsewhere.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: expect.stringMatching(/^Schedules and Group messages run on another computer/) }] });
     await elsewhere.executor.dispose();
     const here = await world({ groups: true });
     await here.writeAutomations(sweep(closeFound));
@@ -1584,6 +1572,95 @@ ${steps}`;
       .toBe("This computer does not keep Elsewhere's records. Run it from the computer that keeps them.");
     expect(await f.executor.runNowRefusal(SWEEP)).toBeNull();
     expect(await f.executor.runNowRefusal("collection:Tasks#stamp")).toBeNull();
+    await f.executor.dispose();
+  });
+});
+
+describe("Group messages on a dataset Collection", () => {
+  const FROM_TEAM = "collection:Budget#from-team";
+  const fromTeam = (steps: string) => `  - id: from-team
+    name: From Team
+    when:
+      group-message: Team
+    do:
+${steps}`;
+  const addFromMessage = `      - add-record:
+          Notes: '=person.name + ": " + message.body'
+          Status: New
+        operation: invoices.create
+`;
+  // A message in a Group, as the engine claims it when it stores the message.
+  const messageClaim = (claimId: string, message: { groupId?: string; depth?: number; authorKind?: "human" | "agent" | "automation" } = {}): AutomationClaim => ({
+    claimId, automationId: FROM_TEAM, trigger: { key: `message:${claimId}` }, recordId: null, collectionPath: "Budget", depth: message.depth ?? 0,
+    state: "pending", attempts: 0, run: 1, createdAtMs: Date.now(), updatedAtMs: Date.now(),
+    change: {
+      kind: "message", authorOriginId: null, actorKind: message.authorKind ?? "human", onBehalfOf: null, fields: [], fieldsOmitted: 0,
+      message: {
+        id: `m-${claimId}`, threadId: "thread", groupId: message.groupId ?? "team", lane: "posts", authorKind: message.authorKind ?? "human",
+        authorDisplayName: "Bob", createdAtMs: Date.now(), body: "Buy tickets", authorUserId: "u-bob",
+      },
+    },
+  });
+  const runMessage = async (f: Awaited<ReturnType<typeof world>>, claim: AutomationClaim) => {
+    f.engineClaims.push(claim);
+    f.executor.notifyClaimed();
+    await f.until(() => ["done", "failed"].includes(f.engineClaims.find((candidate) => candidate.claimId === claim.claimId)!.state));
+    await f.executor.idle();
+    return f.engineClaims.find((candidate) => candidate.claimId === claim.claimId)!;
+  };
+  // Bob is in Team and cannot edit Budget.
+  const bob = { grantId: "g-bob", recipientUserId: "u-bob", recipientEmail: "bob@dohc.test", files: null, channel: { wireId: "team", canPost: true } };
+
+  it("watches its Group, and runs a message from a member who cannot edit the Collection through the dataset", async () => {
+    const f = await world({ groups: true, roster: { kind: "owner", ownerUserId: "user-owner", grants: [bob] } });
+    await f.writeAutomations(fromTeam(addFromMessage));
+    await f.executor.open();
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: null }] });
+    expect(f.watched).toEqual([{ automationId: FROM_TEAM, groupId: "team" }]);
+    expect(f.host.automations.subscriptions()).toEqual([]);
+    expect(await runMessage(f, messageClaim("atc_message"))).toMatchObject({ state: "done" });
+    expect((await f.records()).map((row) => row.values)).toEqual([expect.objectContaining({ [NOTES]: "Bob: Buy tickets", [STATUS]: "New" })]);
+    expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: FROM_TEAM, depth: 1 } });
+    await f.executor.dispose();
+  });
+
+  it("skips a message from a Group the automation no longer watches", async () => {
+    const f = await world({ groups: true });
+    await f.writeAutomations(fromTeam(addFromMessage));
+    await f.executor.open();
+    expect(await runMessage(f, messageClaim("atc_elsewhere", { groupId: "old-team" }))).toMatchObject({ state: "done" });
+    expect(await f.records()).toEqual([]);
+    expect(await f.executor.runs(FROM_TEAM)).toEqual([expect.objectContaining({ claimId: "atc_elsewhere", writes: [] })]);
+    await f.executor.dispose();
+  });
+
+  it("writes one step deeper than the message, so the dataset stops a chain of automations at depth 4", async () => {
+    const f = await world({ groups: true });
+    await f.writeAutomations(fromTeam(addFromMessage) + `  - id: log-new
+    name: Log new invoices
+    when:
+      record-added: null
+    do:
+      - set:
+          Status: Logged
+        operation: invoices.status
+`);
+    await f.executor.open();
+    // An automation's post at depth 3 starts this one; its record is at depth 4.
+    expect(await runMessage(f, messageClaim("atc_deep", { depth: 3, authorKind: "automation" }))).toMatchObject({ state: "done" });
+    expect(f.host.automations.claims("collection:Budget#log-new")).toMatchObject([{ state: "failed", error: "chain-stopped", depth: 4 }]);
+    expect((await f.records()).map((row) => row.values[STATUS])).toEqual(["New"]);
+    await f.executor.dispose();
+  });
+
+  it("fails without writing anything when an editor cannot read the Group", async () => {
+    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+    const f = await world({ groups: true, roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
+    await f.writeAutomations(fromTeam(addFromMessage));
+    await f.executor.open();
+    const failed = await runMessage(f, messageClaim("atc_hidden"));
+    expect(failed).toMatchObject({ state: "failed", error: expect.stringContaining("ana@dohc.test") });
+    expect(await f.records()).toEqual([]);
     await f.executor.dispose();
   });
 });

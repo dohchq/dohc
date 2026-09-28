@@ -304,8 +304,6 @@ export function operationsOf(automation: Automation): string[] {
   return [...names];
 }
 
-const DATASET_GROUP_TRIGGER_UNSUPPORTED = "This Collection's automations cannot start from Group messages. Choose a record change as the trigger.";
-
 /**
  * Why this executor cannot run an automation yet, or null when it can. The
  * executor subscribes only automations it can run; the ⚡ panel shows the
@@ -460,16 +458,16 @@ export function subscriptionFor(trigger: AutomationTrigger): { kinds: Automation
 /**
  * The dataset ledger subscription a dataset Collection's automation needs:
  * its table, and its watched fields as field ids of the approved rules. Null
- * for a button, whose presses claim instead, and for a schedule, whose due
- * times the engine claims. Or why the automation cannot run on the dataset.
+ * for a button, whose presses claim instead, and for a schedule or a Group
+ * message, which the engine claims. Or why the automation cannot run on the
+ * dataset.
  */
 export function datasetSubscriptionFor(
   automation: Automation,
   definition: DatasetDefinition,
 ): { tableId: string; kinds: AutomationChangeKind[]; fieldIds: string[] | null } | { problem: string } | null {
   const trigger = automation.when;
-  if (trigger.kind === "group-message") return { problem: DATASET_GROUP_TRIGGER_UNSUPPORTED };
-  if (trigger.kind === "schedule") return null;
+  if (trigger.kind === "schedule" || trigger.kind === "group-message") return null;
   const table = trigger.table === null
     ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
     : definition.tables.find((candidate) => candidate.name === trigger.table);
