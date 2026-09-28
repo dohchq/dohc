@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   acquireBuildSlot,
+  acquireVerificationSlot,
   reclaimStaleSlots,
   resolveBuildBudget,
 } from "../tools/rust-engine-program/build-slot.mjs";
@@ -37,8 +38,8 @@ function deadPid() {
   return res.pid;
 }
 
-function plantSlot(root, i, { pid, heartbeatAgeMs }) {
-  const dir = join(root, `build-slot-${i}`);
+function plantSlot(root, i, { pid, heartbeatAgeMs, kind = "build-slot" }) {
+  const dir = join(root, `${kind}-${i}`);
   mkdirSync(dir, { recursive: true });
   const ownerPath = join(dir, "owner.json");
   writeFileSync(
@@ -246,6 +247,28 @@ test("two lanes get two different slots", async () => {
     assert.notEqual(first.name, second.name);
     first.release();
     second.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a PR gate holds the one verification slot beside the cargo lanes", async () => {
+  const root = slotRoot();
+  try {
+    assert.equal(acquireVerificationSlot({ CI: "1" }), null);
+    const gate = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+    assert.equal(gate.name, "verification-slot-1");
+    const lane = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
+    assert.equal(lane.name, "build-slot-1");
+    lane.release();
+    gate.release();
+    assert.equal(existsSync(join(root, "verification-slot-1")), false);
+
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 45 * 60_000, kind: "verification-slot" });
+    const next = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+    assert.equal(next.name, "verification-slot-1");
+    next.release();
+    assert.match(readFileSync(join(root, "events.log"), "utf8"), /reclaimed verification-slot-1/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
