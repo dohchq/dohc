@@ -944,6 +944,9 @@ const automationRunFields = {
   trigger: automationTriggerSchema,
   // The run began under another version of the automation.
   definitionChanged: z.boolean(),
+  // It failed before it started, as a chain stop or a change too large to
+  // start automations for, so it cannot run again.
+  neverStarted: z.boolean(),
   // The chain depth cap stopped it before it ran.
   chainStopped: z.boolean(),
   undone: z.boolean(),

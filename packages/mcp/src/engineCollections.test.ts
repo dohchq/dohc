@@ -347,7 +347,7 @@ describe("desktop CLI automation proxy", () => {
   const run = {
     run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
     trigger: { kind: "changed" as const, recordId: "rec_1", by: "human" as const, depth: 0 },
-    definitionChanged: true, chainStopped: false, undone: false,
+    definitionChanged: true, neverStarted: false, chainStopped: false, undone: false,
   };
   const answers = {
     automationRuns: { ok: true, runs: [{ ...run, changes: 1 }] },

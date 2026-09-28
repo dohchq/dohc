@@ -12,21 +12,27 @@ import { cutText } from "./automationChat";
 // one before it on this computer.
 
 // Mirrors of crates/dohc-engine-domain/src/automations.rs: the chain depth
-// cap, and the failure reason the engine records for a run that did not
-// finish. A chain stop is a flag on the failure, not a reason text.
+// cap, and the failure reasons the engine records for a chain stop and for a
+// run that did not finish.
 const AUTOMATION_CHAIN_DEPTH_CAP = 4;
 /** The failure a claim at the chain depth cap is inserted with, in the engine and the dataset ledger. */
 export const AUTOMATION_CHAIN_STOPPED = "chain-stopped";
-/** Why a press at the chain depth cap ran nothing. */
-export const CHAIN_STOPPED_PRESS = `dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so this press did not run.`;
 const AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
+
+// The copy for everyone but this computer's person. It leaves out the
+// computer's name and the step's error, which can name what only this
+// person can see.
+export const FAILED_ELSEWHERE_BODY = "It ran on another person's computer, so only they can try it again.";
+const NEVER_STARTED_ELSEWHERE_BODY = "It could not start on another person's computer, so no one can try it again.";
 
 /** An automation's newest failed claim, from the engine or the dataset ledger. */
 export interface AutomationFailure {
   automationId: string;
   /** The claim Try again runs. */
   claimId: string;
-  /** It never ran, as a chain stop, so no Try again can run it. */
+  /** It failed before it started, as a chain stop or a change too large to claim, so no Try again can run it. */
+  neverStarted: boolean;
+  /** The chain depth cap stopped it before it started. */
   chainStopped: boolean;
   error: string;
   updatedAtMs: number;
@@ -102,11 +108,28 @@ function automationTarget(automationId: string, claimId: string | null): Automat
   };
 }
 
+// The automation as a notice names it, in quotes, within `room` characters.
+function quotedName(failure: AutomationFailure, name: string | null, room: number): string {
+  const shown = plain(name ?? /#([^#]+)$/u.exec(failure.automationId)?.[1] ?? failure.automationId).trim() || "An automation";
+  return `"${cutText(shown, Math.max(1, room - 2))}"`;
+}
+
+// Why a chain stop ran nothing, and what to check. It names nothing private.
+const CHAIN_STOPPED_WHY = `dohc stops a chain after automations and agents start each other ${AUTOMATION_CHAIN_DEPTH_CAP} times in a row. ` +
+  "Check which automations start each other.";
+/** Why a press at the chain depth cap ran nothing, as the pressing window shows it. */
+export const CHAIN_STOPPED_PRESS = `This press did not run. ${CHAIN_STOPPED_WHY}`;
+
+// Why a chain stop's automation did not run, for every person told.
+function chainStopped(failure: AutomationFailure, name: string | null): string {
+  return `${quotedName(failure, name, NOTICE_TITLE_MAX_CHARS)} did not run. ${CHAIN_STOPPED_WHY}`;
+}
+
 /**
- * One failure as a notice: what happened, why when the engine recorded a
- * known reason, and where it ran. The two engine reasons get their own
- * sentences; any other error is the step's own text. A chain stop never
- * ran, so it offers no Try again.
+ * One failure as a notice: what happened, why when the ledger recorded a
+ * known reason, and where. The two engine reasons get their own sentences;
+ * any other error is the step's own text. A run that never started offers
+ * no Try again, since none can run it.
  */
 export function automationFailedNotice(input: {
   workspaceId: string;
@@ -116,15 +139,15 @@ export function automationFailedNotice(input: {
   name: string | null;
 }): AutomationFailedNotice {
   const { workspaceId, computer, failure } = input;
-  const name = plain(input.name ?? /#([^#]+)$/u.exec(failure.automationId)?.[1] ?? failure.automationId).trim() || "An automation";
-  const quoted = (room: number) => `"${cutText(name, Math.max(1, room - 2))}"`;
+  const quoted = (room: number) => quotedName(failure, input.name, room);
   const count = failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
-  const where = ` It ran on ${plain(computer.label).trim() || "another computer"}.`;
+  const label = plain(computer.label).trim() || "another computer";
+  const where = failure.neverStarted ? ` This happened on ${label}.` : ` It ran on ${label}.`;
   let title: string;
   let what: string;
   if (failure.chainStopped) {
     title = "An automation chain stopped";
-    what = `dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so ${quoted(NOTICE_TITLE_MAX_CHARS)} did not run.`;
+    what = chainStopped(failure, input.name);
   } else if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
     title = `Automation ${quoted(NOTICE_TITLE_MAX_CHARS - "Automation  did not finish".length)} did not finish`;
     what = "dohc stopped retrying a run that did not finish.";
@@ -139,6 +162,15 @@ export function automationFailedNotice(input: {
     kind: "automation-failed",
     title,
     body: `${count}${cutText(what, room)}${where}`,
-    target: automationTarget(failure.automationId, failure.chainStopped ? null : failure.claimId),
+    target: automationTarget(failure.automationId, failure.neverStarted ? null : failure.claimId),
   };
+}
+
+/**
+ * The body the other people involved get, in place of the step's error and
+ * the computer's name. It promises a retry only when one can run.
+ */
+export function automationFailedElsewhereBody(failure: AutomationFailure, name: string | null): string {
+  if (failure.chainStopped) return chainStopped(failure, name);
+  return failure.neverStarted ? NEVER_STARTED_ELSEWHERE_BODY : FAILED_ELSEWHERE_BODY;
 }

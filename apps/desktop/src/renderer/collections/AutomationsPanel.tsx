@@ -902,7 +902,7 @@ export function AutomationsPanel(props: {
             }}
             onSave={saveEdited}
             onCancel={() => leave(() => setEditing(null))}
-            onOpenFile={() => props.onOpenFile(filePath)}
+            onOpenFile={props.onOpenFile}
             onError={onError}
           />
         ) : runsOf ? (
