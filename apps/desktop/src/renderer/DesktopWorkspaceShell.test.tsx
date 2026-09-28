@@ -14,11 +14,12 @@ import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, WORKSPACE_ACTIVITY_REFRESH_MAX_WAI
 import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbench/workbenchState";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
+import { deferred } from "../testing/deferred";
+import { WORKSPACE, STORED_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
+
 // Count inspector and explorer work when the shell renders again.
 vi.mock("./documentVersionKey", { spy: true });
 vi.mock("./path", { spy: true });
-import { deferred } from "../testing/deferred";
-import { WORKSPACE, STORED_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
 
 describe("workspace switch performance timeline", () => {
   it("reuses the bootstrap agent-status read for initial history", async () => {
@@ -312,6 +313,7 @@ describe("collection folders", () => {
       if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
     }
   });
+
 
   it("reserves pending record names and retries the same partial identity", async () => {
     const bridge = makeBridge(Promise.resolve(null));

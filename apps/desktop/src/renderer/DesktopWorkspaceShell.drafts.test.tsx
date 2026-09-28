@@ -1,7 +1,5 @@
 // @vitest-environment jsdom
-import {
-  openDirtyMarkdown,
-} from "./DesktopWorkspaceShell.testSupport";
+import "./DesktopWorkspaceShell.testSupport";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +12,27 @@ import { captureOrphanedDraft } from "./orphanedDrafts";
 import { CollectionFieldWriteHost, abandonPendingCollectionFieldWrites, collectionWriteFailures, collectionWritesPaused, discardCollectionFieldWrite, enqueueCollectionFieldWrite, hasPendingCollectionFieldWrites } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
 import { GlobalRecoveryList, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, isFileOpenStartMark, recordDocUpdate, makeBridge, renderShell, enterMarkdownSource, holdHistory, sourceEditorText, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+
+async function openDirtyMarkdown(
+  bridge: ReturnType<typeof makeBridge>,
+): Promise<{
+  user: ReturnType<typeof userEvent.setup>;
+  editor: HTMLElement;
+}> {
+  const user = userEvent.setup();
+  renderShell(holdHistory(bridge));
+  const row = (await screen.findAllByTestId("tree-row")).find(
+    (candidate) => candidate.dataset.path === "a.md",
+  )!;
+  await user.click(row);
+  await screen.findByTestId("view-markdown");
+  const editor = await enterMarkdownSource(user);
+  await user.type(editor, "Draft!");
+  await waitFor(() =>
+    expect(screen.queryAllByTestId("tab-dirty").length).toBeGreaterThan(0),
+  );
+  return { user, editor };
+}
 
 describe("workspace switch admission", () => {
   it("restores B's layout and engine surfaces after one admitted open", async () => {

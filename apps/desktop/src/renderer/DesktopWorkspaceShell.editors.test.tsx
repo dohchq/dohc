@@ -1,7 +1,5 @@
 // @vitest-environment jsdom
-import {
-  SKIPPED_RECORD,
-} from "./DesktopWorkspaceShell.testSupport";
+import "./DesktopWorkspaceShell.testSupport";
 import { act, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -15,6 +13,24 @@ import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS } from "./workspaceActivityCoalesce
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
 import { WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, DM_GRAPH_NODE, CANONICAL_DM, dmSyncResult, makeBridge, renderShell, enterMarkdownSource, holdHistory, shellBootstrapProps, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
+
+// One share's durable skip record, as the registry holds it.
+const SKIPPED_RECORD = {
+  ops: [
+    {
+      originId: "origin-granter",
+      originSeq: 7,
+      opKind: "moment.append",
+      code: "share-boundary-violation",
+      detail:
+        "replicated moment is outside the share boundary: the share " +
+        "granted version main, the relay offered version version-other",
+      atMs: 1000,
+    },
+  ],
+  more: 1,
+  generation: 3,
+};
 
 describe("editor groups", () => {
   function fileTreeRow(path: string): HTMLElement {
