@@ -559,7 +559,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           assertCurrent(); host.automationClaims.release({ workspaceId, claimId: started.claimId, attempts: started.attempts });
         },
         retry(claimId: string) { assertCurrent(); return host.automationClaims.retry({ workspaceId, claimId }); },
-        claims(automationId: string) { assertCurrent(); return host.automationClaims.claims(workspaceId, automationId); },
+        claims(automationId: string, page?: { before?: string; limit?: number }) { assertCurrent(); return host.automationClaims.claims(workspaceId, automationId, page); },
+        pruneHistory(keep: readonly string[]) { assertCurrent(); return host.automationClaims.pruneHistory(workspaceId, keep); },
         claim(automationId: string, claimId: string) { assertCurrent(); return host.automationClaims.claim(workspaceId, automationId, claimId); },
         failures() { assertCurrent(); return host.automationClaims.failures(workspaceId); },
         /**

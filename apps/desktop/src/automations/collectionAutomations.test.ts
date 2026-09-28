@@ -269,7 +269,18 @@ async function world(options: {
       pending.push(claim);
       return claim;
     },
-    listAutomationClaims: async ({ automationId }) => ({ claims: [...claims.values()].filter((claim) => claim.automationId === automationId).reverse() }),
+    listAutomationClaims: async ({ automationId }) => ({ claims: [...claims.values()].filter((claim) => claim.automationId === automationId).reverse(), next: null }),
+    getAutomationClaim: async (input: { claimId: string } | { automationId: string; key: string }) => {
+      const claim = [...claims.values()].find((candidate) => "claimId" in input
+        ? candidate.claimId === input.claimId
+        : candidate.automationId === input.automationId && "key" in candidate.trigger && candidate.trigger.key === input.key);
+      return { claim: claim ?? null };
+    },
+    pruneAutomationHistory: async ({ keep }) => {
+      historyPrunes.push(keep);
+      wake();
+      return { pruned: 0, more: false };
+    },
     // When Group messages last started nothing here, as the engine records it.
     readAutomationGroupSkips: async () => ({ ...groupSkips }),
     // Each automation's failure most recently settled, as the failure notice shows it.
@@ -430,6 +441,8 @@ async function world(options: {
   let rosterCalls = 0;
   let beforeRead: (() => void) | null = null;
   let prunes = 0;
+  // The claims each run history prune kept.
+  const historyPrunes: string[][] = [];
   let updates = 0;
   const resumable: Array<ReadonlySet<string> | null> = [];
   const baseStore = createAutomationRunStore(root, resolveWorkspaceMetadataDir);
@@ -598,6 +611,7 @@ async function world(options: {
     skipNotices,
     rosterCalls: () => rosterCalls,
     prunes: () => prunes,
+    historyPrunes,
     resumable,
     beforeNextRead: (hook: () => void) => { beforeRead = hook; },
     moveRecord: (record: FakeRecord, name: string) => { record.path = `${record.collection}/${name}.md`; },
@@ -2656,6 +2670,32 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
     await w.until(() => w.prunes() === 1);
     expect(claim.state).toBe("failed");
+  });
+
+  it("expires run history at open, then at most hourly after a run settles, keeping each run an unfinished Undo names", async () => {
+    const note = "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: seen}}]\n";
+    const w = await world({ automations: { Tasks: note } });
+    let now = 1_000;
+    const executor = w.makeExecutor({ nowMs: () => now });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const first = w.claim("collection:Tasks#note", task);
+    await executor.open();
+    await w.settledClaim(first);
+    await w.until(() => w.prunes() === 1);
+    expect(w.historyPrunes).toEqual([[]]);
+    const [saved] = (await w.baseStore.runsOf("collection:Tasks#note", first.claimId)).runs;
+    await w.baseStore.save({ ...saved!, undo: "started" });
+    now += 60 * 60 * 1000 - 1;
+    w.claim("collection:Tasks#note", task);
+    executor.notifyClaimed();
+    await w.until(() => w.prunes() === 2);
+    expect(w.historyPrunes).toHaveLength(1);
+    now += 1;
+    w.claim("collection:Tasks#note", task);
+    executor.notifyClaimed();
+    await w.until(() => w.historyPrunes.length === 2);
+    expect(w.historyPrunes[1]).toEqual([first.claimId]);
+    await executor.dispose();
   });
 
   it("drops a settle the engine refused because its recovery took the claim, and leaves the run unsettled", async () => {

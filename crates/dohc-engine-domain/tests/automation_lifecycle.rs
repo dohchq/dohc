@@ -477,9 +477,8 @@ fn an_automation_authored_creation_keeps_the_self_skip_and_the_depth_cap() {
     );
 }
 
-/// Settling past the history drops old field claims but keeps an added
-/// claim's key, so a record whose binding comes back later is not added
-/// twice.
+/// Expiring run history keeps an added claim's key, so a record whose
+/// binding comes back later is not added twice.
 #[test]
 fn a_pruned_added_claim_keeps_its_key() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -506,53 +505,33 @@ fn a_pruned_added_claim_keeps_its_key() {
         11,
     );
     assert_eq!(reconcile(&mut store, 20).len(), 1);
-    let limit = dohc_engine_domain::AUTOMATION_CLAIM_HISTORY_LIMIT;
-    store
-        .write_with(&NoFaults, |tx| {
-            for seq in 0..limit {
-                let facts = dohc_engine_domain::CollectionRecordApplyFacts {
-                    shared_author: None,
-                    live_cursor: None,
-                    collection_path: "tasks".to_owned(),
-                    record_id: ALPHA.to_owned(),
-                    created: false,
-                    author_origin_id: None,
-                    attribution: None,
-                    source: Some(("origin-a".to_owned(), seq)),
-                    recorded_at_ms: 100 + seq,
-                    fields: vec![dohc_engine_domain::CollectionFieldChangeFact {
-                        field_name: "status".to_owned(),
-                        previous_json: None,
-                        next_json: Some("\"open\"".to_owned()),
-                        history_id: seq,
-                    }],
-                };
-                dohc_engine_domain::claim_automation_triggers_in_tx(tx, WS, &facts, 100 + seq)?;
-            }
-            Ok::<_, dohc_engine_domain::DomainError>(())
-        })
-        .expect("claim newer field changes");
-    let mut now_ms = 1_000;
-    while let Some((claim, _)) = dohc_engine_domain::claim_next_pending_automation(
+    let (claim, _) = dohc_engine_domain::claim_next_pending_automation(
         &mut store,
         WS,
         "collection:",
-        now_ms,
+        1_000,
         &NoFaults,
     )
     .expect("claim next")
-    {
-        dohc_engine_domain::settle_automation_claim(
-            &mut store,
-            WS,
-            &claim.claim_id,
-            &dohc_engine_domain::AutomationSettle::Done,
-            now_ms,
-            &NoFaults,
-        )
-        .expect("settle");
-        now_ms += 1;
-    }
+    .expect("the added claim");
+    dohc_engine_domain::settle_automation_claim(
+        &mut store,
+        WS,
+        &claim.claim_id,
+        &dohc_engine_domain::AutomationSettle::Done,
+        1_000,
+        &NoFaults,
+    )
+    .expect("settle");
+    let pruned = dohc_engine_domain::prune_automation_history(
+        &mut store,
+        WS,
+        &[],
+        1_001 + dohc_engine_domain::AUTOMATION_HISTORY_RETENTION_MS,
+        &NoFaults,
+    )
+    .expect("prune");
+    assert_eq!(pruned.pruned, 1);
     let added_facts: String = store
         .read_with(|conn| {
             conn.query_row(
@@ -562,7 +541,7 @@ fn a_pruned_added_claim_keeps_its_key() {
                 |row| row.get(0),
             )
         })
-        .expect("the added claim is kept past the history");
+        .expect("the added claim is kept after it expires");
     assert_eq!(added_facts, "[]", "a kept added claim drops its facts");
 
     write(

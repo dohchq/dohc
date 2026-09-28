@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { JsonValue } from "@dohc/app-backend-runtime";
-import { AUTOMATION_NEVER_STARTED_REFUSAL, DATASET_AUTOMATION_HISTORY } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
@@ -241,8 +241,15 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     },
     listAutomationClaims: async ({ automationId }: { automationId: string }) => {
       if (!engineReadable) throw new Error("The engine could not read its claims.");
-      return { claims: engineClaims.filter((claim) => claim.automationId === automationId).sort((left, right) => right.createdAtMs - left.createdAtMs) };
+      return { claims: engineClaims.filter((claim) => claim.automationId === automationId).sort((left, right) => right.createdAtMs - left.createdAtMs), next: null };
     },
+    getAutomationClaim: async (input: { claimId: string } | { automationId: string; key: string }) => {
+      const claim = [...engineClaims].find((candidate) => "claimId" in input
+        ? candidate.claimId === input.claimId
+        : candidate.automationId === input.automationId && "key" in candidate.trigger && candidate.trigger.key === input.key);
+      return { claim: claim ?? null };
+    },
+    pruneAutomationHistory: async () => ({ pruned: 0, more: false }),
     listAutomationFailures: async () => ({ failures: engineFailures }),
     retryAutomationClaim: async ({ claimId }: { claimId: string }) => {
       engineRetries.push(claimId);
@@ -354,7 +361,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     engineClaims, engineFailures, engineRetries, setEngineReadable: (readable: boolean) => { engineReadable = readable; },
     served: () => served,
     get executor() { return executor!; },
-    claims: () => host.automations.claims(AUTOMATION),
+    claims: () => host.automations.claims(AUTOMATION).claims,
     automationsChanged: () => automationsChanged,
     setRoster: (next: ReachRoster) => { roster = next; },
     openHost: () => { hostOpen = true; executor!.datasetsChanged(); },
@@ -762,8 +769,9 @@ describe("Collection automations on a dataset", () => {
     await f.until(() => f.claims()[0]?.state === "failed");
     const failed = f.claims()[0]!.claimId;
     fail = false;
-    for (let index = 0; index <= DATASET_AUTOMATION_HISTORY; index += 1) await setPaid(index % 2 === 1);
-    await f.until(() => f.claims().filter((claim) => claim.state === "done").length >= DATASET_AUTOMATION_HISTORY);
+    // The newest page of run history holds 20.
+    for (let index = 0; index <= 20; index += 1) await setPaid(index % 2 === 1);
+    await f.until(() => f.claims().filter((claim) => claim.state === "done").length >= 20);
     expect(f.claims().some((claim) => claim.claimId === failed)).toBe(false);
     expect(await f.executor.retry({ automationId: AUTOMATION, claimId: failed, startOver: false })).toEqual({ status: "queued", press: false });
     await f.until(() => f.host.automations.failures().length === 0);
@@ -870,7 +878,7 @@ describe("Collection automations on a dataset", () => {
     expect(hold).toMatchObject({ action: "find", stoppedFor: "ana@dohc.test" });
     const { id: invoice } = await f.create({});
     await f.edit(invoice, { [PAID]: true });
-    await f.until(() => f.claims()[0]?.state === "pending" && f.host.automations.claims(AUTOMATION)[0]?.attempts === 0);
+    await f.until(() => f.claims()[0]?.state === "pending" && f.host.automations.claims(AUTOMATION).claims[0]?.attempts === 0);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     expect(await f.executor.confirmReach(hold!)).toBe("confirmed");
     await f.until(async () => (await f.record(invoice))?.values[STATUS] === "Closed");
@@ -1077,14 +1085,14 @@ ${step}`;
     await expect(press(f, { recordId: invoice, pressId: pressId(25) })).rejects.toThrow("changed");
     const pressed = await press(f, { recordId: invoice, pressId: pressId(20), confirmed: ["invoices.settle"] });
     if (pressed.busy) throw new Error("The press ran.");
-    await f.until(() => f.settled.length === 1 && f.host.automations.claims(`collection:${BUDGET}#watch`)[0]?.state === "done");
+    await f.until(() => f.settled.length === 1 && f.host.automations.claims(`collection:${BUDGET}#watch`).claims[0]?.state === "done");
     expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "done", error: null }]);
     expect((await f.record(invoice))?.values[STATUS]).toBe(`Settled by ${BUTTON_AUTOMATION}: pressed`);
     // History names the automation behind the action's commit.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ operation: "invoices.settle", automation: { automationId: BUTTON_AUTOMATION, depth: 1 } });
-    expect(f.host.automations.claims(`collection:${BUDGET}#watch`)).toEqual([expect.objectContaining({ state: "done", depth: 1 })]);
+    expect(f.host.automations.claims(`collection:${BUDGET}#watch`).claims).toEqual([expect.objectContaining({ state: "done", depth: 1 })]);
     expect(f.notices).toEqual([expect.objectContaining({ body: "Status changed" })]);
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([expect.objectContaining({ claimId: pressed.claimId })]);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([expect.objectContaining({ claimId: pressed.claimId })]);
     await f.executor.dispose();
   });
 
@@ -1134,14 +1142,14 @@ ${step}`;
     const input = { workspaceId: "workspace", collectionPath: "Budget", field: "Mark paid", recordId: JSON.stringify(invoice), confirm: [] as string[], pressKey: "cli-1" };
     // Hold names its reverse, so only Settle is asked about.
     await expect(pressNamed(input, caller)).resolves.toEqual({ confirm: [{ name: "invoices.settle", label: "Settle" }] });
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
     const pressed = await pressNamed({ ...input, confirm: ["invoices.settle"] }, caller);
     if ("confirm" in pressed || pressed.busy || "relayed" in pressed) throw new Error("The press ran.");
     await f.until(() => f.settled.length === 1);
     expect((await f.record(invoice))?.values[STATUS]).toBe(`Settled by ${BUTTON_AUTOMATION}: pressed`);
     // The same key sent again answers the first run, and asks nothing.
     await expect(pressNamed(input, caller)).resolves.toEqual({ busy: false, claimId: pressed.claimId, settled: { outcome: "done", error: null } });
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toHaveLength(1);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toHaveLength(1);
     // A button that runs only a reversible action presses with nothing to confirm.
     await f.writeAutomations(markPaid(hold));
     f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
@@ -1192,11 +1200,11 @@ ${step}`;
     const disposed = f.executor.dispose();
     release();
     await disposed;
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toMatchObject([{ state: "pending" }]);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toMatchObject([{ state: "pending" }]);
     // The next executor sends the saved request under the same key: the host answers from its receipt.
     f.makeExecutor();
     await f.executor.open();
-    await f.until(() => f.host.automations.claims(BUTTON_AUTOMATION)[0]?.state === "done");
+    await f.until(() => f.host.automations.claims(BUTTON_AUTOMATION).claims[0]?.state === "done");
     const settles = f.host.history({ datasetId: definition.datasetId }).entries.filter((entry) => entry.operation === "invoices.settle");
     expect(settles).toHaveLength(1);
     expect((await f.record(invoice))?.values[STATUS]).toBe(`Settled by ${BUTTON_AUTOMATION}: pressed`);
@@ -1214,7 +1222,7 @@ ${step}`;
     const described = owner(f);
     const withoutAction = { ...described, operations: described.operations.filter((operation) => operation.operationId !== SETTLE) };
     await expect(press(f, { recordId: invoice, pressId: pressId(21) }, withoutAction)).rejects.toThrow("Only people who can edit Invoices can use this button.");
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
     await f.executor.dispose();
   });
 
@@ -1239,13 +1247,13 @@ ${step}`;
     await f.until(() => f.settled.length === 1);
     expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "done", error: null }]);
     expect((await f.record(invoice))?.values[STATUS]).toBe(`Paid by Person ${PRESSER} with Mark paid`);
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([expect.objectContaining({ claimId: pressed.claimId, state: "done", depth: 0,
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([expect.objectContaining({ claimId: pressed.claimId, state: "done", depth: 0,
       fact: { kind: "button", datasetId: definition.datasetId, tableId: TABLE, recordId: invoice, fieldId: MARK_PAID, definitionHash: expect.stringMatching(/^[0-9a-f]{64}$/) },
       actor: { kind: "owner", userId: PRESSER } })]);
     // The press sent again after a lost reply answers how its run ended, and runs nothing more.
     expect(await press(f, { recordId: invoice, pressId: pressId(1) })).toEqual({ busy: false, claimId: pressed.claimId, settled: { outcome: "done", error: null } });
     await expect(press(f, { recordId: "another", pressId: pressId(1) })).rejects.toThrow("already names another press");
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toHaveLength(1);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toHaveLength(1);
     // History names the automation, which wrote as the owner.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: BUTTON_AUTOMATION, depth: 1 } });
     await f.executor.dispose();
@@ -1262,7 +1270,7 @@ ${step}`;
     const pressed = await f.executor.pressDataset({ ...input, recordId: JSON.stringify(invoice), pressId: pressId(1), by: agent(2) }, owner(f), () => undefined);
     if (pressed.busy) throw new Error("The press ran.");
     await f.until(() => f.settled.length === 1);
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([expect.objectContaining({ depth: 2, actor: { kind: "owner", userId: PRESSER, agent: { depth: 2 } } })]);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([expect.objectContaining({ depth: 2, actor: { kind: "owner", userId: PRESSER, agent: { depth: 2 } } })]);
     // The run writes one step deeper than the press, and run history names the agent.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: BUTTON_AUTOMATION, depth: 3 } });
     expect(await f.executor.run(BUTTON_AUTOMATION, pressed.claimId)).toMatchObject({ trigger: { kind: "button", by: "agent", depth: 2 } });
@@ -1294,7 +1302,7 @@ ${step}`;
       described, () => undefined)).rejects.toThrow("This record is not in Invoices.");
     // A record the table does not hold gets no claim.
     await expect(press(f, { recordId: "missing", pressId: pressId(3) })).rejects.toThrow("This record is no longer in Invoices.");
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
     await f.executor.dispose();
   });
 
@@ -1333,7 +1341,7 @@ ${step}`;
     const reader = { ...owner(f), operations: owner(f).operations.filter((operation) => operation.operationId === LIST) };
     expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], reader))
       .toEqual([{ kind: "disabled", reason: "Only people who can edit Invoices can use this button." }]);
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
     await f.executor.dispose();
   });
 
@@ -1410,7 +1418,7 @@ ${step}`;
     expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
       .toEqual([{ kind: "disabled", reason: moved }]);
     await expect(press(f, { recordId: invoice, pressId: pressId(10) })).rejects.toThrow(moved);
-    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
     await f.executor.dispose();
   });
 
@@ -1651,8 +1659,8 @@ ${steps}`;
     // The schedule's edit declares depth 1, so the record change it starts claims at depth 1 and runs.
     expect(f.host.history({ datasetId: definition.datasetId }).entries.find((entry) => entry.automation?.automationId === SWEEP))
       .toMatchObject({ automation: { depth: 1 } });
-    await f.until(() => f.host.automations.claims(`collection:${BUDGET}#note-closed`)[0]?.state === "done");
-    expect(f.host.automations.claims(`collection:${BUDGET}#note-closed`)).toMatchObject([{ depth: 1 }]);
+    await f.until(() => f.host.automations.claims(`collection:${BUDGET}#note-closed`).claims[0]?.state === "done");
+    expect(f.host.automations.claims(`collection:${BUDGET}#note-closed`).claims).toMatchObject([{ depth: 1 }]);
     expect((await f.record(paid))?.values[NOTES]).toBe("closed");
     await f.executor.dispose();
   });
@@ -1864,7 +1872,7 @@ ${steps}`;
     await f.executor.open();
     // An automation's post at depth 3 starts this one; its record is at depth 4.
     expect(await runMessage(f, messageClaim("atc_deep", { depth: 3, authorKind: "automation" }))).toMatchObject({ state: "done" });
-    expect(f.host.automations.claims(`collection:${BUDGET}#log-new`)).toMatchObject([{ state: "failed", error: "chain-stopped", depth: 4 }]);
+    expect(f.host.automations.claims(`collection:${BUDGET}#log-new`).claims).toMatchObject([{ state: "failed", error: "chain-stopped", depth: 4 }]);
     expect((await f.records()).map((row) => row.values[STATUS])).toEqual(["New"]);
     await f.executor.dispose();
   });

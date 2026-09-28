@@ -352,7 +352,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     /** For the trusted executor. Commits and presses claim through the host; deleting a dataset forgets its claims. */
     automationClaims: { subscribe: automations.subscribe, unsubscribe: automations.unsubscribe, subscriptions: automations.subscriptions,
       next: automations.next, settle: automations.settle, release: automations.release, retry: automations.retry,
-      claims: automations.claims, claim: automations.claim, failures: automations.failures, pressed: automations.pressed,
+      claims: automations.claims, claim: automations.claim, pruneHistory: automations.pruneHistory, failures: automations.failures, pressed: automations.pressed,
       /** Throws why this host cannot take a press of this button, as `press` would. */
       assertPressable(raw: DatasetScope & Pick<DatasetPressInput, "tableId" | "fieldId">): void { pressableHead(raw); },
       /**
