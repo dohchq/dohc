@@ -16,6 +16,7 @@
     "./collection-automations": "./src/collectionAutomations.ts",
     "./dataset-automation-plan": "./src/datasetAutomationPlan.ts",
     "./dataset-automation-undo": "./src/datasetAutomationUndo.ts",
+    "./press-waiting": "./src/pressWaiting.ts",
     "./record-ids": "./src/recordIds.ts",
     "./group-messages-notice": "./src/groupMessagesNotice.ts",
     "./skipped-runs-notice": "./src/skippedRunsNotice.ts"

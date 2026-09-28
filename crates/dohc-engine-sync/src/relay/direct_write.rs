@@ -18,7 +18,7 @@
 //! answered stale or refused, or they are not a Collection's own files. Send
 //! changes still offers everything not delivered.
 
-use dohc_engine_files::floor::collision_key;
+pub use dohc_engine_files::floor::collision_key;
 use std::collections::{BTreeMap, BTreeSet};
 
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome, hex_sha256};

@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn newer_policy_holds_capture_and_recovers_without_widening() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    write_file(scratch.path(), "kept.md", b"captured content");
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    ingest(&mut sink, "kept.md").expect("healthy capture");
+    drop(sink);
+    write_file(scratch.path(), "kept.md", b"changed");
+    write_file(scratch.path(), "private/note.md", b"excluded");
+    let policy = "version = 2\n[[rule]]\npath = \"private/**\"\ntracked = false\n";
+    write_file(scratch.path(), ".dohc/files.toml", policy.as_bytes());
+    let (_, mut sink) = sink_for(&scratch, &supervisor);
+    assert!(ingest(&mut sink, "kept.md").is_err());
+    assert!(ingest(&mut sink, "private/note.md").is_err());
+    assert_eq!(
+        snapshot(&db, "kept.md").expect("head survives").text,
+        "captured content"
+    );
+    assert!(snapshot(&db, "private/note.md").is_none());
+    drop(sink);
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        policy.replace("version = 2", "version = 1").as_bytes(),
+    );
+    let (_, mut sink) = sink_for(&scratch, &supervisor);
+    assert!(matches!(
+        ingest(&mut sink, "private/note.md").expect("excluded"),
+        IngestOutcome::NotOwned
+    ));
+    assert!(matches!(
+        ingest(&mut sink, "kept.md").expect("recovered"),
+        IngestOutcome::Captured { .. }
+    ));
+}
+
+#[test]
 fn an_unreadable_policy_holds_capture_instead_of_widening_or_retiring() {
     let scratch = ScratchDir::new().expect("scratch");
     let supervisor = WorkspaceSupervisor::new();

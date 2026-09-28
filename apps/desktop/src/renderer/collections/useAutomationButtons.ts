@@ -1,6 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
-import type { AutomationRunSettledEvent, AutomationRunWaitingEvent } from "../../ipc/bridgeContract";
+import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
+import type { AutomationRunSettledEvent } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
 // Button fields for one Collection in one window: what each button shows,
@@ -49,12 +50,6 @@ interface Run {
 
 type Outcome = Pick<AutomationRunSettledEvent, "outcome" | "error">;
 
-const WAITING: Record<AutomationRunWaitingEvent["reason"], string> = {
-  roster: "Waiting to check who can edit this Collection.",
-  held: "Waiting for someone who can edit this Collection to allow a step.",
-  busy: "Waiting for other automations to finish.",
-  session: "Sign in to send this automation's chat messages.",
-};
 // Events that arrive before their press answer; only the newest are kept.
 const EARLY_EVENTS = 20;
 // Idle stores the window keeps for Collections it showed before.
@@ -168,10 +163,10 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     if (closed || event.workspaceId !== workspaceId) return;
     const found = find(event.claimId);
     if (!found) {
-      remember(earlyWaits, event.claimId, WAITING[event.reason]);
+      remember(earlyWaits, event.claimId, PRESS_WAITING[event.reason]);
       return;
     }
-    found[1].waiting = WAITING[event.reason];
+    found[1].waiting = PRESS_WAITING[event.reason];
     changed(found[0]);
   });
 

@@ -322,10 +322,45 @@ fn array_index(key: &str) -> Option<u32> {
 /// Parse `.dohc/files.toml`. Collects all shape errors in one pass (never a
 /// partial application), matching `parseFilesPolicy` (`effectivePolicy.ts`).
 pub fn parse_files_policy(toml_text: &str) -> Result<Vec<FilesPolicyRule>, Vec<String>> {
-    let value = match toml_text.parse::<toml::Table>() {
+    parse_files_policy_diagnostic(toml_text).map_err(|(_, errors)| errors)
+}
+
+fn parse_files_policy_diagnostic(
+    toml_text: &str,
+) -> Result<Vec<FilesPolicyRule>, (DiagnosticReason, Vec<String>)> {
+    let mut value = match toml_text.parse::<toml::Table>() {
         Ok(table) => table,
-        Err(err) => return Err(vec![format!("invalid TOML: {err}")]),
+        Err(err) => {
+            return Err((
+                DiagnosticReason::Invalid,
+                vec![format!("invalid TOML: {err}")],
+            ));
+        }
     };
+    if let Some(version) = value.remove("version") {
+        let number = version
+            .as_integer()
+            .map(|value| value as f64)
+            .or_else(|| version.as_float());
+        if number != Some(1.0) {
+            let unsupported = number.is_some_and(|value| {
+                value > 1.0 && value <= 9_007_199_254_740_991.0 && value.fract() == 0.0
+            });
+            let detail = if unsupported {
+                "files.toml uses a newer version. Update dohc to read this file.".to_owned()
+            } else {
+                "files.toml has an invalid version. Set version to 1.".to_owned()
+            };
+            return Err((
+                if unsupported {
+                    DiagnosticReason::UnsupportedVersion
+                } else {
+                    DiagnosticReason::Invalid
+                },
+                vec![detail],
+            ));
+        }
+    }
     let mut errors: Vec<String> = Vec::new();
     let rule_value = validate_top_level(&value, &mut errors);
     let mut rules: Vec<FilesPolicyRule> = Vec::new();
@@ -358,7 +393,7 @@ pub fn parse_files_policy(toml_text: &str) -> Result<Vec<FilesPolicyRule>, Vec<S
     if errors.is_empty() {
         Ok(rules)
     } else {
-        Err(errors)
+        Err((DiagnosticReason::Invalid, errors))
     }
 }
 
@@ -559,6 +594,7 @@ pub struct PolicyDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticReason {
     Unreadable,
+    UnsupportedVersion,
     Invalid,
 }
 
@@ -572,6 +608,17 @@ pub struct SearchPolicySnapshot {
 }
 
 impl SearchPolicySnapshot {
+    /// Capture cannot interpret the user's narrowing rules yet.
+    pub fn holds_file_capture(&self) -> bool {
+        self.diagnostics.iter().any(|diagnostic| {
+            diagnostic.file == "files.toml"
+                && matches!(
+                    diagnostic.reason,
+                    DiagnosticReason::Unreadable | DiagnosticReason::UnsupportedVersion
+                )
+        })
+    }
+
     /// Whether FILE search must fail closed (a policy file is broken).
     pub fn is_degraded(&self) -> bool {
         !self.diagnostics.is_empty()
@@ -586,7 +633,7 @@ enum PolicyRead<T> {
 fn read_policy_file<T>(
     root_dir: &Path,
     file_name: &'static str,
-    parse: impl FnOnce(&str) -> Result<Vec<T>, Vec<String>>,
+    parse: impl FnOnce(&str) -> Result<Vec<T>, (DiagnosticReason, Vec<String>)>,
 ) -> PolicyRead<T> {
     let broken = |reason: DiagnosticReason, detail: String| {
         PolicyRead::Broken(PolicyDiagnostic {
@@ -648,7 +695,7 @@ fn read_policy_file<T>(
     };
     match parse(&text) {
         Ok(rules) => PolicyRead::Rules(Some(rules)),
-        Err(errors) => broken(DiagnosticReason::Invalid, errors.join("; ")),
+        Err((reason, errors)) => broken(reason, errors.join("; ")),
     }
 }
 
@@ -665,11 +712,13 @@ fn describe_io(err: &std::io::Error) -> String {
 /// frozen), never a silent widen.
 pub fn read_engine_search_policy(root_dir: &Path) -> SearchPolicySnapshot {
     let mut snapshot = SearchPolicySnapshot::default();
-    match read_policy_file(root_dir, "files.toml", parse_files_policy) {
+    match read_policy_file(root_dir, "files.toml", parse_files_policy_diagnostic) {
         PolicyRead::Rules(rules) => snapshot.files_policy = rules,
         PolicyRead::Broken(diag) => snapshot.diagnostics.push(diag),
     }
-    match read_policy_file(root_dir, "visibility.toml", parse_visibility_policy) {
+    match read_policy_file(root_dir, "visibility.toml", |text| {
+        parse_visibility_policy(text).map_err(|errors| (DiagnosticReason::Invalid, errors))
+    }) {
         PolicyRead::Rules(rules) => snapshot.visibility_policy = rules,
         PolicyRead::Broken(diag) => snapshot.diagnostics.push(diag),
     }
@@ -814,6 +863,39 @@ mod tests {
         let rules = parse_files_policy(toml).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].searchable, Some(false));
+    }
+
+    #[test]
+    fn newer_files_policy_holds_capture_until_readable() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        std::fs::create_dir(scratch.path().join(".dohc")).expect("policy directory");
+        let path = scratch.path().join(".dohc/files.toml");
+        for version in ["2", "2.0"] {
+            std::fs::write(
+                &path,
+                format!("version = {version}\n[[rule]]\npath = \"private/**\"\ntracked = false\n"),
+            )
+            .expect("newer policy");
+            let snapshot = read_engine_search_policy(scratch.path());
+            assert_eq!(
+                snapshot.diagnostics[0].reason,
+                DiagnosticReason::UnsupportedVersion
+            );
+            assert!(snapshot.holds_file_capture());
+            assert!(!path_is_search_indexed(&snapshot, "private/note.md"));
+        }
+        std::fs::write(
+            &path,
+            "version = 1\n[[rule]]\npath = \"private/**\"\ntracked = false\n",
+        )
+        .expect("supported policy");
+        let snapshot = read_engine_search_policy(scratch.path());
+        assert!(!snapshot.holds_file_capture());
+        assert!(!path_is_search_indexed(&snapshot, "private/note.md"));
+        std::fs::write(&path, "version = \"1\"").expect("invalid policy");
+        let snapshot = read_engine_search_policy(scratch.path());
+        assert_eq!(snapshot.diagnostics[0].reason, DiagnosticReason::Invalid);
+        assert!(!snapshot.holds_file_capture());
     }
 
     #[test]

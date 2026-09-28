@@ -953,40 +953,9 @@ fn nfc(value: &str) -> String {
     value.nfc().collect()
 }
 
-/// The channel lookup slug derived from a display name — NFC, lowercase,
-/// dash-separated, ascii-safe (`channelSlugForName`, matrix 4.1b). Durable rows
-/// key on `channel_id`, never the slug, so a rename cannot fork channel state.
-///
-/// Ports the TS transform verbatim: `NFC` → `toLowerCase` → collapse
-/// whitespace/underscore runs to `-` → drop everything outside `[a-z0-9-]` →
-/// collapse `-` runs → trim leading/trailing `-`.
+/// The bounded Unicode lookup slug. Durable rows key on channel_id.
 pub fn channel_slug_for_name(name: &str) -> String {
-    let lowered = nfc(name).to_lowercase();
-    let mut out = String::with_capacity(lowered.len());
-    // Whitespace and `_` become `-`; other non-`[a-z0-9-]` chars are dropped.
-    for ch in lowered.chars() {
-        if ch.is_whitespace() || ch == '_' {
-            out.push('-');
-        } else if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' {
-            out.push(ch);
-        }
-        // else: dropped (matches `.replace(/[^a-z0-9-]/gu, "")`).
-    }
-    // Collapse `-` runs and trim leading/trailing `-`.
-    let mut collapsed = String::with_capacity(out.len());
-    let mut prev_dash = false;
-    for ch in out.chars() {
-        if ch == '-' {
-            if !prev_dash {
-                collapsed.push('-');
-            }
-            prev_dash = true;
-        } else {
-            collapsed.push(ch);
-            prev_dash = false;
-        }
-    }
-    collapsed.trim_matches('-').to_owned()
+    crate::names::name_slug(name, 200)
 }
 
 /// base32 lowercase (RFC 4648, no padding) of `bytes` (`base32LowercaseNoPadding`).
@@ -1156,13 +1125,18 @@ fn is_bounded_replicated_chat_id(value: &str, max_utf16_units: usize) -> bool {
         && !has_projection_control_char(value)
 }
 
-fn is_replicated_channel_slug(value: &str) -> bool {
-    is_bounded_replicated_chat_id(value, 200)
+pub fn is_replicated_channel_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 200
+        && nfc(value) == value
+        && value == value.to_lowercase()
         && value.split('-').all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            part.chars()
+                .next()
+                .is_some_and(crate::names::is_name_letter_or_number)
+                && part.chars().all(|ch| {
+                    crate::names::is_name_letter_or_number(ch) || crate::names::is_name_mark(ch)
+                })
         })
 }
 
@@ -1724,11 +1698,11 @@ fn is_js_whitespace(ch: char) -> bool {
 }
 
 fn is_mention_alnum(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '\u{017F}' | '\u{212A}')
+    crate::names::is_name_letter_or_number(ch)
 }
 
 fn is_mention_body(ch: char) -> bool {
-    is_mention_alnum(ch) || matches!(ch, '.' | '_' | '-')
+    is_mention_alnum(ch) || crate::names::is_name_mark(ch) || matches!(ch, '.' | '_' | '-')
 }
 
 fn normalize_mention_candidate(candidate: &str) -> Option<String> {
@@ -1741,7 +1715,16 @@ fn normalize_mention_candidate(candidate: &str) -> Option<String> {
     if candidate.is_empty() {
         return None;
     }
-    Some(candidate.nfc().flat_map(char::to_lowercase).collect())
+    let normalized: String = candidate
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
+        .nfc()
+        .collect();
+    if normalized.len() > 200 {
+        return None;
+    }
+    Some(normalized)
 }
 
 fn range_contains(ranges: &[(usize, usize)], offset: usize) -> bool {
@@ -2322,12 +2305,21 @@ impl<'a> LinkedChatStore<'a> {
         workspace_id: &str,
         slug: &str,
     ) -> Result<Option<ChatChannel>, DomainError> {
+        let requested = nfc(slug).to_lowercase();
         let slug = channel_slug_for_name(slug);
         if slug.is_empty() {
             return Ok(None);
         }
         self.store.read_with(|conn| {
-            let found = channel_by_slug(conn, workspace_id, &slug)?;
+            let exact = if is_replicated_channel_slug(&requested) {
+                channel_by_slug(conn, workspace_id, &requested)?
+            } else {
+                None
+            };
+            let found = match exact {
+                Some(channel) => Some(channel),
+                None => channel_by_slug(conn, workspace_id, &slug)?,
+            };
             match found {
                 Some(ch) if !channel_is_placeholder(conn, workspace_id, &ch.channel_id)? => {
                     Ok(Some(ch))

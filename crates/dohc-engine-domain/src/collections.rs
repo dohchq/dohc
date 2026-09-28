@@ -205,6 +205,8 @@ macro_rules! reason_code {
 reason_code!(CollectionSchemaReasonCode {
     InvalidYaml,
     RootNotMapping,
+    UnsupportedVersion,
+    InvalidVersion,
     RootCollectionUnsupported,
     UnknownProperty,
     ExpectedText,
@@ -1186,10 +1188,28 @@ pub fn parse_collection_schema(yaml_text: &str) -> CollectionSchemaParseResult {
         return degraded_document(CollectionSchemaReasonCode::RootNotMapping);
     };
 
+    if let Some(version) = mapping_get(root, "version") {
+        let number = version
+            .as_integer()
+            .map(|value| value as f64)
+            .or_else(|| version.as_floating_point());
+        if number != Some(1.0) {
+            let code = if number.is_some_and(|value| {
+                value > 1.0 && value <= 9_007_199_254_740_991.0 && value.fract() == 0.0
+            }) {
+                CollectionSchemaReasonCode::UnsupportedVersion
+            } else {
+                CollectionSchemaReasonCode::InvalidVersion
+            };
+            let mut result = degraded_document(code);
+            result.reasons[0].path = "/version".to_owned();
+            return result;
+        }
+    }
     let mut reasons = Vec::new();
     report_unknown_properties(
         root,
-        &["name", "description", "fields", "views"],
+        &["version", "name", "description", "fields", "views"],
         "",
         &mut reasons,
     );
@@ -3837,6 +3857,12 @@ pub fn reconcile_collections_in_tx(
     let collection_schemas: HashMap<&str, &CollectionSchema> = parsed_schemas
         .iter()
         .filter(|(_, collection_path, _)| !collection_path.is_empty())
+        .filter(|(_, _, parsed)| {
+            !parsed
+                .reasons
+                .iter()
+                .any(|reason| reason.code == CollectionSchemaReasonCode::UnsupportedVersion)
+        })
         .map(|(_, collection_path, parsed)| (collection_path.as_str(), &parsed.schema))
         .collect();
     let records: Vec<&CollectionSnapshot> = snapshots
@@ -5893,6 +5919,15 @@ pub fn get_collection_record(
     else {
         return Ok(None);
     };
+    if collection
+        .reasons
+        .iter()
+        .any(|reason| reason.code == CollectionSchemaReasonCode::UnsupportedVersion)
+    {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection.yaml uses a newer version. Update dohc to read this file.",
+        });
+    }
     let record = load_collection_records(
         conn,
         workspace_id,

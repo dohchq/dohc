@@ -125,14 +125,14 @@ describe("link browser credential material", () => {
     expect(f.fetchRelay.mock.calls.filter(([req]) => new URL(req.url).pathname === "/sync/link-refresh")).toHaveLength(1);
   });
 
-  it.each([401, 503])("preserves refresh refusal %i and session retention", async status => {
+  it.each([404, 503])("preserves refresh refusal %i and session retention", async status => {
     const f = fixture();
     const { session, cookie } = await f.exchange();
     f.setNow(901_001);
     f.fetchRelay.mockResolvedValue(new Response(null, { status }));
-    expect(await f.application.resolveLinkBrowserMaterial(session, cookie, signal())).toEqual({ ok: false, status: status === 401 ? 404 : 503 });
+    expect(await f.application.resolveLinkBrowserMaterial(session, cookie, signal())).toEqual({ ok: false, status: status === 404 ? 404 : 503 });
     f.fetchRelay.mockResolvedValue(Response.json({ ok: true, grantId: "grant-alpha", capabilityToken: renewed, capabilityExpiresAtMs: 1_801_001 }));
-    expect(await f.application.resolveLinkBrowserMaterial(session, cookie, signal())).toMatchObject(status === 401 ? { ok: false, status: 404 } : { ok: true, capabilityToken: renewed });
+    expect(await f.application.resolveLinkBrowserMaterial(session, cookie, signal())).toMatchObject(status === 404 ? { ok: false, status: 404 } : { ok: true, capabilityToken: renewed });
   });
 
   it("keeps a still-valid capability when refresh is unavailable", async () => {

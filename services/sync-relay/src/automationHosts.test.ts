@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   AUTOMATION_COMPUTERS_PER_WORKSPACE,
+  AUTOMATION_SERVER_MAX_WORKSPACES,
   AUTOMATION_HOST_MAX_BODY_BYTES,
   AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES,
   type RelayAutomationHostState,
@@ -92,15 +93,15 @@ describe("automation hosts", () => {
       releasedThroughMs: null,
     });
     expect(claimed.computers).toEqual([
-      { installId: "desktop", label: "Ice's desktop", lastSeenMs: 12_000 },
-      { installId: "laptop", label: "laptop", lastSeenMs: 11_000 },
+      { installId: "desktop", kind: "computer", label: "Ice's desktop", lastSeenMs: 12_000 },
+      { installId: "laptop", kind: "computer", label: "laptop", lastSeenMs: 11_000 },
     ]);
 
     // A later claim finds a host and changes nothing but its own last seen.
     clock = 13_000;
     const again = await checkIn(h, "laptop", true, "Ice's laptop");
     expect(again.host).toEqual(claimed.host);
-    expect(again.computers[0]).toEqual({ installId: "laptop", label: "Ice's laptop", lastSeenMs: 13_000 });
+    expect(again.computers[0]).toEqual({ installId: "laptop", kind: "computer", label: "Ice's laptop", lastSeenMs: 13_000 });
   });
 
   it("answers nobody but the owner, and never a browser cookie", async () => {
@@ -438,10 +439,229 @@ describe("automation hosts", () => {
     expect(countRows(dbPath, "sync_relay_automation_hosts")).toBe(0);
     expect(countRows(dbPath, "sync_relay_automation_computers")).toBe(0);
     expect(countRows(dbPath, "sync_relay_automation_group_handovers")).toBe(0);
+    expect(countRows(dbPath, "sync_relay_automation_host_placements")).toBe(0);
 
     const damaged = inspectDatabase(dbPath);
     damaged.exec("DROP TABLE sync_relay_automation_computers");
     damaged.close();
     expect(() => reopenTestStorage(dbPath)).toThrow("automation host schema is missing or damaged");
+  });
+});
+
+describe("a server that runs automations", () => {
+  const SERVER = { label: "My dohc server" };
+
+  // One store with two handlers: `off` as the relay runs with automations
+  // off, `on` as it runs with them on.
+  async function relays(): Promise<{ off: SyncRelayHandler; on: SyncRelayHandler; storage: SyncRelayStorage }> {
+    const { h: off, storage } = await relay();
+    return { off, on: testHandler(storage, { nowMs: () => clock, automationServer: SERVER }), storage };
+  }
+
+  async function groupMark(h: SyncRelayHandler, generation: number): Promise<unknown> {
+    const response = await groups(h, generation);
+    expect(response.status).toBe(200);
+    return response.json();
+  }
+
+  // Fills the server with other workspaces, as far as its limit: each one
+  // hosted there, or with `handingOver`, being handed to it.
+  function fillServer(storage: SyncRelayStorage, handingOver = false) {
+    // Other workspaces' rows, standing in for a full server, need no workspace rows.
+    const db = inspectDatabase(storagePath(storage));
+    db.exec("PRAGMA foreign_keys = OFF");
+    const insert = db.prepare(
+      handingOver
+        ? "INSERT INTO sync_relay_automation_hosts (workspace_id, install_id, generation, handover_from) VALUES (?, 'x', 1, 'server')"
+        : "INSERT INTO sync_relay_automation_hosts (workspace_id, install_id, generation) VALUES (?, 'server', 1)",
+    );
+    for (let index = 0; index < AUTOMATION_SERVER_MAX_WORKSPACES; index++) insert.run(`other-${index}`);
+    return {
+      makeRoom() {
+        db.prepare("DELETE FROM sync_relay_automation_hosts WHERE workspace_id = 'other-0'").run();
+        db.close();
+      },
+    };
+  }
+
+  it("records a first claim on the server and lists it first", async () => {
+    const { on } = await relays();
+    clock = 12_000;
+    const claimed = await checkIn(on, "desktop", true, "Ice's desktop");
+    expect(claimed.host).toEqual({ installId: "server", generation: 1, handoverFrom: null, releasedThroughMs: null });
+    expect(claimed.computers).toEqual([
+      { installId: "server", kind: "server", label: "My dohc server", lastSeenMs: 12_000 },
+      { installId: "desktop", kind: "computer", label: "Ice's desktop", lastSeenMs: 12_000 },
+    ]);
+  });
+
+  it("never takes the server's install id from a computer", async () => {
+    const { off, on } = await relays();
+    for (const h of [off, on]) {
+      expect((await send(h, "check-in", { installId: "server", label: "Fake", claim: true })).status).toBe(400);
+      expect((await send(h, "release", {
+        installId: "server", generation: 0, releasedThroughMs: 1, groups: GROUPS, groupsWatched: 0,
+      })).status).toBe(400);
+      const presses = `/sync/${WORKSPACE}/automation-presses`;
+      expect((await h(request("owner", `${presses}?installId=server`))).status).toBe(400);
+      for (const [action, body] of [
+        ["accept", { generation: 1, hostPressIds: ["press-1"] }],
+        ["settle", { hostPressId: "press-1", outcome: "done", error: null }],
+      ] as const) {
+        const answer = await h(request("owner", `${presses}/${action}`, jsonBody({ installId: "server", ...body })));
+        expect(answer.status, action).toBe(400);
+        expect(await answer.text(), action).toContain("reserved for the server");
+      }
+    }
+    expect((await send(off, "choose", { installId: "server", generation: 0 })).status).toBe(400);
+    expect((await read(on)).host).toBeNull();
+  });
+
+  it("hands a computer the relay placed over to the server at its next check-in", async () => {
+    const { off, on } = await relays();
+    await checkIn(off, "desktop", true);
+    await checkIn(off, "laptop");
+
+    expect((await checkIn(on, "laptop")).host?.installId, "not the host").toBe("desktop");
+    const handing = await checkIn(on, "desktop");
+    expect(handing.host).toEqual({ installId: "server", generation: 2, handoverFrom: "desktop", releasedThroughMs: null });
+    const released = await state(await send(on, "release", {
+      installId: "desktop", generation: 2, releasedThroughMs: 9_000, groups: GROUPS, groupsWatched: 1,
+    }));
+    expect(released.host).toEqual({ installId: "server", generation: 3, handoverFrom: null, releasedThroughMs: 9_000 });
+    expect(await groupMark(on, 3)).toEqual({ ok: true, generation: 3, groups: GROUPS });
+  });
+
+  it("keeps a host recorded before the relay told placed hosts from chosen ones", async () => {
+    const { off, on, storage } = await relays();
+    await checkIn(off, "desktop", true);
+    const db = inspectDatabase(storagePath(storage));
+    db.prepare("DELETE FROM sync_relay_automation_host_placements").run();
+    db.close();
+    expect((await checkIn(on, "desktop", true)).host?.installId).toBe("desktop");
+  });
+
+  it("keeps a computer the owner chose", async () => {
+    const { off, on } = await relays();
+    await checkIn(off, "desktop", true);
+    await checkIn(off, "laptop");
+    await state(await send(off, "choose", { installId: "laptop", generation: 1 }));
+    await state(await send(off, "release", {
+      installId: "desktop", generation: 2, releasedThroughMs: 9_000, groups: GROUPS, groupsWatched: 1,
+    }));
+    const chosen = await checkIn(on, "laptop", true);
+    expect(chosen.host).toEqual({ installId: "laptop", generation: 3, handoverFrom: null, releasedThroughMs: 9_000 });
+
+    // Choosing the host it already has is a choice too.
+    const { off: other, on: otherOn } = await relays();
+    await checkIn(other, "desktop", true);
+    await state(await send(other, "choose", { installId: "desktop", generation: 1 }));
+    expect((await checkIn(otherOn, "desktop", true)).host?.installId).toBe("desktop");
+  });
+
+  it("lets the owner choose the server, and stops at the server's limit", async () => {
+    const { off, on, storage } = await relays();
+    await checkIn(off, "desktop", true);
+    const server = fillServer(storage);
+    const full = await send(on, "choose", { installId: "server", generation: 1 });
+    expect(full.status).toBe(400);
+    expect(await full.text()).toContain("as many workspaces as it can");
+    server.makeRoom();
+    const chosen = await state(await send(on, "choose", { installId: "server", generation: 1 }));
+    expect(chosen.host).toEqual({ installId: "server", generation: 2, handoverFrom: "desktop", releasedThroughMs: null });
+  });
+
+  it("places a computer while the server is full, and hands it over once there is room", async () => {
+    const { on, storage } = await relays();
+    const server = fillServer(storage, true);
+    expect((await checkIn(on, "desktop", true)).host?.installId).toBe("desktop");
+    server.makeRoom();
+    expect((await checkIn(on, "desktop", true)).host).toEqual({
+      installId: "server", generation: 2, handoverFrom: "desktop", releasedThroughMs: null,
+    });
+  });
+
+  describe("once it stops running automations", () => {
+    it("starts the next computer after the relay's now, which the server never ran past", async () => {
+      const { off, on } = await relays();
+      await checkIn(off, "desktop", true);
+      await checkIn(on, "desktop");
+      await state(await send(on, "release", {
+        installId: "desktop", generation: 2, releasedThroughMs: 9_000, groups: GROUPS, groupsWatched: 1,
+      }));
+      // The server ran on after 9,000, in this process, until at most now.
+      clock = 20_000;
+      const moved = await checkIn(off, "laptop", true);
+      expect(moved.host).toEqual({ installId: "laptop", generation: 4, handoverFrom: null, releasedThroughMs: 20_000 });
+
+      // The progress never goes back, even when the relay's clock does.
+      await checkIn(on, "laptop");
+      await state(await send(on, "release", {
+        installId: "laptop", generation: 5, releasedThroughMs: 25_000, groups: GROUPS, groupsWatched: 4,
+      }));
+      clock = 15_000;
+      const again = await checkIn(off, "laptop", true);
+      expect(again.host).toEqual({ installId: "laptop", generation: 7, handoverFrom: null, releasedThroughMs: 25_000 });
+    });
+
+    it("keeps a placed computer placed across a handover it called off", async () => {
+      const { off, on } = await relays();
+      await checkIn(off, "desktop", true);
+      expect((await checkIn(on, "desktop")).host?.handoverFrom).toBe("desktop");
+      expect((await checkIn(off, "laptop")).host?.installId).toBe("desktop");
+      expect((await checkIn(on, "desktop")).host).toEqual({
+        installId: "server", generation: 4, handoverFrom: "desktop", releasedThroughMs: null,
+      });
+    });
+
+    it("starts the computer the server was handing to when the owner chooses it again", async () => {
+      const { off, on } = await relays();
+      await checkIn(on, "desktop", true);
+      await checkIn(on, "laptop");
+      await state(await send(on, "choose", { installId: "laptop", generation: 1 }));
+      const chosen = await state(await send(off, "choose", { installId: "laptop", generation: 2 }));
+      expect(chosen.host).toEqual({ installId: "laptop", generation: 3, handoverFrom: null, releasedThroughMs: clock });
+      expect(await groupMark(off, 3)).toEqual({ ok: true, generation: 3, groups: null });
+    });
+
+    it("moves the host from the server to the next computer that claims it, from now", async () => {
+      const { off, on } = await relays();
+      await checkIn(on, "desktop", true);
+      expect((await checkIn(off, "laptop")).host?.installId, "no claim").toBe("server");
+      const moved = await checkIn(off, "desktop", true);
+      expect(moved.host).toEqual({ installId: "desktop", generation: 2, handoverFrom: null, releasedThroughMs: clock });
+      expect(moved.computers.map((computer) => computer.kind)).toEqual(["computer", "computer"]);
+      expect(await groupMark(off, 2)).toEqual({ ok: true, generation: 2, groups: null });
+      // The relay placed it, so it goes back once the server runs automations again.
+      expect((await checkIn(on, "desktop")).host?.installId).toBe("server");
+    });
+
+    it("ends the server's handover to a computer, which starts from now", async () => {
+      const { off, on } = await relays();
+      await checkIn(on, "desktop", true);
+      await checkIn(on, "laptop");
+      await state(await send(on, "choose", { installId: "laptop", generation: 1 }));
+      const started = await checkIn(off, "desktop");
+      expect(started.host).toEqual({ installId: "laptop", generation: 3, handoverFrom: null, releasedThroughMs: clock });
+      expect(await groupMark(off, 3)).toEqual({ ok: true, generation: 3, groups: null });
+    });
+
+    it("calls off a computer's handover to the server, since that computer still runs", async () => {
+      const { off, on } = await relays();
+      await checkIn(off, "desktop", true);
+      await checkIn(on, "desktop");
+      expect((await send(off, "take-over", { generation: 2 })).status, "the server cannot take over").toBe(400);
+      const kept = await checkIn(off, "laptop");
+      expect(kept.host).toEqual({ installId: "desktop", generation: 3, handoverFrom: null, releasedThroughMs: null });
+    });
+
+    it("starts a chosen computer from now instead of waiting for the server", async () => {
+      const { off, on } = await relays();
+      await checkIn(on, "desktop", true);
+      await checkIn(off, "laptop");
+      const chosen = await state(await send(off, "choose", { installId: "laptop", generation: 1 }));
+      expect(chosen.host).toEqual({ installId: "laptop", generation: 2, handoverFrom: null, releasedThroughMs: clock });
+      expect(await groupMark(off, 2)).toEqual({ ok: true, generation: 2, groups: null });
+    });
   });
 });

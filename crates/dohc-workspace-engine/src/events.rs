@@ -21,6 +21,12 @@ pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
 /// Delivery can be dropped, so subscribers retain their retry timer.
 pub const CAPTURE_INITIAL_SETTLED_EVENT: &str = "capture.initialSettled";
 
+/// Sent once per workspace per engine process when a placement there had to
+/// fall back to a check-then-rename, because the drive has no atomic rename
+/// that refuses to replace. The payload names the workspace. Delivery can be
+/// dropped; `watcher.status` reports the same fact as `noAtomicPlacement`.
+pub const CAPTURE_NO_ATOMIC_PLACEMENT_EVENT: &str = "capture.noAtomicPlacement";
+
 /// Record events fire on every device as that device's engine applies an
 /// update — local `ydoc.recordUpdate` and pulled replication alike. One
 /// applied update emits together: `record.created` first, then

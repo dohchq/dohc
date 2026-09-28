@@ -105,6 +105,7 @@ import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetH
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
+import * as shareRemovalStorage from "./storage/shareRemoval";
 import * as sharesStorage from "./storage/shares";
 import * as discussionStorage from "./storage/discussion";
 import * as handoffStorage from "./storage/handoff";
@@ -299,7 +300,7 @@ export function openSyncRelayStorage(
     }
     owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
     owner.write(() => initializeSyncRelaySchema(db));
-    return new SqliteSyncRelayStorage(
+    const storage = new SqliteSyncRelayStorage(
       db,
       {
         workspaceQuotaBytes,
@@ -314,6 +315,8 @@ export function openSyncRelayStorage(
       liveTickets as unknown as LiveTicketStoragePolicy | undefined,
       owner,
     );
+    storage.purgeExpiredShareRemovals(Date.now());
+    return storage;
   } catch (error) {
     try {
       if (owner) owner.close(); else db.close();
@@ -544,7 +547,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return noticeStorage.pendingShareNotices(this, recipientUserId);
   }
 
-  readAutomationHost(input: {workspaceId: string; ownerUserId: string}) {
+  readAutomationHost(input: automationHostStorage.AutomationHostReadInput) {
     return automationHostStorage.readAutomationHost(this, input);
   }
 
@@ -949,6 +952,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[] {
     return sharesStorage.listSharesReceivedBy(this, recipientUserId);
+  }
+
+  removeShareAccess(input: shareRemovalStorage.ShareRemovalInput) {
+    return shareRemovalStorage.removeShareAccess(this, input);
+  }
+
+  purgeExpiredShareRemovals(nowMs: number): void {
+    shareRemovalStorage.purgeExpiredShareRemovals(this, nowMs);
+  }
+
+  undoShareRemoval(input: Parameters<typeof shareRemovalStorage.undoShareRemoval>[1]) {
+    return shareRemovalStorage.undoShareRemoval(this, input);
+  }
+
+  listRemovedSharesForRecipient(userId: string, shareId?: string) {
+    return shareRemovalStorage.listRemovedSharesForRecipient(this, userId, shareId);
   }
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {

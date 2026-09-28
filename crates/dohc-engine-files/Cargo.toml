@@ -65,8 +65,14 @@ unicode-normalization = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 # Safe descriptor-relative filesystem operations. On Linux this also exposes
-# openat2; other Unix targets use the portable openat/renameat path.
+# openat2; other Unix targets use the portable openat/renameat path. Linux and
+# macOS also get the exclusive rename (renameat2 RENAME_NOREPLACE,
+# renamex_np RENAME_EXCL) the materializer's no-replace step uses.
 rustix = { version = "1.1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+# Read identity from the pinned restoration handle without unsafe code.
+winapi-util = "0.1"
 
 [dev-dependencies]
 # The differential harness parses the workspace-kernel golden fixtures under tests/fixtures

@@ -1,4 +1,4 @@
-import { groupFolderForName } from "@dohc/security-contract";
+import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
   ListFileChatsPayload,
   CreateFileChatPayload,
@@ -883,7 +883,7 @@ export function registerChatsIpcHandlers<
   // the name, so the toast names the group and what to change.
   const GROUP_CREATE_REFUSALS = new Map<string, string>([
     ["channel-exists", "A group with that name already exists."],
-    ["invalid-channel-name", "Use 1 to 80 characters, with at least one letter from a to z or a digit."],
+    ["invalid-channel-name", "Use 1 to 80 characters, including at least one letter or number."],
   ]);
   function groupCreateRefusal(error: unknown): unknown {
     const copy = error instanceof Error ? GROUP_CREATE_REFUSALS.get(error.message) : undefined;
@@ -902,7 +902,7 @@ export function registerChatsIpcHandlers<
         // A group is a folder: the folder is the group's slug unless the
         // creator named one. Main creates it so the group's files have a
         // home before the first post.
-        const folderPath = input.folderPath ?? groupFolderForName(input.name);
+        const folderPath = input.folderPath ?? nameSlug(input.name);
         if (!folderPath) {
           throw new Error("Give the group a name with a letter or a number, or name its folder.");
         }

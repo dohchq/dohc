@@ -1,5 +1,7 @@
 import { useEffect, useRef, type RefObject } from "react";
 
+import { useFocusReturn } from "./focusReturn";
+
 // The window's drag regions take presses before the page sees them. While
 // any menu is open, the root carries data-menu-open and styles.css turns the
 // drag regions off, so a press on the titlebar reaches the page and closes
@@ -30,6 +32,7 @@ export function useDismiss(options: {
   onClose: () => void;
 }): void {
   const { open, container, trigger } = options;
+  useFocusReturn(open, container, () => trigger.current);
   const onClose = useRef(options.onClose);
   onClose.current = options.onClose;
 
@@ -50,7 +53,6 @@ export function useDismiss(options: {
       if (event.key !== "Escape") return;
       event.preventDefault();
       close();
-      trigger.current?.focus();
     }
     const release = holdMenuOpen();
     document.addEventListener("pointerdown", onPointerDown);

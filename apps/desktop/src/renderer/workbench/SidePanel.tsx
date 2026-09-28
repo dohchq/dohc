@@ -5,6 +5,7 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
 } from "./workbenchState";
+import { useFocusReturn } from "../ui/focusReturn";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 
 const KEYBOARD_RESIZE_STEP = 16;
@@ -22,6 +23,7 @@ export function SidePanel(props: {
   children: React.ReactNode;
 }) {
   const asideRef = useRef<HTMLElement>(null);
+  useFocusReturn(true, asideRef);
   // The panel's left edge at drag start — widths derive from clientX against
   // it, so the math holds even if the activity bar ever changes width.
   const dragLeft = useRef<number | null>(null);
@@ -31,6 +33,8 @@ export function SidePanel(props: {
   return (
     <aside
       ref={asideRef}
+      tabIndex={-1}
+      data-focus-surface="panel"
       data-testid="side-panel"
       className="relative flex shrink-0 flex-col border-r border-line bg-panel-2"
       style={{ width }}

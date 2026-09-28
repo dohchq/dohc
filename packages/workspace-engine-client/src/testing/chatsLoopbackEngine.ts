@@ -1,3 +1,5 @@
+import { nameSlug as slug } from "@dohc/workspace-contracts/names";
+import { scanMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract";
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
@@ -169,15 +171,6 @@ function jsonResult(value: unknown): JsonValue {
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function slug(name: string): string {
-  return name
-    .normalize("NFC")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
 }
 
 function normalizeNonempty(value: string, code: string): string {
@@ -407,57 +400,8 @@ function personalFeedMessages(
     );
 }
 
-function codeRanges(body: string): Array<[number, number]> {
-  const ranges: Array<[number, number]> = [];
-  const fenceRe = /^[ \t]*(`{3,}|~{3,})/u;
-  let offset = 0;
-  let openFence: { char: string; len: number; start: number } | undefined;
-  for (const line of body.split("\n")) {
-    const marker = fenceRe.exec(line)?.[1];
-    if (!openFence && marker) {
-      openFence = { char: marker[0] ?? "", len: marker.length, start: offset };
-    } else if (
-      openFence &&
-      marker?.[0] === openFence.char &&
-      marker.length >= openFence.len &&
-      line.trim() === marker
-    ) {
-      ranges.push([openFence.start, offset + line.length]);
-      openFence = undefined;
-    }
-    offset += line.length + 1;
-  }
-  if (openFence) ranges.push([openFence.start, body.length]);
-  const inFence = (position: number): boolean =>
-    ranges.some(([start, end]) => position >= start && position < end);
-  const runRe = /`+/gu;
-  let open: { len: number; start: number } | undefined;
-  for (let match = runRe.exec(body); match !== null; match = runRe.exec(body)) {
-    if (inFence(match.index)) continue;
-    if (!open) open = { len: match[0].length, start: match.index };
-    else if (open.len === match[0].length) {
-      ranges.push([open.start, match.index + match[0].length]);
-      open = undefined;
-    }
-  }
-  return ranges;
-}
-
 function mentionHandles(body: string): string[] {
-  const ranges = codeRanges(body);
-  const regex = /(^|[\s(\[{])@([a-z0-9][a-z0-9._-]*)/giu;
-  const handles: string[] = [];
-  const seen = new Set<string>();
-  for (let match = regex.exec(body); match !== null; match = regex.exec(body)) {
-    const start = match.index + (match[1]?.length ?? 0);
-    if (ranges.some(([from, to]) => start >= from && start < to)) continue;
-    const handle = (match[2] ?? "").replace(/[._-]+$/u, "").normalize("NFC").toLowerCase();
-    if (handle.length > 0 && !seen.has(handle)) {
-      seen.add(handle);
-      handles.push(handle);
-    }
-  }
-  return handles;
+  return [...new Set(scanMentionTokens(body, { ignoreCode: true }).map(token => normalizeHandle(token.handle)))];
 }
 
 const EMOJI_ATOM =
@@ -1908,8 +1852,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const handle = requiredString(params, "handle", "invalid-message-body").trim().toLowerCase();
-    if (!/^[a-z0-9-]+$/u.test(handle)) throw new Error("invalid-message-body");
+    const input = requiredString(params, "handle", "invalid-message-body").trim();
+    const token = scanMentionTokens("@" + input)[0];
+    if (!token || token.end !== 1 + input.replace(/[._-]+$/u, "").length || !/^[\p{L}\p{N}\p{M}._-]+$/u.test(input)) throw new Error("invalid-message-body");
+    const handle = normalizeHandle(token.handle);
     const unreadOnly = optionalBoolean(params, "unreadByAgentOnly") ?? false;
     const rows = state.mentions
       .filter((mention) => mention.handle === handle)

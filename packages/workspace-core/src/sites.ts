@@ -1,5 +1,6 @@
 import { stripWindowsAliasSuffix } from "./paths";
 import { isRecord } from "./records";
+import { fileVersionError, fileVersionReason } from "@dohc/workspace-contracts/file-version";
 export type SiteKind = "static" | "package" | "configured";
 export type SiteConfidence = "high" | "medium" | "low";
 export type SitePackageManager = "pnpm" | "npm" | "yarn" | "bun";
@@ -486,6 +487,11 @@ export function parseDohcSiteConfig(json: string, path = "dohc.json"): ParsedDoh
     return { diagnostics };
   }
 
+  const versionError = fileVersionError(parsed.version, path);
+  const versionReason = fileVersionReason(parsed.version);
+  if (versionError && versionReason) {
+    return { diagnostics: [diagnostic(path, "error", versionReason, versionError)] };
+  }
   const config: DohcSiteConfig = {};
   let declaredType: string | undefined;
   if (parsed.type !== undefined) {

@@ -56,7 +56,7 @@ const SECRET_RETIRE_FAILED: CaptureError = CaptureError {
 /// The workspace key could not be loaded or created — a transient/config
 /// failure, kept dirty for retry (never silently dropping secret capture).
 const POLICY_UNAVAILABLE: CaptureError = CaptureError {
-    reason: "files.toml unreadable: ownership unknown, holding for retry",
+    reason: "files.toml unavailable: ownership unknown, holding for retry",
 };
 const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
     reason: "workspace secret key unavailable",
@@ -292,7 +292,7 @@ pub struct StoreCaptureSink {
     author_json: Option<String>,
     search_policy: Arc<SearchPolicySnapshot>,
     files_policy: PolicyState,
-    /// Set when any op this run was held on an unreadable policy. The driver
+    /// Set when any op this run was held on an unavailable policy. The driver
     /// reads it after the apply to arm its policy-recovery trigger — a
     /// deterministic signal from the exact decision point, immune to the
     /// blip being over before any re-read could observe it.
@@ -353,7 +353,7 @@ pub(crate) enum PolicyState {
     /// rule (writes are never dropped for a bad policy; search is where a
     /// broken policy fails closed).
     Known(Option<Vec<FilesPolicyRule>>),
-    /// The file exists but could not be read (IO error, symlink refusal,
+    /// The file uses an unsupported version or could not be read (IO error, symlink refusal,
     /// oversize — possibly a transient editor lock). The narrowing set is
     /// unknown: falling back to floor-only would durably capture paths the
     /// user may have excluded, and the policy-retire branch would delete
@@ -378,15 +378,10 @@ impl StoreCaptureSink {
             provenance,
         } = params;
         // `.dohc/files.toml` can only narrow engine ownership below the hard
-        // floor. See [`PolicyState`] for the absent/malformed/unreadable
-        // split: only a file that exists but cannot be read makes ownership
-        // unknown; malformed keeps the WS-F floor-only rule.
+        // floor. Unreadable and unsupported policies hold capture;
+        // malformed policies keep the WS-F floor-only rule.
         let snapshot = Arc::new(read_engine_search_policy(&shadow_root));
-        let files_unreadable = snapshot.diagnostics.iter().any(|diagnostic| {
-            diagnostic.file == "files.toml"
-                && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
-        });
-        let files_policy = if files_unreadable {
+        let files_policy = if snapshot.holds_file_capture() {
             PolicyState::Unavailable
         } else {
             PolicyState::Known(snapshot.files_policy.clone())
@@ -485,7 +480,7 @@ impl StoreCaptureSink {
         Ok(self.secret_key.as_ref().expect("key just ensured"))
     }
 
-    /// Whether any op this run was held on an unreadable policy.
+    /// Whether any op this run was held on an unavailable policy.
     pub fn policy_held(&self) -> bool {
         self.policy_held.get()
     }
@@ -837,7 +832,14 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
     ) -> Result<(), CaptureError> {
-        self.retire_head_with(path, only_if_text_head, summary, true)
+        self.retire_head_with(path, only_if_text_head, summary, true, false)
+    }
+
+    /// Retire a head because its file is gone. The actor confirms the absence
+    /// on its own thread and refuses while the file is back, so a replace
+    /// caught between its two renames is never recorded as a delete.
+    fn retire_absent_head(&self, path: &str, summary: Option<String>) -> Result<(), CaptureError> {
+        self.retire_head_with(path, false, summary, true, true)
     }
 
     fn retire_head_with(
@@ -846,6 +848,7 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
         allow_ydoc_origin: bool,
+        confirm_absent: bool,
     ) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
         match self.actor.capture_retire_materialized_blocking_guarded(
@@ -862,6 +865,7 @@ impl StoreCaptureSink {
                 allow_ydoc_origin,
             },
             self.shadow_root.clone(),
+            confirm_absent,
             Arc::new(self.self_writes.clone()),
             self.leases.clone(),
             Arc::new(NoFaults),
@@ -1354,13 +1358,15 @@ impl CaptureSink for StoreCaptureSink {
                 }
             }
             CurrentContent::Absent => {
+                // Raced a delete between scan and re-read: retire like an
+                // ordinary delete (pass provenance; no ownership label), and
+                // report NotOwned so the manifest forgets the path. A refused
+                // retire keeps the self-write identity: the file is back, and
+                // the rescan may find dohc's own bytes.
+                self.retire_absent_head(path, self.provenance.summary.clone())?;
                 if changed {
                     self.self_writes.clear_path(&self.workspace_id, path);
                 }
-                // Raced a delete between scan and re-read: retire like an
-                // ordinary delete (pass provenance; no ownership label), and
-                // report NotOwned so the manifest forgets the path.
-                self.retire_head(path, false, self.provenance.summary.clone())?;
                 Ok(IngestOutcome::NotOwned)
             }
             CurrentContent::NonOwnable => {
@@ -1393,6 +1399,7 @@ impl CaptureSink for StoreCaptureSink {
                     path,
                     false,
                     Some("Stopped tracking non-text content".to_owned()),
+                    false,
                     false,
                 )?;
                 Ok(IngestOutcome::NotOwned)
@@ -1457,7 +1464,7 @@ impl CaptureSink for StoreCaptureSink {
                 match self.path_containment(path) {
                     Containment::Contained => {}
                     Containment::Absent => {
-                        return self.retire_head(path, false, self.provenance.summary.clone());
+                        return self.retire_absent_head(path, self.provenance.summary.clone());
                     }
                     Containment::Escaped => return Err(ESCAPES_ROOT),
                 }
@@ -1467,7 +1474,7 @@ impl CaptureSink for StoreCaptureSink {
                     // file gone; absence confirms it outright.
                     Ok(_) => self.retire_head(path, false, self.provenance.summary.clone()),
                     Err(err) if absent_error(&err) => {
-                        self.retire_head(path, false, self.provenance.summary.clone())
+                        self.retire_absent_head(path, self.provenance.summary.clone())
                     }
                     // Indeterminate (permissions, locks): cannot prove
                     // absence — retain last-known-good, fail-safe.
