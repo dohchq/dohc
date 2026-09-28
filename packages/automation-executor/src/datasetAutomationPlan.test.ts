@@ -4,7 +4,6 @@ import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts
 import { chatDirectoryOf } from "./automationChat";
 import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
 import {
-  DATASET_WAKE_NEEDS_BUTTON,
   datasetAutomationProblem,
   datasetEffectKey,
   datasetFieldWritesOf,
@@ -111,17 +110,19 @@ describe("dataset automation steps", () => {
     }
   });
 
-  it("wakes an agent from a button, a schedule, or a Group message, since a commit does not say whether a person or an agent made it", () => {
+  it.each([
+    "record-added: null", "record-changed: null", "record-removed: null", "field-changed: Status",
+    'starts-matching: record.Status == "Done"', "button: Ask", "{schedule: day, timezone: UTC}", "group-message: Team",
+  ])("allows a wake on every supported trigger, including both branches: %s", (when) => {
     const wake = automation("      - wake-agent: Review this\n        person: user_ana\n").do;
-    const changed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
-    for (const steps of everywhere(wake, changed.do)) {
-      expect(datasetAutomationProblem({ ...changed, do: steps }, generated)).toBe(DATASET_WAKE_NEEDS_BUTTON);
-    }
-    const pressed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n", "button: Ask");
-    for (const steps of everywhere(wake, pressed.do)) expect(datasetAutomationProblem({ ...pressed, do: steps }, generated)).toBeNull();
-    for (const when of ["{schedule: day, timezone: UTC}", "group-message: Team"]) {
-      const started = automation("      - notify: Done\n        to: [user_ana]\n", when);
-      for (const steps of everywhere(wake, started.do)) expect(datasetAutomationProblem({ ...started, do: steps }, generated)).toBeNull();
+    const started = automation("      - notify: Done\n        to: [user_ana]\n", when);
+    for (const steps of everywhere(wake, started.do)) {
+      expect(datasetAutomationProblem({ ...started, do: steps }, generated)).toBeNull();
+      if (started.when.kind === "starts-matching") {
+        expect(datasetAutomationProblem({ ...started, do: steps }, authored)).toContain("cannot read a record to check a condition");
+      } else {
+        expect(datasetAutomationProblem({ ...started, do: steps }, authored)).toBeNull();
+      }
     }
   });
 
