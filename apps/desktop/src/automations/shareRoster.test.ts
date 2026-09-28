@@ -11,6 +11,7 @@ import {
   SHARE_ROSTER_FRESH_MS,
   SHARE_ROSTER_REFRESH_MS,
   type ListedGrant,
+  type ListedLink,
   type RosterAnswer,
   type RosterListing,
 } from "./shareRoster";
@@ -28,10 +29,18 @@ function row(overrides: Record<string, unknown> = {}) {
 
 function link(overrides: Record<string, unknown> = {}) {
   return {
-    status: "active", selector: { paths: ["Trip"], versionId: null },
+    grantId: "g-link", status: "active", selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null,
     dependents: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", access: "edit", generation: 1, createdAtMs: 1 }],
     ...overrides,
   };
+}
+
+// A link's own grant, as the listing keeps it.
+function linkGrant(grantId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    grant: { grantId, recipientUserId: null, recipientEmail: null, selector: { paths: ["Trip"], versionId: null }, access: "edit" },
+    ended: false, automationsGeneration: null, ...overrides,
+  } as ListedLink;
 }
 
 const ana: ListedGrant = {
@@ -96,18 +105,38 @@ describe("roster from the relay's listings", () => {
         { ...anaOnRoster, grantId: "g-5" },
         { ...anaOnRoster, grantId: "g-6", files: { paths: [], versionId: "v-1", access: "edit" } },
       ],
+      formerLinks: [],
     });
   });
 
-  it("lists the dependents of active share links like named grants", async () => {
+  it("lists each active Edit link as its own grant, and every active link's dependents like named grants", async () => {
     expect(await listed({ granted: [] }, [
       link(),
-      link({ status: "revoked" }),
-      link({ selector: null, dependents: [] }),
-    ])).toEqual({ grants: [{
-      grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test",
-      selector: { paths: ["Trip"], versionId: null }, access: "edit",
-    }] });
+      link({ grantId: "g-view", access: "view", dependents: [] }),
+      link({ grantId: "g-comment", access: "comment", dependents: [] }),
+      link({ grantId: "g-revoked", status: "revoked" }),
+      link({ grantId: "g-revoked-damaged", status: "revoked", selector: null, access: "unknown" }),
+    ])).toEqual({
+      grants: [{
+        grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test",
+        selector: { paths: ["Trip"], versionId: null }, access: "edit",
+      }],
+      links: [linkGrant("g-link")],
+    });
+  });
+
+  it("keeps a link that wrote automations directly after it ends, without its dependents", async () => {
+    const listing = await listed({ granted: [] }, [
+      link({ grantId: "g-ended", status: "revoked", automationsGeneration: 3 }),
+      link({ grantId: "g-narrowed", access: "view", automationsGeneration: 3, dependents: [] }),
+    ]);
+    expect(listing).toEqual({
+      grants: [],
+      links: [
+        linkGrant("g-ended", { ended: true, automationsGeneration: 3 }),
+        linkGrant("g-narrowed", { automationsGeneration: 3, grant: { ...linkGrant("g-narrowed").grant, access: "view" } }),
+      ],
+    });
   });
 
   it.each([
@@ -130,15 +159,35 @@ describe("roster from the relay's listings", () => {
         row({ grantId: "g-3", workspaceId: "ws-other", selector: null, damaged: true, access: 7, principalKind: 3, revokedAtMs: "no" }),
         row(),
       ],
-    })).toEqual({ grants: [ana] });
+    })).toEqual({ grants: [ana], links: [] });
     expect(await listed({ granted: [row({ workspaceId: undefined })] }))
       .toEqual({ grants: null, problem: { kind: "unusable-listing" } });
   });
 
-  it("calls a damaged link with dependents, or a link it cannot read, damaged", async () => {
-    for (const damaged of [link({ selector: null }), link({ status: "paused" }), link({ dependents: "all" })]) {
+  it("calls an active link it cannot read, or an ended one that wrote automations directly, damaged", async () => {
+    for (const damaged of [
+      link({ selector: null }),
+      link({ selector: null, access: "unknown", dependents: [] }),
+      link({ status: "paused" }),
+      link({ dependents: "all" }),
+      link({ automationsGeneration: 0 }),
+      link({ automationsGeneration: "2" }),
+      link({ access: "read-write" }),
+      link({ status: "revoked", automationsGeneration: 3, selector: null }),
+      link({ status: "revoked", automationsGeneration: 3, selector: { kind: "chat", channelWireId: "wire" }, access: "read-write" }),
+      link({ status: "revoked", automationsGeneration: 3, selector: { paths: [], versionId: "v-1" } }),
+    ]) {
       expect(await listed({ granted: [] }, [damaged])).toEqual({ grants: null, problem: { kind: "damaged-link" } });
     }
+  });
+
+  it("says the server needs an update when it lists links without their automations writes", async () => {
+    const { automationsGeneration: _left, ...older } = link();
+    expect(await listed({ granted: [] }, [older])).toEqual({ grants: null, problem: { kind: "outdated-server" } });
+    const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
+    const stored = { version: 1, grants: null, problem: { kind: "outdated-server" } } as const;
+    expect(reachRosterFor({ entry: { ...entry, shareRoster: stored }, localUserId: null, latest: null, next: "" }))
+      .toEqual({ kind: "unknown", problem: { kind: "outdated-server" } });
   });
 
   it("calls a listing that is not the relay's shape unusable", async () => {
@@ -159,6 +208,8 @@ describe("listing from the relay", () => {
     });
     const answer = await listRosterGrants(WORKSPACE, get);
     expect(answer.kind === "answered" && answer.listing.grants?.map((grant) => grant.grantId)).toEqual(["g-1", "g-dep"]);
+    expect(answer.kind === "answered" && answer.listing.grants !== null && answer.listing.links.map((own) => own.grant.grantId))
+      .toEqual(["g-link"]);
   });
 
   it("reports no answer, and names what to do", async () => {
@@ -246,7 +297,7 @@ describe("the roster the reach check reads", () => {
     const read = (shareRoster: unknown) =>
       reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, latest: null, next });
     expect(reachRosterFor({ entry: { ...entry, remote }, localUserId: null, latest: null, next })).toEqual(unchecked);
-    expect(read({ version: 2, grants: [ana] })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster] });
+    expect(read({ version: 2, grants: [ana], links: [] })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster], formerLinks: [] });
     expect(read({ version: 2, grants: null, problem: { kind: "damaged-link" } }))
       .toEqual({ kind: "unknown", problem: { kind: "damaged-link" } });
     for (const damaged of [
@@ -256,14 +307,47 @@ describe("the roster the reach check reads", () => {
       { ...ana, selector: { kind: "group", channelWireId: "wire", paths: [], versionId: null }, access: "read-write" },
       { ...ana, recipientUserId: null, recipientEmail: null },
     ]) {
-      expect(read({ version: 2, grants: [damaged] }), JSON.stringify(damaged)).toEqual(unchecked);
+      expect(read({ version: 2, grants: [damaged], links: [] }), JSON.stringify(damaged)).toEqual(unchecked);
     }
     expect(read({ version: 2, grants: null })).toEqual(unchecked);
   });
 
+  it("makes each active link an editor of its own, and keeps a link that wrote automations directly and stopped editing", () => {
+    const read = (links: unknown[]) => reachRosterFor({
+      entry: { ...entry, remote, shareRoster: { version: 2, grants: [ana], links } as RegistryEntry["shareRoster"] },
+      localUserId: null, latest: null, next: "",
+    });
+    const onRoster = (grantId: string, access = "edit") =>
+      ({ grantId, recipientUserId: null, recipientEmail: null, files: { paths: ["Trip"], versionId: null, access }, channel: null });
+    expect(read([
+      linkGrant("g-a"),
+      linkGrant("g-b", { automationsGeneration: 3 }),
+      linkGrant("g-ended", { ended: true, automationsGeneration: 3 }),
+      linkGrant("g-narrowed", { automationsGeneration: 3, grant: { ...linkGrant("g-narrowed").grant, access: "comment" } }),
+      linkGrant("g-view", { grant: { ...linkGrant("g-view").grant, access: "view" } }),
+    ])).toEqual({
+      kind: "owner", ownerUserId: "u-owner",
+      grants: [anaOnRoster, onRoster("g-a"), onRoster("g-b"), onRoster("g-narrowed", "comment"), onRoster("g-view", "view")],
+      formerLinks: [
+        { grantId: "g-ended", generation: 3, files: { paths: ["Trip"], versionId: null } },
+        { grantId: "g-narrowed", generation: 3, files: { paths: ["Trip"], versionId: null } },
+      ],
+    });
+  });
+
+  it("calls a copy saved before links were listed, or a link that names a person, unchecked", () => {
+    const unchecked = { kind: "unknown", problem: { kind: "unchecked", next: "" } };
+    const read = (shareRoster: unknown) =>
+      reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, latest: null, next: "" });
+    expect(read({ version: 2, grants: [ana] })).toEqual(unchecked);
+    expect(read({ version: 2, grants: [], links: [linkGrant("g-a", { grant: { ...linkGrant("g-a").grant, recipientUserId: "u-ana" } })] }))
+      .toEqual(unchecked);
+    expect(read({ version: 2, grants: [], links: [{ ...linkGrant("g-a"), ended: undefined }] })).toEqual(unchecked);
+  });
+
   it("prefers a listing it learned but could not save", () => {
     expect(reachRosterFor({
-      entry: { ...entry, remote, shareRoster: { version: 1, grants: [ana] } }, localUserId: null, next: "",
+      entry: { ...entry, remote, shareRoster: { version: 1, grants: [ana], links: [] } }, localUserId: null, next: "",
       latest: { grants: null, problem: { kind: "unusable-listing" } },
     })).toEqual({ kind: "unknown", problem: { kind: "unusable-listing" } });
   });
@@ -287,12 +371,12 @@ describe("keeping the roster current", () => {
   const answered = (listing: RosterListing): RosterAnswer => ({ kind: "answered", listing });
   const offline: RosterAnswer = { kind: "unanswered", next: "Check your connection, then try again.", partial: false };
   const failing: RosterAnswer = { kind: "unanswered", next: "Your server is not answering. Try again later.", partial: false };
-  const cached = { kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster] };
+  const cached = { kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster], formerLinks: [] };
   const unchecked = (next: string) => ({ kind: "unknown", problem: { kind: "unchecked", next } });
 
   // A roster listed before, with no pull since.
   function seed(): void {
-    store.setShareRoster(WORKSPACE, { grants: [ana] }, false);
+    store.setShareRoster(WORKSPACE, { grants: [ana], links: [] }, false);
   }
 
   // The same registry file, read the way a restarted dohc reads it.
@@ -318,12 +402,12 @@ describe("keeping the roster current", () => {
   }
 
   it("lists at open and every 10 minutes while open, and stops at close", async () => {
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana], links: [] }));
     r.open(WORKSPACE);
     r.open(WORKSPACE);
     expect(list).toHaveBeenCalledTimes(1);
     await r.forRun(WORKSPACE);
-    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 1, grants: [ana] });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 1, grants: [ana], links: [] });
 
     vi.advanceTimersByTime(SHARE_ROSTER_REFRESH_MS);
     expect(list).toHaveBeenCalledTimes(2);
@@ -334,7 +418,7 @@ describe("keeping the roster current", () => {
 
   it("shows the cached roster without listing; a run refreshes after a pull", async () => {
     seed();
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana], links: [] }));
     expect(await r.cached(WORKSPACE)).toEqual(cached);
     r.pullStarting(WORKSPACE)();
     expect(await r.cached(WORKSPACE)).toEqual(cached);
@@ -346,7 +430,7 @@ describe("keeping the roster current", () => {
   });
 
   it("lists again before a run only when the last listing is older than a minute", async () => {
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana], links: [] }));
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     now += SHARE_ROSTER_FRESH_MS - 1;
     await r.forRun(WORKSPACE);
@@ -389,7 +473,7 @@ describe("keeping the roster current", () => {
   });
 
   it("keeps the mark across a restart, so a claim that runs before any listing answers sees it", async () => {
-    const before = rosters(async () => answered({ grants: [ana] }));
+    const before = rosters(async () => answered({ grants: [ana], links: [] }));
     await before.rosters.forRun(WORKSPACE);
     before.rosters.pullStarting(WORKSPACE);
     restart();
@@ -398,7 +482,7 @@ describe("keeping the roster current", () => {
   });
 
   it("uses the cache after a restart when no pull followed the listing", async () => {
-    const before = rosters(async () => answered({ grants: [ana] }));
+    const before = rosters(async () => answered({ grants: [ana], links: [] }));
     await before.rosters.forRun(WORKSPACE);
     restart();
     const { rosters: after } = rosters(async () => offline);
@@ -406,7 +490,7 @@ describe("keeping the roster current", () => {
   });
 
   it("does not depend on the clock", async () => {
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana], links: [] }));
     await r.forRun(WORKSPACE);
     now -= 60 * 60_000;
     r.pullStarting(WORKSPACE)();
@@ -440,7 +524,7 @@ describe("keeping the roster current", () => {
       throw new Error("disk full");
     });
     expect(() => r.pullStarting(WORKSPACE)).toThrow("disk full");
-    list.mockImplementation(async () => answered({ grants: [ana] }));
+    list.mockImplementation(async () => answered({ grants: [ana], links: [] }));
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
   });
 
@@ -451,8 +535,8 @@ describe("keeping the roster current", () => {
     const run = r.forRun(WORKSPACE);
     // A pull lands during that listing, and may bring a new editor's change.
     r.pullStarting(WORKSPACE)();
-    list.mockImplementation(async () => answered({ grants: [ana] }));
-    first.resolve(answered({ grants: [] }));
+    list.mockImplementation(async () => answered({ grants: [ana], links: [] }));
+    first.resolve(answered({ grants: [], links: [] }));
     expect(await run, "the run used a listing a pull overlapped").toEqual(cached);
     expect(list).toHaveBeenCalledTimes(2);
 
@@ -463,15 +547,15 @@ describe("keeping the roster current", () => {
     now += SHARE_ROSTER_FRESH_MS;
     const busy = r.forRun(WORKSPACE);
     r.pullStarting(WORKSPACE)();
-    third.resolve(answered({ grants: [] }));
+    third.resolve(answered({ grants: [], links: [] }));
     await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(4));
     r.pullStarting(WORKSPACE)();
-    fourth.resolve(answered({ grants: [] }));
+    fourth.resolve(answered({ grants: [], links: [] }));
     expect(await busy).toEqual(unchecked("Try again in a moment."));
   });
 
   it("lists again before a run when a pull followed the listing, and only while the relay answers", async () => {
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana], links: [] }));
     await r.forRun(WORKSPACE);
     await r.forRun(WORKSPACE);
     expect(list).toHaveBeenCalledTimes(1);
@@ -493,7 +577,7 @@ describe("keeping the roster current", () => {
 
   it("clears the mark when the next listing answers, unless a pull ran during it", async () => {
     seed();
-    const { list, saveRoster, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    const { list, saveRoster, rosters: r } = rosters(async () => answered({ grants: [ana], links: [] }));
     r.pullStarting(WORKSPACE)();
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
@@ -513,7 +597,7 @@ describe("keeping the roster current", () => {
     now += SHARE_ROSTER_FRESH_MS;
     const run = r.forRun(WORKSPACE);
     r.pullStarting(WORKSPACE)();
-    answer.resolve(answered({ grants: [ana] }));
+    answer.resolve(answered({ grants: [ana], links: [] }));
     expect(await run).toEqual(cached);
     expect(saveRoster.mock.calls.at(-2)?.[2], "the overlapped listing saved without its mark").toBe(true);
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
@@ -521,7 +605,7 @@ describe("keeping the roster current", () => {
 
   it("marks a listing it could not save yet", async () => {
     let fail = true;
-    const { rosters: r } = rosters(async () => answered({ grants: [ana] }), (id, listing, pulledAfter) => {
+    const { rosters: r } = rosters(async () => answered({ grants: [ana], links: [] }), (id, listing, pulledAfter) => {
       if (fail) throw new Error("disk full");
       store.setShareRoster(id, listing, pulledAfter);
     });
@@ -529,7 +613,7 @@ describe("keeping the roster current", () => {
     expect(() => r.pullStarting(WORKSPACE), "a pull ran with its mark unsaved").toThrow("disk full");
     fail = false;
     r.pullStarting(WORKSPACE)();
-    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ grants: [ana], pulledAfter: true });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ grants: [ana], links: [], pulledAfter: true });
   });
 
   it("makes the roster unknown when the relay answered part of a listing and then stopped", async () => {
@@ -554,16 +638,16 @@ describe("keeping the roster current", () => {
   it("uses a new listing it could not save, and saves it on the next try", async () => {
     seed();
     let fail = true;
-    const { list, rosters: r } = rosters(async () => answered({ grants: [] }), (id, listing, pulledAfter) => {
+    const { list, rosters: r } = rosters(async () => answered({ grants: [], links: [] }), (id, listing, pulledAfter) => {
       if (fail) throw new Error("disk full");
       store.setShareRoster(id, listing, pulledAfter);
     });
-    expect(await r.forRun(WORKSPACE)).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [] });
+    expect(await r.forRun(WORKSPACE)).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [], formerLinks: [] });
     expect(store.find(WORKSPACE)?.shareRoster?.grants).toEqual([ana]);
     fail = false;
-    expect(await r.forRun(WORKSPACE)).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [] });
+    expect(await r.forRun(WORKSPACE)).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [], formerLinks: [] });
     expect(list, "the retry listed again instead of saving what it knew").toHaveBeenCalledTimes(1);
-    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 2, grants: [] });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 2, grants: [], links: [] });
   });
 
   it("retries a listing that got no answer on sync passes, once a minute, until one answers", async () => {
@@ -577,17 +661,17 @@ describe("keeping the roster current", () => {
     await r.pulled(WORKSPACE, false);
     expect(list, "an early pass ended the retries").toHaveBeenCalledTimes(2);
     now += SHARE_ROSTER_FRESH_MS;
-    list.mockImplementation(async () => answered({ grants: [ana] }));
+    list.mockImplementation(async () => answered({ grants: [ana], links: [] }));
     await r.pulled(WORKSPACE, false);
     expect(list).toHaveBeenCalledTimes(3);
     now += SHARE_ROSTER_FRESH_MS;
     await r.pulled(WORKSPACE, false);
     expect(list, "a pass listed again after a listing answered").toHaveBeenCalledTimes(3);
-    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 1, grants: [ana] });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 1, grants: [ana], links: [] });
   });
 
   it("lists when sync recovers, at most once a minute", async () => {
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana], links: [] }));
     await r.pulled(WORKSPACE, false);
     expect(list, "an ordinary pass listed").not.toHaveBeenCalled();
     await r.pulled(WORKSPACE, true);
@@ -609,15 +693,15 @@ describe("keeping the roster current", () => {
     r.sharesChanged(WORKSPACE);
     r.sharesChanged(WORKSPACE);
     expect(list).toHaveBeenCalledTimes(1);
-    list.mockImplementation(async () => answered({ grants: [ana] }));
-    first.resolve(answered({ grants: [] }));
+    list.mockImplementation(async () => answered({ grants: [ana], links: [] }));
+    first.resolve(answered({ grants: [], links: [] }));
     await r.forRun(WORKSPACE);
     expect(list).toHaveBeenCalledTimes(2);
-    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 2, grants: [ana] });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 2, grants: [ana], links: [] });
   });
 
   it("refreshes every open workspace when a change names none", async () => {
-    const { list, rosters: r } = rosters(async () => answered({ grants: [] }));
+    const { list, rosters: r } = rosters(async () => answered({ grants: [], links: [] }));
     r.open(WORKSPACE);
     await r.forRun(WORKSPACE);
     r.sharesChanged(null);
@@ -627,7 +711,7 @@ describe("keeping the roster current", () => {
 
   it("lists nothing for a workspace that does not sync, whose owner is this computer's person", async () => {
     store.register({ workspaceId: "ws-local", rootPath: "/local", kind: "personal", mode: "local-first" });
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana], links: [] }));
     r.open("ws-local");
     expect(await r.forRun("ws-local")).toEqual({ kind: "owner", ownerUserId: null, grants: [] });
     expect(list).not.toHaveBeenCalled();
@@ -637,7 +721,7 @@ describe("keeping the roster current", () => {
 describe("a direct write's author in History", () => {
   const grant = (grantId: string, recipientUserId: string | null, recipientEmail: string | null, access: "view" | "edit") =>
     ({ grantId, recipientUserId, recipientEmail, selector: { paths: ["trip"], versionId: null }, access }) as ListedGrant;
-  const roster = { version: 1, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")] };
+  const roster = { version: 1, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")], links: [] };
 
   it("names the person and the level of the grant they wrote through", () => {
     expect(rosterAuthorLabel(roster, { userId: "ana", grantId: "g-1" })).toBe("ana@example.com (Edit)");

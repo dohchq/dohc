@@ -762,6 +762,12 @@ export function listLinkGrantsByWorkspace(
                 link.parent_grant_id AS link_parent_grant_id,
                 usage.last_used_at_ms AS last_used_at_ms,
                 credential.minted_at_ms AS url_issued_at_ms,
+                -- A write names each path it wrote in paths_json, so a
+                -- Collection's automations.yaml ends in '/automations.yaml"'.
+                -- JSON escapes a quote inside a name, so no other path does.
+                (SELECT MAX(direct.grant_generation) FROM sync_relay_collection_writes direct
+                  WHERE direct.grant_id = link.grant_id
+                    AND direct.paths_json LIKE '%/automations.yaml"%') AS automations_generation,
                 dependent.grant_id AS dependent_grant_id,
                 dependent.share_id AS dependent_share_id,
                 dependent.principal_kind AS dependent_principal_kind,
@@ -833,6 +839,10 @@ export function listLinkGrantsByWorkspace(
             row.url_issued_at_ms === null || row.url_issued_at_ms === undefined
               ? null
               : Number(row.url_issued_at_ms),
+          automationsGeneration:
+            row.automations_generation === null || row.automations_generation === undefined
+              ? null
+              : Number(row.automations_generation),
         };
         links.set(grantId, link);
       }

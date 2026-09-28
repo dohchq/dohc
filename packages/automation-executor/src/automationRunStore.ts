@@ -327,6 +327,7 @@ const ReachVerdictsSchema = z.object({
     verdict: z.enum(["allowed", "stopped", "held"]),
     stoppedFor: z.string().nullable(),
     narrowed: z.literal(true).optional(),
+    accountedLinks: z.array(z.string().min(1)).optional(),
     seq: z.number().int().nonnegative(),
     recipient: z.object({ id: z.string(), name: z.string(), action: z.enum(["post", "notify", "change"]) }).optional(),
   })),

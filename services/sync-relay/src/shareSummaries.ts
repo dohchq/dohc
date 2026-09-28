@@ -221,6 +221,7 @@ export function createShareSummaries(
       revokedAtMs: grant.revokedAtMs,
       lastUsedAtMs: row.lastUsedAtMs,
       urlIssuedAtMs: row.urlIssuedAtMs,
+      automationsGeneration: row.automationsGeneration,
       dependents: await Promise.all(row.dependents.map(dependentGrantSummary)),
     };
   };

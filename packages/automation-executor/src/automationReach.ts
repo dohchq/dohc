@@ -20,6 +20,7 @@ export interface RosterGrant {
   // are keyed by it with their account.
   grantId: string;
   // A claimed grant names an account. A pending invite names only an email.
+  // A share link names neither: whoever holds it is one editor, the link.
   recipientUserId: string | null;
   recipientEmail: string | null;
   // The files the grant covers. A path covers itself and everything beneath
@@ -38,13 +39,31 @@ export type RosterProblem =
   | { kind: "damaged-share"; recipientEmail: string | null }
   | { kind: "damaged-link" }
   // The relay answered, but not with a listing dohc can use.
-  | { kind: "unusable-listing" };
+  | { kind: "unusable-listing" }
+  // The relay is older than this dohc and leaves out what the check needs.
+  | { kind: "outdated-server" };
+
+/**
+ * A share link that wrote a Collection's automations directly (ADR 0013)
+ * and can no longer edit them: revoked, or narrowed below Edit. What it
+ * wrote may still be there, and this computer may never have checked it
+ * while the link could edit. So a step this link could not have run waits
+ * for a current editor once, as if the link had just left (ADR 0012).
+ * `generation` is the newest grant generation it wrote automations under,
+ * so a later editing period of the same link is new evidence. `files` is
+ * the scope its grant covered, read as Edit.
+ */
+export interface FormerLinkEditor {
+  grantId: string;
+  generation: number;
+  files: { paths: readonly string[]; versionId: string | null };
+}
 
 /** What this computer knows about who can edit and reach what in a workspace. */
 export type ReachRoster =
   // The owner's computer. A workspace that does not sync has no grants, and
   // its owner is this computer's person, whose account may be unknown.
-  | { kind: "owner"; ownerUserId: string | null; grants: readonly RosterGrant[] }
+  | { kind: "owner"; ownerUserId: string | null; grants: readonly RosterGrant[]; formerLinks?: readonly FormerLinkEditor[] }
   | { kind: "unknown"; problem: RosterProblem }
   // A collaborator's computer. The relay tells a recipient only about their
   // own grant, so the other editors are unknown. The recipient's grant bounds
@@ -114,7 +133,12 @@ export interface ReachAutomation {
 }
 
 // `person` names the editor whose reach stopped the step, when one did.
-export type StepReach = { allowed: true } | { allowed: false; reason: string; person?: string };
+// `formerStops` are the former links that could have written the step and
+// could not have run it: it waits for a current editor once for each
+// `evidence`, a link and the generation it last wrote automations under.
+export type StepReach =
+  | { allowed: true; formerStops?: ReadonlyArray<{ evidence: string; name: string }> }
+  | { allowed: false; reason: string; person?: string };
 
 /**
  * A share the owner is about to create. `recipientEmail` is null for a
@@ -137,6 +161,8 @@ interface Person {
   userId: string | null;
   email: string | null;
   grants: RosterGrant[];
+  // A share link: the name that tells it apart from other links.
+  link?: { name: string };
 }
 
 const ALLOWED: StepReach = { allowed: true };
@@ -213,15 +239,20 @@ function canPost(person: Person, channelWireId: string | null): boolean {
 }
 
 // Everyone on the roster except the owner, one entry per person. A claimed
-// grant names an account; a pending invite names only an email.
+// grant names an account; a pending invite names only an email. Each share
+// link is its own editor, keyed by its grant, whoever made it or opened it:
+// a person who opened it in dohc holds a grant of their own.
 function peopleOf(roster: Extract<ReachRoster, { kind: "owner" }>): Person[] {
   const people = new Map<string, Person>();
   for (const grant of roster.grants) {
     if (grant.recipientUserId !== null && grant.recipientUserId === roster.ownerUserId) continue;
-    // A link about to be made names nobody yet: whoever opens it is one new person.
+    if (grant.recipientUserId === null && grant.recipientEmail === null) {
+      people.set(`link:${grant.grantId}`, linkPerson(grant, "Anyone with your share link"));
+      continue;
+    }
     const key = grant.recipientUserId !== null
       ? `user:${grant.recipientUserId}`
-      : grant.recipientEmail === null ? "link" : `email:${grant.recipientEmail.toLowerCase()}`;
+      : `email:${grant.recipientEmail!.toLowerCase()}`;
     const person = people.get(key);
     if (person) {
       person.email ??= grant.recipientEmail;
@@ -233,8 +264,29 @@ function peopleOf(roster: Extract<ReachRoster, { kind: "owner" }>): Person[] {
   return [...people.values()];
 }
 
+// A link names the first path it shares, so two links read apart.
+function linkPerson(grant: RosterGrant, who: string): Person {
+  const path = grant.files?.paths[0];
+  return { userId: null, email: null, grants: [grant], link: { name: path ? `${who} to ${path}` : who } };
+}
+
+// The former links that could have written any of `sources`, each as the
+// editor it was.
+function formerEditorsOf(roster: ReachRoster, sources: readonly string[]): Array<Person & { evidence: string }> {
+  if (roster.kind !== "owner") return [];
+  return (roster.formerLinks ?? [])
+    .map((link) => ({
+      evidence: `${link.grantId}#${link.generation}`,
+      ...linkPerson({
+        grantId: link.grantId, recipientUserId: null, recipientEmail: null,
+        files: { ...link.files, access: "edit" }, channel: null,
+      }, "Anyone who had your share link"),
+    }))
+    .filter((person) => sources.some((path) => canEdit(person, path)));
+}
+
 function nameOf(person: Person): string {
-  return person.email ?? "Someone you shared with";
+  return person.link?.name ?? person.email ?? "Someone you shared with";
 }
 
 function problemReason(problem: RosterProblem, collection: ReachCollection): string {
@@ -249,6 +301,8 @@ function problemReason(problem: RosterProblem, collection: ReachCollection): str
       return "dohc can't read what one of your share links grants. End it from Share… on any file, then try again.";
     case "unusable-listing":
       return "dohc could not read this workspace's shares from your server. Try again later.";
+    case "outdated-server":
+      return `dohc could not check who can edit ${collection.name} because your server is older than this version of dohc. Update your server, then try again.`;
   }
 }
 
@@ -356,11 +410,20 @@ export function checkAutomationReach(roster: ReachRoster, automation: ReachAutom
   // keeps that reason.
   const blind = editors.find((person) => !reaches(person, collection.path, "view"));
   const unseen = blind && stop(`${nameOf(blind)} cannot view ${collection.name}.`, nameOf(blind));
+  const former = formerEditorsOf(roster, sources);
   const checkStep = (step: ReachStep): StepReach => {
     const target = step.kind === "change-records" || step.kind === "find-records" || step.kind === "dataset-operation" || step.kind === "dataset-field" ? step.collection : null;
     const targetProblem = target && pathProblem(target.path, target.name, "target");
     if (targetProblem) return stop(targetProblem);
-    if (roster.kind === "owner") return checkOwnerStep(roster, collection, step, people, editors);
+    if (roster.kind === "owner") {
+      const reach = checkOwnerStep(roster, collection, step, people, editors);
+      if (!reach.allowed || former.length === 0) return reach;
+      // Every current editor passed, so each former link is checked alone.
+      const formerStops = former
+        .filter((link) => !checkOwnerStep(roster, collection, step, people, [link]).allowed)
+        .map((link) => ({ evidence: link.evidence, name: nameOf(link) }));
+      return formerStops.length === 0 ? reach : { allowed: true, formerStops };
+    }
     if (step.kind === "dataset-operation" || step.kind === "dataset-field") return stop(`In a shared view, automations cannot use ${collection.name}'s records.`);
     return target && within(target.path, collection.path)
       ? ALLOWED
