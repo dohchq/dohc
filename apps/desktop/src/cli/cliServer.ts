@@ -553,19 +553,20 @@ function writeActor(
 }
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
-// traffic reaches this socket through the MCP server, whose declared identity
-// is agent `dohc-mcp` acting on behalf of the local owner, at the depth of the
+// traffic carries its handshake name, or `dohc-mcp` when unnamed,
+// acting on behalf of the local owner, at the depth of the
 // agent run in progress; a human write is attributed as this device's local
 // author under the workspace display name.
 function collectionWriteAuthor(
   actor: CliActor,
   context: CliWorkspaceContext,
   options: CliServerOptions,
+  agent: string | undefined,
 ): ChangeAuthor {
   if (writeActor(actor, context, options) === "agent") {
     return {
       kind: "agent",
-      agentId: "dohc-mcp",
+      agentId: agent ?? "dohc-mcp",
       onBehalfOf: "local",
       depth: options.agentRunDepth(context.workspaceId),
     };
@@ -2209,7 +2210,7 @@ async function dispatch(
         const outcome = await collections.writes.setFields({
           recordPath: validated.normalized,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, context, options),
+          author: collectionWriteAuthor(request.args.actor, context, options, request.args.agent),
         });
         return { ok: true as const, recordPath: outcome.path };
       } catch (error) {
@@ -2250,7 +2251,7 @@ async function dispatch(
           collectionPath: collectionValidated.normalized,
           name: request.args.name,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, context, options),
+          author: collectionWriteAuthor(request.args.actor, context, options, request.args.agent),
         });
         return {
           ok: true as const,
@@ -2319,10 +2320,24 @@ async function dispatch(
       if (request.args.actor !== "agent") return { ok: false, written: [], reason: `A file write through the CLI socket is recorded as an agent's; send actor "agent".` };
       if (!context.writeFiles) return { ok: false, written: [], reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
       try {
-        const result = await context.writeFiles(request.args.files, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
+        const root = await realpath(context.rootPath);
+        const folder = await realpath(request.args.cwd);
+        const files: CliFileWrite[] = [];
+        for (const file of request.args.files) {
+          const checked = validateUserMaterializePath(file.path, { platform: process.platform });
+          if (!checked.ok) return { ...cliPathRejected(checked.reason, file.path), written: [] };
+          files.push({ ...file, path: relative(root, resolve(folder, checked.normalized)).split(sep).join("/") });
+        }
+        const result = await context.writeFiles(files, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
         if (result.written?.length) await notifyWrite(options, context);
-        return result;
-      } catch (error) { return mcpFailure(error, "dohc could not write the files. Retry the write."); }
+        const callerPath = (path: string) => relative(folder, join(root, path)).split(sep).join("/");
+        if (result.ok) return { ...result, written: result.written.map(callerPath) };
+        return {
+          ...result,
+          ...(result.written !== undefined ? { written: result.written.map(callerPath) } : {}),
+          ...(result.path !== undefined ? { path: callerPath(result.path) } : {}),
+        };
+      } catch (error) { return mcpFailure(error, "dohc could not write the files. Check that the files are writable."); }
     }
 
     case "documentRead": {

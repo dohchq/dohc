@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rmdir, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { MAX_FILE_WRITE_BYTES } from "@dohc/cli/protocol";
+import { MAX_FILE_WRITE_BYTES, MAX_FILE_WRITE_FILES } from "@dohc/cli/protocol";
 import { createTestScratch } from "./testTemp";
 import { AuthoredTextChangedError, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
-import { withOrderedWorkspaceTextPath, writeWorkspaceText } from "./workspaceAssets";
+import { withOrderedWorkspaceTargetPath, writeWorkspaceText } from "./workspaceAssets";
 import { decodeFileWriteContent, writeWorkspaceFilesAs } from "./workspaceFileWrites";
+import * as policyFile from "./workspaceEnginePolicyFile";
 
 const author = { kind: "agent", agentId: "Test agent", onBehalfOf: "local", depth: 3 } as const;
 const file = (path: string, content = "new") => ({ path, contentBase64: Buffer.from(content).toString("base64") });
@@ -31,6 +32,47 @@ async function fixture() {
 }
 
 describe("workspace file write admission", () => {
+  it.each(["file", "link"])("refuses a %s at .dohc in the desktop", async kind => {
+    const f = await fixture();
+    await rmdir(join(f.rootPath, ".dohc"));
+    if (kind === "file") await writeFile(join(f.rootPath, ".dohc"), "blocked");
+    else {
+      const outside = await createTestScratch("dohc-metadata-outside-");
+      await symlink(outside, join(f.rootPath, ".dohc"), process.platform === "win32" ? "junction" : "dir");
+    }
+    expect(await f.run([file("plain.txt")])).toMatchObject({ ok: false, written: [], reason: expect.stringContaining("policy directory") });
+    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+    await expect(readFile(join(f.rootPath, "plain.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.skipIf(process.platform !== "win32").each(["notes.md.", "notes.md ", "build./x", "build /x"])("refuses Windows alias %s before writing", async path => {
+    const f = await fixture();
+    await writeFile(join(f.rootPath, ".dohc/files.toml"), '[[rule]]\npath = "build/**"\ntracked = false\n');
+    expect(await f.run([file("first.txt"), file(path)])).toMatchObject({ ok: false, written: [], reason: expect.stringContaining("trailing dots and spaces") });
+    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+
+  it("bounds batch count before admission", async () => {
+    const f = await fixture();
+    expect(await f.run(Array.from({ length: MAX_FILE_WRITE_FILES + 1 }, (_, n) => file(`${n}.txt`, ""))))
+      .toMatchObject({ ok: false, written: [], reason: expect.stringContaining("256 files") });
+    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+
+  it("reads policy once for admission and again at each write", async () => {
+    const f = await fixture();
+    const readPolicy = vi.spyOn(policyFile, "readWorkspaceEnginePolicy");
+    const implementation = f.capture.writeAuthoredFile.getMockImplementation()!;
+    f.capture.writeAuthoredFile.mockImplementation(async (...args) => {
+      expect(readPolicy).toHaveBeenCalledTimes(f.capture.writeAuthoredFile.mock.calls.length);
+      return implementation(...args);
+    });
+    try {
+      expect(await f.run([file("a.txt"), file("b.txt")])).toMatchObject({ ok: true });
+      expect(readPolicy).toHaveBeenCalledTimes(3);
+    } finally { readPolicy.mockRestore(); }
+  });
+
   it.each(["../escape.txt", ".env", "notes.md", "notes.markdown", "scene.excalidraw", "shared-with-me/a.txt", ".dohc/private.txt"])("refuses %s before writing the batch", async path => {
     const f = await fixture();
     expect(await f.run([file("first.txt"), file(path)])).toMatchObject({ ok: false, written: [] });
@@ -78,7 +120,7 @@ describe("workspace file write admission", () => {
     const f = await fixture();
     await writeFile(join(f.rootPath, "queued.txt"), "original");
     const entered = barrier(), release = barrier();
-    const held = withOrderedWorkspaceTextPath(f.rootPath, "queued.txt", async () => { entered.release(); await release.promise; });
+    const held = withOrderedWorkspaceTargetPath(f.rootPath, await realpath(join(f.rootPath, "queued.txt")), async () => { entered.release(); await release.promise; });
     await entered.promise;
     const pending = f.run([file("queued.txt")]);
     await writeFile(join(f.rootPath, ".dohc/files.toml"), '[[rule]]\npath = "queued.txt"\ntracked = false\n');
@@ -101,12 +143,13 @@ describe("workspace file write admission", () => {
 
   it("returns the current hash for a stale write", async () => {
     const f = await fixture();
-    await writeFile(join(f.rootPath, "plain.txt"), "current");
+    const current = Buffer.alloc(2 * 1024 * 1024, "current");
+    await writeFile(join(f.rootPath, "plain.txt"), current);
     f.capture.writeAuthoredFile.mockRejectedValueOnce(new AuthoredTextChangedError("plain.txt"));
     expect(await f.run([{ ...file("plain.txt"), expectedSha256: "0".repeat(64) }])).toMatchObject({
-      ok: false, written: [], currentSha256: createHash("sha256").update("current").digest("hex"),
+      ok: false, written: [], currentSha256: createHash("sha256").update(current).digest("hex"),
     });
-    expect(await readFile(join(f.rootPath, "plain.txt"), "utf8")).toBe("current");
+    expect(await readFile(join(f.rootPath, "plain.txt"))).toEqual(current);
   });
 
   it("returns only the first two paths when file three fails", async () => {
@@ -145,7 +188,7 @@ describe("workspace file write admission", () => {
   it("names malformed policy as the reason to fix before retrying", async () => {
     const f = await fixture();
     await writeFile(join(f.rootPath, ".dohc/files.toml"), "invalid [[");
-    expect(await f.run([file("plain.txt")])).toMatchObject({ ok: false, written: [], reason: expect.stringContaining("Fix the policy") });
+    expect(await f.run([file("plain.txt")])).toMatchObject({ ok: false, written: [], reason: expect.stringContaining("Fix the reported policy errors") });
     expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
   });
 

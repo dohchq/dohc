@@ -460,9 +460,9 @@ describe("mcp tool path containment", () => {
       const refusal =
         "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.";
       await expect(
-        writeWorkspaceFile(ctx, { path: "notes/new.txt", content: "nope" }),
+        createWorkspaceDirectory(ctx, { path: "notes" }),
       ).resolves.toMatchObject({ ok: false, reason: refusal });
-      await expect(readFile(join(ctx.root, "notes/new.txt"), "utf8")).rejects.toThrow();
+      await expect(stat(join(ctx.root, "notes"))).rejects.toThrow();
 
       await writeFile(join(ctx.root, "keep.txt"), "still here");
       await expect(deleteWorkspacePath(ctx, { path: "keep.txt" })).resolves.toMatchObject({
@@ -2077,7 +2077,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
     await withWorkspace(async (ctx) => {
       armMetadataErrno(ctx, "EPERM");
       try {
-        const result = await writeWorkspaceFile(ctx, { path: "notes.txt", content: "draft\n" });
+        const result = await createWorkspaceDirectory(ctx, { path: "notes" });
         expect(result).toMatchObject({
           ok: false,
           reason:
@@ -2089,7 +2089,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
         disarm();
       }
       // The claim the message makes, checked.
-      await expect(readFile(join(ctx.root, "notes.txt"), "utf8")).rejects.toThrow();
+      await expect(stat(join(ctx.root, "notes"))).rejects.toThrow();
     });
   });
 
@@ -2109,7 +2109,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
       await withWorkspace(async (ctx) => {
         armMetadataErrno(ctx, code);
         try {
-          const result = await writeWorkspaceFile(ctx, { path: "notes.txt", content: "draft\n" });
+          const result = await createWorkspaceDirectory(ctx, { path: "notes" });
           const reason = refusalReason(result);
           expect(reason, code).toContain(`(${code})`);
           expect(reason, code).toContain(instruction);
@@ -2120,7 +2120,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
           disarm();
         }
         // The claim the message makes, checked.
-        await expect(readFile(join(ctx.root, "notes.txt"), "utf8")).rejects.toThrow();
+        await expect(stat(join(ctx.root, "notes"))).rejects.toThrow();
       });
     }
   });
@@ -2128,7 +2128,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
   it("passes a guard refusal through whole", async () => {
     await withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, ".dohc"), "not a directory");
-      const result = await writeWorkspaceFile(ctx, { path: "notes.txt", content: "draft\n" });
+      const result = await createWorkspaceDirectory(ctx, { path: "notes" });
       expect(result).toMatchObject({
         ok: false,
         reason: notARealFolderRefusal(DOHC_METADATA_GUARD, {
@@ -2140,15 +2140,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
   });
 });
 
-// Every mutating tool checks.dohc is a real folder before it touches a
-// visible file, and refuses without changing anything when it is not. One
-// pre-existing test covered that, through a symlinked .dohc, for two of the
-// eight tools; these cover all eight.
-//
-// The refusal needs no seam and no symlink privilege: a REGULAR FILE at
-// <root>/.dohc makes ensureGuardedDir's post-mkdir check refuse on every
-// platform, so this runs everywhere the gate does rather than only where
-// symlink creation is permitted.
+// Direct filesystem mutations check the metadata folder before writing.
 describe("a refused recordability boundary leaves the filesystem alone", () => {
   async function withBlockedMetadataDir<T>(
     fn: (ctx: ToolContext) => Promise<T>,
@@ -2166,41 +2158,13 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
 
   // Delete is the one case with a second boundary behind this one:
   // safeTrashDir checks .dohc again on its way to the trash folder, so
-  // removing the change-record boundary alone still leaves this passing. The
-  // other seven fail without it.
+  // removing the change-record boundary alone still leaves this passing.
   it("refuses the delete, and the file is still where it was", async () => {
     await withBlockedMetadataDir(async (ctx) => {
       await writeFile(join(ctx.root, "note.txt"), "still here");
 
       expect(await deleteWorkspacePath(ctx, { path: "note.txt" })).toMatchObject({ ok: false, reason: BLOCKED });
       expect(await readFile(join(ctx.root, "note.txt"), "utf8")).toBe("still here");
-    });
-  });
-
-  it("refuses the write, and no file appears", async () => {
-    await withBlockedMetadataDir(async (ctx) => {
-      expect(
-        await writeWorkspaceFile(ctx, { path: "notes/new.txt", content: "written" }),
-      ).toMatchObject({ ok: false, reason: BLOCKED });
-      await expect(stat(join(ctx.root, "notes", "new.txt"))).rejects.toThrow();
-    });
-  });
-
-  it("refuses an overwrite, and the existing bytes are untouched", async () => {
-    await withBlockedMetadataDir(async (ctx) => {
-      await writeFile(join(ctx.root, "note.txt"), "original");
-
-      expect(
-        await writeWorkspaceFile(ctx, { path: "note.txt", content: "replacement" }),
-      ).toMatchObject({ ok: false, reason: BLOCKED });
-      expect(await readFile(join(ctx.root, "note.txt"), "utf8")).toBe("original");
-    });
-  });
-
-  it("refuses the app, and no app root appears", async () => {
-    await withBlockedMetadataDir(async (ctx) => {
-      expect(await createApp(ctx, { appRoot: "sites/landing" })).toMatchObject({ ok: false, reason: BLOCKED });
-      await expect(stat(join(ctx.root, "sites", "landing"))).rejects.toThrow();
     });
   });
 
@@ -2220,21 +2184,6 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
     await withBlockedMetadataDir(async (ctx) => {
       expect(await createWorkspaceDirectory(ctx, { path: "notes/2026" })).toMatchObject({ ok: false, reason: BLOCKED });
       await expect(stat(join(ctx.root, "notes", "2026"))).rejects.toThrow();
-    });
-  });
-
-  it("refuses the import, and no database appears", async () => {
-    await withBlockedMetadataDir(async (ctx) => {
-      await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n");
-
-      expect(
-        await importData(ctx, {
-          sourcePath: "people.csv",
-          databasePath: "people.sqlite",
-          tableName: "people",
-        }),
-      ).toMatchObject({ ok: false, reason: BLOCKED });
-      await expect(stat(join(ctx.root, "people.sqlite"))).rejects.toThrow();
     });
   });
 

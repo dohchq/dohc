@@ -142,6 +142,7 @@ const documentReadArgsSchema = z
 export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
 
 export const MAX_FILE_WRITE_BYTES = 10 * 1024 * 1024;
+export const MAX_FILE_WRITE_FILES = 256;
 export const MAX_CLI_REQUEST_BYTES = 14 * 1024 * 1024;
 export const fileWriteFileSchema = z.object({
   path: documentPathArg,
@@ -152,7 +153,7 @@ export const fileWriteFileSchema = z.object({
 export type CliFileWrite = z.infer<typeof fileWriteFileSchema>;
 const fileWriteArgsSchema = z.object({
   ...argsBase,
-  files: z.array(fileWriteFileSchema).min(1),
+  files: z.array(fileWriteFileSchema).min(1).max(MAX_FILE_WRITE_FILES),
   agent: documentAgentNameSchema.optional(),
   requestId: requestIdSchema,
 }).strict();
@@ -290,6 +291,7 @@ export const collectionCreateFieldsSchema = boundedCollectionFields(0);
 const collectionSetFieldsArgsSchema = z
   .object({
     ...argsBase,
+    agent: documentAgentNameSchema.optional(),
     recordPath: collectionPathArg,
     fields: collectionSetFieldsFieldsSchema,
   })
@@ -297,6 +299,7 @@ const collectionSetFieldsArgsSchema = z
 const collectionCreateRecordArgsSchema = z
   .object({
     ...argsBase,
+    agent: documentAgentNameSchema.optional(),
     collectionPath: collectionPathArg,
     // One file name inside the collection folder, without the .md extension.
     name: z

@@ -299,18 +299,12 @@ function deleteAftermath(path: string, aftermath: Aftermath): string {
   }
 }
 
-async function ensureRecordable(ctx: ToolContext, prepare = true) {
+async function ensureRecordable(ctx: ToolContext) {
   // No legacy durable-writer platform gate — the engine
   // captures the physical write. The metadata-dir safety check still fails
   // closed before visible disk changes (symlinked/escaping .dohc).
   try {
-    if (prepare) await safeMetadataDir(ctx);
-    else {
-      const path = join(ctx.root, ".dohc");
-      const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
-      if (entry && (entry.isSymbolicLink() || !entry.isDirectory())) throw new Error(notARealFolderRefusal(DOHC_METADATA_GUARD, entry));
-      if (entry && !(await isWithinRealRoot(ctx.root, path))) throw new Error(outsideWorkspaceRefusal(DOHC_METADATA_GUARD));
-    }
+    await safeMetadataDir(ctx);
     return null;
   } catch (error) {
     return { ok: false as const, reason: metadataDirRefusal(error) };
@@ -807,8 +801,6 @@ export async function writeWorkspaceFile(
   },
   agent?: string,
 ) {
-  const recordable = await ensureRecordable(ctx, false);
-  if (recordable) return recordable;
   const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   const refusal = liveDocumentWriteRefusal(resolved);
@@ -1763,8 +1755,6 @@ export async function createApp(
   args: { appRoot: string; title?: string; withDohcJson?: boolean },
   agent?: string,
 ) {
-  const recordable = await ensureRecordable(ctx, false);
-  if (recordable) return recordable;
   const root = await safeResolve(ctx, args.appRoot);
   if (!root.ok) return { ok: false as const, reason: root.reason };
   if (!root.normalized) return { ok: false as const, reason: "appRoot must name a folder" };
@@ -2029,8 +2019,6 @@ export async function importData(
   args: { sourcePath: string; databasePath: string; tableName: string },
   agent?: string,
 ) {
-  const recordable = await ensureRecordable(ctx, false);
-  if (recordable) return recordable;
   const sourceRel = await safeResolve(ctx, args.sourcePath, "read");
   if (!sourceRel.ok) return { ok: false as const, reason: sourceRel.reason };
   // Same secret floor as read/search: an import is a read of the source,
@@ -2384,6 +2372,7 @@ export async function readRecord(
 export async function setRecordFields(
   ctx: ToolContext,
   args: { recordPath: string; fields: unknown },
+  agent?: string,
 ) {
   const resolved = await safeResolve(ctx, args.recordPath, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
@@ -2394,6 +2383,7 @@ export async function setRecordFields(
   );
   if (!fields.ok) return { ok: false as const, reason: fields.reason };
   return requestCli(ctx, "collectionSetFields", {
+    agent,
     recordPath: resolved.normalized,
     fields: fields.value,
   });
@@ -2402,6 +2392,7 @@ export async function setRecordFields(
 export async function createRecord(
   ctx: ToolContext,
   args: { collectionPath: string; name: string; fields?: unknown },
+  agent?: string,
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
@@ -2412,6 +2403,7 @@ export async function createRecord(
   );
   if (!fields.ok) return { ok: false as const, reason: fields.reason };
   return requestCli(ctx, "collectionCreateRecord", {
+    agent,
     collectionPath: resolved.normalized,
     name: args.name,
     fields: fields.value,

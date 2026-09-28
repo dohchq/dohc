@@ -339,6 +339,21 @@ it.each([
 
 
 describe("file write handshake attribution", () => {
+  it.each(["Codex", "invalid/name"])("forwards %s to both Collection writes", async name => {
+    const root = await workspaceRoot();
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({ root, home: "/home", request: async request => {
+      requests.push(request);
+      return { ok: false, reason: "Test refusal" };
+    } }, name);
+    await client.callTool({ name: "dohc_set_record_fields", arguments: { recordPath: "tasks/a.md", fields: { status: "done" } } });
+    await client.callTool({ name: "dohc_create_record", arguments: { collectionPath: "tasks", name: "b" } });
+    expect(requests).toMatchObject([
+      { verb: "collectionSetFields", args: { actor: "agent", agent: name === "Codex" ? name : undefined } },
+      { verb: "collectionCreateRecord", args: { actor: "agent", agent: name === "Codex" ? name : undefined } },
+    ]);
+  });
+
   it.each(["Codex", "invalid/name"])("forwards the validated name from %s", async name => {
     const root = await workspaceRoot();
     const requests: unknown[] = [];

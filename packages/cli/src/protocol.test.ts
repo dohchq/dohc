@@ -1,12 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
   CLI_PROTOCOL_VERSION,
+  MAX_FILE_WRITE_FILES,
   cliRequestSchema,
   parseCliResult,
 } from "./protocol";
 
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
+
+it("bounds fileWrite batches to 256 files", () => {
+  const request = (count: number) => ({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+    args: { ...argsBase, requestId: "batch", files: Array.from({ length: count }, (_, n) => ({ path: `${n}.txt`, contentBase64: "" })) } });
+  expect(cliRequestSchema.safeParse(request(MAX_FILE_WRITE_FILES)).success).toBe(true);
+  expect(cliRequestSchema.safeParse(request(MAX_FILE_WRITE_FILES + 1)).success).toBe(false);
+});
+
+it.each(["collectionSetFields", "collectionCreateRecord"])("validates the agent label for %s", verb => {
+  const fields = verb === "collectionSetFields" ? { recordPath: "tasks/a.md", fields: { status: "done" } }
+    : { collectionPath: "tasks", name: "a", fields: {} };
+  const request = (agent: string) => ({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { ...argsBase, ...fields, agent } });
+  expect(cliRequestSchema.safeParse(request("Client")).success).toBe(true);
+  expect(cliRequestSchema.safeParse(request("automation/spoof")).success).toBe(false);
+});
 
 describe("moment author results", () => {
   it.each([

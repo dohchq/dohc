@@ -3479,10 +3479,9 @@ export function createWorkspaceEngineCapture(
           correlationId: writeOptions.correlationId ?? `authored-write-${writeOptions.requestId ?? createId()}`,
         };
         try {
-          let text: string | undefined;
-          if (typeof content === "string") text = content;
-          else if (!content.includes(0)) {
-            try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content); }
+          let decoded = content;
+          if (typeof content !== "string" && !content.includes(0)) {
+            try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content); }
             catch { /* Invalid UTF-8 is stored as bytes. */ }
           }
           const input = {
@@ -3493,11 +3492,11 @@ export function createWorkspaceEngineCapture(
             ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
-            ...(author ? { author } : {}),
+            author,
           };
-          const result = text === undefined
-            ? await engine.writeBinaryFile({ ...input, bytes: content as Uint8Array })
-            : await engine.writeTextFile({ ...input, text, publish: true });
+          const result = typeof decoded === "string"
+            ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
+            : await engine.writeBinaryFile({ ...input, bytes: decoded });
           return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome };
         } catch (error) {
           if (error instanceof VersionedTextStoreError && error.code === "write-precondition-failed") {

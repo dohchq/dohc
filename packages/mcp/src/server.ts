@@ -528,7 +528,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         fields: z.record(z.string().min(1).max(200), z.unknown()),
       },
     },
-    async (args) => text(await setRecordFields(ctx, args)),
+    async (args) => text(await setRecordFields(ctx, args, agentName())),
   );
 
   registerWrite(
@@ -542,7 +542,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         fields: z.record(z.string().min(1).max(200), z.unknown()).optional(),
       },
     },
-    async (args) => text(await createRecord(ctx, args)),
+    async (args) => text(await createRecord(ctx, args, agentName())),
   );
 
   const automationInput = {

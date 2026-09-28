@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import { join } from "node:path";
-import { MAX_FILE_WRITE_BYTES, type CliFileWrite, type CliResultByVerb } from "@dohc/cli/protocol";
+import { MAX_FILE_WRITE_BYTES, MAX_FILE_WRITE_FILES, type CliFileWrite, type CliResultByVerb } from "@dohc/cli/protocol";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
@@ -28,9 +28,12 @@ export function decodeFileWriteContent(contentBase64: string): Buffer {
 }
 
 async function admit(rootPath: string, path: string, policy: WorkspaceEnginePolicySnapshot) {
-  if (policy.errors.length) throw new Error(`dohc could not read the workspace file policy: ${policy.errors.join("; ")}. Fix the policy and retry.`);
+  if (policy.errors.length) throw new Error(`dohc could not read the workspace file policy: ${policy.errors.join("; ")}. Fix the reported policy errors.`);
   const checked = validateUserMaterializePath(path, { platform: process.platform });
   if (!checked.ok) throw new Error(`Cannot write ${path}: ${checked.reason}. Choose a writable workspace path.`);
+  if (process.platform === "win32" && checked.normalized.split("/").some(segment => /[. ]$/u.test(segment))) {
+    throw new Error(`Cannot write ${path}: Windows removes trailing dots and spaces. Choose a path without those endings.`);
+  }
   const target = await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, checked.normalized),
     spelled: path, label: "File path", access: "write" });
   for (const name of [checked.normalized, target.relative]) {
@@ -56,6 +59,9 @@ export async function writeWorkspaceFilesAs<Workspace extends { rootPath: string
   const requestId = options.requestId ?? randomUUID();
   try {
     operation.assertCurrent();
+    if (files.length > MAX_FILE_WRITE_FILES) {
+      throw new Error(`The write exceeds ${MAX_FILE_WRITE_FILES} files. Split the files into smaller batches.`);
+    }
     if (operation.workspace.readOnly || operation.workspace.shareView !== undefined) {
       throw new Error("This workspace is read-only. Write in the owning workspace.");
     }
@@ -76,10 +82,10 @@ export async function writeWorkspaceFilesAs<Workspace extends { rootPath: string
           createOnly: file.createOnly, expectedContentHash: file.expectedSha256, signal: operation.signal,
           requestId: `fileWrite:${requestId}:${index}`, correlationId: `fileWrite:${requestId}`,
           beforeWrite: async resolvedAbsolute => {
-            if (resolvedAbsolute !== file.resolvedAbsolute) throw new Error("The file path changed. Retry the write.");
+            if (resolvedAbsolute !== file.resolvedAbsolute) throw new Error("The file path changed. Check where the path now points.");
             operation.assertCurrent();
             const queued = await admit(rootPath, file.path, await readWorkspaceEnginePolicy(rootPath));
-            if (queued.resolvedAbsolute !== file.resolvedAbsolute) throw new Error("The file path changed. Retry the write.");
+            if (queued.resolvedAbsolute !== file.resolvedAbsolute) throw new Error("The file path changed. Check where the path now points.");
           },
         });
         requirePublishedWrite(file.path, outcome);
@@ -89,11 +95,17 @@ export async function writeWorkspaceFilesAs<Workspace extends { rootPath: string
     return { ok: true, written };
   } catch (error) {
     const currentSha256 = error instanceof AuthoredTextChangedError && failedAbsolute
-      ? await readFile(failedAbsolute).then(bytes => createHash("sha256").update(bytes).digest("hex"), () => null)
+      ? await currentFileHash(failedAbsolute).catch(() => null)
       : undefined;
     return { ok: false, written, path: failedPath,
-      reason: error instanceof Error ? error.message : "dohc could not write the file. Retry the write.",
+      reason: error instanceof Error ? error.message : "dohc could not write the file. Check that the file is writable.",
       ...(currentSha256 !== undefined ? { currentSha256 } : {}),
     };
   }
+}
+
+async function currentFileHash(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
 }
