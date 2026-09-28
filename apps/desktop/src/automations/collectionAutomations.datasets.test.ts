@@ -995,7 +995,7 @@ describe("Collection automations on a dataset", () => {
     if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
     const hash = definitionHash(summary.automations[0].automation);
     const trash = async () => { throw new Error("A dataset's added records stay."); };
-    await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: hash }], trash)).resolves.toEqual({ undone: 1, left: 0 });
+    await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: hash }], trash)).resolves.toMatchObject({ undone: 1, left: 0, errorMessage: null });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     expect(await f.executor.runs(AUTOMATION)).toEqual([expect.objectContaining({ undone: true })]);
     await f.executor.dispose();
@@ -1525,7 +1525,7 @@ describe("dataset automation claims in both ledgers", () => {
     if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
     const trash = async () => { throw new Error("A dataset's added records stay."); };
     await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: definitionHash(summary.automations[0].automation) }], trash))
-      .resolves.toEqual({ undone: 1, left: 0 });
+      .resolves.toMatchObject({ undone: 1, left: 0, errorMessage: null });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     await f.executor.dispose();
   });
