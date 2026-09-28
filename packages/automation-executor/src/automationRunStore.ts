@@ -214,12 +214,13 @@ const UndoRequestSchema = z.object({
   version: z.number().int().positive(),
   values: z.record(z.string(), JsonValueSchema),
 });
-// Version 5 plans and saves one step at a time, in the progress file beside
+// Version 6 plans and saves one step at a time, in the progress file beside
 // the run's state, names each Collection the steps write by its Collection
-// id, and records when the run ended. A run in any other format cannot be
-// read, and the claim fails instead of starting over.
+// id, records when the run ended, and qualifies formula-visible fields by
+// dataset and table. A run in any other format cannot be read, and the claim
+// fails instead of starting over or reading bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.literal(5),
+  version: z.literal(6),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -256,6 +257,8 @@ const OlderRunSchema = z.object({
   automationId: z.string().min(1),
   keySeed: z.string().min(1),
   datasetId: z.string().min(1).nullable().optional(),
+  // Version 5 kept its dataset in the rules it started under.
+  rules: z.object({ datasetId: z.string().min(1) }).nullable().optional(),
   undo: z.enum(["started", "done"]).nullable().optional(),
 });
 // When each folder of saved runs next holds a claim past its 30 days, and
@@ -290,7 +293,7 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 5;
+  version: 6;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -318,8 +321,8 @@ export interface StoredRun {
   /** Dataset Undo requests sent again after their record changed, saved before each is sent. */
   undoRequests: DatasetUndoRequest[];
   /**
-   * The dataset fields the plan's formulas could see, or null for a document
-   * Collection. A run resumes only while every one of them is still readable.
+   * Dataset, table, and field keys the plan's formulas could see, or null for
+   * a document Collection. Each must remain readable when the run resumes.
    */
   readableFields: string[] | null;
   /**
@@ -370,7 +373,7 @@ const SubscriptionsSchema = z.object({
 });
 
 const ReachVerdictsSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   verdicts: z.array(z.object({
     automationId: z.string().min(1),
     definitionHash: z.string().min(1),
@@ -803,7 +806,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       const stats = await lstat(path).catch(() => null);
       // A file that names no claim stays; the folder's next full pass reads it again.
       if (!older.success || runName(older.data.claimId, older.data.keySeed) !== name || stats === null) return { kind: "keep" };
-      runs.push({ ...older.data, datasetId: older.data.datasetId ?? null, undo: older.data.undo ?? null, finishedAtMs: stats.mtimeMs });
+      runs.push({ ...older.data, datasetId: older.data.datasetId ?? older.data.rules?.datasetId ?? null, undo: older.data.undo ?? null, finishedAtMs: stats.mtimeMs });
     }
     const [first] = runs;
     if (first === undefined || runs.some((run) => run.claimId !== first.claimId || run.automationId !== first.automationId)) return { kind: "keep" };
@@ -1012,7 +1015,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     },
     saveReachVerdicts(verdicts) {
       return serial(async () => {
-        await writeDurably(join(await base(), "reach.json"), `${JSON.stringify({ version: 1, verdicts })}\n`);
+        await writeDurably(join(await base(), "reach.json"), `${JSON.stringify({ version: 2, verdicts })}\n`);
       });
     },
     async reachVerdictsPath() {

@@ -90,6 +90,7 @@ import {
 import { datasetPresser, datasetRecordExists, runDatasetAutomation, type DatasetRunClaim, type DatasetRunHost } from "./datasetAutomationRun";
 import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, sameReachVerdict, type StoredReachVerdict } from "./reachVerdicts";
+import { createAutomationTargets } from "./automationTargets";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
 import type { GroupMessagesSkipped } from "./groupMessagesNotice";
 import {
@@ -2778,8 +2779,8 @@ export class CollectionAutomations {
    * Each dataset Collection folder, with its approved rules. Null when dohc
    * cannot run dataset automations, or the workspace has no dataset host. A
    * dataset's descriptor sits beside its schema, in its Collection's folder.
-   * A dataset store that cannot open, or a dataset whose rules cannot be
-   * read, is reported and left out, so document automations still run.
+   * Store and rule errors are reported. Once identified, a folder stays
+   * indexed even if its operation metadata is temporarily unavailable.
    */
   private async datasetFolders(open = false): Promise<Map<string, IndexedDataset> | null> {
     let listed: Awaited<ReturnType<DatasetAutomationHost["datasets"]>> | null;
@@ -2801,15 +2802,17 @@ export class CollectionAutomations {
         unplaced.add(definition.datasetId);
         continue;
       }
-      // Only a dataset with automations needs its operation source and grants read.
-      const checked = await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`)
-        ? await this.withLiveHost((host) => ({ generated: host.generated(definition.datasetId), grants: host.dataGrants(definition.datasetId) }))
-          .catch((error: unknown) => {
-            this.options.onError(`read dataset ${definition.datasetId}'s operations`, error);
-            return null;
-          })
-        : null;
-      folders.set(folder, { definition, generated: checked?.generated ?? false, grants: checked?.grants ?? { workspaceId: "", grants: [] } });
+      // Subscription discovery keeps only identity. Target resolution loads
+      // approved rules and current grants on demand, even without automations.
+      folders.set(folder, { definition, generated: false, grants: { workspaceId: "", grants: [] } });
+      if (!(await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`))) continue;
+      try {
+        const metadata = await this.withLiveHost((host) => ({ generated: host.generated(definition.datasetId), grants: host.dataGrants(definition.datasetId) }));
+        if (metadata === null) throw new Error(`The dataset host for ${folder} is unavailable.`);
+        folders.set(folder, { definition, ...metadata });
+      } catch (error) {
+        this.options.onError(`read dataset ${definition.datasetId}'s operations`, error);
+      }
     }
     this.unplacedDatasets = unplaced;
     return folders;
@@ -3740,19 +3743,22 @@ export class CollectionAutomations {
     }
   }
 
+  private targetResolver() {
+    return createAutomationTargets({
+      readText: this.options.readText,
+      readSchemaFields: (path) => this.readSchemaFields(path),
+      isCollection: (path) => this.collections.has(path),
+      withHost: (work) => this.withLiveHost(work),
+    });
+  }
+
   private runDependencies(): CollectionAutomationRunDependencies {
     return {
+      targets: this.targetResolver(),
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withRecordWrites,
-      isCollection: (path) => this.collections.has(path),
       collectionIdOf: (path) => this.collections.get(path) ?? null,
       collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
-      isDatasetCollection: (path) => this.options.pathExists(`${path}/dataset.json`),
-      collectionFields: async (path) => {
-        // Read now: a code step can name any Collection, not only those the file names.
-        const fields = await this.readSchemaFields(path);
-        return typeof fields === "string" ? { problem: fields } : fields;
-      },
       readCode: async (path) => {
         const read = await this.options.readText(path);
         return read === null ? null : { text: read.text, truncated: read.truncated };

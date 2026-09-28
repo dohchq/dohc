@@ -11,6 +11,7 @@ import type {
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
+import type { AutomationTargets, TargetResolution } from "./automationTargets";
 import {
   codeFilesOf,
   codeRecordKey,
@@ -138,23 +139,15 @@ export interface CollectionRecordWrites {
 }
 
 export interface CollectionAutomationRunDependencies {
+  targets: AutomationTargets;
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
   /** Record writes with the workspace's write authority, ending at `signal`. */
   withRecordWrites<T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>): Promise<T>;
-  /** Whether a folder is a Collection the engine lists. */
-  isCollection(path: string): boolean;
   /** A document Collection's id, the object id of its collection.yaml, or null when the folder is not one. */
   collectionIdOf(path: string): string | null;
   /** Where the document Collection with this id is now, or null when this workspace has none. */
   collectionPathOf(collectionId: string): string | null;
-  /** Whether a folder keeps its records in a dataset (it holds dataset.json). */
-  isDatasetCollection(path: string): Promise<boolean>;
-  /**
-   * The fields a Collection's schema defines, or why they cannot be read;
-   * null when the Collection has no schema, so any field is its own.
-   */
-  collectionFields(path: string): Promise<ReadonlySet<string> | { problem: string } | null>;
   /** A code file a step runs, as text; null when it does not exist. */
   readCode(path: string): Promise<{ text: string; truncated: boolean } | null>;
   /** The name a formula's `person` shows for the person who pressed a button. */
@@ -252,12 +245,13 @@ const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped
 const collectionNamed = (path: string): ReachCollection => ({ path, name: path.split("/").at(-1) ?? path });
 
 /** Why a step cannot read or change a Collection's records through this executor, or null. */
-async function targetProblem(dependencies: CollectionAutomationRunDependencies, target: ReachCollection): Promise<string | null> {
+function targetProblem(resolved: TargetResolution): string | null {
+  if (resolved.kind === "problem") return resolved.problem;
   // A dataset's records change only through its approved operations.
-  if (await dependencies.isDatasetCollection(target.path)) {
-    return `Automations cannot use ${target.name} yet, because its records change only through its Collection actions.`;
+  if (resolved.kind === "dataset") {
+    return `Automations cannot use ${resolved.collection.name} yet, because its records change only through its Collection actions.`;
   }
-  return dependencies.isCollection(target.path) ? null : `dohc cannot find the Collection ${target.path}.`;
+  return null;
 }
 
 export type ClaimRuns =
@@ -331,7 +325,7 @@ export async function savedRunOf(
 /** A new run's record, before anything of it is saved. */
 export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, nowMs: number): StoredRun {
   return {
-    version: 5,
+    version: 6,
     claimId: claim.claimId,
     automationId: claim.automationId,
     definitionHash: definitionHash(automation),
@@ -365,6 +359,16 @@ export async function runCollectionAutomation(
   // A run that started while the Collection kept its records in a dataset
   // wrote them there; it never goes on as document writes.
   if (current !== null && current.rules !== null) return failed(RULES_CHANGED_ERROR);
+  const liveTargets = dependencies.targets;
+  const resolved = new Map<string, Promise<TargetResolution>>();
+  dependencies = { ...dependencies, targets: { resolve: (path) => {
+    let target = resolved.get(path);
+    if (target === undefined) {
+      target = liveTargets.resolve(path);
+      resolved.set(path, target);
+    }
+    return target;
+  } } };
 
   // Where the automation's messages go, found once for the reach check and
   // the steps.
@@ -391,7 +395,7 @@ export async function runCollectionAutomation(
   // ones this executor can use; a saved step's were followed above.
   const savedSteps = new Set(current?.steps.map((step) => step.ordinal));
   for (const target of fileTargets(automation, collection, savedSteps)) {
-    const problem = await targetProblem(dependencies, target);
+    const problem = targetProblem(await dependencies.targets.resolve(target.path));
     if (problem !== null) return failed(problem);
   }
 
@@ -428,7 +432,7 @@ export async function runCollectionAutomation(
     nowMs: scheduleDueAt(claim) ?? claim.createdAtMs,
     key: { claimId: claim.claimId, hash: run.keySeed },
   };
-  const backend = documentBackend(dependencies, input, ctx);
+  const backend = documentBackend(dependencies, input, ctx, liveTargets);
   // One evaluator budget for the whole attempt: its conditions, then every step.
   const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
   if (current === null) {
@@ -548,7 +552,7 @@ export function claimPerson(claim: AutomationClaim): string | null {
  * which answers each read with the writes of the steps before it, since each
  * write settles before it returns.
  */
-function documentBackend(dependencies: CollectionAutomationRunDependencies, input: CollectionAutomationRunInput, ctx: RunContext): StepBackend {
+function documentBackend(dependencies: CollectionAutomationRunDependencies, input: CollectionAutomationRunInput, ctx: RunContext, liveTargets: AutomationTargets): StepBackend {
   const { automation, signal } = input;
   // The claim as the steps read it: where its Collection is now.
   const claim = { ...input.claim, collectionPath: ctx.claim.collectionPath };
@@ -590,6 +594,8 @@ function documentBackend(dependencies: CollectionAutomationRunDependencies, inpu
         const read = async (collectionPath: string, recordId: string) => {
           const earlier = seen.get(JSON.stringify([collectionPath, recordId]));
           if (earlier !== undefined) return earlier;
+          const problem = targetProblem(await dependencies.targets.resolve(collectionPath));
+          if (problem !== null) throw new Error(problem);
           const record = await readDocumentRecord(reads, collectionPath, recordId);
           return record === null ? null : remember(collectionPath, record);
         };
@@ -614,6 +620,8 @@ function documentBackend(dependencies: CollectionAutomationRunDependencies, inpu
               const step = ordered.get(ordinal);
               const query = step?.kind === "find" ? findQueryOf(step.condition) : null;
               if (query === null || "problem" in query) throw new Error(query?.problem ?? `Step ${ordinal + 1} is not a Find.`);
+              const problem = targetProblem(await dependencies.targets.resolve(collectionOf(ordinal)));
+              if (problem !== null) throw new Error(problem);
               const result = await reads.queryCollectionRecords({
                 collectionPath: collectionOf(ordinal),
                 ...(query.match === "all" ? {} : { filter: { field: query.field, operator: query.operator, value: values[0] ?? null } }),
@@ -653,6 +661,11 @@ function documentBackend(dependencies: CollectionAutomationRunDependencies, inpu
       // Only a dataset Collection's run plans dataset effects.
       if (effect.kind !== "set" && effect.kind !== "add" && effect.kind !== "message" && effect.kind !== "notice" && effect.kind !== "wake" && effect.kind !== "invoke") {
         return { outcome: failed(UNREADABLE_RUN_ERROR) };
+      }
+      if (effect.kind === "set" || effect.kind === "add") {
+        const path = effect.kind === "set" ? effect.target.collectionPath : effect.collectionPath;
+        const problem = targetProblem(await liveTargets.resolve(path));
+        if (problem !== null) return { outcome: failed(problem) };
       }
       return await applyEffect(dependencies, { run, author, signal, ordinal: place.ordinal, automationName: automation.name, depth: claim.depth + 1, chat }, effect, place.mode);
     },
@@ -704,11 +717,10 @@ async function checkCodeTargets(
   }
   if (kept.includes("held")) return { kind: "wait", reason: "held" };
   for (const { step, target } of named.values()) {
-    const problem = await targetProblem(dependencies, target);
-    if (problem !== null) return stop(step, target.name, problem);
-    const fields = await dependencies.collectionFields(target.path);
+    const resolved = await dependencies.targets.resolve(target.path);
+    if (resolved.kind !== "document") return stop(step, target.name, targetProblem(resolved)!);
+    const fields = resolved.fields;
     if (fields === null) continue;
-    if ("problem" in fields) return stop(step, target.name, fields.problem);
     for (const change of targets) {
       if (change.ordinal !== step || change.collection !== target.path) continue;
       const missing = change.fields.find((field) => !fields.has(field));
@@ -1003,9 +1015,8 @@ async function followCollections(
     if (!verdict.allowed) return failed(verdict.reason);
   }
   for (const target of targets) {
-    if (!dependencies.isCollection(target.path) || await dependencies.isDatasetCollection(target.path)) {
-      return failed(`dohc cannot find the Collection ${target.path}.`);
-    }
+    const problem = targetProblem(await dependencies.targets.resolve(target.path));
+    if (problem !== null) return failed(problem);
   }
   if (moved) await dependencies.store.save(run);
   return null;

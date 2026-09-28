@@ -268,6 +268,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   let roster = options.roster ?? OWNER;
   let afterInvoke = options.afterInvoke;
   let hostOpen = options.hostOpen ?? true;
+  let metadataFailure: "unavailable" | "generated" | "grants" | null = null;
+  let listedForFailure = false;
   // Rules the executor sees in place of the approved ones, as after a schema change it indexes.
   let indexed: DatasetDefinition | null = null;
   // Whether saved rules still resolve, as before an approved change that drops them.
@@ -359,6 +361,19 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
       const current = override === null ? host.automations : { ...host.automations,
         datasets: () => ({ definitions: [override], failures: [] as Array<{ datasetId: string; error: unknown }> }),
         revision: (datasetId: string) => ({ ...host.automations.revision(datasetId), definition: override }) };
+      if (metadataFailure !== null) {
+        if (!listedForFailure) return await work({ ...current, datasets: () => {
+          const listed = current.datasets();
+          listedForFailure = true;
+          return listed;
+        } });
+        const failure = metadataFailure;
+        metadataFailure = null;
+        listedForFailure = false;
+        if (failure === "unavailable") return null;
+        const fail = () => { throw new Error(`Cannot read ${failure}`); };
+        return await work({ ...current, ...(failure === "generated" ? { generated: fail } : { dataGrants: fail }) });
+      }
       const resolving = rulesResolve ? current : { ...current, resolves: () => false };
       const moved = unpressable;
       const pressable = moved === null ? resolving : { ...resolving, assertPressable: () => { throw new Error(moved); } };
@@ -389,6 +404,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     dropRules: () => { rulesResolve = false; },
     keepRules: () => { rulesResolve = true; },
     fixStore: () => { storeFails = false; },
+    failNextMetadata: (failure: NonNullable<typeof metadataFailure>) => { metadataFailure = failure; },
     afterNextSave: (hook: () => void) => { afterSave = hook; },
     moveToServer: () => { unpressable = "This Collection moved to a server, so its buttons can't run here."; },
   };
@@ -751,6 +767,24 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
+  it.each(["unavailable", "generated", "grants"] as const)("keeps dataset identity and reports a pending claim when index metadata fails: %s", async (failure) => {
+    const f = await world();
+    await f.executor.open();
+    await f.executor.dispose();
+    const { id: invoice } = await f.create({});
+    await f.edit(invoice, { [PAID]: true });
+    expect(f.claims()).toMatchObject([{ state: "pending" }]);
+    f.failNextMetadata(failure);
+    f.makeExecutor();
+    await f.executor.open();
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.errors).toContainEqual({ context: `read dataset ${definition.datasetId}'s operations`, error: expect.any(Error) });
+    expect(f.claims()).toMatchObject([{ state: "failed" }]);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    await expect(f.executor.datasetIn("Budget")).resolves.toBe(definition.datasetId);
+    await f.executor.dispose();
+  });
+
   it("hands a claim back without counting its attempt while it waits to check who can edit, then runs it", async () => {
     const f = await world({ roster: UNKNOWN });
     await f.executor.open();
@@ -961,9 +995,10 @@ describe("Collection automations on a dataset", () => {
     // Ana stops editing: Secret, and ID, become readable only because she left.
     f.setRoster(OWNER);
     f.executor.rosterChanged();
-    const heldFields = () => f.executor.holds().map((hold) => hold.step).filter((step) => step.startsWith("field:")).sort();
+    const fieldStep = (fieldId: string) => JSON.stringify(["field", definition.datasetId, TABLE, fieldId]);
+    const heldFields = () => f.executor.holds().map((hold) => hold.step).filter((step) => step.startsWith('["field",')).sort();
     await f.until(() => heldFields().length === 2);
-    expect(heldFields()).toEqual([`field:${id(3)}`, `field:${SECRET}`]);
+    expect(heldFields()).toEqual([fieldStep(id(3)), fieldStep(SECRET)]);
     // An approved schema change removes Spare. Secret stays held.
     const withoutSpare = structuredClone(withSpare);
     withoutSpare.tables[0]!.fields = withoutSpare.tables[0]!.fields.filter((field) => field.fieldId !== SPARE);
@@ -973,7 +1008,7 @@ describe("Collection automations on a dataset", () => {
     f.changeRules(withoutSpare);
     // Two operations and six fields, once the change is indexed.
     await f.until(async () => await steps() === 8);
-    expect(heldFields()).toEqual([`field:${id(3)}`, `field:${SECRET}`]);
+    expect(heldFields()).toEqual([fieldStep(id(3)), fieldStep(SECRET)]);
     await f.executor.dispose();
   });
 
@@ -1606,7 +1641,7 @@ describe("dataset automation claims in both ledgers", () => {
     const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
     const saved = (claimId: string, outcome: StoredRun["outcome"], rest: Partial<StoredRun> = {}): StoredRun => ({
-      version: 5, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
+      version: 6, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
       applied: [], created: [], replans: [], undoRequests: [], readableFields: null, collections: [], rules: null,
       superseded: false, undo: null, settled: outcome?.state === "done", outcome, ...rest,
     });

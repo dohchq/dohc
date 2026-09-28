@@ -24,7 +24,7 @@ import {
 } from "./automationPlan";
 import { changedSincePressed } from "./automationButtons";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
-import { checkAutomationReach, type ReachCollection, type ReachDatasetGrants, type ReachRoster } from "./automationReach";
+import { checkAutomationReach, datasetFieldKey, type ReachCollection, type ReachDatasetGrants, type ReachRoster } from "./automationReach";
 import type { DatasetEffect, DatasetReplan, RunWrite, StoredRun, StoredStep } from "./automationRunStore";
 import { KEPT_CHANGING_ERROR, MAX_REREADS, runSteps, StepRecordChanged, unfinishedStep, type StepBackend } from "./automationStepRun";
 import {
@@ -126,7 +126,7 @@ export interface DatasetRunHost {
 
 export interface DatasetAutomationRunDependencies extends Pick<
   CollectionAutomationRunDependencies,
-  "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
+  "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
 > {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
@@ -199,7 +199,7 @@ function runRecordOf(row: Row, datasetId: string, table: DatasetTable, readable:
   const values: JsonObject = {};
   for (const field of table.fields) {
     // Formulas see only what every editor can read.
-    if (Object.hasOwn(row.values, field.fieldId) && readable.has(field.fieldId)) values[field.name] = row.values[field.fieldId] ?? null;
+    if (Object.hasOwn(row.values, field.fieldId) && readable.has(datasetFieldKey(datasetId, table.tableId, field.fieldId))) values[field.name] = row.values[field.fieldId] ?? null;
   }
   return { id: String(row.id), key: row.id, path: datasetRecordKey(datasetId, table.tableId, row.id), values };
 }
@@ -324,6 +324,9 @@ export async function runDatasetAutomation(
   // effects write the first, or send what was read from it, so the run stops
   // before either.
   if (current !== null && current.rules?.datasetId !== datasetId) return failed(RULES_CHANGED_ERROR);
+  const target = await dependencies.targets.resolve(collection.path);
+  if (target.kind === "problem") return target.code === "host-unavailable" ? { kind: "wait", reason: "engine" } : failed(target.problem);
+  if (target.kind !== "dataset" || target.approved.datasetId !== datasetId) return failed(RULES_CHANGED_ERROR);
 
   // Where the automation's messages go, found once for the reach check and
   // the steps.
@@ -363,7 +366,7 @@ export async function runDatasetAutomation(
   for (const [index, verdict] of verdicts.entries()) {
     const step = steps[index]!;
     if (step.kind === "dataset-field") {
-      if (verdict.allowed) readable.add(step.field.fieldId);
+      if (verdict.allowed) readable.add(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId));
     } else if (!verdict.allowed) {
       return failed(verdict.reason);
     }
@@ -464,6 +467,10 @@ function datasetBackend(
   const codeSteps = codeStepOrdinals(automation);
   return {
     async step(work) {
+      const target = await dependencies.targets.resolve(collection.path);
+      if (target.kind === "problem" && target.code === "host-unavailable") return null;
+      if (target.kind === "problem") throw new Error(target.problem);
+      if (target.kind !== "dataset" || target.approved.datasetId !== datasetId) throw new Error(RULES_CHANGED_ERROR);
       const result = await dependencies.withHost(async (host) => {
         const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth });
         // Each record the step read, by identity, with the version it read.
@@ -691,7 +698,7 @@ async function codeRecords(
   for (const [key, { ordinal, texts, id, fields }] of changed) {
     // A snapshot that already shows every field the code may see needs no second read.
     const earlier = snapshots.get(key);
-    const unseen = [...fields].some((name) => readable.has(table.fields.find((field) => field.name === name)!.fieldId) && !Object.hasOwn(earlier?.values ?? {}, name));
+    const unseen = [...fields].some((name) => readable.has(datasetFieldKey(definition.datasetId, table.tableId, table.fields.find((field) => field.name === name)!.fieldId)) && !Object.hasOwn(earlier?.values ?? {}, name));
     let snapshot = earlier;
     if (earlier === undefined || unseen) {
       const operation = datasetCodeOperation(definition, table, "read", [...fields]);
@@ -803,6 +810,9 @@ async function reachNow(
   const roster = await dependencies.cachedRoster();
   if (roster.kind === "unknown") return { kind: "wait", reason: "roster" };
   const { automation, collection, held } = input;
+  const target = await dependencies.targets.resolve(collection.path);
+  if (target.kind === "problem") return target.code === "host-unavailable" ? { kind: "wait", reason: "engine" } : failed(target.problem);
+  if (target.kind !== "dataset" || target.approved.datasetId !== datasetIdOf(held)) return failed(RULES_CHANGED_ERROR);
   const steps = datasetReachSteps(automation, collection, datasetRules, host.dataGrants(datasetIdOf(held)), chat);
   // The rules reach checked at the start no longer resolve the automation.
   if (steps === null) return failed(RULES_CHANGED_ERROR);

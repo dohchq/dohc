@@ -14,7 +14,7 @@ const setA = { kind: "set" as const, target: { recordId: "rec_a", collectionPath
 
 function run(claimId: string, state: "done" | "failed" | null, atMs: number, settled = state === "done"): StoredRun {
   return {
-    version: 5, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
+    version: 6, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: atMs, finishedAtMs: state === null ? null : atMs, steps: [{ ordinal: 0, effects: [setA, setA] }],
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
     created: [], replans: [], undoRequests: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, settled,
@@ -131,7 +131,7 @@ describe("the automation run store", () => {
     const files = await readdir(join(folder, automationFolder!));
     const planOf = (claimId: string) => join(folder, automationFolder!, files.find((file) => file.endsWith(".json") && file.startsWith(hashOf(claimId)))!);
     const text = await readFile(planOf("atc_older"), "utf8");
-    await writeFile(planOf("atc_older"), text.replace('"version":5', '"version":4'));
+    await writeFile(planOf("atc_older"), text.replace('"version":6', '"version":5'));
     await writeFile(planOf("atc_damaged"), "{ torn");
     const later = Date.now() + 31 * 24 * 60 * 60 * 1000;
     await expect(store.expire(Date.now(), async () => "gone", null)).resolves.toBeNull();
@@ -289,6 +289,14 @@ describe("the automation run store", () => {
     await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: true });
   });
 
+  it("fails closed on old unqualified reach keys", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-reach-old-"), testMetadataDir);
+    await writeFile(await store.reachVerdictsPath(), JSON.stringify({ version: 1, verdicts: [{
+      automationId: AUTOMATION, definitionHash: "h", step: "operation:records.edit", verdict: "stopped", stoppedFor: "Ana", seq: 1,
+    }] }));
+    expect(await store.readReachVerdicts()).toEqual({ unreadable: true, verdicts: [] });
+  });
+
   it("reads a run in another format, a run without its progress, or a renamed run as unreadable", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
@@ -301,8 +309,8 @@ describe("the automation run store", () => {
     const progress = (await readdir(files)).find((file) => file.endsWith(".progress.jsonl"))!;
     const text = await readFile(join(files, header), "utf8");
 
-    // An earlier format kept its progress inside the run.
-    await writeFile(join(files, header), text.replace('"version":5', '"version":4'));
+    // An earlier format kept its progress inside the run, or did not qualify formula-visible fields.
+    await writeFile(join(files, header), text.replace('"version":6', '"version":5'));
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
     await writeFile(join(files, header), text);
     await rm(join(files, progress));

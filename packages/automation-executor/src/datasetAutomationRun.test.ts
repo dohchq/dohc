@@ -21,7 +21,8 @@ import {
   type ChatDirectoryChannel,
 } from "./automationChat";
 import { definitionDigest, definitionHash, stepKey } from "./automationPlan";
-import type { ReachRoster, RosterGrant } from "./automationReach";
+import { datasetFieldKey, type ReachRoster, type RosterGrant } from "./automationReach";
+import { datasetRunClaim } from "./datasetAutomationPlan";
 import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import { createAutomationRunStore } from "./automationRunStore";
 import { DEADLINE_ERROR, GROUP_CHANGED_ERROR, RULES_CHANGED_ERROR } from "./collectionAutomationRun";
@@ -40,10 +41,14 @@ import {
 // A run checks reach again before each record effect, against the roster
 // last read. Unless a test changes it, that is the roster the run began with.
 function runWithRoster(
-  dependencies: Omit<DatasetAutomationRunDependencies, "cachedRoster"> & Partial<Pick<DatasetAutomationRunDependencies, "cachedRoster">>,
+  dependencies: Omit<DatasetAutomationRunDependencies, "cachedRoster" | "targets"> & Partial<Pick<DatasetAutomationRunDependencies, "cachedRoster" | "targets">>,
   input: DatasetAutomationRunInput,
 ) {
-  return runDatasetAutomation({ cachedRoster: async () => input.roster, ...dependencies }, input);
+  return runDatasetAutomation({
+    cachedRoster: async () => input.roster,
+    targets: { resolve: async () => ({ kind: "dataset", collection: input.collection, approved: revision, generated: true, grants: { workspaceId: "workspace", grants: [] } }) },
+    ...dependencies,
+  }, input);
 }
 
 // A dataset run against a scripted host: what it sends, under which key,
@@ -87,6 +92,7 @@ const claim: DatasetAutomationClaim = {
 const fromLedger = (claimed: DatasetAutomationClaim): DatasetRunClaim => ({ source: "dataset", claim: claimed });
 // A run with no chat step reads no chat and sends nothing.
 const sendsNothing = {
+  targets: { resolve: async () => ({ kind: "dataset" as const, collection: { path: "Budget", name: "Budget" }, approved: revision, generated: true, grants: { workspaceId: "workspace", grants: [] } }) },
   chat: {
     directory: async () => { throw new Error("This automation sends no messages."); },
     write: async () => { throw new Error("This automation sends no messages."); },
@@ -413,6 +419,33 @@ describe("a Find's formulas", () => {
 });
 
 describe("the rules a dataset run uses", () => {
+  it("exposes trigger facts only through their dataset and table field keys", () => {
+    const table = definition.tables[0]!;
+    const fields = (datasetId: string, tableId: string) => datasetRunClaim(claim, "Budget", table, new Set([datasetFieldKey(datasetId, tableId, STATUS)])).change.fields;
+    expect(fields(definition.datasetId, TABLE)).toEqual([{ field: "Status", previous: null, next: { value: "Open" } }]);
+    expect(fields("other-dataset", TABLE)).toEqual([]);
+    expect(fields(definition.datasetId, "other-table")).toEqual([]);
+  });
+
+  it.each([false, true])("stops a replaced destination before reads or effects, afterRead=%s", async (afterRead) => {
+    const script = host({ resolves: () => true, edit: async () => { throw new Error("Must not write"); } });
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-destination-"), testMetadataDir);
+    let resolutions = 0;
+    const outcome = await runWithRoster({
+      withHost: async (work) => await work(script.surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store,
+      nowMs: () => 1, personName: (id) => id, ...sendsNothing,
+      targets: { resolve: async () => ({ kind: "dataset", collection: { path: "Budget", name: "Budget" },
+        approved: !afterRead || resolutions++ > 1 ? { ...revision, datasetId: "replacement" } : revision,
+        generated: true, grants: { workspaceId: "workspace", grants: [] } }) },
+    }, {
+      held: fromLedger(claim), automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
+      signal: new AbortController().signal, stopped: new AbortController().signal,
+    });
+    expect(outcome).toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
+    expect(script.sent.every((sent) => sent.operationId === LIST)).toBe(true);
+    if (!afterRead) expect(script.sent).toEqual([]);
+  });
+
   it("plans under the rules reach checked, not a newer approval that lands between them", async () => {
     // The newer rules add a read that shows the record's id, which the plan would prefer for the trigger record.
     const WIDE = id(12);
