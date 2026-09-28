@@ -287,14 +287,7 @@ async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
             )
             .await
             .expect_err("an unknown first version must fail closed");
-        assert_eq!(
-            error.message,
-            if method == "versionedBinary.write" {
-                "invalid-version"
-            } else {
-                "version-not-found"
-            }
-        );
+        assert_eq!(error.message, "version-not-found");
     }
 
     let connection =
@@ -6366,14 +6359,6 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         }),
     )
     .await;
-    call(
-        &transport,
-        &handle_a,
-        30,
-        "versions.setActive",
-        json!({ "workspaceId": workspace_a, "versionId": named["id"] }),
-    )
-    .await;
     let written = call(
         &transport,
         &handle_a,
@@ -6398,16 +6383,6 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     )
     .await;
     assert_eq!(happy["bytesBase64"], "BAMCAQ==");
-
-    call(
-        &transport,
-        &handle_a,
-        31,
-        "versions.setActive",
-        json!({ "workspaceId": workspace_a, "versionId": "main" }),
-    )
-    .await;
-    assert!(!scratch.path().join("private.bin").exists());
 
     call(&transport, &handle_a, 6, "workspace.close", json!({})).await;
     let connection =

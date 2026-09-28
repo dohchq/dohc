@@ -244,6 +244,8 @@ impl ActorHandle {
                     store,
                     &root,
                     &input.workspace_id,
+                    &input.version_id,
+                    input.request_id.as_deref(),
                     &format!("authored-mat_{}", write.moment.moment_id),
                     self_writes.as_ref(),
                     input.now_ms,
@@ -720,9 +722,6 @@ fn versioned_text_write_with_publication_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    if conditions.is_some() {
-        ensure_publication_version(store, &input.workspace_id, &input.version_id)?;
-    }
     ensure_mutation_version_on_store(
         store,
         &input.workspace_id,
@@ -750,6 +749,9 @@ fn versioned_text_write_with_publication_on_store(
             (None, None) => write_text_in_tx(tx, input),
         }
         .map_err(RuntimeError::from)?;
+        if !result.deduped && conditions.is_some() {
+            ensure_publication_version(tx, &input.workspace_id, &input.version_id)?;
+        }
         if !result.deduped
             && let (Some(conditions), Some(root)) = (conditions, root_dir)
         {
@@ -850,7 +852,6 @@ fn versioned_binary_write_conditioned_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    ensure_publication_version(store, &input.workspace_id, &input.version_id)?;
     ensure_mutation_version_on_store(
         store,
         &input.workspace_id,
@@ -870,6 +871,13 @@ fn versioned_binary_write_conditioned_on_store(
         let result =
             dohc_engine_domain::write_published_binary_in_tx(tx, input, fingerprint.as_deref())
                 .map_err(RuntimeError::from)?;
+        if !replayed
+            && conditions.is_some_and(|conditions| {
+                conditions.create_only || conditions.expected_sha256.is_some()
+            })
+        {
+            ensure_publication_version(tx, &input.workspace_id, &input.version_id)?;
+        }
         if !replayed && let Some(conditions) = conditions {
             conditions.check(
                 root_dir,
@@ -913,6 +921,8 @@ fn versioned_binary_write_conditioned_on_store(
         store,
         root_dir,
         &input.workspace_id,
+        &input.version_id,
+        input.request_id.as_deref(),
         &result.moment.moment_id,
         self_writes,
         input.now_ms,
@@ -926,45 +936,102 @@ fn versioned_binary_write_conditioned_on_store(
 }
 
 fn ensure_publication_version(
-    store: &EngineStore,
+    conn: &rusqlite::Connection,
     workspace_id: &str,
     version_id: &str,
 ) -> Result<(), RuntimeError> {
-    let active: Option<String> = store.read_with(|conn| {
-        conn.query_row(
+    let active: Option<String> = conn
+        .query_row(
             "SELECT version_id FROM active_versions WHERE workspace_id = ?1",
             [workspace_id],
             |row| row.get(0),
         )
         .optional()
-        .map_err(StorageError::corrupt_public)
-    })?;
+        .map_err(StorageError::corrupt_public)?;
     if version_id != active.as_deref().unwrap_or("main") {
         return Err(DomainError::InvalidVersion.into());
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish_write_job(
     store: &EngineStore,
     root: &std::path::Path,
     workspace_id: &str,
+    version_id: &str,
+    request_id: Option<&str>,
     job_id: &str,
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<(bool, PostCommitMaterializeOutcome), RuntimeError> {
-    let Some(job) = store.load_materialization_job(job_id)? else {
-        return Ok((false, PostCommitMaterializeOutcome::Skipped));
+    use PostCommitMaterializeOutcome as Outcome;
+    let recorded: Option<String> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT publication_outcome FROM engine_requests WHERE request_id = ?1",
+            [request_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(StorageError::corrupt_public)
+    })?;
+    if let Some(recorded) = recorded {
+        let outcome = match recorded.as_str() {
+            "applied" => Outcome::Applied,
+            "skipped" => Outcome::Skipped,
+            "conflict" => Outcome::Conflict,
+            "superseded" => Outcome::Superseded,
+            _ => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "invalid recorded publication outcome",
+                }
+                .into());
+            }
+        };
+        return Ok((outcome == Outcome::Applied, outcome));
+    }
+    let (result, settled) = match store.load_materialization_job(job_id)? {
+        None => ((false, Outcome::Skipped), true),
+        Some(job) => match job.status {
+            JobStatus::Complete => ((true, Outcome::Applied), true),
+            JobStatus::Conflict => ((false, Outcome::Conflict), true),
+            JobStatus::Cancelled => ((false, Outcome::Superseded), true),
+            JobStatus::Pending => {
+                store
+                    .read_with(|conn| ensure_publication_version(conn, workspace_id, version_id))?;
+                let result = materialize_pending_job(
+                    store,
+                    root,
+                    workspace_id,
+                    &job,
+                    self_writes,
+                    now_ms,
+                    faults,
+                );
+                let settled = !matches!(result.1, Outcome::Error | Outcome::Skipped);
+                (result, settled)
+            }
+        },
     };
-    Ok(match job.status {
-        JobStatus::Complete => (true, PostCommitMaterializeOutcome::Applied),
-        JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
-        JobStatus::Cancelled => (false, PostCommitMaterializeOutcome::Superseded),
-        JobStatus::Pending => {
-            materialize_pending_job(store, root, workspace_id, &job, self_writes, now_ms, faults)
-        }
-    })
+    if settled {
+        let name = match result.1 {
+            Outcome::Applied => "applied",
+            Outcome::Skipped => "skipped",
+            Outcome::Conflict => "conflict",
+            Outcome::Superseded => "superseded",
+            Outcome::Error => unreachable!("transient errors are not settled"),
+        };
+        store.read_with(|conn| {
+            conn.execute(
+                "UPDATE engine_requests SET publication_outcome = ?2 WHERE request_id = ?1",
+                params![request_id, name],
+            )
+            .map_err(StorageError::persist_public)
+        })?;
+    }
+    Ok(result)
 }
 
 fn versioned_text_rename_on_store(

@@ -2572,6 +2572,8 @@ CREATE INDEX materialization_displacements_state
 // A job references either content table. Keep the reference checks while
 // allowing text jobs to use the text blob already owned by their moment.
 const V2_MATERIALIZATION_TEXT_BLOBS_DDL: &str = "\
+ALTER TABLE engine_requests ADD COLUMN publication_outcome TEXT
+    CHECK (publication_outcome IN ('applied', 'skipped', 'conflict', 'superseded'));
 CREATE TABLE materialization_jobs_next (
     job_id TEXT NOT NULL PRIMARY KEY,
     target_path TEXT NOT NULL,
@@ -2744,7 +2746,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        ordinal: 21,
+        ordinal: 24,
         id: "v2-materialization-text-blobs",
         sql: V2_MATERIALIZATION_TEXT_BLOBS_DDL,
         sets_user_version: None,
@@ -3088,7 +3090,7 @@ mod tests {
             ),
             (
                 "v2-materialization-text-blobs",
-                "3f5bf14bb5704f8f7b02e3af1fd50db2fbc59ee031e11aedf99339bf1bfce74c",
+                "2f5662203a97d14c1ecd6e1902a1dfd2d1b0dfe11734fe7c12b4a2982fc317ca",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3108,11 +3110,18 @@ mod tests {
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
         let before = BASELINE_MIGRATIONS.len() - 1;
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 24);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at, kind) VALUES ('before-upgrade', 'fingerprint', 7, 3, 'versioned')", []).unwrap();
         let binary = crate::blob::put_binary_blob(&conn, b"binary").unwrap();
         conn.execute("INSERT INTO materialization_jobs (job_id, target_path, content_sha256, preimage_present, target_generation, created_at_ms) VALUES ('pending', 'asset.bin', ?1, 0, 1, 1), ('complete', 'other.bin', ?1, 0, 2, 2)", [&binary]).unwrap();
         conn.execute("UPDATE materialization_jobs SET status='complete', completed_at_ms=3 WHERE job_id='complete'", []).unwrap();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let request: (String, i64, Option<String>) = conn.query_row(
+            "SELECT payload_hash, result_seq, publication_outcome FROM engine_requests WHERE request_id='before-upgrade'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(request, ("fingerprint".into(), 7, None));
         let jobs: i64 = conn.query_row("SELECT count(*) FROM materialization_jobs WHERE (job_id='pending' AND status='pending') OR (job_id='complete' AND status='complete' AND completed_at_ms=3)", [], |row| row.get(0)).unwrap();
         assert_eq!(jobs, 2);
         assert!(

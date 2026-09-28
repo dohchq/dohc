@@ -87,6 +87,192 @@ fn create() -> WriteConditions {
 }
 
 #[tokio::test]
+async fn publication_replay_after_version_switch_preserves_settled_outcomes_and_fingerprints() {
+    for pending in [false, true] {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).unwrap().actor;
+        actor
+            .ensure_main_version(
+                "publish".into(),
+                1,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        actor
+            .create_named_version(
+                dohc_engine_domain::CreateNamedVersion {
+                    workspace_id: "publish".into(),
+                    new_version_id: "draft".into(),
+                    name: "Draft".into(),
+                    from_version_id: "main".into(),
+                    now_ms: 2,
+                    request_id: None,
+                },
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let input = text("switch-text", "note.txt", "published");
+        let bytes = binary("switch-binary");
+        let faults = || -> Arc<dyn FaultInjector> {
+            if pending {
+                ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit)
+            } else {
+                Arc::new(NoFaults)
+            }
+        };
+        let first_text = publish(&actor, scratch.path(), input.clone(), create(), faults())
+            .await
+            .unwrap();
+        let first_binary = actor
+            .versioned_binary_write_with_conditions(
+                bytes.clone(),
+                scratch.path().into(),
+                create(),
+                Arc::new(()),
+                faults(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let expected = if pending {
+            Outcome::Error
+        } else {
+            Outcome::Applied
+        };
+        assert_eq!(first_text.materialize_outcome, expected);
+        assert_eq!(first_binary.materialize_outcome, expected);
+        actor
+            .set_active_version(
+                dohc_engine_runtime::ActiveVersionSwitch {
+                    workspace_id: "publish".into(),
+                    version_id: "draft".into(),
+                    root_dir: scratch.path().into(),
+                    self_writes: Arc::new(()),
+                    now_ms: 20,
+                },
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        supervisor.close(&db).unwrap();
+        let actor = supervisor.open(&db, 21).unwrap().actor;
+        let replay_text = publish(
+            &actor,
+            scratch.path(),
+            input.clone(),
+            create(),
+            Arc::new(NoFaults),
+        )
+        .await;
+        let replay_binary = actor
+            .versioned_binary_write_with_conditions(
+                bytes.clone(),
+                scratch.path().into(),
+                create(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await;
+        if pending {
+            assert!(matches!(
+                replay_text,
+                Err(RuntimeError::Domain(DomainError::InvalidVersion))
+            ));
+            assert!(matches!(
+                replay_binary,
+                Err(RuntimeError::Domain(DomainError::InvalidVersion))
+            ));
+        } else {
+            let replay_text = replay_text.unwrap();
+            let replay_binary = replay_binary.unwrap();
+            assert_eq!(
+                replay_text.materialize_outcome,
+                first_text.materialize_outcome
+            );
+            assert_eq!(
+                replay_binary.materialize_outcome,
+                first_binary.materialize_outcome
+            );
+            assert_eq!(replay_text.write.moment, first_text.write.moment);
+            assert_eq!(replay_binary.write.moment, first_binary.write.moment);
+            assert!(replay_text.write.deduped && replay_binary.write.deduped);
+        }
+        let mut changed = input.clone();
+        changed.text.push('!');
+        assert!(matches!(
+            publish(
+                &actor,
+                scratch.path(),
+                changed,
+                create(),
+                Arc::new(NoFaults)
+            )
+            .await,
+            Err(RuntimeError::Domain(
+                DomainError::IdempotencyKeyReuseMismatch
+            ))
+        ));
+        let mut changed = bytes.clone();
+        changed.bytes.push(42);
+        assert!(matches!(
+            actor
+                .versioned_binary_write_with_conditions(
+                    changed,
+                    scratch.path().into(),
+                    create(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new()
+                )
+                .await,
+            Err(RuntimeError::Domain(
+                DomainError::IdempotencyKeyReuseMismatch
+            ))
+        ));
+        assert!(matches!(
+            publish(
+                &actor,
+                scratch.path(),
+                input,
+                WriteConditions::default(),
+                Arc::new(NoFaults)
+            )
+            .await,
+            Err(RuntimeError::Domain(
+                DomainError::IdempotencyKeyReuseMismatch
+            ))
+        ));
+        assert!(matches!(
+            actor
+                .versioned_binary_write_with_conditions(
+                    bytes,
+                    scratch.path().into(),
+                    WriteConditions::default(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new()
+                )
+                .await,
+            Err(RuntimeError::Domain(
+                DomainError::IdempotencyKeyReuseMismatch
+            ))
+        ));
+        assert_eq!(count(&actor).await, 2);
+        assert!(!scratch.path().join("note.txt").exists());
+        assert!(!scratch.path().join("asset.bin").exists());
+        supervisor.close(&db).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn inactive_publication_refuses_before_recording_and_can_retry_after_activation() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
@@ -787,7 +973,7 @@ async fn rolled_back_pending_text_cannot_publish_after_restart() {
 }
 
 #[tokio::test]
-async fn superseded_text_job_is_complete_after_restart() {
+async fn superseded_text_result_remains_superseded_after_restart() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     let supervisor = WorkspaceSupervisor::new();
@@ -833,7 +1019,7 @@ async fn superseded_text_job_is_complete_after_restart() {
             .await
             .unwrap()
             .materialize_outcome,
-        Outcome::Applied
+        Outcome::Superseded
     );
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("note.txt")).unwrap(),
