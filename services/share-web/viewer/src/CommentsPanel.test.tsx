@@ -10,6 +10,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommentsPanel } from "./CommentsPanel";
+import {LINK_REFUSALS, linkRefusalBody} from "@dohc/security-contract/link-refusal";
 
 const FIRST_SESSION = "abcdefghijkl";
 const SECOND_SESSION = "mnopqrstuvwx";
@@ -147,6 +148,57 @@ describe("CommentsPanel", () => {
       submitButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
   }
+
+  it.each(["link_read_rate_limited", "link_live_unavailable", "link_unavailable", "link_view_access"] as const)("shows %s when loading fails, retaining the last refusal after retries", async code => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn().mockImplementation(async () => jsonResponse(linkRefusalBody(code), LINK_REFUSALS[code].status));
+    vi.stubGlobal("fetch", fetcher);
+    await render("comment");
+    await act(async () => {await vi.advanceTimersByTimeAsync(120_000);});
+    await settle(() => container.textContent!.includes(LINK_REFUSALS[code].error));
+    if (code === "link_read_rate_limited") expect(fetcher.mock.calls.length).toBeGreaterThan(1);
+    else expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["recovered", "stopped"])("clears the retryable activity refusal when the follower is %s", async outcome => {
+    vi.useFakeTimers();
+    const message = LINK_REFUSALS.link_read_rate_limited.error;
+    let attempts = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      if (!requestPath(input).includes("/activity")) return Promise.resolve(discussionPage());
+      attempts++;
+      if (attempts === 1) return Promise.resolve(jsonResponse(linkRefusalBody("link_read_rate_limited"), 429));
+      if (attempts === 2) return Promise.resolve(outcome === "recovered" ? availableActivityAt(7) : jsonResponse({ok: false, error: "not found"}, 404));
+      return new Promise<Response>(() => {});
+    }));
+    await render("comment");
+    await settle(() => container.textContent!.includes(message));
+    await act(async () => {await vi.advanceTimersByTimeAsync(1_000);});
+    await settle(() => outcome === "recovered" ? !bodyInput().disabled : container.textContent!.includes("Comments stopped updating."));
+    expect(container.textContent).not.toContain(message);
+    expect(attempts).toBe(outcome === "recovered" ? 3 : 2);
+  });
+
+  it.each(["link_read_rate_limited", "link_live_unavailable", "link_unavailable", "link_view_access"] as const)("shows %s on post and preserves the draft", async code => {
+    vi.useFakeTimers();
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {posts++;return Promise.resolve(jsonResponse(linkRefusalBody(code), LINK_REFUSALS[code].status));}
+      const path = requestPath(input);
+      if (!path.includes("/activity")) return Promise.resolve(discussionPage());
+      if (path.includes("hold=0")) return Promise.resolve(availableActivityAt(7));
+      return new Promise<Response>(() => {});
+    }));
+    await render("comment");
+    await settle(() => !bodyInput().disabled);
+    setControlValue(bodyInput(), "Keep this draft");
+    submit();
+    await act(async () => {await vi.advanceTimersByTimeAsync(120_000);});
+    await settle(() => container.textContent!.includes(LINK_REFUSALS[code].error));
+    expect(bodyInput().value).toBe("Keep this draft");
+    if (code === "link_view_access") expect(posts).toBe(1);
+    else expect(posts).toBeGreaterThan(1);
+  });
 
   function clickButton(label: string): void {
     const button = [...container.querySelectorAll("button")]

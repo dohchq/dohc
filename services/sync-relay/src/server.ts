@@ -1,4 +1,5 @@
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
+import {normalizeLinkRefusal} from "./linkRefusal";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import type { AppBackendRoute } from "./appBackendRoutes";
 import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
@@ -555,14 +556,12 @@ export function createSyncRelayHandler({
   ) => {
     const {capabilityToken, capability} = requireLinkCapability(request);
     const admittedAtMs = nowMs();
-    if (
-      !capabilityRateLimiter.allow(
+    const admitted =
+      capabilityRateLimiter.allow(
         capability.session.capabilityHash,
         admittedAtMs,
-      ) || !grantRateLimiter.allow(capability.grantId, admittedAtMs)
-    ) {
-      throw relayError("link_read_rate_limited");
-    }
+      ) && grantRateLimiter.allow(capability.grantId, admittedAtMs);
+    if (!admitted) throw relayError("link_read_rate_limited");
     return { capabilityToken, capability };
   };
 
@@ -688,7 +687,7 @@ export function createSyncRelayHandler({
     egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
   const respondToLinkAppCollection = createLinkAppCollectionRoutes({storage,limits:appPublicationLimits,policy:appCollectionPolicy,linkKey:linkKey!,publicEditRelease,nowMs,
     requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes},discussionActivity});
-  const handle: SyncRelayHandler = async (request) => {
+  const dispatch: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
       if (pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve") {
@@ -958,6 +957,12 @@ export function createSyncRelayHandler({
     } catch (error) {
       return errorResponse(error);
     }
+  };
+  const handle: SyncRelayHandler = async (request) => {
+    const result = await dispatch(request);
+    const path = new URL(request.url).pathname;
+    if (!/^\/sync\/link(?:[/-]|$)/.test(path) || result.status < 400) return result;
+    return normalizeLinkRefusal(result);
   };
   return Object.assign(handle, {
     resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),

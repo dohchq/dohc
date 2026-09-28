@@ -1,5 +1,6 @@
 import { jsonResponse } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
+import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
 
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
@@ -95,7 +96,7 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   key_envelope_not_found: "key envelope not found",
   link_discussion_blocked: "link discussion writes are blocked",
   link_discussion_paused: "link discussion writes are paused",
-  link_read_rate_limited: "too many link reads",
+  link_read_rate_limited: LINK_REFUSALS.link_read_rate_limited.error,
   method_not_allowed: "method not allowed",
   not_found: "not found",
   notice_list_full: "the recipient has too many unread notices",
@@ -164,8 +165,6 @@ export function errorResponse(error: unknown): Response {
   return errorBody("internal_error");
 }
 
-// A link credential that does not resolve answers 401 with the not-found body:
-// the status tells the viewer to re-exchange, and the body says nothing more.
 export function invalidLinkCapability(): RelayError {
-  return new RelayError("not_found", undefined, 401);
+  return notFound();
 }

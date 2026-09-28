@@ -277,7 +277,7 @@ it("serves only public bundle descriptors and verified bytes through the existin
   expect((await f.http(`${f.path}?authorityRevision=1&authorityRevision=1`)).status).toBe(400);
   expect((await f.http(`${f.path}?principalId=owner`)).status).toBe(400);
   expect((await f.http(f.path, {headers: {cookie: "ambient"}})).status).toBe(404);
-  expect((await f.http(f.path, {headers: {authorization: "Bearer owner"}})).status).toBe(401);
+  expect((await f.http(f.path, {headers: {authorization: "Bearer owner"}})).status).toBe(404);
   const manifest = f.raw.prepare("SELECT manifest_sha256 FROM sync_relay_app_publications").get()!.manifest_sha256;
   expect((await f.http(`${f.path}/blobs/${manifest}?authorityRevision=1`)).status).toBe(404);
 });
@@ -302,7 +302,7 @@ it.each(["session", "expired", "grant", "generation", "owner", "selector", "vers
   }
   if (kind === "corrupt-length") f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=?").run(digest(script));
   if (kind === "corrupt-hash") f.raw.prepare("UPDATE sync_relay_blobs SET content=? WHERE sha256=?").run(Buffer.alloc(script.byteLength), digest(script));
-  expect((await f.http(f.blobPath)).status).toBe(["session", "expired", "grant", "generation", "owner"].includes(kind) ? 401 : 404);
+  expect((await f.http(f.blobPath)).status).toBe(404);
 });
 
 it.each(["withdrawal", "expiry", "abort", "grant", "selector", "principal", "generation", "owner"])("stops a backpressured publication stream after %s", async kind => {
@@ -410,7 +410,7 @@ it("retains damaged owner rows for withdrawal and refuses their manifests generi
   const damaged = page.publications.find(row => row.publicationId === f.published.publicationId)!;
   expect(damaged).toEqual({publicationId: f.published.publicationId, authorityRevision: 1, shareId: "s", grantId: "g", active: true, collectionCapability: null, datasetCapability: null, linkCurrent: true, manifestUnavailable: true});
   expect(page.publications.find(row => row.publicationId === other.publicationId)).toMatchObject({collectionCapability: null, datasetCapability: null, linkCurrent: true, manifestUnavailable: false, appRoot: "app"});
-  const refused = await f.http();expect(refused.status).toBe(404);expect(await refused.json()).toEqual({ok: false, error: "not found", code: "not_found"});
+  const refused = await f.http();expect(refused.status).toBe(404);expect(await refused.json()).toEqual({ok: false, error: "not found"});
   expect(f.storage.withdrawAppPublication({workspaceId: "w", publicationId: damaged.publicationId, ownerUserId: "owner", expectedAuthorityRevision: damaged.authorityRevision}).active).toBe(false);
 });
 
@@ -488,7 +488,7 @@ it("hides damaged discovery rows and refuses stale or blocked discovery principa
   f.raw.prepare("INSERT INTO sync_relay_link_principals(principal_id,grant_id,mint_generation,profile_token_hash,created_at_ms,blocked_at_ms,storage_bytes) VALUES('blocked','g',1,?,1,2,1)").run(hashLinkProfileSecret("P".repeat(43),"test-key"));
   expect((await f.http("/sync/link/app-publications")).status).toBe(404);
   f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2").run();
-  expect((await f.http("/sync/link/app-publications")).status).toBe(401);
+  expect((await f.http("/sync/link/app-publications")).status).toBe(404);
 });
 
 it("does not reread manifests while streaming an authorized discovery page",async()=>{
