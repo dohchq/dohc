@@ -11,6 +11,7 @@ import { startTiming, timed } from "./timing.mjs";
 import { testWorkspace } from "./js-tests.mjs";
 import { readWorkspacePackages, selectJavaScript } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
+import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
@@ -175,6 +176,7 @@ export async function verify(args) {
     });
   }
   let database;
+  let lane;
   let rustFailure;
   let desktopEnvironment = process.env;
   async function checkedStep(row, action) {
@@ -205,6 +207,8 @@ export async function verify(args) {
       report.verdict = "PASS";
       return report;
     }
+    // One PR gate at a time per host; the wait is recorded as `queue`.
+    if (mode === "pr") lane = await measure("queue", () => acquireVerificationSlot());
     const needs = mode === "pr" ? (javascript?.needs ?? {engine: false, desktop: false, postgres: false}) : {engine: true, desktop: true};
     const proofs = mode === "pr" ? (javascript?.proofs ?? {}) : {desktop: true};
     const native = gates.rust || needs.engine || needs.desktop;
@@ -296,6 +300,7 @@ export async function verify(args) {
     try { await database?.stop(); }
     catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
     const interrupted = await cancellation.dispose();
+    lane?.release();
     if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
     finishTiming(); Object.assign(report, total);
     save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);

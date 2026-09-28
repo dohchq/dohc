@@ -285,7 +285,7 @@ describe("formulas", () => {
 
   it("stops a formula that reads a record key it may not, however it reaches the record", async () => {
     const idOnly: AutomationScope = { record: { id: "inv-1" }, trigger: { kind: "button", record: { id: "inv-1" } }, person: null, now: scope.now, recordKeys: ["id"] };
-    const refused = { code: "runtime", message: "TypeError: Formulas can read only this record's id, not Status." };
+    const refused = { code: "runtime", message: "TypeError: The formula can read only this record's id, not Status." };
     expect(await evaluator.evaluate(idOnly, [
       "record.id", 'record["id"]', "trigger.record.id", "String(record)", "Object.keys(record)",
       '"id" in record', 'Object.hasOwn(record, "id")',
@@ -362,6 +362,31 @@ describe("formulas", () => {
         .rejects.toThrow(`The step result name "${name}" belongs to a JavaScript built-in.`);
     }
     expect(await evaluator.evaluate(scope, [])).toEqual([]);
+    for (const unavailable of [{ record: "No." }, { total: "Taken." }, { later: 1 as unknown as string }] as Array<Record<string, string>>) {
+      await expect(evaluator.evaluate({ ...scope, unavailable }, [expression("1")])).rejects.toThrow(/cannot bind the name|must each say why/);
+    }
+    await expect(evaluator.evaluate({ ...scope, unavailable: { Math: "No." } }, [expression("1")]))
+      .rejects.toThrow('The step result name "Math" belongs to a JavaScript built-in.');
+  });
+});
+
+describe("results of steps that have not run", () => {
+  const why = "later is step 3's result, and step 3 comes after step 2.";
+  const waiting: AutomationScope = { ...scope, unavailable: { later: why } };
+
+  it("throw why when a formula reads one, and leave every other name as it was", async () => {
+    expect(await evaluator.evaluate(waiting, [expression("later.length"), expression("typeof later"), expression("total + 1")])).toEqual([
+      { ok: false, error: { code: "runtime", message: `ReferenceError: ${why}` } },
+      { ok: false, error: { code: "runtime", message: `ReferenceError: ${why}` } },
+      { ok: true, value: 38.5 },
+    ]);
+  });
+
+  it("throw why when code reads one, directly or by taking it apart, and not when it reads the rest", async () => {
+    for (const source of ["return { output: ctx.later ?? 0 };", "const { later = 0 } = ctx; return { output: later };", "const c = ctx; return { output: c['later'] };"]) {
+      expect(await evaluator.runCode(waiting, source), source).toEqual({ ok: false, error: { code: "runtime", message: `ReferenceError: ${why}` } });
+    }
+    expect(await evaluator.runCode(waiting, "return { output: Object.keys(ctx).includes('later') ? 1 : ctx.total };")).toEqual({ ok: true, value: { output: 37.5 } });
   });
 });
 
@@ -386,6 +411,20 @@ describe("code steps", () => {
       output: { total: 50, tags: ["trip", "urgent"] },
     } });
     expect(await evaluator.runCode(scope, "if (ctx.record.Status !== 'Done') return { set: { Status: 'Done' } };")).toEqual({ ok: true, value: {} });
+  });
+
+  it("share one run's time budget with the formulas around them", async () => {
+    const spent = { prepareMs: 0, runMs: 0 };
+    expect(await evaluator.runCode(scope, "return { output: 1 };", spent)).toEqual({ ok: true, value: { output: 1 } });
+    expect(spent.runMs).toBeGreaterThan(0);
+    const [formula] = await evaluator.evaluate(scope, [expression("1")], spent);
+    expect(formula).toEqual({ ok: true, value: 1 });
+    // Once the run has spent its budget in earlier requests, a later one runs nothing.
+    spent.runMs = AUTOMATION_LIMITS.requestMs;
+    expect(await evaluator.evaluate(scope, [expression("1")], spent)).toEqual([{ ok: false, error: runSpent }]);
+    expect(await evaluator.runCode(scope, "return {};", spent)).toEqual({ ok: false, error: {
+      code: "timeout", message: "The code did not run because the run took longer than 8 s.",
+    } });
   });
 
   it("reject a result the executor cannot use", async () => {

@@ -117,7 +117,7 @@ interface FixtureOptions {
   temporaryRunActivity?: boolean;
   setRunAttribution?: (
     workspaceId: string,
-    run: { agentId: string; onBehalfOf: string; agentRunId: string; depth: number } | null,
+    run: { agentId: string; agentRunId: string; depth: number } | null,
   ) => void | Promise<void>;
   requeueFailures?: Error[];
   recordEligibleTriggerFailures?: Error[];
@@ -151,7 +151,7 @@ interface Fixture {
   presence: ChatDispatchPresenceInput[];
   attributions: Array<{
     workspaceId: string;
-    run: { agentId: string; onBehalfOf: string; agentRunId: string; depth: number } | null;
+    run: { agentId: string; agentRunId: string; depth: number } | null;
   }>;
   errors: unknown[];
   dispatchNotices: Array<{ workspace: ChatDispatchWorkspace; notice: Omit<ChatDispatchNotice, "id"> }>;
@@ -1079,7 +1079,7 @@ describe("chatDispatchService", () => {
     expect(personRun.chainDepth).toBe(0);
     expect(fixture.attributions.at(-1)).toEqual({
       workspaceId: WORKSPACE_ID,
-      run: { agentId: "dohc-chat-runner", onBehalfOf: "local", agentRunId: personRun.run.runId, depth: 0 },
+      run: { agentId: "dohc-chat-runner", agentRunId: personRun.run.runId, depth: 0 },
     });
     await linkAgentReply(fixture, asked.threadId, personRun.run.runId);
     fixture.spawnCalls[0]!.process.emitExit(0);
@@ -1105,7 +1105,7 @@ describe("chatDispatchService", () => {
     const wokenRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     expect(wokenRun.run.triggerMessageId).toBe(wake.message.id);
     expect(fixture.attributions.at(-1)?.run).toEqual({
-      agentId: "dohc-chat-runner", onBehalfOf: "local", agentRunId: wokenRun.run.runId, depth: 3,
+      agentId: "dohc-chat-runner", agentRunId: wokenRun.run.runId, depth: 3,
     });
     // The agent reads that an automation asked, not a person.
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");

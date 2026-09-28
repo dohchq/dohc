@@ -5,7 +5,7 @@ import type { AppLaunchConfig } from "./appLaunchConfig";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
@@ -22,6 +22,7 @@ import {opaqueLinkRefusal as refused} from "./linkRefusal";
 import {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 export {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 import {serveRemoteMcp} from "./remoteMcp";
+import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
 import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError } from "./relayVersion";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
@@ -54,6 +55,15 @@ const DISCUSSION_LIMIT = /^[1-9][0-9]{0,2}$/u;
 const DISCUSSION_REVISION = /^(?:0|[1-9][0-9]{0,15})$/u;
 const DISCUSSION_HOLD = /^(?:0|[1-9][0-9]{0,4})$/u;
 const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
+// A Collection write arrives and commits within the relay's own deadline for it.
+const COLLECTION_WRITE_TIMEOUT_MS = 60_000;
+// The relay's direct-write rate per link: a burst of 30, then one every two seconds.
+const COLLECTION_WRITE_BUCKET_CAPACITY = 30;
+const COLLECTION_WRITE_REFILL_PER_SECOND = 0.5;
+// Large bodies held in memory at once, for Collection writes and for MCP
+// requests that carry one: one per link, and a few in all, as the relay holds.
+const LARGE_BODIES_IN_FLIGHT = 4;
+const MCP_REQUEST_TIMEOUT_MS = 35_000;
 
 type RelayFetch = (request: Request) => Promise<Response>;
 
@@ -87,6 +97,8 @@ interface RelayCall {
   exchangeKey?: boolean;
   /** Extends the deadline by the time the relay may hold the read open. */
   holdMs?: number;
+  /** Replaces the relay deadline, for a call the relay may take longer to answer. */
+  timeoutMs?: number;
   /** Admits the call against a per-session and per-grant in-flight limit. */
   limiter?: ShareWebInFlightLimiter;
   /** Reads the whole relay body, up to the proxy limit, inside the deadline. */
@@ -288,6 +300,26 @@ class ShareWebInFlightLimiter {
 
 function sessionKey(discriminator: string, token: string): string {
   return `${discriminator}:${createHash("sha256").update(token).digest("base64url")}`;
+}
+
+/** Admits one large body per link, and a few in all: a release, or null when full. */
+function largeBodyAdmission(limit = LARGE_BODIES_IN_FLIGHT): (grantId: string) => (() => void) | null {
+  const holding = new Set<string>();
+  return (grantId) => {
+    if (holding.has(grantId) || holding.size >= limit) return null;
+    holding.add(grantId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      holding.delete(grantId);
+    };
+  };
+}
+
+function sameSecret(left: string, right: string): boolean {
+  const a = Buffer.from(left), b = Buffer.from(right);
+  return a.byteLength === b.byteLength && timingSafeEqual(a, b);
 }
 
 function linkDiscriminator(grantId: string): string {
@@ -502,6 +534,38 @@ async function discussionRefusal(relayResponse: Response): Promise<Response | nu
     { status: state.state === "limit-reached" ? 413 : 403 },
   );
 }
+
+// A Collection write's answers, as `parseCollectionWriteOutcome` reads them.
+// Only the receipt's own fields pass: the relay's words, never its headers.
+async function acceptedCollectionWrite(relayResponse: Response): Promise<Response> {
+  const receipt = asRecord(await relayResponse.json().catch(() => null));
+  if (receipt?.ok !== true || typeof receipt.submitId !== "string") return jsonResponse(linkRefusalBody("link_unavailable"), {status: 503});
+  // A retry the relay already recorded is accepted the same way. The paths
+  // are the writer's own, so the answer stays small.
+  return jsonResponse({ ok: true, outcome: "accepted", submitId: receipt.submitId });
+}
+
+async function collectionWriteRefusal(relayResponse: Response): Promise<Response | null> {
+  if (![400, 403, 409, 413, 429].includes(relayResponse.status)) return null;
+  const record = asRecord(await relayResponse.json().catch(() => null));
+  if (!record || typeof record.error !== "string") return null;
+  // The relay limits a link's writes only after it verified the link.
+  if (relayResponse.status === 429) {
+    return record.code === "collection_write_rate_limited" ? writesRateLimited() : null;
+  }
+  // A stale base names the file and its current content, so the writer
+  // keeps their text and reads the winner before trying again.
+  if (relayResponse.status === 409 && record.code === "stale") {
+    const current = record.currentBlobSha256;
+    if (typeof record.path !== "string" || !(current === null || (typeof current === "string" && SHA256_HEX_PATTERN.test(current)))) {
+      return null;
+    }
+    return jsonResponse({ ok: false, outcome: "stale", path: record.path, currentBlobSha256: current }, { status: 409 });
+  }
+  return jsonResponse({ ok: false, outcome: "refused", reason: record.error.slice(0, 1024) }, { status: 403 });
+}
+
+const writesRateLimited = (): Response => jsonResponse(linkRefusalBody("link_read_rate_limited"), {status: 429});
 
 function relayJson(relayResponse: Response): Response {
   return response(relayResponse.body, {
@@ -857,6 +921,14 @@ export function createShareWebApplication({
   );
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
   const mcpLimiter = new ShareWebInFlightLimiter(4, 16);
+  // One pool for every large body, whether it arrives as a Collection write
+  // or as an MCP request that carries one. Either spends one of the link's
+  // write tokens first. The one write an MCP request makes uses the token
+  // and slot that request already took.
+  const admitLargeBody = largeBodyAdmission();
+  const writesInsideAdmittedRequests = new WeakSet<Request>();
+  // Every browser and agent of a link spends the link's tokens before its body is read, as at the relay.
+  const collectionWriteRateLimiter = new TokenBucketLimiter(COLLECTION_WRITE_BUCKET_CAPACITY, COLLECTION_WRITE_REFILL_PER_SECOND, EXCHANGE_MAX_IPS);
   let mcpRequests = 0;
   if (linkLiveConfig && (!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
   const linkLive = linkLiveConfig && publicEditRelease ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
@@ -1071,7 +1143,7 @@ export function createShareWebApplication({
         },
         body: call.body,
       },
-      relayTimeoutMs + (call.holdMs ?? 0),
+      (call.timeoutMs ?? relayTimeoutMs) + (call.holdMs ?? 0),
     );
     try {
       let relayResponse = await fetchRelay(bounded.request);
@@ -1097,7 +1169,7 @@ export function createShareWebApplication({
       if (relayResponse.status === 200) {
         return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot));
       }
-      if ([403, 413, 429].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
+      if ([400, 403, 409, 413, 429].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
         const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch(() => null);
         const detail = parseLinkRefusal(value, relayResponse.status);
         if (detail) return answer(jsonResponse(linkRefusalBody(detail), {status: relayResponse.status}));
@@ -1107,7 +1179,8 @@ export function createShareWebApplication({
       await relayResponse.body?.cancel().catch(() => undefined);
       return answer(refused());
     } catch {
-      return superseded() ?? answer(refused());
+      return superseded() ?? answer(call.path === "/sync/link/collection-writes"
+        ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
     } finally {
       bounded.dispose();
       if (!slotHeld) release();
@@ -1141,17 +1214,29 @@ export function createShareWebApplication({
       const release = mcpLimiter.acquire(sessionKey(discriminator, bearer![2]!), session.grantId);
       if (!release) return refused();
       mcpRequests++;
-      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(35_000)]);
+      const deadlineAtMs = Date.now() + MCP_REQUEST_TIMEOUT_MS;
+      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(MCP_REQUEST_TIMEOUT_MS)]);
       // Only server-held agent credentials cross into the shared link handlers.
       const cookie = `${cookieName(discriminator)}=${bearer![2]}; ${profileCookieName(discriminator)}=${session.agentProfileSecret}`;
+      let holdsLargeBody = false;
       try {
         const result = await serveRemoteMcp(request, {
-          signal, discriminator, cookie, linkLive, liveLimits: linkLiveConfig?.editor,
-          request: (path, init = {}) => handle(new Request(new URL(path, agentOrigin), {
-            ...init, signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal,
-            headers: {host: new URL(agentOrigin).host, origin: agentOrigin, cookie, [LINK_SESSION_HEADER]: discriminator,
-              "content-type": "application/json"},
-          })),
+          signal, deadlineAtMs, discriminator, cookie, linkLive, liveLimits: linkLiveConfig?.editor,
+          admitLargeBody: () => {
+            if (!collectionWriteRateLimiter.allow(session.grantId, nowMs())) return null;
+            const lease = admitLargeBody(session.grantId);
+            holdsLargeBody = lease !== null;
+            return lease;
+          },
+          request: (path, init = {}) => {
+            const internal = new Request(new URL(path, agentOrigin), {
+              ...init, signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal,
+              headers: {host: new URL(agentOrigin).host, origin: agentOrigin, cookie, [LINK_SESSION_HEADER]: discriminator,
+                "content-type": "application/json"},
+            });
+            if (holdsLargeBody) writesInsideAdmittedRequests.add(internal);
+            return handle(internal);
+          },
         });
         return response(result.body, {status: result.status, headers: result.headers});
       } catch (error) {
@@ -1308,6 +1393,83 @@ export function createShareWebApplication({
           });
         },
       });
+    }
+
+    if (pathname === COLLECTION_WRITES_PATH) {
+      // Only the viewer page, or this server's own MCP tools, which send the
+      // viewer's headers: never another site, and never a published app,
+      // whose origin differs and which never holds the link's cookies.
+      const fetchSite = request.headers.get("sec-fetch-site");
+      if (
+        request.method !== "POST" || search || request.headers.get("origin") !== agentOrigin ||
+        (fetchSite !== null && fetchSite !== "same-origin") || !request.headers.has(LINK_SESSION_HEADER) ||
+        request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+      ) {
+        return refused();
+      }
+      const authenticated = readSession(request);
+      if (!authenticated) return refused();
+      const profileSecret = parseCookies(request.headers.get("cookie")).get(
+        profileCookieName(authenticated.discriminator),
+      );
+      // An agent's session writes with its server-held profile only.
+      const agentProfile = authenticated.session.agentProfileSecret;
+      if (
+        !profileSecret || !LINK_SECRET_PATTERN.test(profileSecret) ||
+        (agentProfile !== undefined && !sameSecret(profileSecret, agentProfile))
+      ) {
+        return refused();
+      }
+      // Only a link the relay says can write now spends its tokens and holds a
+      // body slot, shared by every browser and agent of it. The relay decides
+      // again, inside its commit.
+      const admitted = writesInsideAdmittedRequests.has(request);
+      let writable = false;
+      const probe = await callRelay(request, authenticated, {
+        path: "/sync/link/share",
+        buffered: true,
+        ok: async (relayResponse) => {
+          const meta = asRecord(await relayResponse.json().catch(() => null));
+          writable = meta?.access === "edit" && asRecord(meta.effectiveSelector)?.versionId === null;
+          return response(null);
+        },
+      });
+      if (!writable) return probe.status === 200 ? refused() : probe;
+      const renewed = (result: Response): Response => {
+        const cookie = probe.headers.get("set-cookie");
+        if (cookie && sessions.isCurrent(authenticated.discriminator, authenticated.token, authenticated.session.capabilityToken, nowMs())) {
+          result.headers.set("set-cookie", cookie);
+        }
+        return result;
+      };
+      if (!admitted && !collectionWriteRateLimiter.allow(authenticated.session.grantId, nowMs())) return renewed(writesRateLimited());
+      const release = admitted ? () => {} : admitLargeBody(authenticated.session.grantId);
+      if (!release) return renewed(writesRateLimited());
+      try {
+        // Only what a write is. Who writes comes from the capability and the
+        // profile, and no cookie or account reaches the relay.
+        let body: string;
+        try {
+          const value = asRecord(await readBoundedJson(request, MAX_COLLECTION_WRITE_ENVELOPE_BYTES,
+            AbortSignal.any([request.signal, AbortSignal.timeout(COLLECTION_WRITE_TIMEOUT_MS)])));
+          if (!value || Object.keys(value).some((key) => key !== "submitId" && key !== "changes")) return renewed(refused());
+          body = JSON.stringify(value);
+        } catch {
+          return renewed(refused());
+        }
+        return renewed(await callRelay(request, authenticated, {
+          path: "/sync/link/collection-writes",
+          method: "POST",
+          headers: { "x-dohc-link-profile-secret": profileSecret, "content-type": "application/json" },
+          body,
+          buffered: true,
+          timeoutMs: COLLECTION_WRITE_TIMEOUT_MS,
+          ok: acceptedCollectionWrite,
+          refusal: collectionWriteRefusal,
+        }));
+      } finally {
+        release();
+      }
     }
 
     if (

@@ -99,7 +99,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   function owner(auth: AppBackendAuth, workspaceId: string): DatasetAuthority {
     current();
     if (auth.kind !== "named" || auth.workspaceId !== workspaceId || !storage.workspaceIsOwnedBy(workspaceId, auth.userId)) throw notFound();
-    return {caller: {kind: "owner", userId: auth.userId}, principalKey: ownerPrincipalKey(workspaceId)};
+    return {caller: {kind: "owner", userId: auth.userId}, principalKey: ownerPrincipalKey(workspaceId), person: auth.userId};
   }
   function enroll(workspaceId: string, datasetId: string, authority: DatasetAuthority) {
     if (authority.caller.kind !== "link") return;

@@ -391,6 +391,9 @@ pub enum FieldValueValidation {
 #[serde(rename_all = "camelCase")]
 pub struct CollectionSummary {
     pub path: String,
+    /// The object id of its schema file. It names the Collection wherever
+    /// the Collection moves.
+    pub object_id: String,
     pub status: CollectionSchemaStatus,
     pub reasons: Vec<CollectionSchemaReason>,
 }
@@ -399,6 +402,7 @@ pub struct CollectionSummary {
 #[serde(rename_all = "camelCase")]
 pub struct CollectionDetails {
     pub path: String,
+    pub object_id: String,
     pub status: CollectionSchemaStatus,
     pub reasons: Vec<CollectionSchemaReason>,
     pub schema: CollectionSchema,
@@ -2802,7 +2806,10 @@ impl ChangeActorKind {
 }
 
 /// Declared write provenance beside `author_origin_id`: the actor kind, the
-/// principal it acted for, and its automation-chain depth. Optional
+/// person it acted for, and its automation-chain depth. The person is an
+/// account id, or a signed-out computer's installation id: the person
+/// typing, the person an agent works for, or the person whose change
+/// started an automation. Optional
 /// provenance, never a second authority — the storage and permission
 /// boundaries stay identical with or without it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2813,6 +2820,56 @@ pub struct ChangeAttribution {
     pub on_behalf_of: Option<String>,
     #[serde(default)]
     pub depth: u32,
+}
+
+/// A person the owner shared with, or an Edit share link, whose change the
+/// relay accepted from its own authentication: never a claim a client made.
+/// It names who changed a record on the computer that claims the change, so
+/// a run can say who started it. A link is its grant and generation, with
+/// the server-minted principal that tells its browser sessions apart; it is
+/// never a person's account. Provenance only, never authority: the run still
+/// acts as the automation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SharedChangeAuthor {
+    #[serde(rename = "named")]
+    Named {
+        #[serde(rename = "userId")]
+        user_id: String,
+        #[serde(rename = "grantId")]
+        grant_id: String,
+        #[serde(rename = "grantGeneration")]
+        grant_generation: i64,
+    },
+    #[serde(rename = "link")]
+    Link {
+        #[serde(rename = "grantId")]
+        grant_id: String,
+        #[serde(rename = "grantGeneration")]
+        grant_generation: i64,
+        #[serde(rename = "principalId")]
+        principal_id: String,
+    },
+}
+
+impl SharedChangeAuthor {
+    /// Every id is present and bounded, and the generation is a real one.
+    pub fn is_valid(&self) -> bool {
+        let (ids, generation) = match self {
+            Self::Named {
+                user_id,
+                grant_id,
+                grant_generation,
+            } => ([user_id, grant_id], *grant_generation),
+            Self::Link {
+                grant_id,
+                grant_generation,
+                principal_id,
+            } => ([grant_id, principal_id], *grant_generation),
+        };
+        ids.iter().all(|id| !id.is_empty() && id.len() <= 512)
+            && (1..=9_007_199_254_740_991).contains(&generation)
+    }
 }
 
 /// The most automation hops any declared chain may report. Bounds the wire,
@@ -2958,6 +3015,15 @@ pub struct CollectionRecordApplyFacts {
     pub created: bool,
     pub author_origin_id: Option<String>,
     pub attribution: Option<ChangeAttribution>,
+    /// Who the relay accepted a live-shared record's change from, when that
+    /// was a person the owner shared with or an Edit share link. Set only by
+    /// the session host, from the relay's authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_author: Option<SharedChangeAuthor>,
+    /// The relay's live journal cursor of the frame this change came in,
+    /// set only by the session host that accepted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_cursor: Option<i64>,
     /// The replication coordinate of the op this apply came from:
     /// `(origin_id, origin_seq)`. A replicated apply carries the envelope's
     /// coordinate; a local apply carries its own journaled coordinate, set by
@@ -3185,6 +3251,8 @@ pub fn index_collection_frontmatter_apply_in_tx(
         created: !index_initialized,
         author_origin_id: author_origin_id.map(str::to_owned),
         attribution: attribution.cloned(),
+        shared_author: None,
+        live_cursor: None,
         source: source_update.map(|(origin_id, origin_seq)| (origin_id.to_owned(), origin_seq)),
         recorded_at_ms,
         fields: field_facts,
@@ -4622,17 +4690,26 @@ fn collection_summary_for_version(
     }
     let stored = conn
         .query_row(
-            "SELECT schema_status,degradation_reasons_json FROM collections \
-             WHERE workspace_id=?1 AND version_id=?2 AND collection_path=?3",
+            "SELECT c.schema_status,c.degradation_reasons_json,s.object_id FROM collections c \
+             JOIN snapshots s ON s.workspace_id=c.workspace_id \
+               AND s.version_id=c.version_id AND s.path=c.schema_path \
+             WHERE c.workspace_id=?1 AND c.version_id=?2 AND c.collection_path=?3",
             params![workspace_id, version_id, collection_path],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(crate::DomainError::sql_corrupt)?;
     stored
-        .map(|(status, reasons)| {
+        .map(|(status, reasons, object_id)| {
             Ok(CollectionSummary {
                 path: collection_path.to_owned(),
+                object_id,
                 status: stored_schema_status(&status)?,
                 reasons: stored_schema_reasons(&reasons)?,
             })
@@ -4671,10 +4748,12 @@ pub fn list_collections(
     let version_id = active_version_id(conn, workspace_id)?;
     let mut statement = conn
         .prepare(
-            "SELECT collection_path,schema_status,degradation_reasons_json FROM collections \
-             WHERE workspace_id=?1 AND version_id=?2 \
-               AND (?3 IS NULL OR collection_path>?3) \
-             ORDER BY collection_path LIMIT ?4",
+            "SELECT c.collection_path,c.schema_status,c.degradation_reasons_json,s.object_id \
+             FROM collections c JOIN snapshots s ON s.workspace_id=c.workspace_id \
+               AND s.version_id=c.version_id AND s.path=c.schema_path \
+             WHERE c.workspace_id=?1 AND c.version_id=?2 \
+               AND (?3 IS NULL OR c.collection_path>?3) \
+             ORDER BY c.collection_path LIMIT ?4",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
     let rows = statement
@@ -4690,6 +4769,7 @@ pub fn list_collections(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
@@ -4698,9 +4778,10 @@ pub fn list_collections(
         .map_err(crate::DomainError::sql_corrupt)?;
     let mut collections = rows
         .into_iter()
-        .map(|(path, status, reasons)| {
+        .map(|(path, status, reasons, object_id)| {
             Ok(CollectionSummary {
                 path,
+                object_id,
                 status: stored_schema_status(&status)?,
                 reasons: stored_schema_reasons(&reasons)?,
             })
@@ -4742,6 +4823,7 @@ pub fn get_collection(
         })?;
     Ok(Some(CollectionDetails {
         path: summary.path,
+        object_id: summary.object_id,
         status: summary.status,
         reasons: summary.reasons,
         schema,
@@ -6809,7 +6891,7 @@ mod tests {
                    PRIMARY KEY (workspace_id, version_id, collection_path));\
                  CREATE TABLE snapshots(\
                    workspace_id TEXT, version_id TEXT, path TEXT, blob_sha256 TEXT NOT NULL,\
-                   PRIMARY KEY (workspace_id, version_id, path));\
+                   object_id TEXT NOT NULL, PRIMARY KEY (workspace_id, version_id, path));\
                  CREATE TABLE blobs(sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);\
                  CREATE TABLE collection_records(\
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
@@ -6838,7 +6920,7 @@ mod tests {
         // A filtered or sorted page reads the schema for its button fields.
         connection
             .execute(
-                "INSERT INTO snapshots VALUES (?1, 'main', 'schema.yaml', 'differential-schema')",
+                "INSERT INTO snapshots VALUES (?1, 'main', 'schema.yaml', 'differential-schema', 'schema-object')",
                 [WORKSPACE],
             )
             .expect("schema snapshot");

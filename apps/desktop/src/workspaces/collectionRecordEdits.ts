@@ -156,9 +156,10 @@ export function actorOriginIdFor(author: ChangeAuthor): string | undefined {
 
 /**
  * The declared attribution recorded beside the actor origin. An agent author
- * writes as an agent for its `onBehalfOf` principal at its run's chain depth;
- * an automation writes at the depth its author carries (one greater than its
- * trigger's); every other author through this seam is a person.
+ * writes as an agent for its `onBehalfOf` person at its run's chain depth;
+ * an automation writes for its run's person, when it has one, at the depth
+ * its author carries (one greater than its trigger's); every other author
+ * through this seam is a person.
  */
 export function attributionFor(author: ChangeAuthor): ChangeAttributionWire {
   switch (author.kind) {
@@ -167,7 +168,7 @@ export function attributionFor(author: ChangeAuthor): ChangeAttributionWire {
     case "automation":
       return {
         actorKind: "automation",
-        onBehalfOf: author.onBehalfOf,
+        ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
         depth: author.depth,
       };
     default:

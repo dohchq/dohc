@@ -156,11 +156,14 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
                     .is_none_or(|value| depth_within(value, 1))
         }
         // An automation writing a file, so the moment carries its identity
-        // and chain depth into the claims the write causes.
+        // and chain depth into the claims the write causes. It names the
+        // person its run acts for, and a run with nobody names nobody.
         Some("automation") => {
             nonempty("automationId")
-                && nonempty("onBehalfOf")
-                && object.len() == 4
+                && object
+                    .get("onBehalfOf")
+                    .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+                && object.len() == 3 + usize::from(object.contains_key("onBehalfOf"))
                 && object
                     .get("depth")
                     .is_some_and(|value| depth_within(value, 0))
@@ -258,5 +261,18 @@ mod tests {
             validated_author(Some(&automation)).is_err(),
             "an automation always names its depth"
         );
+        let for_nobody =
+            json!({"kind": "automation", "automationId": "collection:Tasks#a", "depth": 1});
+        assert!(
+            validated_author(Some(&for_nobody)).is_ok(),
+            "a run with nobody names nobody"
+        );
+        for invalid in [
+            json!({"kind": "automation", "automationId": "collection:Tasks#a", "onBehalfOf": "", "depth": 1}),
+            json!({"kind": "automation", "automationId": "collection:Tasks#a", "onBehalfOf": null, "depth": 1}),
+            json!({"kind": "automation", "automationId": "collection:Tasks#a", "extra": "x", "depth": 1}),
+        ] {
+            assert!(validated_author(Some(&invalid)).is_err(), "{invalid}");
+        }
     }
 }

@@ -1362,24 +1362,24 @@ describe("automation authors", () => {
     const author = { kind: "automation" as const, displayName: "Stamp the finish date" };
     const started = await recording.startChannelThread({
       workspaceId: "workspace", channelId: "channel", threadId: "thread-auto", messageId: "message-auto-1",
-      idempotencyKey: "claim/step/post", automation: { automationId: "collection:Trip/Tasks#stamp", chainDepth: 1 },
+      idempotencyKey: "claim/step/post", automation: { automationId: "collection:object-tasks#stamp", chainDepth: 1 },
       author, authorOwnerDisplayName: "Ice", body: "Finished Book hotel",
     });
     expect(requests.at(-1)).toMatchObject({
       idempotencyKey: "claim/step/post",
       params: { threadId: "thread-auto", messageId: "message-auto-1", authorKind: "automation", authorOwnerDisplayName: "Ice",
-        automation: { automationId: "collection:Trip/Tasks#stamp", chainDepth: 1 } },
+        automation: { automationId: "collection:object-tasks#stamp", chainDepth: 1 } },
     });
     expect(started.message).toMatchObject({ id: "message-auto-1", author, authorOwnerDisplayName: "Ice",
-      automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" } });
+      automation: { automationId: "collection:object-tasks#stamp" } });
     const reply = await recording.sendMessage({
       workspaceId: "workspace", threadId: "thread-auto", messageId: "message-auto-2", idempotencyKey: "claim/step2/post",
-      automation: { automationId: "collection:Trip/Tasks#stamp", chainDepth: 2 }, author, body: "Again",
+      automation: { automationId: "collection:object-tasks#stamp", chainDepth: 2 }, author, body: "Again",
     });
     expect(requests.at(-1)).toMatchObject({ idempotencyKey: "claim/step2/post", params: { messageId: "message-auto-2" } });
-    expect(reply.automation).toEqual({ automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" });
-    expect((await adapter.listMessages({ workspaceId: "workspace", threadId: "thread-auto" })).map((message) => message.automation?.collectionPath))
-      .toEqual(["Trip/Tasks", "Trip/Tasks"]);
+    expect(reply.automation).toEqual({ automationId: "collection:object-tasks#stamp" });
+    expect((await adapter.listMessages({ workspaceId: "workspace", threadId: "thread-auto" })).map((message) => message.automation?.automationId))
+      .toEqual(["collection:object-tasks#stamp", "collection:object-tasks#stamp"]);
     // Without ids, the adapter still mints them.
     const minted = await adapter.sendMessage({ workspaceId: "workspace", threadId: "thread-auto", author: { kind: "human", displayName: "Ice" }, body: "Thanks" });
     expect(minted.id).toMatch(/^message-/u);
@@ -1392,7 +1392,7 @@ describe("automation authors", () => {
     await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
       author: { kind: "automation", displayName: "Stamp the finish date" }, body: "Done" })).rejects.toThrow("invalid-input");
     await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
-      automation: { automationId: "collection:Trip/Tasks#stamp", chainDepth: 1 },
+      automation: { automationId: "collection:object-tasks#stamp", chainDepth: 1 },
       author: { kind: "human", displayName: "Ice" }, body: "Done" })).rejects.toThrow("invalid-input");
     await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
       automation: { automationId: "other:hello/triage", chainDepth: 1 },
@@ -1403,7 +1403,7 @@ describe("automation authors", () => {
     const message = decodeChatsResult(CHATS_METHOD.messageSend, {
       id: "message", workspaceId: "workspace", threadId: "thread",
       author: { kind: "automation", displayName: "Stamp the finish date" }, authorOwnerDisplayName: "Ice", authorUserId: "ice",
-      body: "Done", createdAtMs: 1, attachments: [], automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+      body: "Done", createdAtMs: 1, attachments: [], automation: { automationId: "collection:object-tasks#stamp" },
     });
     expect(message.author.kind).toBe("automation");
     expect(() => decodeChatsResult(CHATS_METHOD.reactionSet, {

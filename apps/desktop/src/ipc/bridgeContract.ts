@@ -23,6 +23,8 @@ import type {
   CollectionAutomationsFile,
   CollectionAutomationStop,
   CollectionFieldMark,
+  CollectionAutomationGroup,
+  CollectionAutomationPeople,
   CollectionAutomationTarget,
   CollectionAutomationUndo,
   PressSettled,
@@ -510,6 +512,7 @@ const CollectionSchemaReason = z.object({
 // have no .extend, so the shape is the reusable piece.
 const collectionSummaryShape = {
   path: PATH_STRING,
+  objectId: z.string().min(1).max(256),
   status: z.enum(["valid", "degraded"]),
   reasons: z.array(CollectionSchemaReason).max(MAX_SCHEMA_COLLECTION_ITEMS),
   omittedReasons: z.number().int().nonnegative().optional(),
@@ -1412,13 +1415,23 @@ export const EngineMomentRecord = z.object({
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.
-  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096) }).strict().optional(),
+  // `collection` is left out once this computer no longer has the automation's Collection.
+  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096).optional() }).strict().optional(),
   // Present when a person the owner shared with wrote the moment directly
   // (ADR 0013): main names them from the owner's share roster. The user id
   // picks them for Stop and restore.
   namedAuthor: z.object({
     userId: z.string().min(1).max(256),
     label: z.string().min(1).max(400),
+  }).strict().optional(),
+  // Present when an Edit share link wrote the moment directly (ADR 0013).
+  // The grant names the link, and the principal the browser session that
+  // used it; neither names a person.
+  linkAuthor: z.object({
+    kind: z.literal("link"),
+    grantId: z.string().min(1).max(500),
+    grantGeneration: z.number().int().positive(),
+    principalId: z.string().min(1).max(500),
   }).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
@@ -1579,10 +1592,11 @@ export type ChatFileReferenceInput = z.infer<typeof ChatFileReferenceInput>;
 // Messages and their authors as the renderer shows them. Only the automation
 // executor in main writes an automation's message; the renderer never sends one.
 const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation"]);
-// Which automation wrote a message, when it ran on this computer.
+// Which automation wrote a message, when it ran on this computer, and
+// where its Collection is now: null once this computer no longer has it.
 const CHAT_MESSAGE_AUTOMATION = z.object({
   automationId: z.string().min(1).max(1024),
-  collectionPath: SAFE_RELATIVE_PATH,
+  collectionPath: SAFE_RELATIVE_PATH.nullable(),
 });
 
 export const ChatMessageRecord = z.object({
@@ -4529,14 +4543,29 @@ export const ListCollectionAutomationsPayload = z.object({
 export type ListCollectionAutomationsPayload = z.infer<typeof ListCollectionAutomationsPayload>;
 export type ListCollectionAutomationsResult = CollectionAutomationsFile | { status: "unavailable" };
 
+// One page of an automation's runs, newest first. `before` is the `next`
+// of the page before; `next` is null after the oldest.
 export const ListCollectionAutomationRunsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: COLLECTION_AUTOMATION_ID,
+  before: z.string().min(1).max(512).optional(),
 });
 export type ListCollectionAutomationRunsPayload = z.infer<typeof ListCollectionAutomationRunsPayload>;
 // A shared view keeps no runs: its automations run on the owner's computer.
 export type ListCollectionAutomationRunsResult =
-  | { status: "listed"; runs: CollectionAutomationRun[] }
+  | { status: "listed"; runs: CollectionAutomationRun[]; next: string | null }
+  | { status: "unavailable" };
+
+// One run however old, as run history lists it, such as the run a notice opens.
+export const GetCollectionAutomationRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  claimId: z.string().min(1).max(256),
+});
+export type GetCollectionAutomationRunPayload = z.infer<typeof GetCollectionAutomationRunPayload>;
+export type GetCollectionAutomationRunResult =
+  | { status: "found"; run: CollectionAutomationRun }
+  | { status: "missing" }
   | { status: "unavailable" };
 
 // Try again for a failed run. `startOver` confirms running an automation
@@ -4559,38 +4588,77 @@ export const ListAutomationTargetsPayload = z.object({
 export type ListAutomationTargetsPayload = z.infer<typeof ListAutomationTargetsPayload>;
 export type ListAutomationTargetsResult = { collections: CollectionAutomationTarget[] } | { status: "unavailable" };
 
+// The builder's Group pickers: the Groups on this computer, with why one
+// cannot start this Collection's automations or take their posts, or null.
+// A shared view gets none: its automations run on the owner's computer.
+export const ListAutomationGroupsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListAutomationGroupsPayload = z.infer<typeof ListAutomationGroupsPayload>;
+export type ListAutomationGroupsResult = { groups: CollectionAutomationGroup[] } | { status: "unavailable" };
+
+// The builder's people pickers, for Direct message and Notify steps: this
+// computer's person and each person who accepted a share, by the name the
+// owner knows them by, with why a step cannot reach one, or null. A shared
+// view gets nobody: its automations run on the owner's computer.
+export const ListAutomationPeoplePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListAutomationPeoplePayload = z.infer<typeof ListAutomationPeoplePayload>;
+export type ListAutomationPeopleResult = CollectionAutomationPeople | { status: "unavailable" };
+
 // The builder checks a draft the way saving would: what the file contract
-// refuses, and each formula's syntax error or null. Formulas are one
-// expression each, as the file stores them; only their syntax is checked.
+// refuses, the syntax error of each formula and message in it, at its JSON
+// Pointer from the automation, why dohc would not run it in its
+// Collection, and the code files its steps name that the Collection's
+// folder lacks. Neither stops a save. Nothing runs.
 export const CheckCollectionAutomationPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
   automation: z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value)),
-  formulas: z.array(z.string().max(2_000)).max(500),
 });
 export type CheckCollectionAutomationPayload = z.infer<typeof CheckCollectionAutomationPayload>;
 export type CheckCollectionAutomationResult = {
   diagnostics: AutomationDiagnostic[];
-  formulaProblems: Array<string | null>;
+  formulaProblems: Array<{ path: string; problem: string } | { path: string; code: AutomationDiagnostic["code"] }>;
+  cannotRun: string | null;
+  /** Each code file a step names, relative to the Collection's folder, that dohc cannot find. */
+  missingFiles: string[];
 };
 
-// Undo for a finished run, as the person who clicked it.
+// Undo for a finished run, as the person who clicked it. `deletes` is null
+// until the person confirms the preview of a run that added dataset records;
+// then it carries that preview's token and the delete they chose for each
+// choice it asked.
 export const UndoCollectionAutomationRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: COLLECTION_AUTOMATION_ID,
   claimId: z.string().min(1).max(256),
+  deletes: z.object({
+    token: z.string().min(1).max(128),
+    chosen: z.array(z.object({ key: z.string().min(1).max(16_384), operationId: z.string().min(1).max(256) })).max(64),
+  }).nullable(),
 });
 export type UndoCollectionAutomationRunPayload = z.infer<typeof UndoCollectionAutomationRunPayload>;
 export type UndoCollectionAutomationRunResult = CollectionAutomationUndo;
 
-// Stop and restore (ADR 0013): the owner stops a person they shared with and
-// puts back what that person wrote directly. Main finds the person's grants
-// on this workspace from the relay; the renderer names only the person.
-export const StopAndRestorePersonPayload = z.object({
+// Stop and restore (ADR 0013): the owner stops a person they shared with,
+// or ends an Edit share link, and puts back what it wrote directly. Main
+// finds the grants on this workspace from the relay; the renderer names only
+// the person or the link's grant.
+export const StopAndRestoreTarget = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("person"), userId: z.string().min(1).max(256) }).strict(),
+  z.object({ kind: z.literal("link"), grantId: OPAQUE_ID }).strict(),
+]);
+export type StopAndRestoreTarget = z.infer<typeof StopAndRestoreTarget>;
+export const StopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
-  userId: z.string().min(1).max(256),
+  target: StopAndRestoreTarget,
 }).strict();
-export type StopAndRestorePersonPayload = z.infer<typeof StopAndRestorePersonPayload>;
-export const StopAndRestorePersonResult = z.discriminatedUnion("status", [
+export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
+export const StopAndRestoreResult = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("restored"),
     // Each file put back, with the forward moment its Undo restores before.
@@ -4604,6 +4672,12 @@ export const StopAndRestorePersonResult = z.discriminatedUnion("status", [
     // Runs of the person's automations undone, and those Undo could not undo.
     runsUndone: z.number().int().nonnegative(),
     runsLeft: z.number().int().nonnegative(),
+    // Changes the undone runs made that stay as they are.
+    runChangesKept: z.number().int().nonnegative(),
+    // They wrote automations: runs another computer holds are not undone here.
+    wroteAutomations: z.boolean(),
+    // One of those automations sends messages, which no Undo takes back.
+    sendsMessages: z.boolean(),
     // What stopped the restore part way; the files above were restored.
     errorMessage: z.string().nullable(),
   }).strict(),
@@ -4611,7 +4685,7 @@ export const StopAndRestorePersonResult = z.discriminatedUnion("status", [
   // person wrote yet. Nothing was restored; trying again continues.
   z.object({ status: z.literal("waiting") }).strict(),
 ]);
-export type StopAndRestorePersonResult = z.infer<typeof StopAndRestorePersonResult>;
+export type StopAndRestoreResult = z.infer<typeof StopAndRestoreResult>;
 export const UndoStopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
@@ -4626,7 +4700,7 @@ export const ConfirmCollectionAutomationStepPayload = z.object({
   definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
   step: z.string().min(1).max(512),
   seq: z.number().int().nonnegative(),
-  // A person a formula named, whose hold this is.
+  // A person a formula named, or a Collection a code step named, whose hold this is.
   recipient: z.string().min(1).max(1_024).optional(),
 });
 export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
@@ -4691,6 +4765,19 @@ export type FindDatasetCollectionPayload = z.infer<typeof FindDatasetCollectionP
 export type FindDatasetCollectionResult =
   | { status: "found"; collectionPath: string }
   | { status: "cannot-run"; reason: string }
+  | { status: "unavailable" };
+
+// Where an automation's Collection is now, found by its Collection id, so
+// Open automation follows a Collection that moved. A shared view holds no
+// executor.
+export const FindAutomationCollectionPayload = z.strictObject({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+});
+export type FindAutomationCollectionPayload = z.infer<typeof FindAutomationCollectionPayload>;
+export type FindAutomationCollectionResult =
+  | { status: "found"; collectionPath: string }
+  | { status: "missing" }
   | { status: "unavailable" };
 
 // Replaces the file's automations with these, over the content the panel
@@ -5469,7 +5556,7 @@ export const RetryAutomationNoticePayload = z.object({
 });
 export const RetryAutomationNoticeResult = z.union([
   z.object({ status: z.literal("queued"), press: z.boolean() }),
-  z.object({ status: z.enum(["definition-changed", "progress-gone"]), repeatsMessages: z.boolean() }),
+  z.object({ status: z.literal("definition-changed"), repeatsMessages: z.boolean() }),
   z.object({ status: z.literal("refused"), reason: z.string().min(1).max(2_000) }),
 ]);
 
@@ -6047,11 +6134,14 @@ export interface DohcDesktopBridge
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
+  getCollectionAutomationRun(payload: GetCollectionAutomationRunPayload): Promise<GetCollectionAutomationRunResult>;
   retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
+  listAutomationGroups(payload: ListAutomationGroupsPayload): Promise<ListAutomationGroupsResult>;
+  listAutomationPeople(payload: ListAutomationPeoplePayload): Promise<ListAutomationPeopleResult>;
   checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
-  stopAndRestorePerson(payload: StopAndRestorePersonPayload): Promise<StopAndRestorePersonResult>;
+  stopAndRestore(payload: StopAndRestorePayload): Promise<StopAndRestoreResult>;
   undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
@@ -6061,6 +6151,7 @@ export interface DohcDesktopBridge
   automationShareImpact(payload: AutomationShareImpactPayload): Promise<AutomationShareImpactResult>;
   listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
   findDatasetCollection(payload: FindDatasetCollectionPayload): Promise<FindDatasetCollectionResult>;
+  findAutomationCollection(payload: FindAutomationCollectionPayload): Promise<FindAutomationCollectionResult>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   listAutomationButtons(payload: ListAutomationButtonsPayload): Promise<ListAutomationButtonsResult>;
   listRecordButtons(payload: ListRecordButtonsPayload): Promise<ListRecordButtonsResult>;

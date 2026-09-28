@@ -1,6 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { desktopRoot } from "./desktopApp";
 
@@ -34,8 +35,21 @@ export async function spawnSyncRelay(input: {
   port?: number;
   linkBoundary?: SyncRelayLinkBoundary;
   appPublications?: boolean;
+  /**
+   * Releases Edit share links the way a self-hosted relay does: a deployment
+   * whose live host runs this engine. Needs the link boundary, and a database
+   * path in a folder of its own, which the deployment's files sit beside.
+   */
+  editLinks?: { engineExecutable: string };
 }): Promise<SyncRelayHandle> {
   const started = performance.now();
+  const deployment = input.editLinks ? join(dirname(dirname(input.dbPath)), "relay-deployment") : null;
+  if (deployment) {
+    execFileSync(process.execPath, ["--import", "tsx/esm", "src/relayDeploymentCommand.ts", "initialize",
+      "--config", join(deployment, "deployment.json"), "--database", input.dbPath, "--continuity-directory", join(deployment, "continuity")],
+    { cwd: relayRoot, stdio: "pipe", windowsHide: true });
+    mkdirSync(join(deployment, "live-host"));
+  }
   const child: ChildProcess = spawn(
     process.execPath,
     [
@@ -56,13 +70,23 @@ export async function spawnSyncRelay(input: {
         NODE_ENV: "test",
         SYNC_RELAY_TEST_AUTH: "1",
         SYNC_RELAY_PORT: String(input.port ?? 0),
-        SYNC_RELAY_DB_PATH: input.dbPath,
+        SYNC_RELAY_DB_PATH: deployment ? undefined : input.dbPath,
         ...(input.appPublications ? { DOHC_RELAY_APP_PUBLICATIONS: "1" } : {}),
         ...(input.linkBoundary
           ? {
               DOHC_RELAY_LINK_KEY: input.linkBoundary.linkKey,
               DOHC_RELAY_EXCHANGE_KEY: input.linkBoundary.relayExchangeKey,
               DOHC_RELAY_SHARE_WEB_ORIGIN: input.linkBoundary.publicViewerOrigin,
+            }
+          : {}),
+        ...(deployment && input.editLinks
+          ? {
+              DOHC_SELF_HOST_LIVE: "1",
+              DOHC_RELAY_DEPLOYMENT_CONFIG: join(deployment, "deployment.json"),
+              DOHC_RELAY_SERVICE_HOST_ROOT: join(deployment, "live-host"),
+              DOHC_RELAY_ENGINE_EXECUTABLE: input.editLinks.engineExecutable,
+              DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.com",
+              DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.com",
             }
           : {}),
         FORCE_COLOR: "0",
