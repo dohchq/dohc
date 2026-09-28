@@ -19,6 +19,7 @@ import {
   literalFor,
   literalText,
   MAX_NAME_LENGTH,
+  MAX_IF_DEPTH,
   MAX_STEPS,
   numberValue,
   reachPlaces,
@@ -46,13 +47,14 @@ import {
 // a formula wherever a person wants one. A trigger watches a record, a
 // button, or a schedule, or, in the file only for now, a Group; in a
 // dataset it watches one table, whose fields Only if and Set fields offer.
-// An If holds its own Do and
-// Otherwise steps, which edit like the automation's. Steps the builder
-// cannot edit yet, such as a message, stay as they are and read as their
-// sentence; the file edits them. A Find or an added record can name its
-// result, and a later Set fields step in the same list can change it. Save runs the file contract's check through main first,
-// so it never writes what the parser would refuse, and the panel writes the
-// whole list over the content it read.
+// An If holds a condition and its own Do and Otherwise steps, which edit
+// like the automation's. Steps the builder cannot edit yet, such as a
+// message, stay as they are and read as their sentence; the file edits
+// them. A Find or an added record can name its result, and a later Set
+// fields step in the same list can change it. Save runs the file
+// contract's check through main first, so it never writes what the parser
+// would refuse, and the panel writes the whole list over the content it
+// read.
 
 type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 type Target = Extract<ListAutomationTargetsResult, { collections: unknown }>["collections"][number];
@@ -460,7 +462,8 @@ const comparedValue = (field: FieldDefinition | undefined): ConditionRow["value"
 type ConditionPart =
   | { kind: "condition" }
   | { kind: "match" }
-  | { kind: "find"; number: number; key: number; dataset: boolean };
+  | { kind: "find"; number: number; key: number; dataset: boolean }
+  | { kind: "if"; number: number; key: number };
 
 function ConditionEditor(props: {
   /** Which condition this is, which names its controls. */
@@ -480,8 +483,9 @@ function ConditionEditor(props: {
   const { condition, problem, onChange } = props;
   const only = props.part.kind === "condition";
   const find = props.part.kind === "find" ? props.part : null;
-  const name = find ? `Step ${find.number}, condition` : only ? "Condition" : "Match condition";
-  const part = find ? `find-${find.key}` : props.part.kind;
+  const step = props.part.kind === "find" || props.part.kind === "if" ? props.part : null;
+  const name = step ? `Step ${step.number}, condition` : only ? "Condition" : "Match condition";
+  const part = step ? `${props.part.kind}-${step.key}` : props.part.kind;
   // What the executor can read: a document's Find checks one field; a dataset's compares fields with ==.
   const operators = find === null ? Object.keys(OPERATOR_LABELS) as ConditionOperator[] : find.dataset ? ["is" as const] : ["is" as const, "contains" as const];
   const most = find !== null && !find.dataset ? 1 : Infinity;
@@ -489,7 +493,7 @@ function ConditionEditor(props: {
   return (
     <>
       <select
-        aria-label={find ? `Step ${find.number}, records to find` : only ? "Condition" : "Match"}
+        aria-label={find ? `Step ${find.number}, records to find` : step ? `Step ${step.number}, if` : only ? "Condition" : "Match"}
         data-focus={`${part}-mode`}
         value={condition.mode}
         onChange={(event) => {
@@ -582,7 +586,7 @@ function ConditionEditor(props: {
         </>
       ) : condition.mode === "formula" ? (
         <input
-          aria-label={find ? `Step ${find.number}, condition formula` : only ? "Condition formula" : "Condition to match"}
+          aria-label={step ? `Step ${step.number}, condition formula` : only ? "Condition formula" : "Condition to match"}
           value={condition.formula}
           spellCheck={false}
           placeholder={only ? 'record.Priority == "High"' : 'record.Status == "Blocked"'}
@@ -620,7 +624,7 @@ interface StepEntry {
   verdict: string | null;
   /** An If's Do and Otherwise steps, which the draft holds instead of the step's own lists; null for any other step. */
   branches: Record<Branch, StepEntry[]> | null;
-  /** What a Find step reads, which the draft holds instead of the step's condition; null for any other step. */
+  /** What a Find step reads, or when an If runs its Do steps, which the draft holds instead of the step's condition; null for any other step. */
   condition: ConditionDraft | null;
 }
 /**
@@ -643,7 +647,7 @@ function entryOf(step: AutomationStep, verdict: string | null, dataset: boolean,
   // "All records" is a Find of true.
   const condition = step.kind === "find"
     ? conditionDraftOf(step.condition === "true" ? null : step.condition, (rows) => findRowsFit(rows, dataset))
-    : null;
+    : step.kind === "if" ? conditionDraftOf(step.if) : null;
   return { key: newKey(), step, rows: values.map((value) => ({ key: newKey(), value })), verdict, branches, condition };
 }
 
@@ -680,20 +684,24 @@ function bindingOf(step: AutomationStep, table: AutomationTable | null, trigger:
  * list or in a list around it. A result named inside an If stays there.
  */
 function entriesInOrder(entries: readonly StepEntry[], table: AutomationTable | null, trigger: string | null) {
-  const all: Array<{ entry: StepEntry; list: readonly StepEntry[]; listId: ListId; index: number; number: number; scope: readonly Binding[] }> = [];
-  const walk = (list: readonly StepEntry[], listId: ListId, outer: readonly Binding[]) => {
+  const all: Array<{
+    entry: StepEntry; list: readonly StepEntry[]; listId: ListId; index: number; number: number; scope: readonly Binding[];
+    /** The Ifs around the entry. */
+    depth: number;
+  }> = [];
+  const walk = (list: readonly StepEntry[], listId: ListId, outer: readonly Binding[], depth: number) => {
     let scope = outer;
     list.forEach((entry, index) => {
-      all.push({ entry, list, listId, index, number: all.length + 1, scope });
+      all.push({ entry, list, listId, index, number: all.length + 1, scope, depth });
       if (entry.branches !== null) {
-        walk(entry.branches.do, `${entry.key}/do`, scope);
-        walk(entry.branches.otherwise, `${entry.key}/otherwise`, scope);
+        walk(entry.branches.do, `${entry.key}/do`, scope, depth + 1);
+        walk(entry.branches.otherwise, `${entry.key}/otherwise`, scope, depth + 1);
       }
       const bound = bindingOf(entry.step, table, trigger);
       if (bound !== null && bound.name !== "") scope = [...scope, bound];
     });
   };
-  walk(entries, "do", []);
+  walk(entries, "do", [], 0);
   return all;
 }
 
@@ -751,7 +759,7 @@ function placeOf(
     }
     if (name === undefined) {
       // A Find's condition, a result's name, and a Set's records each have a control where the step edits.
-      const control = kind === "find" ? "condition" : kind === "as" || kind === "records" ? kind : null;
+      const control = kind === "find" || kind === "if" ? "condition" : kind === "as" || kind === "records" ? kind : null;
       return { key: control !== null && edits(entry) ? `step-${entry.key}/${control}` : `step-${entry.key}`, name: null };
     }
     if (kind !== "set" && kind !== "add-record" && kind !== "input") return { key: `step-${entry.key}`, name: null };
@@ -1042,7 +1050,9 @@ export function AutomationBuilder(props: {
     : draft.when;
   const stepOf = (entry: StepEntry): AutomationStep => {
     const { step, rows, branches } = entry;
-    if (step.kind === "if" && branches !== null) return { ...step, do: branches.do.map(stepOf), otherwise: branches.otherwise.map(stepOf) };
+    if (step.kind === "if" && branches !== null) {
+      return { ...step, if: entry.condition === null ? step.if : (conditionOf(entry.condition) ?? ""), do: branches.do.map(stepOf), otherwise: branches.otherwise.map(stepOf) };
+    }
     if (step.kind === "find" && entry.condition !== null && editableFind(step, table, triggerTable) !== null) {
       return { ...step, condition: conditionOf(entry.condition, fieldsOf(entry)) ?? "true" };
     }
@@ -1070,7 +1080,7 @@ export function AutomationBuilder(props: {
   const full = ordered.length >= MAX_STEPS;
   const editableOf = (entry: StepEntry) => editableStep(entry.step, table, triggerTable);
   const edits = (entry: StepEntry) =>
-    editableAction(entry.step, table) !== null || editableOf(entry) !== null || editableFind(entry.step, table, triggerTable) !== null;
+    entry.step.kind === "if" || editableAction(entry.step, table) !== null || editableOf(entry) !== null || editableFind(entry.step, table, triggerTable) !== null;
   const dirty = JSON.stringify(automation) !== JSON.stringify(props.baseline);
   // What Save writes: a draft without a name takes its sentence, and a new
   // one an id from its name. Main checks exactly this.
@@ -1196,7 +1206,9 @@ export function AutomationBuilder(props: {
     for (const { key: entry, row } of condition.rows) {
       if (row.field === "") problems.set(`${key}/${entry}`, "Choose a field.");
       else if (fields === recordFields && lacks(recordFields, row.field)) problems.set(`${key}/${entry}/field`, notAField(row.field));
-      else if (typeIn(fields, row.field) === "number" && row.value !== null && typeof rowValue(row, fields) !== "number") {
+      // Rows nobody changed write their own text back, which the file already takes.
+      else if (condition.rows !== condition.saved?.rows && typeIn(fields, row.field) === "number" && row.value !== null &&
+        typeof rowValue(row, fields) !== "number") {
         problems.set(`${key}/${entry}`, "Enter a number.");
       }
     }
@@ -1209,11 +1221,11 @@ export function AutomationBuilder(props: {
       if (schedule.days.length === 0) problems.set("when/days", "Choose at least one day.");
     }
   }
-  // A schedule has no record, so rows that compare its fields cannot hold.
+  conditionProblems(draft.condition, "if");
+  // A schedule has no record, so rows that compare its fields cannot hold; that comes before what the rows lack.
   if (noRecord && draft.condition.mode === "rows") {
     problems.set("if", "This trigger has no record to compare. Choose Always, or write a formula.");
   }
-  conditionProblems(draft.condition, "if");
   if (automation.when.kind === "starts-matching") conditionProblems(draft.matching, "when/condition");
   if (draft.steps.length === 0) problems.set(listProblem("do"), "Add a step.");
   for (const { entry } of ordered) {
@@ -1231,6 +1243,13 @@ export function AutomationBuilder(props: {
     }
     if (find !== null && entry.condition !== null) {
       conditionProblems(entry.condition, `step-${key}/condition`, fieldsOf(entry));
+      continue;
+    }
+    if (step.kind === "if" && entry.condition !== null) {
+      conditionProblems(entry.condition, `step-${key}/condition`);
+      if (noRecord && entry.condition.mode === "rows") {
+        problems.set(`step-${key}/condition`, "This trigger has no record to compare. Write a formula.");
+      }
       continue;
     }
     const action = editableAction(step, table);
@@ -1348,8 +1367,15 @@ export function AutomationBuilder(props: {
       setSteps(listId, (current) => current.filter((entry) => entry.key !== key)));
   };
   const addStep = (id: ListId, step: AutomationStep) => {
-    const entry = entryOf(step, null, table !== null);
-    focusAfter(`step-${entry.key}-first`, () => setSteps(id, (current) => [...current, entry]));
+    // A new If starts with empty branches and one field row to fill in.
+    const added: StepEntry = step.kind === "if"
+      ? {
+          ...entryOf(step, null, table !== null, { do: [], otherwise: [] }),
+          // A trigger with no record has no fields to compare, so its If starts as a formula.
+          condition: noRecord ? { mode: "formula", formula: "", rows: [], saved: null } : { mode: "rows", formula: "", rows: [newCondition()], saved: null },
+        }
+      : entryOf(step, null, table !== null);
+    focusAfter(step.kind === "if" ? `if-${added.key}-mode` : `step-${added.key}-first`, () => setSteps(id, (current) => [...current, added]));
   };
   const setRows = (key: number, rows: Row[]) => setStep(key, (entry) => ({ ...entry, rows }));
   const newCondition = (): ConditionEntry => ({ key: newKey(), row: { field: recordFields[0]?.name ?? "", operator: "is", value: comparedValue(recordFields[0]) } });
@@ -1583,12 +1609,20 @@ export function AutomationBuilder(props: {
             <code className="min-w-0 flex-1 truncate rounded bg-panel-2 px-1 font-mono text-[11px] text-ink" title={step.file}>{step.file}</code>
             <SecondaryButton size="compact" onClick={() => props.onOpenFile(`${collectionPath}/${step.file}`)}>Open file</SecondaryButton>
           </div>
-        ) : entry.branches !== null && step.kind === "if" ? (
-          // The If's own condition reads as the file wrote it; its steps edit here.
+        ) : entry.branches !== null && entry.condition !== null && step.kind === "if" ? (
           <div className="flex flex-col gap-2">
-            <p className="m-0 break-words text-[12px] leading-snug text-muted">
-              <Sentence parts={[{ kind: "code", text: step.if }]} />
-            </p>
+            <ConditionEditor
+              part={{ kind: "if", number, key }}
+              condition={entry.condition}
+              expression={conditionOf(entry.condition)}
+              fields={recordFields}
+              collection={watched}
+              problemKey={`step-${key}/condition`}
+              problem={problem}
+              newRow={newCondition}
+              focusAfter={focusAfter}
+              onChange={(change) => setStep(key, (current) => ({ ...current, condition: change(current.condition!) }))}
+            />
             {(["do", "otherwise"] as const).map((branch) => (
               <div
                 key={branch}
@@ -1724,60 +1758,80 @@ export function AutomationBuilder(props: {
     );
   };
   /** A list of steps, and the buttons that add a step to its end. */
-  const stepList = (listId: ListId, list: readonly StepEntry[]): ReactNode => (
-    <>
-      {list.map((entry) => stepItem(placedByKey.get(entry.key)!))}
-      <Problem shown={problem(listProblem(listId))} />
-      <div className="flex flex-wrap gap-1.5">
-        <SecondaryButton
-          size="compact"
-          className="flex items-center gap-1"
-          data-focus={`add-${listId}`}
-          aria-describedby={problem(listProblem(listId))?.id}
-          disabled={full}
-          onClick={() => addStep(listId, { kind: "set", values: [blankRow().value], records: null, operation: null })}
-        >
-          <Plus size={12} aria-hidden />
-          Set fields
-        </SecondaryButton>
-        <SecondaryButton
-          size="compact"
-          className="flex items-center gap-1"
-          disabled={full}
-          onClick={() => addStep(listId, { kind: "add-record", values: [blankRow().value], collection: null, as: null, operation: null })}
-        >
-          <Plus size={12} aria-hidden />
-          Add a record
-        </SecondaryButton>
-        <SecondaryButton
-          size="compact"
-          className="flex items-center gap-1"
-          disabled={full}
-          onClick={() => addStep(listId, { kind: "find", condition: "true", collection: null, as: "", operation: null })}
-        >
-          <Plus size={12} aria-hidden />
-          Find records
-        </SecondaryButton>
-        {table !== null && table.actions.some((candidate) => candidate.table === table.name) ? (
+  const stepList = (listId: ListId, list: readonly StepEntry[]): ReactNode => {
+    // The Ifs around this list: an If in a list three deep would be a fourth.
+    const around = listId === "do" ? 0 : placedByKey.get(Number(listId.split("/")[0]))!.depth + 1;
+    const deepest = around >= MAX_IF_DEPTH;
+    return (
+      <>
+        {list.map((entry) => stepItem(placedByKey.get(entry.key)!))}
+        <Problem shown={problem(listProblem(listId))} />
+        <div className="flex flex-wrap gap-1.5">
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1"
+            data-focus={`add-${listId}`}
+            aria-describedby={problem(listProblem(listId))?.id}
+            disabled={full}
+            onClick={() => addStep(listId, { kind: "set", values: [blankRow().value], records: null, operation: null })}
+          >
+            <Plus size={12} aria-hidden />
+            Set fields
+          </SecondaryButton>
           <SecondaryButton
             size="compact"
             className="flex items-center gap-1"
             disabled={full}
-            onClick={() => addStep(listId, {
-              kind: "invoke",
-              operation: table.actions.find((candidate) => candidate.table === table.name)!.name,
-              // The action reads its record itself, so it takes the record's id.
-              input: noRecord || draft.when.kind === "record-removed" ? [] : [{ key: "id", value: { kind: "formula", expression: "record.id" } }],
-            })}
+            onClick={() => addStep(listId, { kind: "add-record", values: [blankRow().value], collection: null, as: null, operation: null })}
           >
             <Plus size={12} aria-hidden />
-            Run an action
+            Add a record
           </SecondaryButton>
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1"
+            disabled={full}
+            onClick={() => addStep(listId, { kind: "find", condition: "true", collection: null, as: "", operation: null })}
+          >
+            <Plus size={12} aria-hidden />
+            Find records
+          </SecondaryButton>
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1"
+            disabled={full || deepest}
+            aria-describedby={deepest ? `${problemIds}deep-${listId.replace(/\W/gu, "_")}` : undefined}
+            onClick={() => addStep(listId, { kind: "if", if: "", do: [], otherwise: [] })}
+          >
+            <Plus size={12} aria-hidden />
+            If
+          </SecondaryButton>
+          {table !== null && table.actions.some((candidate) => candidate.table === table.name) ? (
+            <SecondaryButton
+              size="compact"
+              className="flex items-center gap-1"
+              disabled={full}
+              onClick={() => addStep(listId, {
+                kind: "invoke",
+                operation: table.actions.find((candidate) => candidate.table === table.name)!.name,
+                // The action reads its record itself, so it takes the record's id.
+                input: noRecord || draft.when.kind === "record-removed" ? [] : [{ key: "id", value: { kind: "formula", expression: "record.id" } }],
+              })}
+            >
+              <Plus size={12} aria-hidden />
+              Run an action
+            </SecondaryButton>
+          ) : null}
+        </div>
+        {full ? <p className="m-0 text-[12px] text-muted">An automation holds at most {MAX_STEPS} steps. Remove a step to add another.</p> : null}
+        {deepest ? (
+          <p id={`${problemIds}deep-${listId.replace(/\W/gu, "_")}`} className="m-0 text-[12px] text-muted">
+            An If here would sit inside three others, and an automation allows three.
+          </p>
         ) : null}
-      </div>
-      {full ? <p className="m-0 text-[12px] text-muted">An automation holds at most {MAX_STEPS} steps. Remove a step to add another.</p> : null}
-    </>
-  );
+      </>
+    );
+  };
 
   const trigger = draft.when;
   const nextRun = trigger.kind === "schedule" ? nextRunOf(trigger) : null;

@@ -12,6 +12,8 @@ const MAX_ID_LENGTH = 64;
 export const MAX_NAME_LENGTH = 120;
 // Steps in one automation, counting each If and the steps inside it.
 export const MAX_STEPS = 25;
+// An If inside an If inside an If; the file refuses a fourth.
+export const MAX_IF_DEPTH = 3;
 
 export type ConditionOperator = "is" | "is-not" | "contains";
 
@@ -67,8 +69,15 @@ export function conditionRows(expression: string): ConditionRow[] | null {
     const contains = comparison ? null : CONTAINS.exec(rest);
     const match = comparison ?? contains;
     if (!match) return null;
-    const field = fieldOf(match[1], match[2]);
-    const value = JSON.parse(comparison ? match[4]! : match[3]!) as ConditionRow["value"];
+    let field: string;
+    let value: ConditionRow["value"];
+    try {
+      field = fieldOf(match[1], match[2]);
+      value = JSON.parse(comparison ? match[4]! : match[3]!) as ConditionRow["value"];
+    } catch {
+      // A JavaScript escape JSON does not have, such as "\x41", stays a formula.
+      return null;
+    }
     const operator: ConditionOperator = contains ? "contains" : match[3] === "==" ? "is" : "is-not";
     rows.push({ field, operator, value });
     rest = rest.slice(match[0].length);
