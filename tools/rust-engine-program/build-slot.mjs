@@ -85,20 +85,20 @@ function logEvent(root, line) {
   }
 }
 
-function slotDir(root, i) {
-  return join(root, `build-slot-${i}`);
+function slotDir(root, i, kind) {
+  return join(root, `${kind}-${i}`);
 }
 
-/** The held slots, as `build-slot-N: pid P since T` lines. */
-function holders(root, slots) {
+/** The held slots, as `<kind>-N: pid P since T` lines. */
+function holders(root, slots, kind) {
   const held = [];
   for (let i = 1; i <= slots; i += 1) {
-    const dir = slotDir(root, i);
+    const dir = slotDir(root, i, kind);
     try {
       const owner = JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
-      held.push(`build-slot-${i}: pid ${owner.pid} since ${owner.start}`);
+      held.push(`${kind}-${i}: pid ${owner.pid} since ${owner.start}`);
     } catch {
-      if (existsSync(dir)) held.push(`build-slot-${i}: owner unreadable`);
+      if (existsSync(dir)) held.push(`${kind}-${i}: owner unreadable`);
     }
   }
   return held.join("; ");
@@ -120,7 +120,7 @@ function holders(root, slots) {
  * re-claimed. The lock is held for milliseconds; one left by a dead sweeper
  * is removed after 5 minutes. Returns how many slots were freed.
  */
-export function reclaimStaleSlots({ root, slots, staleMs }) {
+export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot" }) {
   const sweepLock = join(root, "reclaim.lock");
   try {
     mkdirSync(sweepLock);
@@ -174,7 +174,7 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
   try {
     let reclaimed = 0;
     for (let i = 1; i <= slots; i += 1) {
-      const dir = slotDir(root, i);
+      const dir = slotDir(root, i, kind);
       const ownerPath = join(dir, "owner.json");
       let heartbeatAt;
       let why;
@@ -235,7 +235,7 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
         } catch {
           logEvent(
             root,
-            `RECLAIM FAULT: build-slot-${i} was renamed away from a new ` +
+            `RECLAIM FAULT: ${kind}-${i} was renamed away from a new ` +
               `owner and could not be restored; its lane runs unaccounted ` +
               `(${tomb})`,
           );
@@ -249,7 +249,7 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
       }
       logEvent(
         root,
-        `reclaimed build-slot-${i}: ${why}, heartbeat ` +
+        `reclaimed ${kind}-${i}: ${why}, heartbeat ` +
           `${Math.round((Date.now() - heartbeatAt) / 60_000)} min stale`,
       );
       reclaimed += 1;
@@ -328,16 +328,37 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation) {
 }
 
 /**
- * Take a build slot, waiting (and reclaiming dead owners) until one frees.
+ * Take one of the host's four cargo lanes for a build or test run.
+ */
+export function acquireBuildSlot(options) {
+  return acquireSlot({ ...options, kind: "build-slot", lanes: "cargo lanes" });
+}
+
+/**
+ * Hold the host's single verification lane for a whole PR gate, so two gates
+ * never compete for the same cores and disk. Null on a single-tenant host.
+ * A gate can wait behind several others, so this waits up to six hours.
+ */
+export function acquireVerificationSlot(env = process.env) {
+  const budget = resolveBuildBudget(env);
+  if (!budget) return null;
+  return acquireSlot({ root: budget.root, slots: 1, kind: "verification-slot", lanes: "verification runs",
+    waitMs: 6 * 60 * 60_000, pollMs: 60_000, cooperativeCancellation: true });
+}
+
+/**
+ * Take a slot of `kind`, waiting (and reclaiming dead owners) until one frees.
  * Resolves to `{ name, dir, release }`; `release` is idempotent and also runs
  * on process exit. Throws when `waitMs` elapses with every slot held.
  * With cooperativeCancellation, the caller handles child termination and
  * releases the slot in finally; signals set a nonzero exit code without exiting.
  * Signals received while waiting reject acquisition so caller cleanup can run.
  */
-export async function acquireBuildSlot({
+async function acquireSlot({
   root,
   slots,
+  kind,
+  lanes,
   waitMs = 90 * 60_000,
   pollMs = 15_000,
   staleMs = 30 * 60_000,
@@ -345,12 +366,13 @@ export async function acquireBuildSlot({
   cooperativeCancellation = false,
 }) {
   mkdirSync(root, { recursive: true });
+  const label = kind.replace("-", " ");
   const deadline = Date.now() + waitMs;
   let denied = false;
   const cancellation = new AbortController();
   const cancel = (signal, code) => {
     process.exitCode = code;
-    cancellation.abort(new Error(`Build slot acquisition cancelled by ${signal}.`));
+    cancellation.abort(new Error(`${label[0].toUpperCase()}${label.slice(1)} acquisition cancelled by ${signal}.`));
   };
   const onSigint = () => cancel("SIGINT", 130);
   const onSigterm = () => cancel("SIGTERM", 143);
@@ -361,31 +383,31 @@ export async function acquireBuildSlot({
   try { for (;;) {
     cancellation.signal.throwIfAborted();
     for (let i = 1; i <= slots; i += 1) {
-      const dir = slotDir(root, i);
+      const dir = slotDir(root, i, kind);
       try {
         mkdirSync(dir);
       } catch (error) {
         if (error.code === "EEXIST") continue; // Held.
         throw error; // EACCES etc. is a fault, not contention.
       }
-      return claimSlot(dir, `build-slot-${i}`, heartbeatMs, cooperativeCancellation);
+      return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation);
     }
-    if (reclaimStaleSlots({ root, slots, staleMs }) > 0) continue;
+    if (reclaimStaleSlots({ root, slots, staleMs, kind }) > 0) continue;
     if (!denied) {
       denied = true;
       logEvent(root, `denied: pid ${process.pid} found all ${slots} slots held`);
     }
     if (Date.now() >= deadline) {
       throw new Error(
-        `no build slot freed within ${Math.round(waitMs / 60_000)} minutes: ` +
-          `the concurrency budget is ${slots} concurrent cargo lanes ` +
+        `no ${label} freed within ${Math.round(waitMs / 60_000)} minutes: ` +
+          `the concurrency budget is ${slots} concurrent ${lanes} ` +
           `and all ${slots} slots at ${root} ` +
-          `are held — ${holders(root, slots)}. Wait for a lane to finish and ` +
+          `are held — ${holders(root, slots, kind)}. Wait for a lane to finish and ` +
           `rerun; a dead lane's slot is reclaimed automatically once its ` +
           `heartbeat is 30 minutes stale.`,
       );
     }
-    console.log(`  waiting for a build slot: all ${slots} held — ${holders(root, slots)}`);
+    console.log(`  waiting for a ${label}: all ${slots} held — ${holders(root, slots, kind)}`);
     await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())), undefined, { signal: cancellation.signal });
   } } finally {
     process.off("SIGINT", onSigint);

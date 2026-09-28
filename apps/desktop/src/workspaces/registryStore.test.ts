@@ -118,18 +118,18 @@ describe("share roster", () => {
 
   it("raises the version only when the listing changes, and survives a reopen", () => {
     store.register(personal);
-    store.setShareRoster("ws-1", { grants: [grant("g-1")] }, false);
-    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 1, grants: [grant("g-1")] });
+    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [] }, false);
+    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 1, grants: [grant("g-1")], links: [], formerGrants: [] });
 
     vi.mocked(renameSync).mockClear();
-    store.setShareRoster("ws-1", { grants: [grant("g-1")] }, false);
+    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [] }, false);
     expect(renameSync, "an unchanged listing rewrote the registry").not.toHaveBeenCalled();
 
     store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } }, false);
     store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } }, true);
     expect(store.find("ws-1")?.shareRoster).toEqual({ version: 2, grants: null, problem: { kind: "damaged-link" }, pulledAfter: true });
-    store.setShareRoster("ws-1", { grants: [grant("g-1"), grant("g-2")] }, false);
-    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 3, grants: [grant("g-1"), grant("g-2")] });
+    store.setShareRoster("ws-1", { grants: [grant("g-1"), grant("g-2")], links: [], formerGrants: [] }, false);
+    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 3, grants: [grant("g-1"), grant("g-2")], links: [], formerGrants: [] });
     expect(createRegistryStore(registryPath).find("ws-1")?.shareRoster?.version).toBe(3);
   });
 
@@ -137,14 +137,14 @@ describe("share roster", () => {
     store.register(personal);
     store.markShareRosterPulled("ws-1");
     expect(store.find("ws-1")?.shareRoster, "a mark with no listing").toBeUndefined();
-    store.setShareRoster("ws-1", { grants: [grant("g-1")] }, false);
+    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [] }, false);
     store.markShareRosterPulled("ws-1");
     expect(createRegistryStore(registryPath).find("ws-1")?.shareRoster?.pulledAfter).toBe(true);
     vi.mocked(renameSync).mockClear();
     store.markShareRosterPulled("ws-1");
     expect(renameSync, "a second pull rewrote the registry").not.toHaveBeenCalled();
-    store.setShareRoster("ws-1", { grants: [grant("g-1")] }, false);
-    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 1, grants: [grant("g-1")] });
+    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [] }, false);
+    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 1, grants: [grant("g-1")], links: [], formerGrants: [] });
   });
 });
 

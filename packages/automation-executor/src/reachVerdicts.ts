@@ -14,6 +14,12 @@ import type { StepReach } from "./automationReach";
 // Verdicts carry a sequence number from a counter that only rises, so a
 // confirmation or a dismissal applies only to the verdict the person saw,
 // whatever the clock.
+//
+// A share link that wrote a Collection's automations and then stopped
+// editing may have written a step before this computer ever checked it
+// with the link as an editor. So a step that link could not have run waits
+// once, whatever its last verdict, and the verdict remembers the link so a
+// confirmation is not asked for again.
 
 export type ReachVerdict = "allowed" | "stopped" | "held";
 
@@ -35,10 +41,12 @@ export interface StoredReachVerdict {
   stoppedFor: string | null;
   /** The step could run before reach narrowed, and nobody has dismissed its notice. */
   narrowed?: true;
+  /** The former links' evidence this step has already waited for, as "grant#generation". */
+  accountedLinks?: readonly string[];
   seq: number;
 }
 
-type Verdict = Pick<StoredReachVerdict, "verdict" | "stoppedFor" | "narrowed">;
+type Verdict = Pick<StoredReachVerdict, "verdict" | "stoppedFor" | "narrowed" | "accountedLinks">;
 
 /**
  * The verdict to keep for one step, given its last one and what the roster
@@ -46,15 +54,28 @@ type Verdict = Pick<StoredReachVerdict, "verdict" | "stoppedFor" | "narrowed">;
  * never ran is not announced as stopped.
  */
 export function nextReachVerdict(previous: Verdict | undefined, reach: StepReach, switchedOn: boolean): Verdict {
+  const accounted = previous?.accountedLinks ?? [];
+  const kept = accounted.length === 0 ? {} : { accountedLinks: accounted };
   if (!reach.allowed) {
     const narrowed = switchedOn &&
       (previous?.verdict === "allowed" || (previous?.verdict === "stopped" && previous.narrowed === true));
-    return { verdict: "stopped", stoppedFor: reach.person ?? null, ...(narrowed ? { narrowed: true } : {}) };
+    return { verdict: "stopped", stoppedFor: reach.person ?? null, ...(narrowed ? { narrowed: true } : {}), ...kept };
   }
+  const formerStops = reach.formerStops ?? [];
+  const accountedLinks = [...new Set([...accounted, ...formerStops.map((stop) => stop.evidence)])].sort();
+  const withLinks = accountedLinks.length === 0 ? {} : { accountedLinks };
   if (previous?.verdict === "stopped" || previous?.verdict === "held") {
-    return { verdict: "held", stoppedFor: previous.stoppedFor };
+    return { verdict: "held", stoppedFor: previous.stoppedFor, ...withLinks };
   }
-  return { verdict: "allowed", stoppedFor: null };
+  const unaccounted = formerStops.find((stop) => !accounted.includes(stop.evidence));
+  if (unaccounted) return { verdict: "held", stoppedFor: unaccounted.name, ...withLinks };
+  return { verdict: "allowed", stoppedFor: null, ...kept };
+}
+
+/** Whether two verdicts would be saved the same. */
+export function sameReachVerdict(left: Verdict | undefined, right: Verdict): boolean {
+  return left?.verdict === right.verdict && left.stoppedFor === right.stoppedFor && left.narrowed === right.narrowed &&
+    (left.accountedLinks ?? []).join("\n") === (right.accountedLinks ?? []).join("\n");
 }
 
 export function reachVerdictKey(automationId: string, definitionHash: string, step: string, recipient?: string): string {

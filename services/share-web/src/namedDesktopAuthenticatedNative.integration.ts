@@ -169,7 +169,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
         captureFor: () => {ordinaryCaptureCalls++; throw new Error("Ordinary capture must not handle shared live editing.");},
         ensureCaptureFor: async () => {ordinaryCaptureCalls++; throw new Error("Ordinary capture must not handle shared live editing.");},
         isSharedView: () => true, sharedCaptureFor: async () => capture, resolveDocumentPath: async (_workspace, path) => path,
-        onError: () => {}});
+        localPersonId: () => "person-local", onError: () => {}});
       const sessionId = `${localWorkspaceId}-session`;
       const states: EngineYDocSaveStateEvent[] = [];
       sender.on(CHANNELS.engineYDocSaveState, payload => states.push(EngineYDocSaveStateEvent.parse(payload)));

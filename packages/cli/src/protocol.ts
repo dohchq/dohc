@@ -304,7 +304,8 @@ const automationArgs = {
   automation: z.string().min(1).max(200),
 };
 const automationRunIdArg = z.string().min(1).max(256);
-const automationRunsArgsSchema = z.object(automationArgs).strict();
+// `page` is the `next` of an earlier listing: the runs older than it.
+const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional() }).strict();
 const automationRunArgsSchema = z
   .object({ ...automationArgs, run: automationRunIdArg })
   .strict();
@@ -579,6 +580,18 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     kind: z.literal("public"),
     principalId: z.string().min(1),
     grantId: z.string().min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal("named"),
+    userId: z.string().min(1),
+    grantId: z.string().min(1),
+    grantGeneration: z.number().int().positive(),
+  }).strict(),
+  z.object({
+    kind: z.literal("link"),
+    grantId: z.string().min(1),
+    grantGeneration: z.number().int().positive(),
+    principalId: z.string().min(1),
   }).strict(),
   z.object({
     kind: z.literal("automation"),
@@ -881,15 +894,18 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("created"), recordId: z.string(), path: z.string() }).strict(),
   z.object({ kind: z.literal("kept"), recordId: z.string(), path: z.string(), field: z.string(), planned: z.json(), current: z.json() }).strict(),
   z.object({ kind: z.literal("skipped"), recordId: z.string(), path: z.string(), reason: z.string() }).strict(),
+  // An edit that landed, with the record version it was sent at and the one it left.
   z.object({
     kind: z.literal("dataset-edit"),
     rules: automationDatasetRulesSchema,
     operationId: z.string(),
     tableId: z.string(),
     recordId: automationDatasetRecordIdSchema,
+    expectedVersion: z.number().int().positive(),
     version: z.number().int().positive(),
     fields: z.array(z.object({ fieldId: z.string(), field: z.string(), before: z.json(), after: z.json() }).strict()),
   }).strict(),
+  // A record the run added. `deletes` are the approved deletes Undo may use on it, as the run recorded them.
   z.object({
     kind: z.literal("dataset-created"),
     rules: automationDatasetRulesSchema,
@@ -897,6 +913,7 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
     tableId: z.string(),
     recordId: automationDatasetRecordIdSchema,
     version: z.number().int().positive(),
+    deletes: z.array(z.string()),
   }).strict(),
   // An action that ran, by its label then, and the dataset revision its commit made. When the
   // rules named a reverse action, `reverseOperationId` is it and `undo` is its input; Undo runs that or nothing.
@@ -924,11 +941,18 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
 ]);
 // The change a run is for. `kind` is null for a dataset run that failed
 // before it could carry its change; `by` is null when the change did not say.
+// A person the owner shared with, or an Edit share link, the relay accepted
+// the change from. A link is its grant, never a person's account.
+const automationSharedAuthorSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("named"), userId: z.string().min(1), grantId: z.string().min(1), grantGeneration: z.number().int().positive() }).strict(),
+  z.object({ kind: z.literal("link"), grantId: z.string().min(1), grantGeneration: z.number().int().positive(), principalId: z.string().min(1) }).strict(),
+]);
 const automationTriggerSchema = z
   .object({
     kind: z.enum(["added", "changed", "removed", "message", "button", "schedule"]).nullable(),
     recordId: z.string().nullable(),
     by: z.enum(["human", "agent", "automation"]).nullable(),
+    sharedAuthor: automationSharedAuthorSchema.nullable(),
     depth: z.number().int().nonnegative(),
   })
   .strict();
@@ -953,6 +977,8 @@ const automationRunsResultSchema = z.discriminatedUnion("ok", [
     .object({
       ok: z.literal(true),
       runs: z.array(z.object({ ...automationRunFields, changes: z.number().int().nonnegative() }).strict()),
+      // The `page` that lists the older runs, or null after the oldest.
+      next: z.string().min(1).nullable(),
     })
     .strict(),
   rawFailureSchema,
@@ -992,7 +1018,7 @@ const automationRetryResultSchema = z.union([
   z
     .object({
       ok: z.literal(false),
-      status: z.enum(["definition-changed", "progress-gone"]),
+      status: z.literal("definition-changed"),
       repeatsMessages: z.boolean(),
       reason: z.string().min(1),
     })

@@ -403,6 +403,7 @@ describe("CLI socket server", () => {
     };
     agentRunDepth = 0;
     serverOptions = {
+      localPersonId: () => "person-local",
       stateDir,
       listWorkspaces() {
         calls.listWorkspaces += 1;
@@ -1176,8 +1177,8 @@ describe("CLI socket server", () => {
     const unsupported = state !== "valid";
     const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
     const collection: Awaited<ReturnType<CliCollectionsPort["query"]>>["collection"] = unsupported
-      ? { path: "tasks", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }] }
-      : { path: "tasks", status: "valid", reasons: [] };
+      ? { path: "tasks", objectId: "object-test", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }] }
+      : { path: "tasks", objectId: "object-test", status: "valid", reasons: [] };
     const queries: Array<Parameters<CliCollectionsPort["query"]>[0]> = [];
     const recordReads: Array<Parameters<CliCollectionsPort["getRecord"]>[0]> = [];
     context.collections = {
@@ -1231,7 +1232,7 @@ describe("CLI socket server", () => {
               next: { present: true, value: 9007199254740993n },
               authorOriginId: "origin_agent",
               actorKind: "agent" as const,
-              onBehalfOf: "local",
+              onBehalfOf: "person-local",
               depth: 0,
               recordedAtMs: SERVER_NOW_MS,
             },
@@ -1305,8 +1306,8 @@ describe("CLI socket server", () => {
   });
 
   it("answers the automation verbs from the Automations panel's calls", async () => {
-    const AUTOMATION = "collection:tasks#stamp";
-    const trigger = { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, depth: 1 };
+    const AUTOMATION = "collection:object-tasks#stamp";
+    const trigger = { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 };
     const field = { kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" };
     const run = {
       claimId: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
@@ -1323,7 +1324,11 @@ describe("CLI socket server", () => {
       },
     ];
     context.automations = {
-      runs: vi.fn(async () => [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }]),
+      automationIdAt: vi.fn(async (collectionPath: string, id: string) => (collectionPath === "tasks" ? `collection:object-tasks#${id}` : null)),
+      runs: vi.fn(async (_automationId: string, _before?: string) => ({
+        runs: [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }],
+        next: "1:atc_1",
+      })),
       run: vi.fn(async (_automationId: string, claimId: string) =>
         claimId === "atc_1" ? { ...run, steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
       retry: vi.fn(async (input) => {
@@ -1339,8 +1344,12 @@ describe("CLI socket server", () => {
         run: "atc_1", state: "failed", error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
         trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false, changes: 2,
       }],
+      next: "1:atc_1",
     });
-    expect(context.automations.runs).toHaveBeenCalledWith(AUTOMATION);
+    expect(context.automations!.runs).toHaveBeenCalledWith(AUTOMATION, undefined);
+    // The next page names where the last one ended.
+    await invoke("automationRuns", { ...args, page: "1:atc_1" });
+    expect(context.automations!.runs).toHaveBeenLastCalledWith(AUTOMATION, "1:atc_1");
     await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
       ok: true,
       run: { run: "atc_1", trigger, steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },
@@ -1515,7 +1524,7 @@ describe("CLI socket server", () => {
         input: {
           recordPath: "tasks/a.md",
           fields: { status: "done", notes: null },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
         },
       },
       {
@@ -1524,7 +1533,7 @@ describe("CLI socket server", () => {
           collectionPath: "tasks",
           name: "write-brief",
           fields: { status: "open" },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
         },
       },
       {
@@ -1574,7 +1583,7 @@ describe("CLI socket server", () => {
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
     // An agent that names itself is recorded under that name, and one that
     // does not stays an agent with no name.
-    const agent = { actorKind: "agent", onBehalfOf: "local", depth: 0 };
+    const agent = { actorKind: "agent", onBehalfOf: "person-local", depth: 0 };
     expect(edits).toEqual([
       {
         path: "notes/plan.md",
@@ -1656,8 +1665,8 @@ describe("CLI socket server", () => {
     agentRunDepth = 0;
     await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "open" } });
 
-    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 3 };
-    const attribution = { actorKind: "agent", onBehalfOf: "local", depth: 3 };
+    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 };
+    const attribution = { actorKind: "agent", onBehalfOf: "person-local", depth: 3 };
     expect(authors).toEqual([
       woken,
       woken,
@@ -1734,7 +1743,7 @@ describe("CLI socket server", () => {
       markdown: "# New",
       origin: {
         actorOriginId: "claude-code",
-        attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+        attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 },
       },
     }]);
   });
@@ -2041,7 +2050,7 @@ describe("CLI socket server", () => {
     context.collections = {
       async query() {
         return {
-          collection: { path: "tasks", status: "valid", reasons: [] },
+          collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
           records: [],
           groups: null,
           nextCursor: null,

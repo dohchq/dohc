@@ -4849,7 +4849,7 @@ async fn an_automation_message_names_its_automation_over_rpc() {
             "authorOwnerDisplayName": "Ice",
             "authorUserId": "ice",
             "body": "Finished Book hotel",
-            "automation": { "automationId": "collection:Trip/Tasks#stamp", "chainDepth": 1 },
+            "automation": { "automationId": "collection:object-tasks#stamp", "chainDepth": 1 },
             "nowMs": 20,
         }),
     )
@@ -4860,7 +4860,7 @@ async fn an_automation_message_names_its_automation_over_rpc() {
     );
     assert_eq!(
         started["message"]["automation"],
-        json!({ "automationId": "collection:Trip/Tasks#stamp", "collectionPath": "Trip/Tasks" })
+        json!({ "automationId": "collection:object-tasks#stamp" })
     );
     let sent = call(
         &transport,
@@ -4873,12 +4873,15 @@ async fn an_automation_message_names_its_automation_over_rpc() {
             "authorKind": "automation",
             "authorDisplayName": "Stamp the finish date",
             "body": "Again",
-            "automation": { "automationId": "collection:Trip/Tasks#stamp", "chainDepth": 2 },
+            "automation": { "automationId": "collection:object-tasks#stamp", "chainDepth": 2 },
             "nowMs": 30,
         }),
     )
     .await;
-    assert_eq!(sent["automation"]["collectionPath"], json!("Trip/Tasks"));
+    assert_eq!(
+        sent["automation"],
+        json!({ "automationId": "collection:object-tasks#stamp" })
+    );
     let listed = call(
         &transport,
         &handle,
@@ -4897,11 +4900,11 @@ async fn an_automation_message_names_its_automation_over_rpc() {
     .await;
     assert_eq!(
         threads["threads"][0]["openingMessage"]["automation"],
-        json!({ "automationId": "collection:Trip/Tasks#stamp", "collectionPath": "Trip/Tasks" })
+        json!({ "automationId": "collection:object-tasks#stamp" })
     );
     assert_eq!(
         listed["messages"][1]["automation"]["automationId"],
-        json!("collection:Trip/Tasks#stamp")
+        json!("collection:object-tasks#stamp")
     );
 
     let unnamed = call_error(
@@ -4931,7 +4934,7 @@ async fn an_automation_message_names_its_automation_over_rpc() {
             "authorKind": "human",
             "authorDisplayName": "Ice",
             "body": "Hi",
-            "automation": { "automationId": "collection:Trip/Tasks#stamp", "chainDepth": 1 },
+            "automation": { "automationId": "collection:object-tasks#stamp", "chainDepth": 1 },
             "nowMs": 40,
         }),
     )

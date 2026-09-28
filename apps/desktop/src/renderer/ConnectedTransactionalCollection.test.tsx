@@ -17,8 +17,11 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   onAutomationRunsChanged: vi.fn(() => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
   settled: [] as Array<(event: AutomationRunSettledEvent) => void>,
   onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined),
-  checkCollectionAutomation: vi.fn(async () => ({ diagnostics: [], formulaProblems: [] })),
+  checkCollectionAutomation: vi.fn(async () => ({ diagnostics: [], formulaProblems: [], cannotRun: null, missingFiles: [] })),
+  listAutomationGroups: vi.fn(async () => ({ groups: [] })),
+  listAutomationPeople: vi.fn(async () => ({ status: "listed", people: [] })),
   readScheduleHost: vi.fn(async () => ({ kind: "this-computer" })), onScheduleHostChanged: vi.fn(() => () => undefined),
+  onCloudSessionChanged: vi.fn(() => () => undefined),
   writeCollectionAutomations: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
 vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void }) => <>
@@ -337,7 +340,7 @@ describe("a dataset table's ⚡ panel", () => {
     const donors = { tableId: id(9), name: "Donors", fields: dataset.tables[0]!.fields };
     backend.dataset.mockResolvedValue({ kind: "description", dataset: { ...dataset, tables: [...dataset.tables, donors] } });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [onTable("welcome", "Registrations"), onTable("thank", "Donors")] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [onTable("welcome", "Registrations"), onTable("thank", "Donors")] });
     renderPage();
     const button = await screen.findByTestId("collection-automations-button");
     await waitFor(() => expect(button.textContent).toBe("Automations1"));
@@ -368,7 +371,7 @@ describe("a dataset table's ⚡ panel", () => {
     const withButton: DatasetDescription = { ...dataset, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(6), name: "Confirm", type: "button" }] }] };
     backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
     renderPage();
@@ -376,7 +379,8 @@ describe("a dataset table's ⚡ panel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Confirm");
-    expect(within(panel).getByRole("combobox", { name: "Trigger" }).textContent).toContain("When someone clicks Confirm");
+    expect((within(panel).getByRole("combobox", { name: "Trigger" }) as HTMLSelectElement).value).toBe("button");
+    expect((within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value).toBe("Confirm");
   });
 
   it("adds an action as a button, closes Fields after approval, and opens the builder on it, saving nothing before Save", async () => {
@@ -389,7 +393,7 @@ describe("a dataset table's ⚡ panel", () => {
       throw new Error(`Unexpected ${input.action}`);
     });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [] });
     const onError = vi.fn();
@@ -415,7 +419,7 @@ describe("a dataset table's ⚡ panel", () => {
     const withButton: DatasetDescription = { ...before, tables: [{ ...before.tables[0]!, fields: [...before.tables[0]!.fields, { fieldId: id(8), name: "Confirm", type: "button" }] }] };
     backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
     renderPage();
@@ -435,7 +439,7 @@ describe("a dataset table's ⚡ panel", () => {
       tables: [{ ...before.tables[0]!, fields: [...before.tables[0]!.fields, { fieldId: id(8), name: "Confirm", type: "button" }] }] };
     backend.dataset.mockResolvedValue({ kind: "description", dataset: twice });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
     renderPage();
@@ -457,7 +461,7 @@ describe("a dataset table's ⚡ panel", () => {
       throw new Error(`Unexpected ${input.action}`);
     });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
-    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
     backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
     backend.listAutomationButtons.mockResolvedValue({ buttons: [] });
     const onError = vi.fn();

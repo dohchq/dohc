@@ -7,6 +7,7 @@ type GuestScope = {
   person: GuestValue;
   message?: GuestObject;
   bindings?: GuestObject;
+  unavailable?: { [name: string]: string };
   now: string;
   recordKeys?: string[];
 };
@@ -216,6 +217,13 @@ export function automationGuest(scopeJson: string, kind: GuestKind): GuestEvalua
     record, previous: scope.previous ?? {}, trigger, person: scope.person,
     message: scope.message ?? null, ...scope.bindings, ...helpers,
   };
+  // Another step's result that is not ready: reading it throws why, so it never reads as nothing.
+  const unavailable = (target: object) => {
+    for (const [name, why] of Object.entries(scope.unavailable ?? {})) {
+      Object.defineProperty(target, name, { get() { throw new ReferenceError(why); }, enumerable: false, configurable: false });
+    }
+  };
+  if (kind === "code") unavailable(names);
   try {
     // SharedArrayBuffer's grow returns heap memory without clearing it, so authored code never gets it.
     if (!Reflect.deleteProperty(globalThis, "SharedArrayBuffer")) throw new TypeError("SharedArrayBuffer stayed.");
@@ -231,6 +239,7 @@ export function automationGuest(scopeJson: string, kind: GuestKind): GuestEvalua
       for (const [name, value] of Object.entries(names)) {
         Object.defineProperty(globalThis, name, { value, writable: false, enumerable: false, configurable: false });
       }
+      unavailable(globalThis);
     }
     freeze(globalThis);
   } catch {
