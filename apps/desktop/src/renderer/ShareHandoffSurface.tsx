@@ -1,3 +1,4 @@
+import type {RelayShareReceivedRow} from "../ipc/bridgeContract";
 import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ArrowLeft } from "lucide-react";
@@ -24,7 +25,7 @@ type ReceivedShareState =
   | { kind: "loading"; shareId: string }
   | { kind: "missing"; shareId: string }
   | { kind: "failed"; shareId: string }
-  | { kind: "ready"; shareId: string; shareCode: string; liveEditing: boolean };
+  | { kind: "ready"; shareId: string; shareCode: string; liveEditing: boolean; share: RelayShareReceivedRow };
 
 function HandoffCard(props: {
   title: string;
@@ -88,7 +89,7 @@ export function ShareHandoffSurface(props: {
         if (!lookupRequest.isCurrent(request)) return;
         setReceivedShare(
           result.found
-            ? { kind: "ready", shareId, shareCode: result.share.shareCode, liveEditing: opensForLiveEditing(result.share) }
+            ? { kind: "ready", shareId, shareCode: result.share.shareCode, share: result.share, liveEditing: opensForLiveEditing(result.share) }
             : { kind: "missing", shareId },
         );
       })
@@ -206,6 +207,7 @@ export function ShareHandoffSurface(props: {
         resolvedShare={{
           shareId: receivedShare.shareId,
           shareCode: receivedShare.shareCode,
+          share: receivedShare.share,
         }}
         onWorkspaceReady={props.onWorkspaceReady}
         onBack={props.onBack}

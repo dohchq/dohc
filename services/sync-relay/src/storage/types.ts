@@ -1,3 +1,4 @@
+import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
 import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
@@ -164,6 +165,7 @@ export interface KeyEnvelopeRow {
 }
 
 export interface SyncRelayShareRow {
+  labels?: ShareLabels;
   shareId: string;
   workspaceId: string;
   granterUserId: string;
@@ -926,6 +928,9 @@ export interface SyncRelayStorage {
   // match is exact on the normalized (lowercased) address. Returns the number
   // of grants claimed.
   claimPendingSharesForEmail(email: string, userId: string): number;
+  shareHasActiveGrants(shareId: string): boolean;
+  getShareLabels(shareId: string): ShareLabels;
+  setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
   getShare(shareId: string): SyncRelayShareRow | null;
   listActiveShareGrantsForRecipient(
     shareId: string,

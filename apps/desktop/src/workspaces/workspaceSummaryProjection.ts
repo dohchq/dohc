@@ -1,3 +1,4 @@
+import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import { ShareSkippedOpsSummary, WorkspaceSummary } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
 import { usableShareMountRecord } from "./shareMounts";
@@ -86,6 +87,8 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     shareView = {
       ...(shareId !== null ? { shareId } : {}),
       granterEmail: shareViewGranterEmail(raw),
+      ...(normalizeShareLabel(raw.subjectName) ? {subjectName: normalizeShareLabel(raw.subjectName)} : {}),
+      ...(normalizeShareLabel(raw.sharerName, 320) ? {sharerName: normalizeShareLabel(raw.sharerName, 320)} : {}),
       ...(damaged
         ? { damaged: true as const }
         : { access: level, genericChatWritable }),

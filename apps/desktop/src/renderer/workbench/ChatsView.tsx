@@ -1,3 +1,5 @@
+import {shareSenderLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
+import {ShareSender} from "../ShareSender";
 import { MessageReactions } from "./chatMessages";
 import { chatEditorPath } from "../shell/chatsNav";
 import { parseChatTabPath } from "./workbenchState";
@@ -4780,14 +4782,13 @@ export function ChatsView(props: {
               ) : null}
               <ul className="m-0 list-none p-0">
                 {receivedNotJoined.map((row) => (
-                  <li key={row.shareId} className="mx-2 flex h-8 items-center gap-2 px-2">
+                  <li key={row.shareId} className="mx-2 flex min-h-8 items-center gap-2 px-2 py-1">
                     <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
-                    <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
-                      {row.granterEmail ?? "A teammate"}
-                    </span>
-                    {row.access === "read-only" ? (
-                      <span className="shrink-0 font-mono text-[10px] text-subtle">read-only</span>
-                    ) : null}
+                    <div className="min-w-0 flex-1" title={`${row.subjectName ?? "a Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}>
+                      <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
+                      <ShareSender name={row.sharerName} email={row.granterEmail} />
+                    </div>
+                    <span className="shrink-0 font-mono text-[10px] text-subtle">{shareAccessLabel(row.access)}</span>
                     <button
                       type="button"
                       data-testid="chats-join-shared"

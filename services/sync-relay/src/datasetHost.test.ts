@@ -9,6 +9,7 @@ import { type AppDatasetBinding, type DatasetDefinition } from "@dohc/security-c
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { fixture as appFixture, limits, owner } from "./datasetTestFixture";
 import type { AppBackendAuth } from "./appBackendAuthority";
+import {createDatasetAppRoutes} from "./datasetRoutes";
 import { createRelayDatasetHost, type RelayDatasetHost } from "./datasetHost";
 import { workspaceUsageBytes } from "./storage/workspaces";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
@@ -341,4 +342,43 @@ it("caches only catalog verdicts for relay publications and still observes withd
     await expect(f.invoke(link, id(6), {}, publicationId, "revoked-read")).rejects.toThrow();
     expect(generate).toHaveBeenCalledTimes(1);
   } finally { generate.mockRestore(); }
+});
+
+it("returns app share labels only after named publication authorization", async () => {
+  const f = await fixture(); await f.activate(); const publicationId = f.publish(); f.addHelper();
+  f.storage.setShareLabels("s", {subjectName: "Registrations"}, 10);
+  const route = createDatasetAppRoutes(f.host, f.storage, {nowMs: () => 10, shareSenderLabel: async () => "Ana (owner@dohc.test)"});
+  const request = new Request("https://relay.test/summary");
+  const target = {route: "app-backend" as const, action: "summary" as const, publicationId, workspaceId: "w"};
+  expect(await (await route(request, target, helper)).json()).toEqual({subjectName: "Registrations", sharerName: "Ana (owner@dohc.test)", access: "view"});
+  await expect(route(request, target, {...helper, userId: "stranger"})).rejects.toThrow();
+  f.storage.revokeShareGrant({shareId: "s", grantId: "helper-grant", revokedAtMs: 11});
+  await expect(route(request, target, helper)).rejects.toThrow();
+});
+
+it("rechecks app access after the account sender lookup", async () => {
+  const f = await fixture(); await f.activate(); const publicationId = f.publish(); f.addHelper();
+  const route = createDatasetAppRoutes(f.host, f.storage, {nowMs: () => 10, shareSenderLabel: async () => {
+    f.storage.revokeShareGrant({shareId: "s", grantId: "helper-grant", revokedAtMs: 11});
+    return "Ana (owner@dohc.test)";
+  }});
+  await expect(route(new Request("https://relay.test/summary"), {route: "app-backend", action: "summary", publicationId, workspaceId: "w"}, helper)).rejects.toThrow();
+});
+
+it("reports current app access after a downgrade during the sender lookup", async () => {
+  const f = await fixture(); await f.activate(); const publicationId = f.publish(); f.addHelper();
+  f.storage.db.prepare("UPDATE sync_relay_share_grants SET access = 'comment' WHERE grant_id = 'helper-grant'").run();
+  const route = createDatasetAppRoutes(f.host, f.storage, {nowMs: () => 10, shareSenderLabel: async () => {
+    f.storage.db.prepare("UPDATE sync_relay_share_grants SET access = 'view' WHERE grant_id = 'helper-grant'").run();
+    return "Ana (owner@dohc.test)";
+  }});
+  const response = await route(new Request("https://relay.test/summary"), {route: "app-backend", action: "summary", publicationId, workspaceId: "w"}, helper);
+  expect(await response.json()).toMatchObject({access: "view"});
+});
+
+it("keeps app summaries available without inventing a sender when account lookup fails", async () => {
+  const f = await fixture(); await f.activate(); const publicationId = f.publish(); f.addHelper();
+  const route = createDatasetAppRoutes(f.host, f.storage, {nowMs: () => 10, shareSenderLabel: async () => {throw Error("account unavailable");}});
+  const response = await route(new Request("https://relay.test/summary"), {route: "app-backend", action: "summary", publicationId, workspaceId: "w"}, helper);
+  expect(await response.json()).toMatchObject({sharerName: null, access: "view"});
 });
