@@ -242,6 +242,8 @@ function independentGrant(
   };
 }
 
+const UNDO = { undoId: "undo-1", expiresAtMs: CREATED_MS + 600_000 };
+
 function controllable<T>() {
   let resolve!: (value: T) => void;
   let reject!: (cause: unknown) => void;
@@ -307,7 +309,7 @@ beforeEach(() => {
     outcome: "rotated",
     url: LINK_URL_B,
   });
-  bridgeMock.revokeRelayShareLink.mockResolvedValue({ outcome: "ended" });
+  bridgeMock.revokeRelayShareLink.mockResolvedValue({ outcome: "ended", undo: UNDO });
   bridgeMock.listRelayShares.mockResolvedValue({ granted: [], received: [] });
   bridgeMock.listRelayShareDiscussion.mockResolvedValue(discussionPage());
   bridgeMock.pollRelayShareDiscussionActivity.mockImplementation(
@@ -343,6 +345,7 @@ beforeEach(() => {
     status: "revoked",
     revokedAtMs: CREATED_MS + 1,
     parentGrantId: null,
+    undo: UNDO,
   });
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
 });
@@ -1160,6 +1163,150 @@ describe("RelayShareDialog", () => {
     });
   });
 
+  // The shell owns the notice and its Undo, so the pane hands over the
+  // receipt and the words. A link and a person's access are two removals.
+  it("reports an ended link and an ended named grant with their undo receipts", async () => {
+    const link = readableLink("link-1", {
+      shareId: "share-1",
+      selector: { paths: ["docs/plan.md"], versionId: null },
+    });
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [link],
+      supportedLinkAccess: ["view", "comment"],
+      independentGrants: [independentGrant("named-1", { recipientEmail: "friend@example.test" })],
+    });
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+        shareRemovals={shareRemovals}
+      />,
+    );
+    await showLinkPane(user);
+
+    const group = await openOwnerComments(user, "share-1");
+    const named = await within(group).findByTestId("share-independent-named-1");
+    await user.click(within(named).getByRole("button", { name: "End access" }));
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole("button", {
+        name: "End access",
+      }),
+    );
+    await vi.waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
+    expect(shareRemovals.removed.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      undo: UNDO,
+      message: "Ended friend@example.test's access to docs/plan.md.",
+      restoredMessage: "Restored friend@example.test's access to docs/plan.md.",
+    });
+
+    const row = await screen.findByTestId("share-link-row-link-1");
+    await user.click(within(row).getByRole("button", { name: "End link" }));
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
+        name: "End link",
+      }),
+    );
+    await vi.waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(2));
+    expect(shareRemovals.removed.mock.calls[1]![0]).toMatchObject({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      undo: UNDO,
+      message: "Ended the link to docs/plan.md.",
+      restoredMessage: "Restored the link to docs/plan.md.",
+    });
+
+    // Restoring reads the inventory again while the dialog is open.
+    const reads = bridgeMock.listRelayShareLinks.mock.calls.length;
+    await act(async () => shareRemovals.removed.mock.calls[1]![0].restored());
+    await vi.waitFor(() =>
+      expect(bridgeMock.listRelayShareLinks.mock.calls.length).toBeGreaterThan(reads),
+    );
+    expect(shareRemovals.failed).not.toHaveBeenCalled();
+  });
+
+  // A refused removal goes where the removal's own notice would have gone:
+  // the shell, with Try again. No second copy of it inside the dialog.
+  it("hands a refused End access and End link to the shell instead of an inline error", async () => {
+    const link = readableLink("link-1", {
+      shareId: "share-1",
+      selector: { paths: ["docs/plan.md"], versionId: null },
+    });
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [link],
+      supportedLinkAccess: ["view", "comment"],
+      independentGrants: [independentGrant("named-1", { recipientEmail: "friend@example.test" })],
+    });
+    bridgeMock.revokeRelayShareGrant
+      .mockRejectedValueOnce(new Error("relay down"))
+      .mockResolvedValueOnce({
+        grantId: "named-1",
+        access: "comment",
+        generation: 3,
+        status: "revoked",
+        revokedAtMs: CREATED_MS + 1,
+        parentGrantId: null,
+        undo: UNDO,
+      });
+    bridgeMock.revokeRelayShareLink.mockRejectedValueOnce(new Error("relay down"));
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    const user = userEvent.setup();
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+        shareRemovals={shareRemovals}
+      />,
+    );
+    await showLinkPane(user);
+
+    const group = await openOwnerComments(user, "share-1");
+    const named = await within(group).findByTestId("share-independent-named-1");
+    await user.click(within(named).getByRole("button", { name: "End access" }));
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole("button", {
+        name: "End access",
+      }),
+    );
+    await vi.waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledTimes(1));
+    expect(shareRemovals.failed.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "ws-1",
+      message: "dohc could not end friend@example.test's access to docs/plan.md.",
+    });
+    expect(within(group).queryByText("Couldn't complete that change.")).toBeNull();
+    // Try again runs the removal itself and reports it like a first attempt.
+    await act(async () => shareRemovals.failed.mock.calls[0]![0].retry());
+    await vi.waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledTimes(2);
+
+    const row = await screen.findByTestId("share-link-row-link-1");
+    await user.click(within(row).getByRole("button", { name: "End link" }));
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
+        name: "End link",
+      }),
+    );
+    await vi.waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledTimes(2));
+    expect(shareRemovals.failed.mock.calls[1]![0]).toMatchObject({
+      workspaceId: "ws-1",
+      message: "dohc could not end the link to docs/plan.md.",
+    });
+    expect(screen.queryByText("relay down")).toBeNull();
+    const retry = shareRemovals.failed.mock.calls[1]![0].retry;
+    view.unmount();
+    bridgeMock.revokeRelayShareLink.mockResolvedValueOnce({ outcome: "dependents-changed", dependents: [] });
+    await act(async () => retry());
+    await vi.waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledTimes(3));
+    expect(shareRemovals.failed.mock.calls[2]![0]).toMatchObject({
+      message: "Access through this link changed. Open Share and check who has access before ending the link.",
+    });
+  });
+
   it("bounds the independent grants carried by a link inventory page", () => {
     expect(
       ListRelayShareLinksResult.safeParse({
@@ -1230,7 +1377,7 @@ describe("RelayShareDialog", () => {
   it("ends with no dependents, clears its minted URL, and refreshes", async () => {
     const row = readableLink("grant-link-1", { shareId: "share-link-1" });
     bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [row] });
-    const end = controllable<{ outcome: "ended" }>();
+    const end = controllable<{ outcome: "ended"; undo: typeof UNDO }>();
     bridgeMock.revokeRelayShareLink.mockReturnValueOnce(end.promise);
     const user = userEvent.setup();
     render(
@@ -1264,7 +1411,7 @@ describe("RelayShareDialog", () => {
       expectedDependentGrantIds: [],
     });
     await act(async () => {
-      end.resolve({ outcome: "ended" });
+      end.resolve({ outcome: "ended", undo: UNDO });
     });
 
     expect(screen.queryByText(LINK_URL)).toBeNull();
@@ -1295,7 +1442,7 @@ describe("RelayShareDialog", () => {
         outcome: "dependents-changed",
         dependents: freshDependents,
       })
-      .mockResolvedValueOnce({ outcome: "ended" });
+      .mockResolvedValueOnce({ outcome: "ended", undo: UNDO });
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -1442,7 +1589,7 @@ describe("RelayShareDialog", () => {
 
   it("keeps B busy when a lifecycle success from A arrives late", async () => {
     const resetA = controllable<{ outcome: "rotated"; url: string }>();
-    const endB = controllable<{ outcome: "ended" }>();
+    const endB = controllable<{ outcome: "ended"; undo: typeof UNDO }>();
     bridgeMock.rotateRelayShareLink.mockReturnValueOnce(resetA.promise);
     bridgeMock.revokeRelayShareLink.mockReturnValueOnce(endB.promise);
     bridgeMock.listRelayShareLinks.mockImplementation(
@@ -1496,7 +1643,7 @@ describe("RelayShareDialog", () => {
     );
 
     await act(async () => {
-      endB.resolve({ outcome: "ended" });
+      endB.resolve({ outcome: "ended", undo: UNDO });
     });
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
   });
@@ -1506,7 +1653,7 @@ describe("RelayShareDialog", () => {
       outcome: "dependents-changed";
       dependents: LinkDependent[];
     }>();
-    const errorB = controllable<{ outcome: "ended" }>();
+    const errorB = controllable<{ outcome: "ended"; undo: typeof UNDO }>();
     bridgeMock.rotateRelayShareLink.mockReturnValueOnce(conflictA.promise);
     bridgeMock.revokeRelayShareLink.mockReturnValueOnce(errorB.promise);
     bridgeMock.listRelayShareLinks.mockResolvedValue({

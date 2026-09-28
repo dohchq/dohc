@@ -2870,3 +2870,28 @@ it.each([null, "budget"] as const)("returns structured chat dispatch state: %s",
   expect(await readChat({ root: "/workspace", home: "/home", request }, { threadId: "thread-1" })).toEqual(response);
   expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "chat", args: { cwd: "/workspace", actor: "agent", threadId: "thread-1" } }));
 });
+
+it("tells agents when the owner removed access to a shared view or mounted share", async () => {
+  await withWorkspace(async ctx => {
+    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({version: 1, workspaces: [
+      {workspaceId: "ws-a", rootPath: ctx.root, kind: "personal", shareView: {shareId: "view", ended: true},
+        shareMounts: [{shareId: "mounted", ended: true}, {shareId: "live", ended: false}],
+        confirmedRemovedShares: [{shareId: "view", removedAtMs: 100}, {shareId: "mounted", removedAtMs: 100}]}
+    ]}));
+    const expected = ["view", "mounted"].map(shareId => ({shareId, message: "The owner removed your access. Your local copy stays readable."}));
+    expect(await workspaceStatus(ctx)).toMatchObject({removedShares: expected});
+    expect((await listWorkspaces(ctx)).workspaces[0]).toMatchObject({removedShares: expected});
+  });
+});
+
+it("does not blame the owner for an unconfirmed ended share or a group the recipient left", async () => {
+  await withWorkspace(async ctx => {
+    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({version: 1, workspaces: [
+      {workspaceId: "ws-a", rootPath: ctx.root, kind: "personal",
+        shareView: {shareId: "unknown", ended: true},
+        sharedChannels: [{shareId: "left", ended: true, left: true}]}
+    ]}));
+    expect(await workspaceStatus(ctx)).not.toHaveProperty("removedShares");
+    expect((await listWorkspaces(ctx)).workspaces[0]).not.toHaveProperty("removedShares");
+  });
+});

@@ -55,9 +55,8 @@ it("opens only current selected Markdown objects through the named account and k
   expect(f.forwarded[0]!.headers.has("x-user-id")).toBe(false);
   expect(f.forwarded[0]!.headers.get("x-dohc-relay-exchange-key")).toBe(exchangeKey);
 });
-it.each(["other-account", "revoked", "view", "pinned", "oversized", "claims", "cross-origin"])("refuses named navigation for %s", async mode => {
+it.each(["other-account", "view", "pinned", "oversized", "claims", "cross-origin"])("refuses named navigation for %s", async mode => {
   const f = await fixture(mode === "oversized" ? 1 : 8, mode === "view" ? "view" : "edit");
-  if (mode === "revoked") f.storage.revokeShareGrant({shareId: "share", grantId: "grant", revokedAtMs: 4});
   if (mode === "pinned") {
     const share = f.storage.getShare("share")!;
     vi.spyOn(f.storage, "getShare").mockReturnValue({...share, selectorJson: JSON.stringify({paths: ["docs"], versionId: "side"})});
@@ -73,7 +72,9 @@ it("rechecks the grant after reading current files", async () => {
   vi.spyOn(f.storage, "readCurrentFileState").mockImplementation(input => {
     const result = read(input); f.storage.revokeShareGrant({shareId: "share", grantId: "grant", revokedAtMs: 4}); return result;
   });
-  expect((await f.web(request())).status).toBe(404);
+  const response = await f.web(request());
+  expect(response.status).toBe(404);
+  expect(await response.json()).toMatchObject({code: "share_access_removed", error: "The owner removed your access."});
 });
 it("keeps cancelled navigation in capacity until account resolution finishes", async () => {
   const f = await fixture();
@@ -95,4 +96,12 @@ it("keeps cancelled navigation in capacity until account resolution finishes", a
   release.resolve();
   expect((await second).status).toBe(200);
   expect((await f.web(request())).status).toBe(200);
+});
+
+it("explains removal only to the verified recipient through the web proxy", async () => {
+  const f = await fixture(); f.storage.revokeShareGrant({shareId: "share", grantId: "grant", revokedAtMs: 4});
+  const response = await f.web(request()); expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({ok: false, code: "share_access_removed", error: "The owner removed your access."});
+  const probe = await f.web(request("bob")); expect(probe.status).toBe(404);
+  expect(await probe.json()).toEqual({ok: false, error: "not found"});
 });

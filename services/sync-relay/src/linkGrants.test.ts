@@ -1457,7 +1457,7 @@ describe("owner link contract", () => {
       ),
     );
     expect(revokeResponse.status).toBe(200);
-    expect(await json(revokeResponse)).toEqual({
+    expect(await json(revokeResponse)).toMatchObject({
       ok: true,
       grantId: "named-promoted",
       access: "comment",
@@ -1623,7 +1623,7 @@ describe("owner link contract", () => {
       parentGrantId: null,
     });
 
-    const revokeShareGrant = vi.spyOn(storage, "revokeShareGrant");
+    const revokeShareGrant = vi.spyOn(storage, "removeShareAccess");
     const revokeMissingBefore = storage.getShareGrant(
       "named-revoke-missing-workspace",
     );
@@ -1734,7 +1734,7 @@ describe("owner link contract", () => {
       ).toMatchObject({ ok: true });
 
       const moveShareThen =
-        <M extends "retuneShareGrant" | "promoteShareGrant" | "revokeShareGrant">(method: M) =>
+        <M extends "retuneShareGrant" | "promoteShareGrant" | "removeShareAccess">(method: M) =>
         (target: SyncRelayStorage, ...args: Parameters<SyncRelayStorage[M]>) => {
           updateShareWorkspace(dbPath, "share-existing", OTHER_WORKSPACE);
           const real = target[method] as (
@@ -1746,7 +1746,7 @@ describe("owner link contract", () => {
       const racedStorage = interceptStorage(storage, {
         retuneShareGrant: transition === "retune" ? moveShareThen("retuneShareGrant") : undefined,
         promoteShareGrant: transition === "promote" ? moveShareThen("promoteShareGrant") : undefined,
-        revokeShareGrant: transition === "revoke" ? moveShareThen("revokeShareGrant") : undefined,
+        removeShareAccess: transition === "revoke" ? moveShareThen("removeShareAccess") : undefined,
       });
       const h = handler(racedStorage);
       const targetGrantId =

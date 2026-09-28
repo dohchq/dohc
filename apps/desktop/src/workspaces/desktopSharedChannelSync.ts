@@ -66,6 +66,10 @@ export function createDesktopSharedChannelSync<
   linkedChatStoreFor(
     workspace: EngineWorkspace | WorkspaceAuthorityLease<RegistryEntry, State>,
   ): Parameters<typeof joinedSharedChannelForTarget>[0]["store"];
+  // Reads the relay's account listing again for a workspace with an ended
+  // row the owner may have restored, so the row resumes. Decides for itself
+  // whether the recheck is due; a pass only says it saw an ended row.
+  recheckRemovedShares?(workspaceId: string): Promise<void>;
 }) {
   type AuthorityLease = WorkspaceAuthorityLease<RegistryEntry, State>;
   type Operation = WorkspaceAuthorityOperation<RegistryEntry, State>;
@@ -81,6 +85,7 @@ export function createDesktopSharedChannelSync<
     notifyRenderer,
     projectPendingChatBookmarksAfterPull,
     linkedChatStoreFor,
+    recheckRemovedShares,
   } = dependencies;
   const reportSharedChannelPassCoverage = createPassCoverageReporter((message) =>
     console.info(message),
@@ -226,7 +231,17 @@ export function createDesktopSharedChannelSync<
     let progress: SyncJoinedSharedChannelsResult | null = null;
     try {
       authority.assertCurrent();
-      const current = operation ? operation.workspace : findWorkspace(workspaceId);
+      let current: RegistryEntry | null = operation ? operation.workspace : findWorkspace(workspaceId);
+      // An ended row the relay ended may be one the owner has since put
+      // back. Ask before this pass decides the row is not its work.
+      if (
+        recheckRemovedShares &&
+        current?.sharedChannels?.some((channel) => channel.ended === true && channel.left !== true)
+      ) {
+        await recheckRemovedShares(workspaceId);
+        authority.assertCurrent();
+        current = findWorkspace(workspaceId) ?? current;
+      }
       const entry = current
         ? {
             ...current,

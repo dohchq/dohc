@@ -307,7 +307,7 @@ describe("readRelayChatShareLanes", () => {
       fetchListing: () => Promise.resolve({}),
       workspaceId: "workspace-1",
     });
-    expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
+    expect(lanes).toEqual({ state: "answered", granted: [], received: [], removed: [] });
   });
 
   it("maps chat rows and scopes grants to this workspace coordinate", async () => {
@@ -385,7 +385,32 @@ describe("readRelayChatShareLanes", () => {
           granterEmail: "owner@example.com",
         },
       ],
+      removed: [],
     });
+  });
+
+  // The removed lane is the only source for "the owner removed your access".
+  // Its ids ride with the answer; a lane that is not an array is a malformed
+  // listing, like the other lanes.
+  it("carries the relay's removed share ids, and treats a malformed removed lane as unreachable", async () => {
+    const removed = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
+      fetchListing: () =>
+        Promise.resolve({
+          removed: [
+            { shareId: "share-gone", grantId: "grant", message: "The owner removed your access.", removedAtMs: 5 },
+            { shareId: 7 },
+          ],
+        }),
+      workspaceId: "workspace-1",
+    });
+    expect(removed).toEqual({ state: "answered", granted: [], received: [], removed: ["share-gone"] });
+    const malformed = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
+      fetchListing: () => Promise.resolve({ removed: "share-gone" as unknown as unknown[] }),
+      workspaceId: "workspace-1",
+    });
+    expect(malformed).toEqual({ state: "unreachable" });
   });
 
   it("reports a chat row with unreadable access as unreachable", async () => {
@@ -444,6 +469,7 @@ describe("readRelayChatShareLanes", () => {
           granterEmail: "owner@example.com",
         },
       ],
+      removed: [],
     });
   });
 
@@ -465,7 +491,7 @@ describe("readRelayChatShareLanes", () => {
         }),
       workspaceId: null,
     });
-    expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
+    expect(lanes).toEqual({ state: "answered", granted: [], received: [], removed: [] });
   });
 
   // The row cap is the one door row-level validation does not cover. Every row
