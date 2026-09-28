@@ -685,6 +685,7 @@ export function makeBridge(
     }),
     getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
       path: "tasks",
+      objectId: "object-test",
       status: "valid",
       reasons: [],
       schema: { name: null, description: null, fields: [], views: [] },
@@ -692,7 +693,7 @@ export function makeBridge(
     })),
     queryCollectionRecords: vi.fn(
       async (): Promise<QueryCollectionRecordsResult> => ({
-        collection: { path: "tasks", status: "valid", reasons: [] },
+        collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
         records: [],
         groups: null,
         nextCursor: null,
