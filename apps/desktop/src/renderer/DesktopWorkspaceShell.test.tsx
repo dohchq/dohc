@@ -529,7 +529,7 @@ describe("collection folders", () => {
   it("reserves pending record names and retries the same partial identity", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(async () => ({ files: [], folders: ["tasks"] }));
-    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", status: "valid" as const, reasons: [] }] }));
+    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }] }));
     const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
     bridge.createCollectionRecord.mockImplementationOnce(() => pending.promise);
     renderShell(bridge);
