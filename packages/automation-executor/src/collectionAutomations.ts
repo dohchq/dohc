@@ -900,6 +900,8 @@ export class CollectionAutomations {
   private chat: ChatDirectory | null = null;
   /** The Groups Group-message automations watch, found for their subscriptions. */
   private groups: ChatDirectory | null = null;
+  /** The Groups `groups` was read for: those saved automations name. */
+  private groupsLookedUp: ReadonlySet<string> = new Set();
   /** Whether this computer was the automation host at the last reconcile, so it watches Groups. */
   private groupTriggersHere = false;
   /**
@@ -1374,12 +1376,8 @@ export class CollectionAutomations {
     const collectionId = unapproved ? await this.describedDatasetId(collectionPath) : this.collectionIdOf(collectionPath);
     if (!indexed || collectionId === null) return { status: "missing" };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
-    const unsupported = (automation: Automation) =>
-      unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
+    const { unsupported, reasonOf } = await this.reasonsIn(collectionPath, unapproved);
     const roster = await this.options.cachedRoster();
-    const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
-    // Only the computer that keeps a dataset can run its schedules and Group messages.
-    const keptHereOnly = hostCanRun && this.datasets.has(collectionPath) && (await this.options.groupHost()) === null;
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionId, entry.automation.id), collectionPath, automation: entry.automation }]
@@ -1404,11 +1402,7 @@ export class CollectionAutomations {
       const { automation } = entry;
       const automationId = collectionAutomationId(collectionId, automation.id);
       const hash = definitionHash(automation);
-      const cannotRun = unsupported(automation) ?? this.groupProblem(automation) ?? (hostCanRun
-        ? (keptHereOnly && (automation.when.kind === "schedule" || automation.when.kind === "group-message") ? DATASET_TRIGGERS_ELSEWHERE : null)
-        : automation.when.kind === "schedule" ? SCHEDULES_NEED_SYNC
-        : automation.when.kind === "group-message" ? GROUP_MESSAGES_NEED_SYNC
-        : null);
+      const cannotRun = reasonOf(automation);
       const summary = {
         valid: true as const, automationId, automation, definitionHash: hash, cannotRun,
         lastRun: lastRuns.get(automationId) ?? null,
@@ -1571,6 +1565,47 @@ export class CollectionAutomations {
     if (dataset === undefined) return [...automations];
     const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
     return automations.map((automation) => pinDatasetOperations(automation, dataset, (step) => held.has(JSON.stringify(step))));
+  }
+
+  /**
+   * Why dohc would not run `automation` if the ⚡ panel saved it in this
+   * Collection now, or null: an action the dataset lacks, a Find it cannot
+   * read, or trigger.record on a schedule. It pins steps as a save does,
+   * from what dohc has already indexed, and asks which computer runs
+   * schedules as the list does; it writes and wakes nothing. A Collection
+   * dohc has not indexed yet has no status to give.
+   */
+  async draftCannotRun(collectionPath: string, automation: Automation): Promise<string | null> {
+    await this.ready();
+    const dataset = this.datasets.get(collectionPath);
+    if (dataset === undefined && !this.collections.has(collectionPath)) return null;
+    const indexed = this.files.get(collectionPath);
+    const held = new Set(indexed?.file.status === "read"
+      ? indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? stepsInOrder(entry.automation).map(({ step }) => JSON.stringify(step)) : []))
+      : []);
+    const pinned = dataset === undefined ? automation : pinDatasetOperations(automation, dataset, (step) => held.has(JSON.stringify(step)));
+    return (await this.reasonsIn(collectionPath, false)).reasonOf(pinned);
+  }
+
+  /**
+   * Why dohc does not run an automation in this Collection now, as the ⚡
+   * panel lists it and a draft's check says it: `unsupported`, what keeps
+   * it from running anywhere, and `reasonOf`, that or what keeps it from
+   * starting here, such as a Group it cannot read or schedules without
+   * sync. `unapproved` is a dataset whose rules are not approved.
+   */
+  private async reasonsIn(collectionPath: string, unapproved: boolean) {
+    const unsupported = (automation: Automation) =>
+      unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
+    const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
+    // Only the computer that keeps a dataset can run its schedules and Group messages.
+    const keptHereOnly = hostCanRun && this.datasets.has(collectionPath) && (await this.options.groupHost()) === null;
+    const reasonOf = (automation: Automation): string | null => unsupported(automation) ?? this.groupProblem(automation) ?? (hostCanRun
+      ? (keptHereOnly && (automation.when.kind === "schedule" || automation.when.kind === "group-message") ? DATASET_TRIGGERS_ELSEWHERE : null)
+      : automation.when.kind === "schedule" ? SCHEDULES_NEED_SYNC
+      : automation.when.kind === "group-message" ? GROUP_MESSAGES_NEED_SYNC
+      : null);
+    return { unsupported, reasonOf };
   }
 
   /** Every step that waits for a current editor, and whether dohc could read what was allowed. */
@@ -3087,7 +3122,8 @@ export class CollectionAutomations {
 
   /** Why a Group-message automation's Group cannot start it, or null. */
   private groupProblem(automation: Automation): string | null {
-    if (automation.when.kind !== "group-message") return null;
+    // A Group only a draft names was never looked up, so it is unknown here, not missing.
+    if (automation.when.kind !== "group-message" || !this.groupsLookedUp.has(automation.when.group)) return null;
     const group = this.groups?.group(automation.when.group);
     return group && "problem" in group ? group.problem : null;
   }
@@ -3101,7 +3137,10 @@ export class CollectionAutomations {
       // Only Groups are read, so no roster is needed.
       const directory = await this.options.chat.directory(
         { kind: "owner", ownerUserId: null, grants: [] }, { groups, people: new Set() });
-      if (directory) this.groups = directory;
+      if (directory) {
+        this.groups = directory;
+        this.groupsLookedUp = groups;
+      }
     } catch (error) {
       this.options.onError("find the Groups automations watch", error);
     }

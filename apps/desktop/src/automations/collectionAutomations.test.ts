@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
@@ -960,6 +960,9 @@ describe("Collection automations", () => {
     const syncedList = await synced.automationsIn("Tasks");
     expect(syncedList.status === "read" && syncedList.automations[0]?.valid ? syncedList.automations[0].cannotRun : null)
       .toBe("Turn on sync to run this workspace's schedules.");
+    // The builder's check of the same automation, unchanged, says the same.
+    const saved = syncedList.status === "read" && syncedList.automations[0]?.valid ? syncedList.automations[0].automation : null;
+    await expect(synced.draftCannotRun("Tasks", saved!)).resolves.toBe("Turn on sync to run this workspace's schedules.");
     await synced.dispose();
     // This computer's parser refuses a zone it does not know, so that
     // schedule is off here with its diagnostic.
@@ -1368,6 +1371,19 @@ describe("Collection automations", () => {
       { path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget.", findStopped: "ana@dohc.test cannot view Budget." },
       { path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
     ]);
+  });
+
+  it("says why a draft would not run in its Collection before it is saved, running nothing", async () => {
+    const w = await world({ collections: ["Tasks"], automations: {} });
+    await w.executor.open();
+    const draft: Automation = {
+      id: "settle", name: "Settle", enabled: true, when: { kind: "record-added", table: null }, if: null,
+      do: [{ kind: "invoke", operation: "tasks.settle", input: [] }],
+    };
+    await expect(w.executor.draftCannotRun("Tasks", draft)).resolves.toMatch(/cannot name a table or a Collection action/u);
+    await expect(w.executor.draftCannotRun("Tasks", { ...draft, do: [{ kind: "set", values: [{ field: "Points", value: { kind: "literal", value: 1 } }], records: null, operation: null }] }))
+      .resolves.toBeNull();
+    expect(w.authored).toEqual([]);
   });
 
   it("fails a run whose step reaches past what every editor can reach, before anything is written", async () => {
