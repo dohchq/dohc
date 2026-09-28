@@ -1,3 +1,4 @@
+import { CreationPartialError } from "@dohc/cli/creation";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
@@ -2964,10 +2965,8 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create an untitled text file.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
-  // New record (Phase 2 collections): an ordinary markdown file inside the
-  // collection folder, created through the same IPC every explorer create
-  // takes; the engine adopts it and mints the record id. The untitled name is
-  // unique within the collection folder, not the root.
+  // Human and agent creation share the same record identity and recovery path.
+  const pendingRecordPaths = useRef(new Set<string>());
   const createCollectionRecord = useCallback(
     async (collectionPath: string) => {
       const prefix = `${collectionPath}/`;
@@ -2977,17 +2976,30 @@ export function DesktopWorkspaceShell(props: {
       const scopedFolders = folders
         .filter((folder) => folder.startsWith(prefix))
         .map((folder) => folder.slice(prefix.length));
-      try {
-        const result = await bridge().createWorkspaceFile({
-          workspaceId,
-          relativePath: `${collectionPath}/${uniqueUntitledPath(scopedFiles, scopedFolders, "md")}`,
-          initialText: "",
-        });
-        await refreshFiles();
-        openFile(result.path);
-      } catch (error) {
-        reportShellError("Could not create a record.", error);
-      }
+      scopedFolders.push(...[...pendingRecordPaths.current].filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length)));
+      const selection = workspaceSelection.current;
+      const name = uniqueUntitledPath(scopedFiles, scopedFolders, "md").slice(0, -3);
+      const reservedPath = `${collectionPath}/${name}.md`;
+      pendingRecordPaths.current.add(reservedPath);
+      const execute = async (recordId?: string): Promise<void> => {
+        if (workspaceSelection.current !== selection) return;
+        try {
+          const result = await bridge().createCollectionRecord({ workspaceId, collectionPath, name, recordId });
+          if (workspaceSelection.current !== selection) return;
+          if ("kind" in result) {
+            reportShellError("dohc could not finish this record.", new CreationPartialError(result),
+              result.retry.mode === "resume" ? () => void execute(result.retry.recordId) : null);
+            return;
+          }
+          await refreshFiles();
+          if (workspaceSelection.current !== selection) return;
+          openFile(result.path);
+        } catch (error) {
+          if (workspaceSelection.current === selection) reportShellError("Could not create a record.", error);
+        }
+      };
+      try { await execute(); }
+      finally { pendingRecordPaths.current.delete(reservedPath); }
     },
     [files, folders, openFile, refreshFiles, reportShellError, workspaceId],
   );

@@ -1,3 +1,7 @@
+import { readFile, readdir, unlink } from "node:fs/promises";
+import { join } from "node:path";
+import { createTestScratch } from "../workspaces/testTemp";
+import { createDatasetSources, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
 import { expect, it, vi } from "vitest";
 import { createDatasetHandler } from "./datasetIpc";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
@@ -22,13 +26,15 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "SCHEMA", operationSource: "OPERATIONS" });
   const host = { prepareRecovery:vi.fn(async()=>({transferId:datasetId,manifestSha256:"a".repeat(64),sourceCursor:{workspaceId:"workspace",datasetId,hostEpoch:"epoch",approvedRevisionHash:revision.revisionSha256,revision:0,digest:"b".repeat(64)},revision})), claimRecovery:vi.fn(), discardRecovery:vi.fn(async()=>{}), list: vi.fn(() => ({ datasets: [], nextCursor: null })), invoke: vi.fn(async () => ({ result: [], revision: 1, replayed: false })),
     approvedArtifacts: vi.fn(() => ({ active: true, revision })) };
-  const createSources = vi.fn(async (_workspace: typeof workspace, _files: Record<string, string>, _signal: AbortSignal) => {});
+  const createSources = vi.fn(async (_workspace: typeof workspace, _files: Record<string, string>, _signal: AbortSignal, _progress?: SourceCreationProgress) => {});
   const flushSourceCapture = vi.fn(async (_workspace: typeof workspace, _signal: AbortSignal) => {});
   const withAdapter = vi.fn();
   const handler = createDatasetHandler({ flushSourceCapture,
     async withWorkspaceOperation(_caller: string, workspaceId, work) {
       if (workspaceId !== workspace.workspaceId) throw Error("wrong workspace");
-      return work({ workspace, signal: abort.signal, assertCurrent() { if (!current) throw Error("stale workspace"); } });
+      const result = await work({ workspace, signal: abort.signal, assertCurrent() { if (!current) throw Error("stale workspace"); } });
+      if (!current) throw Error("stale workspace");
+      return result;
     },
     hostForWorkspace: vi.fn(async () => host as unknown as LocalDatasetHost),
     ...(remote ? { dataForWorkspace: async () => remote } : {}),
@@ -176,7 +182,7 @@ it("refuses stale form configuration before writing and guards a late source wri
   await expect(f.handler("window", { ...f.createForm, revisionSha256: "0".repeat(64) })).rejects.toThrow(/rules changed/);
   expect(f.createSources).not.toHaveBeenCalled();
   f.createSources.mockImplementation(async () => { f.stale(); });
-  await expect(f.handler("window", f.createForm)).rejects.toThrow(/stale workspace/);
+  await expect(f.handler("window", f.createForm)).resolves.toMatchObject({ kind: "partial", failedStage: "scope", retry: { mode: "resume" } });
 });
 
 it("keeps recovery owner-only and rejects mismatched approval scope",async()=>{
@@ -244,4 +250,51 @@ it("refuses source review after failed settlement or changed workspace authority
   aborted.flushSourceCapture.mockImplementation(async () => { aborted.abort.abort(new Error("review cancelled")); });
   await expect(aborted.handler("window", request)).rejects.toThrow("review cancelled");
   expect(aborted.withAdapter).not.toHaveBeenCalled();
+});
+
+it.each(["write", "register", "capture", "verify", "revision"] as const)("returns the saved paths and safely retries a form after %s fails", async stage => {
+  const f = fixture();
+  const root = await createTestScratch("dohc-form-retry-");
+  let fail = true;
+  let expected: Record<string, string> = {};
+  f.createSources.mockImplementation(async (_workspace, files, signal, progress) => {
+    expected = files;
+    await createDatasetSources(root, files, signal, {
+      register: async () => { if (fail && stage === "register") throw Error("register failed"); },
+      capture: async () => { if (fail && stage === "capture") throw Error("capture failed"); },
+      verify: async () => { if (fail && stage === "verify") throw Error("verify failed"); },
+    }, (at, paths) => {
+      progress?.(at, paths);
+      if (fail && stage === "write" && paths.length === 1) throw Error("write failed");
+    });
+  });
+  const approved = f.host.approvedArtifacts();
+  f.host.approvedArtifacts.mockImplementation(() => {
+    if (fail && stage === "revision" && f.createSources.mock.calls.length) throw Error("authority unavailable");
+    return approved;
+  });
+  const partial = await f.handler("window", f.createForm);
+  expect(partial).toMatchObject({ kind: "partial", failedStage: stage, retry: { mode: "resume" } });
+  if (partial.kind !== "partial") throw Error("expected partial");
+  expect(partial.created).toEqual(Object.keys(expected).slice(0, stage === "write" ? 1 : 4));
+  fail = false;
+  await expect(f.handler("window", f.createForm)).resolves.toMatchObject({ kind: "form-created" });
+  await expect(f.handler("window", f.createForm)).resolves.toMatchObject({ kind: "form-created" });
+  expect((await readdir(join(root, "apps/form"))).sort()).toEqual(["app.publish.json", "dohc.json", "frontend.css", "frontend.js"]);
+  for (const [path, source] of Object.entries(expected)) expect(await readFile(join(root, path), "utf8")).toBe(source);
+});
+
+it("names saved files when rules change and supports remove-and-retry", async () => {
+  const f = fixture();
+  const root = await createTestScratch("dohc-form-rules-");
+  const approved = f.host.approvedArtifacts();
+  f.host.approvedArtifacts.mockReturnValueOnce(approved).mockReturnValueOnce({ ...approved, active: false });
+  f.createSources.mockImplementation(async (_workspace, files, signal, progress) =>
+    createDatasetSources(root, files, signal, { register: async () => {}, capture: async () => {}, verify: async () => {} }, progress));
+  const partial = await f.handler("window", f.createForm);
+  expect(partial).toMatchObject({ kind: "partial", failedStage: "revision", retry: { mode: "remove-and-retry" } });
+  if (partial.kind !== "partial") throw Error("expected partial");
+  for (const path of partial.created) await unlink(join(root, path));
+  await expect(f.handler("window", f.createForm)).resolves.toMatchObject({ kind: "form-created" });
+  expect(await readdir(join(root, "apps/form"))).toHaveLength(4);
 });

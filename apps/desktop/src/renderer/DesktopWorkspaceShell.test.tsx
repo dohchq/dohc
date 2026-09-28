@@ -518,6 +518,9 @@ function makeBaseBridge(
         contentHash: "a".repeat(64),
       }),
     ),
+    createCollectionRecord: vi.fn(async (payload: { collectionPath: string; name: string; recordId?: string }): Promise<{ path: string; recordId: string } | import("@dohc/cli/creation").CreationPartial> => ({
+      path: `${payload.collectionPath}/${payload.name}.md`, recordId: payload.recordId ?? "rec_abcdefghijklmnopqrstuvwxyz",
+    })),
     createWorkspaceFile: vi.fn(async (payload: { relativePath: string }) => ({
       path: payload.relativePath,
     })),
@@ -1439,6 +1442,36 @@ describe("collection folders", () => {
     for (const [name, descriptor] of Object.entries(offsetDescriptors)) {
       if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
     }
+  });
+
+
+  it("reserves pending record names and retries the same partial identity", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ files: [], folders: ["tasks"] }));
+    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", status: "valid" as const, reasons: [] }] }));
+    const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
+    bridge.createCollectionRecord.mockImplementationOnce(() => pending.promise);
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = await waitFor(() => {
+      const row = screen.getAllByTestId("tree-row").find(entry => entry.dataset.path === "tasks");
+      expect(row?.dataset.collection).toBe("true");
+      return row!;
+    });
+    await user.click(row);
+    const button = await screen.findByRole("button", { name: "New record" }, { timeout: 15_000 });
+    await user.click(button);
+    await user.click(button);
+    expect(bridge.createCollectionRecord.mock.calls[0]![0].name).toBe("Untitled");
+    expect(bridge.createCollectionRecord.mock.calls[1]![0].name).toBe("Untitled 2");
+    const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
+    await act(async () => pending.resolve({
+      kind: "partial", created: ["tasks/Untitled.md"], failedStage: "index", reason: "index unavailable",
+      retry: { mode: "resume", recordId, instruction: "Try again to finish this record." },
+    }));
+    const retry = await screen.findByRole("button", { name: "Try again" });
+    await user.click(retry);
+    expect(bridge.createCollectionRecord.mock.calls[2]![0]).toMatchObject({ name: "Untitled", recordId });
   });
 
   it("opens a collection folder as its views tab with the settled empty state", async () => {

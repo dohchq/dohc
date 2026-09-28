@@ -3,6 +3,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { CreationPartial } from "./creation";
 import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
@@ -293,6 +294,7 @@ const collectionCreateRecordArgsSchema = z
         { message: "a record name is one file name, not a path" },
       ),
     fields: collectionCreateFieldsSchema,
+    recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
   })
   .strict();
 
@@ -823,7 +825,7 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
       recordPath: z.string().min(1),
     })
     .strict(),
-  rawFailureSchema,
+  rawFailureSchema.extend({ partial: CreationPartial.optional() }),
 ]);
 
 const documentReadResultSchema = z.discriminatedUnion("ok", [

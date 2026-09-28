@@ -134,7 +134,7 @@ async function world(options: {
   let beforeNotice: ((notice: AutomationNotice) => Promise<void>) | null = null;
   let idleDrains = 0;
   // Each count fails that many of the next calls.
-  const failures = { authoredWrite: 0, openSession: 0 };
+  const failures = { authoredWrite: 0, openSession: 0, capture: 0 };
   // Fails the one record session opened this many calls from now.
   let opens = 0;
   let failOpenAt: number | null = null;
@@ -482,7 +482,7 @@ async function world(options: {
       return await work(collectionRecordWrites({
         capture, workspaceRoot: root, signal,
         withAdapter: async (read) => await read(engine),
-        onCaptureSettled: (listener) => { settleListeners.add(listener); return () => settleListeners.delete(listener); },
+        onCaptureSettled: (listener) => { if (failures.capture > 0) { failures.capture--; throw Error("capture offline"); } settleListeners.add(listener); return () => settleListeners.delete(listener); },
       }));
     },
     readText: async (path) => {
@@ -2602,7 +2602,7 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task).Seen).toBe(true);
   });
 
-  it("resumes an added record under the id the engine gave it when its fields failed to save", async () => {
+  it.each(["openSession", "capture"] as const)("resumes an added record under the engine ID after %s fails", async stage => {
     const log = "  - id: log\n    name: Log\n    when: {field-changed: Status}\n    do: [{add-record: {Title: Logged}, collection: Log}]\n";
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: log } });
     const parsed = parseAutomationsFile(`version: 1\nautomations:\n${log}`);
@@ -2610,7 +2610,7 @@ describe("Collection automations", () => {
     const claim = w.claim("collection:Tasks#log", w.addRecord("Tasks", "one", { Status: "Done" }));
     // The derived id is taken, so the engine adopts the new file under another.
     w.occupy(derivedRecordId(stepKey(claim.claimId, `${definitionHash(parsed.entries[0].automation)}-1`, 0)));
-    w.failures.openSession = 1;
+    w.failures[stage] = 1;
     await w.executor.open();
     await w.settledClaim(claim);
     expect(claim.state).toBe("failed");

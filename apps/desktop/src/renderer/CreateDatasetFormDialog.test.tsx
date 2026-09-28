@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { CreationPartialError } from "@dohc/cli/creation";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { datasetColumnFields, type DatasetDescription } from "@dohc/security-contract/dataset";
@@ -131,4 +132,19 @@ describe("CreateDatasetFormDialog", () => {
     await act(async () => pending.reject(new Error("Old failure"))); expect(onError).not.toHaveBeenCalled();
     expect((screen.getByRole("button", { name: "Create form" }) as HTMLButtonElement).disabled).toBe(false);
   });
+});
+
+it("sends partial facts to Notices and retries the same form", async () => {
+  const partial = { kind: "partial" as const, created: ["forms/frontend.js"], failedStage: "capture" as const, reason: "capture unavailable",
+    retry: { mode: "resume" as const, instruction: "Try again with the same settings." } };
+  const failure = new CreationPartialError(partial);
+  const onCreate = vi.fn<CreateDatasetFormDialogProps["onCreate"]>().mockRejectedValueOnce(failure).mockResolvedValue(undefined);
+  const { onError } = setup({ onCreate });
+  submit();
+  await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  expect(onError.mock.calls[0]![1]).toBe(failure);
+  expect(failure.message).toContain("Created: forms/frontend.js");
+  expect(failure.message).toContain("could not capture");
+  await act(async () => onError.mock.calls[0]![2]!());
+  expect(onCreate.mock.calls[1]![0]).toEqual(onCreate.mock.calls[0]![0]);
 });

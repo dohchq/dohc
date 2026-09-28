@@ -535,10 +535,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_record",
     {
       description:
-        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. A name already taken in the folder is refused.",
+        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.",
       inputSchema: {
         collectionPath: z.string().min(1).max(4096),
         name: z.string().min(1).max(200),
+        recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
         fields: z.record(z.string().min(1).max(200), z.unknown()).optional(),
       },
     },

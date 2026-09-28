@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -9,6 +9,8 @@ import {
   actorOriginIdFor,
   attributionFor,
   createCollectionRecord,
+  runCollectionRecordCreation,
+  collectionRecordWrites,
   setCollectionRecordFields,
   type CollectionRecordEditContext,
 } from "./collectionRecordEdits";
@@ -632,7 +634,7 @@ describe("setCollectionRecordFields", () => {
 });
 
 describe("createCollectionRecord", () => {
-  it("does not accept matching disk bytes after an authored engine failure", async () => {
+  it("reports durable bytes as partial after an authored engine failure", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session } = fakeSession();
     const engine = fakeEngine();
@@ -646,7 +648,7 @@ describe("createCollectionRecord", () => {
     };
     await expect(createCollectionRecord(context, {
       collectionPath: "tasks", name: "failed", recordId, author: AUTOMATION,
-    })).rejects.toBe(failure);
+    })).resolves.toMatchObject({ kind: "partial", created: ["tasks/failed.md"], failedStage: "write", retry: { mode: "resume", recordId } });
     expect(engine.listeners.size).toBe(0);
   });
 
@@ -855,7 +857,7 @@ describe("createCollectionRecord", () => {
     await engine.lookupsReached(2);
     controller.abort();
     const error = await created.then(
-      () => null,
+      result => result,
       (reason: unknown) => reason,
     );
 
@@ -864,9 +866,7 @@ describe("createCollectionRecord", () => {
     await engine.adopt(root, "tasks/two.md");
     engine.announce(["tasks/two.md"]);
 
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(ADOPTION_TIMEOUT_MESSAGE);
-    expect(((error as Error).cause as Error).message).toBe("collection reloading");
+    expect(error).toMatchObject({ kind: "partial", created: ["tasks/two.md"], failedStage: "index", retry: { mode: "resume" } });
     expect(engine.listeners.size).toBe(0);
     expect(engine.lookups).toHaveLength(2);
     expect(context.openedPaths).toEqual([]);
@@ -883,13 +883,13 @@ describe("createCollectionRecord", () => {
       { collectionPath: "tasks", name: "two", author: AGENT },
     );
     const outcome = created.then(
-      () => null,
+      result => result,
       (reason: unknown) => reason,
     );
     await engine.lookupsReached(1);
     await vi.advanceTimersByTimeAsync(15_000);
 
-    expect(((await outcome) as Error).message).toBe(ADOPTION_TIMEOUT_MESSAGE);
+    expect(await outcome).toMatchObject({ kind: "partial", created: ["tasks/two.md"], failedStage: "index", retry: { mode: "resume" } });
     expect(engine.listeners.size).toBe(0);
   });
 
@@ -913,9 +913,7 @@ describe("createCollectionRecord", () => {
 
     // The file and its id exist by the time the seed fails: the error says
     // so, so a caller reconciles instead of creating a second record.
-    await expect(created).rejects.toThrow(
-      `The record was created at tasks/partial.md (id ${recordId}), but its fields could not be set: settle refused`,
-    );
+    await expect(created).resolves.toMatchObject({ kind: "partial", created: ["tasks/partial.md"], failedStage: "settle", retry: { mode: "resume", recordId } });
   });
 
   it("returns without a session when fields are absent or empty", async () => {
@@ -979,5 +977,166 @@ describe("createCollectionRecord", () => {
     await expect(readFile(join(root, "tasks", "two.md"), "utf8")).rejects.toThrow(
       /ENOENT/,
     );
+  });
+});
+
+describe("partial record retry", () => {
+
+  it("keeps a reassigned automation identity when capture cannot finish", async () => {
+    const root = await createTestScratch("dohc-record-automation-retry-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const adopted = derivedRecordId("reassigned");
+    const originalWrite = context.capture.writeAuthoredTextFile;
+    vi.spyOn(context.capture, "writeAuthoredTextFile").mockImplementationOnce(async (...args) => {
+      const written = await originalWrite(...args);
+      await engine.adoptUnderNewId(root, "tasks/retry.md", adopted);
+      return written;
+    });
+    vi.spyOn(context, "onCaptureSettled").mockImplementationOnce(() => { throw Error("capture offline"); });
+    // The engine reassigned the identity before capture could be confirmed.
+    const remember = vi.fn(async () => {});
+    await expect(collectionRecordWrites(context).create({
+      collectionPath: "tasks", name: "retry", recordId: derivedRecordId("planned"), author: AUTOMATION, onPartial: remember,
+    })).rejects.toThrow();
+    expect(remember).toHaveBeenCalledWith({ path: "tasks/retry.md", recordId: adopted });
+    await expect(collectionRecordWrites(context).create({
+      collectionPath: "tasks", name: "retry", recordId: adopted, author: AUTOMATION,
+    })).resolves.toEqual({ path: "tasks/retry.md", recordId: adopted });
+    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+  });
+
+  it("refuses a retry ID belonging to a different path for humans and agents", async () => {
+    const root = await createTestScratch("dohc-record-path-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const recordId = derivedRecordId("other");
+    engine.records.set(recordId, "tasks/other.md");
+    await expect(createCollectionRecord(contextFor(root, session, engine.overrides), {
+      collectionPath: "tasks", name: "new", fields: { status: "open" }, recordId, author: AGENT,
+    })).rejects.toThrow("belongs to another path");
+    expect(log.updates).toEqual([]);
+  });
+
+
+  it("keeps partial record facts when the workspace lease rejects completion", async () => {
+    const root = await createTestScratch("dohc-record-lease-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    vi.spyOn(context, "onCaptureSettled").mockImplementationOnce(() => { throw Error("capture offline"); });
+    const partial = await runCollectionRecordCreation(async work => {
+      await work(context);
+      throw Error("stale workspace");
+    }, { collectionPath: "tasks", name: "retry", author: AGENT });
+    expect(partial).toMatchObject({ kind: "partial", created: ["tasks/retry.md"], failedStage: "capture" });
+  });
+
+  it("reports a saved record when only the final workspace lease check fails", async () => {
+    const root = await createTestScratch("dohc-record-lease-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const first = runCollectionRecordCreation(async work => {
+      await work(context);
+      throw Error("stale workspace");
+    }, { collectionPath: "tasks", name: "retry", author: AGENT });
+    await engine.listening();
+    const recordId = await engine.adopt(root, "tasks/retry.md");
+    engine.announce(null);
+    expect(await first).toMatchObject({ kind: "partial", failedStage: "scope", retry: { recordId } });
+    await expect(runCollectionRecordCreation(work => work(context), {
+      collectionPath: "tasks", name: "retry", recordId, author: AGENT,
+    })).resolves.toEqual({ path: "tasks/retry.md", recordId });
+    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+  });
+
+
+  it("retries an authored write that landed before the transport failed", async () => {
+    const root = await createTestScratch("dohc-record-write-retry-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const write = context.capture.writeAuthoredTextFile;
+    vi.spyOn(context.capture, "writeAuthoredTextFile").mockImplementationOnce(async (...args) => {
+      await write(...args);
+      throw Error("response lost");
+    });
+    const input = { collectionPath: "tasks", name: "retry", author: AUTOMATION };
+    const partial = await createCollectionRecord(context, input);
+    expect(partial).toMatchObject({ kind: "partial", failedStage: "write", created: ["tasks/retry.md"] });
+    if (!("kind" in partial)) throw Error("expected partial");
+    const retry = createCollectionRecord(context, { ...input, recordId: partial.retry.recordId });
+    await engine.listening();
+    await engine.adopt(root, "tasks/retry.md");
+    engine.announce(null);
+    await expect(retry).resolves.toEqual({ path: "tasks/retry.md", recordId: partial.retry.recordId });
+    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+  });
+
+  it("retries capture subscription failure without leaving a deadline behind", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-record-capture-retry-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    vi.spyOn(context, "onCaptureSettled").mockImplementationOnce(() => { throw Error("capture offline"); });
+    const input = { collectionPath: "tasks", name: "retry", author: AGENT };
+    const partial = await createCollectionRecord(context, input);
+    expect(partial).toMatchObject({ kind: "partial", failedStage: "capture" });
+    expect(vi.getTimerCount()).toBe(0);
+    if (!("kind" in partial)) throw Error("expected partial");
+    const retry = createCollectionRecord(context, { ...input, recordId: partial.retry.recordId });
+    await engine.listening();
+    await engine.adopt(root, "tasks/retry.md");
+    engine.announce(null);
+    await expect(retry).resolves.toEqual({ path: "tasks/retry.md", recordId: partial.retry.recordId });
+    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+  });
+
+  it.each(["bind", "fields", "settle", "close"] as const)("resumes after %s without another file or field update", async stage => {
+    const root = await createTestScratch("dohc-record-retry-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const input = { collectionPath: "tasks", name: "retry", fields: { status: "open" }, author: AGENT };
+    const fail = () => { throw new Error("injected " + stage); };
+    if (stage === "bind") vi.spyOn(context.capture, "openYDocSession").mockImplementationOnce(fail);
+    if (stage === "fields") vi.spyOn(session, "applyDecidedLocalUpdate").mockImplementationOnce(fail);
+    if (stage === "settle") vi.spyOn(session, "settleNow").mockImplementationOnce(fail);
+    if (stage === "close") vi.spyOn(session, "close").mockImplementationOnce(fail);
+    const first = createCollectionRecord(context, input);
+    await engine.listening();
+    const id = await engine.adopt(root, "tasks/retry.md");
+    engine.announce(["tasks/retry.md"]);
+    const partial = await first;
+    expect(partial).toMatchObject({ kind: "partial", created: ["tasks/retry.md"], failedStage: stage, retry: { mode: "resume", recordId: id } });
+    if (!("kind" in partial)) throw Error("expected partial");
+    await expect(createCollectionRecord(context, { ...input, recordId: partial.retry.recordId })).resolves.toEqual({ path: "tasks/retry.md", recordId: id });
+    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+    expect(log.updates).toHaveLength(1);
+    expect(log.order).toContain("settle");
+  });
+
+  it("resumes an adoption timeout with the returned identity", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-record-retry-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const input = { collectionPath: "tasks", name: "retry", author: AGENT };
+    const first = createCollectionRecord(context, input);
+    await engine.lookupsReached(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    const partial = await first;
+    expect(partial).toMatchObject({ kind: "partial", failedStage: "index" });
+    if (!("kind" in partial)) throw Error("expected partial");
+    const retry = createCollectionRecord(context, { ...input, recordId: partial.retry.recordId });
+    await engine.listening();
+    await engine.adopt(root, "tasks/retry.md");
+    engine.announce(null);
+    await expect(retry).resolves.toEqual({ path: "tasks/retry.md", recordId: partial.retry.recordId });
+    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
 });

@@ -1,3 +1,4 @@
+import { CreationPartialError } from "@dohc/cli/creation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RecordButton } from "./collections/RecordButton";
 import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
@@ -417,6 +418,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         const result = await bridge().dataset({ ...input, action: "createForm", workspaceId });
         signal.throwIfAborted();
         if (sequence !== request.current) return;
+        if (result.kind === "partial") throw new CreationPartialError(result);
         if (result.kind !== "form-created") throw Error("dohc could not confirm the form files. Try again.");
         setCreatingForm(false);
         onFormCreated(result.appRoot);

@@ -27,7 +27,7 @@ import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCaptur
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import {
-  createCollectionRecord,
+  runCollectionRecordCreation,
   setCollectionRecordFields,
   type CollectionRecordEditContext,
 } from "../workspaces/collectionRecordEdits";
@@ -238,7 +238,7 @@ export function createDesktopCliServer<State>(
           setFields: (input) =>
             cliCollectionEdit((context) => setCollectionRecordFields(context, input)),
           createRecord: (input) =>
-            cliCollectionEdit((context) => createCollectionRecord(context, input)),
+            runCollectionRecordCreation(cliCollectionEdit, input),
         },
         query: async (params) => {
           const result = await withEngineAdapter(

@@ -64,7 +64,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   discardRecovery: ["recovery-discarded"],
   upload: ["uploaded"],
   file: ["file"],
-  createForm: ["form-created"],
+  createForm: ["form-created", "partial"],
   prepareRelationChoices: ["migration-prepared"],
   create: ["approved"],
   prepare: ["prepared"],

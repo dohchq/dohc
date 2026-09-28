@@ -343,15 +343,16 @@ Returns `{ ok: true, recordPath } | { ok: false, reason }`.
 
 ### `dohc_create_record`
 
-Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. A name already taken in the folder is refused.
+Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `collectionPath`: `string`. Required.
 - `name`: `string`. Required.
+- `recordId`: `string`
 - `fields`: `{ [key: string]: any JSON }`
 
-Returns `{ ok: true, recordId, recordPath } | { ok: false, reason }`.
+Returns `{ ok: true, recordId, recordPath } | { ok: false, reason, partial?: { kind: "partial", created, failedStage, reason, retry } }`.
 
 ### `dohc_list_automation_runs`
 
@@ -883,7 +884,7 @@ Create a form app that adds records to a Collection.
 - `fieldIds`: `UUID[]`. Required.
 - `relationChoices`: `({ fieldId: UUID, operationId: UUID, labelFieldId: UUID })[]`
 
-Returns `{ kind: "form-created", appRoot, paths }`.
+Returns `{ kind: "form-created", appRoot, paths }` or `{ kind: "partial", created, failedStage, reason, retry: { mode, instruction, recordId? } }`.
 
 #### `dohc dataset prepareRelationChoices`
 

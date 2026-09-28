@@ -652,6 +652,14 @@ export const QueryCollectionRecordsResult: z.ZodType<CollectionQueryResultContra
   });
 export type QueryCollectionRecordsResult = CollectionQueryResultContract;
 
+export const CreateCollectionRecordPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  name: z.string().min(1).max(200),
+  recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
+}).strict();
+export type CreateCollectionRecordPayload = z.infer<typeof CreateCollectionRecordPayload>;
+
 export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
@@ -5783,6 +5791,7 @@ export interface DohcDesktopBridge
   listWorkspaceFiles(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListWorkspaceFilesResult>;
+  createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string } | import("@dohc/cli/creation").CreationPartial>;
   createWorkspaceFile(
     payload: CreateWorkspaceFilePayload,
   ): Promise<CreateWorkspaceFileResult>;

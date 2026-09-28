@@ -1,3 +1,4 @@
+import { CreationPartialError } from "@dohc/cli/creation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DATASET_MAX_FIELDS, datasetColumnFields, type DatasetColumnField, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
@@ -100,7 +101,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
     locked.current = true; setPending(true); setInvalid(null);
     try { await props.onCreate(input, abort.signal); }
     catch (cause) {
-      if (alive.current && !abort.signal.aborted) props.onError("dohc could not create this form.", cause, () => { if (alive.current) void execute(input); });
+      if (alive.current && !abort.signal.aborted) props.onError("dohc could not create this form.", cause, cause instanceof CreationPartialError && cause.partial.retry.mode === "remove-and-retry" ? null : () => { if (alive.current) void execute(input); });
     } finally { if (alive.current) { locked.current = false; setPending(false); } }
   }
   if (review && props.onPrepareChoices && props.onApproveChoices && props.onDiscardChoices && props.onLoadPreview) {

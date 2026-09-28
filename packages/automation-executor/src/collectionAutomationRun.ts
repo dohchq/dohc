@@ -113,7 +113,8 @@ export interface CollectionRecordWrites {
    * Collection already has with it. The answer names the id the engine gave
    * the file.
    */
-  create(input: { collectionPath: string; name: string; author: ChangeAuthor; recordId: string }): Promise<{ path: string; recordId: string }>;
+  create(input: { collectionPath: string; name: string; author: ChangeAuthor; recordId: string;
+    onPartial?(record: { path: string; recordId: string }): Promise<void> }): Promise<{ path: string; recordId: string }>;
 }
 
 export interface CollectionAutomationRunDependencies {
@@ -713,20 +714,23 @@ async function applyEffect(
     // record is found again instead of added twice. When the engine gave the
     // file another id, the one this run recorded is the one to find.
     const known = [...run.created].reverse().find((entry) => entry.ordinal === ordinal);
+    const remember = async (record: { path: string; recordId: string }) => {
+      if (!known || known.recordId !== record.recordId || known.path !== record.path) {
+        const entry = { ordinal, ...record };
+        await dependencies.store.recordCreated(run, entry);
+        run.created = [...run.created.filter(existing => existing.ordinal !== ordinal), entry];
+      }
+    };
     const created = await dependencies.withRecordWrites(signal, (edit) =>
       edit.create({
         collectionPath: effect.collectionPath,
         name: effect.name,
         author,
         recordId: known?.recordId ?? effect.recordId,
+        onPartial: remember,
       }),
     );
-    if (!known || known.recordId !== created.recordId || known.path !== created.path) {
-      // Saved before its fields, so a failed seed resumes on this record.
-      const entry = { ordinal, recordId: created.recordId, path: created.path };
-      await dependencies.store.recordCreated(run, entry);
-      run.created = [...run.created.filter((existing) => existing.ordinal !== ordinal), entry];
-    }
+    await remember(created);
     const fields = effect.fields.map(({ field, value }) => ({ field, before: null, after: value }));
     const writes: RunWrite[] = [{ kind: "created", recordId: created.recordId, path: created.path }];
     if (fields.length === 0) return writes;

@@ -1,3 +1,6 @@
+import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
+import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
+import { SourceCreationConflict, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
 import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
@@ -30,7 +33,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   flushSourceCapture(workspace: W, signal: AbortSignal): Promise<void>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
-  createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
+  createSources(workspace: W, files: Record<string, string>, signal: AbortSignal, progress?: SourceCreationProgress): Promise<void>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
   automationName?(workspace: W, automationId: string): Promise<string | null>;
   /**
@@ -44,7 +47,10 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   let preparingMigrations = 0;
   return async (caller: Caller, raw: unknown) => {
     const input = DatasetRequest.parse(raw);
-    return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
+    let formFailure: ((error: unknown) => CreationPartial) | undefined;
+    let formPartial: CreationPartial | undefined;
+    try {
+      return await dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
       const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
       current();
       if (input.action === "export") {
@@ -240,14 +246,44 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         }
         const generated = generateDatasetFormSources({ ...input, approvedRevision: approved.revision });
         const files = Object.fromEntries(Object.entries(generated.files).map(([path, source]) => [`${input.appRoot}/${path}`, source]));
-        await dependencies.createSources(operation.workspace, files, operation.signal);
-        current();
-        const latest = await data.approvedArtifacts(input.datasetId);
-        current();
-        if (!latest.active || latest.revision.revisionSha256 !== input.revisionSha256) {
-          throw new Error("Collection rules changed. The form source was saved. Reload the Collection before approving the form.");
+        let created: string[] = [];
+        let failedStage: CreationStage = "write";
+        let rulesChanged = false;
+        formFailure = (error) => {
+          if (created.length === 0) throw error;
+          const remove = rulesChanged || error instanceof SourceCreationConflict || error instanceof CreatedFileWriteError;
+          return formPartial = {
+            kind: "partial", created, failedStage,
+            reason: error instanceof Error ? error.message : String(error),
+            retry: {
+              mode: remove ? "remove-and-retry" : "resume",
+              instruction: remove
+                ? "Review the listed files in Files, then remove them. Reload the Collection and create the form in an empty folder."
+                : "Try again with the same form settings and folder. Matching files are kept; only missing files are created.",
+            },
+          };
+        };
+        try {
+          await dependencies.createSources(operation.workspace, files, operation.signal, (stage, paths) => {
+            failedStage = stage;
+            created = [...paths];
+          });
+          created = Object.keys(files);
+          failedStage = "scope";
+          current();
+          failedStage = "revision";
+          const latest = await data.approvedArtifacts(input.datasetId);
+          failedStage = "scope";
+          current();
+          if (!latest.active || latest.revision.revisionSha256 !== input.revisionSha256) {
+            failedStage = "revision";
+            rulesChanged = true;
+            throw new Error("Collection rules changed.");
+          }
+          return { kind: "form-created" as const, appRoot: input.appRoot, paths: created };
+        } catch (error) {
+          return formFailure(error);
         }
-        return { kind: "form-created" as const, appRoot: input.appRoot, paths: Object.keys(files) };
       }
       if (input.action === "discard") { host.discard(input.preparationId); return { kind: "discarded" as const }; }
       if (input.action === "prepareSchemaChange" || input.action === "prepareRelationChoices") {
@@ -318,6 +354,11 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256, signal: operation.signal });
       current();
       return { kind: "approved" as const, revision };
-    });
+      });
+    } catch (error) {
+      if (formPartial) return formPartial;
+      if (formFailure) return formFailure(error);
+      throw error;
+    }
   };
 }
