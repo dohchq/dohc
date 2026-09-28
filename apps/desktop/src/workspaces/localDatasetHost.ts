@@ -66,8 +66,12 @@ export interface LocalDatasetHostOptions {
    * agent, whoever clicked.
    */
   agentRun?(): LocalDatasetAgent | null;
-  /** A commit made automation claims. A hint for the executor, which also drains at open. */
-  onAutomationClaims?(): void;
+  /**
+   * A commit made automation claims, and `failed` when it made any failed, as
+   * a chain stop does. A hint for the executor, which also drains and
+   * reports failures at open.
+   */
+  onAutomationClaims?(failed: boolean): void;
   /** A dataset's approved rules or lifecycle changed, so the executor re-indexes. */
   onDatasetsChanged?(): void;
 }
@@ -221,7 +225,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     let apps: ReturnType<typeof createLocalDatasetApps>;
     const exportDirectory = join(directory, "exports");
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime, persistentRuntime: options.persistentRuntime,
-      wakeAutomations: () => { if (!closed) options.onAutomationClaims?.(); },
+      wakeAutomations: (_scope, failed) => { if (!closed) options.onAutomationClaims?.(failed); },
       recovery: {
         directory: exportDirectory, limits: { maxTotalBytes: maxStoredBytes },
         install: { allowOwnerRecoveryClaim: true, account(_context, allocation) { charge(allocation.datasetId,allocation.bytes); },

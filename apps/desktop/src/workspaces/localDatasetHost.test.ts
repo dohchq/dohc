@@ -461,8 +461,8 @@ describe("local dataset owner adapter", () => {
   });
 
   it("writes as an automation only through a context the host made, names it, and wakes the executor", async () => {
-    let wakes = 0;
-    const {host} = await open({onAutomationClaims: () => { wakes += 1; }}), approved = await activate(host);
+    const wakes: boolean[] = [];
+    const {host} = await open({onAutomationClaims: failed => { wakes.push(failed); }}), approved = await activate(host);
     const [own, other] = ["collection:items#welcome", "collection:items#tally"];
     for (const automationId of [own, other]) host.automations.subscribe(id(1), {automationId, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: digest(automationId)});
     expect(host.automations.datasets()).toEqual({definitions: [approved.revision.definition], failures: []});
@@ -470,7 +470,7 @@ describe("local dataset owner adapter", () => {
     const step = call(approved, id(6), "step", {name: "Pens"});
     expect(await host.automations.invoke(context, step)).toMatchObject({replayed: false});
     // The commit's claims are made and its wake has run by the time the step returns.
-    expect(wakes).toBe(1);
+    expect(wakes).toEqual([false]);
     // Its own automation claims nothing; the other claims at the depth the write declared.
     const claimed = host.automations.next();
     expect(claimed).toMatchObject({automationId: other, depth: 1, actor: {kind: "automation", automationId: own, depth: 1}});
@@ -489,6 +489,10 @@ describe("local dataset owner adapter", () => {
     await expect(host.automations.invoke({automationId: own, claimId: "claim", depth: 1}, {...step, idempotencyKey: "forged"})).rejects.toThrow(/not permitted/);
     await expect(host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 5}), {...step, idempotencyKey: "deep"})).rejects.toThrow("You do not have access to this Collection.");
     expect(host.history({datasetId: id(1)}).entries).toHaveLength(2);
+    // A write at depth 4 commits, and its wake says the claims it made are failed chain stops.
+    await host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 4}), {...step, idempotencyKey: "stop"});
+    expect(wakes).toEqual([false, false, true]);
+    expect(host.automations.failures()).toEqual([expect.objectContaining({automationId: other, neverStarted: true, chainStopped: true})]);
   });
 
   it("claims an agent's change at its run's depth and a person's at 0, with the owner's authority", async () => {

@@ -22,8 +22,8 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { ListNoticesResult } from "../ipc/bridgeContract";
+import { FAILED_ELSEWHERE_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import {
-  FAILED_ELSEWHERE_BODY,
   RETRY_ELSEWHERE,
   retryAutomationRun,
   retryFromFailureNotice,
@@ -953,7 +953,7 @@ describe("notices for another person", () => {
 describe("automation notices reach the people involved", () => {
   const AUTOMATION = "collection:trip/tasks#stamp";
   const failure = (generation: number, claimId = "atc_1") => ({
-    automationId: AUTOMATION, claimId, chainStopped: false,
+    automationId: AUTOMATION, claimId, neverStarted: false, chainStopped: false,
     error: "The record is open elsewhere", updatedAtMs: 1_000, generation, datasetInstance: null,
   });
   const report = (
@@ -1135,6 +1135,24 @@ describe("automation notices reach the people involved", () => {
     await sendFailureNotices(sender(owner.store, "install-a", { lastChangedBy: "owner" }), WORKSPACE, report(2));
     await owner.store.sync();
     expect((await failedIn(owner)).map((row) => row.postedHere)).toEqual([true, true]);
+  });
+
+  it("tells everyone involved why a chain stopped, with no run to try again and no promise that someone can", async () => {
+    const server = await relay();
+    await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const owner = await computer(account(server, "owner"), { installId: "install-a" });
+    const ana = await computer(account(server, "ana"));
+    const stopped = { ...report(1, { startedBy: "ana" }), failure: { ...failure(1), neverStarted: true, chainStopped: true, error: "chain-stopped" } };
+    await sendFailureNotices(sender(owner.store, "install-a"), WORKSPACE, stopped);
+    const why = '"Stamp the finish date" did not run. dohc stops a chain after automations and agents start each other 4 times in a row. Check which automations start each other.';
+    await owner.store.sync();
+    await ana.store.sync();
+    const [own] = await failedIn(owner);
+    expect(own).toMatchObject({ title: "An automation chain stopped", body: `${why} This happened on Computer install-a.`, postedHere: true });
+    expect(own?.target?.run).toBeUndefined();
+    const [copy] = await failedIn(ana);
+    expect(copy).toMatchObject({ title: "An automation chain stopped", body: why, postedHere: false, target: { automation: AUTOMATION, path: "trip/tasks/automations.yaml" } });
+    expect(copy?.target?.run).toBeUndefined();
   });
 
   it("sends a copy again when the connection drops, and never runs a notice someone else sent", async () => {

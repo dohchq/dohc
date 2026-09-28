@@ -1310,7 +1310,7 @@ describe("CLI socket server", () => {
     const field = { kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" };
     const run = {
       claimId: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
-      trigger, definitionChanged: true, chainStopped: false, undone: false,
+      trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false,
     };
     const retries: unknown[] = [];
     const answers: Array<Awaited<ReturnType<NonNullable<CliWorkspaceContext["automations"]>["retry"]>>> = [
@@ -1337,7 +1337,7 @@ describe("CLI socket server", () => {
       ok: true,
       runs: [{
         run: "atc_1", state: "failed", error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
-        trigger, definitionChanged: true, chainStopped: false, undone: false, changes: 2,
+        trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false, changes: 2,
       }],
     });
     expect(context.automations.runs).toHaveBeenCalledWith(AUTOMATION);

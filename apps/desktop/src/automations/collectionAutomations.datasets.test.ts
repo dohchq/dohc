@@ -5,13 +5,14 @@ import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { JsonValue } from "@dohc/app-backend-runtime";
-import { DATASET_AUTOMATION_HISTORY } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import { AUTOMATION_NEVER_STARTED_REFUSAL, DATASET_AUTOMATION_HISTORY } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { createPressWindows, registerAutomationButtonsIpc } from "../ipc/automationButtonsIpc";
+import { retryAutomationRun } from "./automationNotices";
 import { createTestScratch } from "../workspaces/testTemp";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel } from "@dohc/automation-executor/automation-chat";
@@ -159,7 +160,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   });
   const settledChecks = async () => { while (checking.size > 0) await Promise.all([...checking]); };
   const host = await createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
-    onAutomationClaims: () => { executor?.notifyClaimed(); wake(); },
+    onAutomationClaims: (failed) => { executor?.notifyClaimed(); if (failed) executor?.failuresChanged(); wake(); },
     onDatasetsChanged: () => executor?.datasetsChanged() });
   hosts.push(host);
   drains.push(settledChecks);
@@ -209,7 +210,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const watched: unknown[] = [];
   // Claims the engine holds for this Collection's automations, as a schedule or a Group message makes them.
   const engineClaims: AutomationClaim[] = [];
-  const engineFailures: Array<Omit<AutomationFailure, "datasetInstance">> = [];
+  const engineFailures: Array<Omit<AutomationFailure, "datasetInstance" | "neverStarted">> = [];
   const engineRetries: string[] = [];
   let engineReadable = true;
   // How many claims the engine has served.
@@ -311,7 +312,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     roster: async () => roster,
     cachedRoster: async () => roster,
     evaluator: options.evaluator ?? sharedEvaluator.forWorkspace("workspace"),
-    store,
+    // A saved record of which failures have notices wakes the test, which can wait for it.
+    store: { ...store, saveReportedFailures: async (reported) => { await store.saveReportedFailures(reported); wake(); } },
     onRunsChanged: wake,
     reportFailure: async (report) => { failureReports.push(report); wake(); },
     withdrawFailure: async () => undefined,
@@ -373,6 +375,70 @@ describe("Collection automations on a dataset", () => {
     await f.until(() => f.claims()[0]?.state === "done");
     expect(f.notices).toEqual([expect.objectContaining({ body: `Invoice ${invoice} paid, was false` })]);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+  });
+
+  it("sends a chain stop's notice as its commit makes it, with nothing else to wake it, and offers no Try again", async () => {
+    const f = await world();
+    await f.writeAutomations(closePaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    // An agent woken three automations deep writes at depth 4 through the dataset.
+    const current = await f.record(invoice);
+    await f.host.action({ ...f.rules, operationId: EDIT, input: { id: invoice, expectedVersion: current!.version, values: { [PAID]: true } },
+      idempotencyKey: "agent-deep", agent: { depth: 4 } });
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.failureReports).toEqual([{
+      failure: expect.objectContaining({ automationId: AUTOMATION, neverStarted: true, chainStopped: true, error: "chain-stopped", generation: 1 }),
+      name: "Close paid invoices",
+      // An agent's change names no person.
+      startedBy: null,
+      replaces: null,
+    }]);
+    expect(f.claims()).toEqual([expect.objectContaining({ state: "failed", attempts: 0, depth: 4 })]);
+    const [run] = await f.executor.runs(AUTOMATION);
+    expect(run).toMatchObject({ state: "failed", neverStarted: true, chainStopped: true });
+    await expect(f.executor.run(AUTOMATION, run!.claimId)).resolves.toMatchObject({ failedStep: null, startsOver: false });
+    const refused = { status: "refused", reason: AUTOMATION_NEVER_STARTED_REFUSAL };
+    await expect(f.executor.retry({ automationId: AUTOMATION, claimId: run!.claimId, startOver: true })).resolves.toEqual(refused);
+    // The CLI and MCP ask as main wires them: this computer holds the run, so its executor answers.
+    await expect(retryAutomationRun({
+      notices: { sentFailure: async () => null },
+      installId: "install-a",
+      holds: async (held) => (await f.executor.run(held.automationId, held.claimId)) !== null,
+      retry: (held) => f.executor.retry(held),
+    }, { workspaceId: "workspace", automationId: AUTOMATION, claimId: run!.claimId, startOver: false })).resolves.toEqual(refused);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+
+  it("sends a chain stop's notice at the next open when its commit's wake was lost, and once across a restart", async () => {
+    const f = await world();
+    await f.writeAutomations(closePaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    await f.executor.dispose();
+    // No executor hears this commit.
+    const deep = async (paid: boolean, key: string) => {
+      const current = await f.record(invoice);
+      await f.host.action({ ...f.rules, operationId: EDIT, input: { id: invoice, expectedVersion: current!.version, values: { [PAID]: paid } },
+        idempotencyKey: key, agent: { depth: 4 } });
+    };
+    await deep(true, "agent-deep");
+    expect(f.failureReports).toEqual([]);
+    f.makeExecutor();
+    await f.executor.open();
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.failureReports[0]?.failure).toMatchObject({ chainStopped: true, generation: 1 });
+    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    await f.until(async () => (await store.readReportedFailures()).some((entry) => entry.generation === 1 && entry.open));
+    // After a restart, only the next stop sends a notice.
+    await f.executor.dispose();
+    f.makeExecutor();
+    await f.executor.open();
+    await deep(false, "agent-deeper");
+    await f.until(() => f.failureReports.length === 2);
+    expect(f.failureReports[1]?.failure).toMatchObject({ chainStopped: true, generation: 2 });
+    await f.executor.dispose();
   });
 
   it("stops a run that must compare a value too large for its claim, instead of comparing it as empty", async () => {
@@ -1199,7 +1265,7 @@ ${step}`;
     expect(await f.executor.run(BUTTON_AUTOMATION, pressed.claimId)).toMatchObject({ trigger: { kind: "button", by: "agent", depth: 2 } });
     const reports = f.failureReports.length;
     const stopped = await f.executor.pressDataset({ ...input, recordId: JSON.stringify(other), pressId: pressId(2), by: agent(4) }, owner(f), () => undefined);
-    expect(stopped).toMatchObject({ busy: false, settled: { outcome: "failed", error: "dohc stops a chain of automations after 4 steps, so this press did not run." } });
+    expect(stopped).toMatchObject({ busy: false, settled: { outcome: "failed", error: "This press did not run. dohc stops a chain after automations and agents start each other 4 times in a row. Check which automations start each other." } });
     // The stop is a failure the owner hears about, without waiting for another change.
     await f.until(() => f.failureReports.length > reports);
     expect(f.failureReports.at(-1)).toMatchObject({ failure: { automationId: BUTTON_AUTOMATION, chainStopped: true } });
@@ -1325,6 +1391,9 @@ ${step}`;
     await f.until(() => f.settled.length === 1);
     expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "failed", error: "Mark paid changed after it was pressed. Press it again." }]);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    // Its notice goes to the person who pressed too.
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.failureReports[0]).toMatchObject({ failure: { claimId: pressed.claimId, neverStarted: false, chainStopped: false }, startedBy: PRESSER });
     await f.executor.dispose();
   });
 
@@ -1390,6 +1459,31 @@ describe("dataset automation claims in both ledgers", () => {
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     expect(await f.executor.retry({ automationId: AUTOMATION, claimId: "atc_failed", startOver: false })).toEqual({ status: "queued", press: false });
     expect(f.engineRetries).toEqual(["atc_failed"]);
+    await f.executor.dispose();
+  });
+
+  it("tells a Group message's author when the engine stops its dataset run's chain, and refuses to run it again", async () => {
+    const f = await world();
+    await f.executor.open();
+    // The engine inserts a Group message's claim at the chain cap failed, and never serves it.
+    const stopped: AutomationClaim = {
+      ...engineClaim("atc_message", "failed", Date.now()), depth: 4, attempts: 0, error: "chain-stopped",
+      change: {
+        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: "user-ana", fields: [], fieldsOmitted: 0,
+        message: { id: "m-1", threadId: "t", groupId: "team", lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 1, body: "Pay it", authorUserId: "user-ana" },
+      },
+    };
+    f.engineClaims.push(stopped);
+    f.engineFailures.push({ automationId: AUTOMATION, claimId: "atc_message", chainStopped: true, error: "chain-stopped", updatedAtMs: stopped.updatedAtMs, generation: 1 });
+    f.executor.failuresChanged();
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.failureReports[0]).toMatchObject({
+      failure: { claimId: "atc_message", neverStarted: true, chainStopped: true, datasetInstance: null }, startedBy: "user-ana",
+    });
+    expect((await f.executor.runs(AUTOMATION))[0]).toMatchObject({ claimId: "atc_message", neverStarted: true, chainStopped: true });
+    expect(await f.executor.retry({ automationId: AUTOMATION, claimId: "atc_message", startOver: true }))
+      .toEqual({ status: "refused", reason: AUTOMATION_NEVER_STARTED_REFUSAL });
+    expect(f.engineRetries).toEqual([]);
     await f.executor.dispose();
   });
 
