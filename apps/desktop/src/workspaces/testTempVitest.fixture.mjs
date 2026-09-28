@@ -11,9 +11,12 @@ const desktop = fileURLToPath(new URL("../../", import.meta.url));
 const parent = join(directory, "dohc-test-scratch");
 const events = join(directory, "events.jsonl");
 const aged = join(parent, "fixture-123-0000000000000001");
-const recent = join(parent, "fixture-123-0000000000000002");
+// A recent run of a live process, and an empty one its dead process abandoned.
+const recent = join(parent, `fixture-${process.pid}-0000000000000002`);
+const abandoned = join(parent, "fixture-123-0000000000000003");
 mkdirSync(aged, { recursive: true });
 mkdirSync(recent);
+mkdirSync(abandoned);
 const old = new Date(Date.now() - 49 * 60 * 60 * 1000);
 utimesSync(aged, old, old);
 
@@ -79,6 +82,6 @@ console.log(JSON.stringify({
   status, scans: records.filter(record => record.scan).length,
   files: allocations.length, roots: new Set(allocations.map(record => record.root)).size,
   clean: allocations.every(record => [record.root, record.suite, ...record.scratch].every(path => !existsSync(path))),
-  agedExists: existsSync(aged), recentExists: existsSync(recent),
+  agedExists: existsSync(aged), recentExists: existsSync(recent), abandonedExists: existsSync(abandoned),
   ...(status ? { output: readFileSync(log, "utf8") } : {}),
 }));

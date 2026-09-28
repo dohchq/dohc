@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createTestScratch } from "./testTemp";
@@ -31,16 +30,6 @@ describe("test scratch initialization", () => {
 
   it("concurrent direct asynchronous callers share the startup sweep", async () => {
     expect(await initialization("async")).toEqual({ scans: 1, rootCreates: 1, agedExists: false });
-  });
-
-  it("removes a worker's empty run root when the worker exits", async () => {
-    const { root } = await initialization("exit");
-    expect(existsSync(root)).toBe(false);
-  });
-
-  it("keeps a run root that still holds scratch when the worker exits", async () => {
-    const { root } = await initialization("exit-occupied");
-    expect(existsSync(root)).toBe(true);
   });
 
   it.each(["scan-failure", "mkdir-failure"])("preserves a rejected startup after %s", async (mode) => {
