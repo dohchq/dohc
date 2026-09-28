@@ -3864,7 +3864,12 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
           if (run === undefined) throw new Error("The Collection workspace attachment changed.");
           return run;
         },
-        onAutomationClaims: () => collectionAutomationsOf(workspace.workspaceId)?.notifyClaimed(),
+        // A commit that made failed claims, as a chain stop does, sends their notices now.
+        onAutomationClaims: (failed) => {
+          const automations = collectionAutomationsOf(workspace.workspaceId);
+          automations?.notifyClaimed();
+          if (failed) automations?.failuresChanged();
+        },
         onDatasetsChanged: () => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(),
       });
       slot.pending = pending;

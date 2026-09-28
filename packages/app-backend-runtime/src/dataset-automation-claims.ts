@@ -53,10 +53,14 @@ export const DATASET_AUTOMATION_HISTORY = 100;
 export const DATASET_AUTOMATION_PRESS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 /** History names the automation behind each of a dataset's newest revisions, this many back. */
 export const DATASET_AUTOMATION_ATTRIBUTED_REVISIONS = 10_000;
+// A chain stop's reason matches the engine's, so either ledger's reads the same.
 export const DATASET_AUTOMATION_CHAIN_STOPPED = "chain-stopped";
-export const DATASET_AUTOMATION_CLAIM_LIMIT = "claim-limit";
-export const DATASET_AUTOMATION_RECORD_ID_TOO_LONG = "record-id-too-long";
+// The claims a change could not make say why, as run history and failure notices show it.
+export const DATASET_AUTOMATION_CLAIM_LIMIT = "This change was too large for dohc to start automations for every record. Change fewer records at a time.";
+export const DATASET_AUTOMATION_RECORD_ID_TOO_LONG = "This record's ID is too long for dohc to start an automation for it. Use a shorter ID.";
 export const DATASET_AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
+/** Why Try again refuses a claim that failed before it started, in either ledger. */
+export const AUTOMATION_NEVER_STARTED_REFUSAL = "This automation run stopped before it started, so it cannot run again.";
 // A served claim, as JSON, fits one response, as the engine's claims do. A
 // value travels whole up to the engine's bound. A record id is JSON, so a
 // claim names its record whole or not at all.
@@ -165,6 +169,8 @@ export interface DatasetAutomationFailure {
   datasetInstance: string;
   /** It failed before it started, as a chain stop or a change too large to claim, so Try again cannot run it. */
   neverStarted: boolean;
+  /** The chain depth cap stopped it before it started. */
+  chainStopped: boolean;
   error: string;
   updatedAtMs: number;
   /** How many times the automation's claims have failed. It only grows. */
@@ -300,8 +306,12 @@ export function createDatasetAutomationClaims(options: {
   /** Charge or refund (negative) the dataset's retained bytes, in the ledger's transaction. */
   account(scope: DatasetScope, bytes: number): void;
   nowMs?: () => number;
-  /** Called after a commit that made claims. A hint only: the executor also drains at open. */
-  wake?(scope: DatasetScope): void;
+  /**
+   * Called after a commit that made claims, with whether it made any failed,
+   * as a chain stop does. A hint only: the executor also drains and reports
+   * failures at open.
+   */
+  wake?(scope: DatasetScope, failed: boolean): void;
 }) {
   const { db } = options, now = options.nowMs ?? Date.now;
   const tx = <T>(run: () => T) => sync(() => options.transaction(() => sync(run)));
@@ -399,6 +409,7 @@ export function createDatasetAutomationClaims(options: {
         .all(cursor.workspaceId, cursor.datasetId).filter(row => row.automation_id !== self).map(row => ({ automationId: String(row.automation_id),
           tableId: String(row.table_id), kinds: JSON.parse(String(row.kinds)) as DatasetChangeKind[], fieldIds: row.field_ids === null ? null : JSON.parse(String(row.field_ids)) as string[] }));
       let delta = 0, made = 0;
+      const failed = new Set<string>();
       if (self !== undefined) {
         const row = [cursor.workspaceId, cursor.datasetId, cursor.revision, self, depth], storageBytes = bytes(row) + ROW_BYTES;
         db.prepare("INSERT INTO dohc_dataset_automation_revisions VALUES(?,?,?,?,?,?)").run(...row, storageBytes);
@@ -420,7 +431,7 @@ export function createDatasetAutomationClaims(options: {
           if (!(error instanceof DatasetChangeFactsError)) throw error;
           refusal = failure(error.message);
         }
-        const at = now(), stopped = depth >= DATASET_AUTOMATION_CHAIN_DEPTH, actorJson = JSON.stringify(actor), failed = new Set<string>();
+        const at = now(), stopped = depth >= DATASET_AUTOMATION_CHAIN_DEPTH, actorJson = JSON.stringify(actor);
         const statement = db.prepare("INSERT INTO dohc_dataset_automation_claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?,?,?)");
         const insert = (automationId: string, tableId: string, recordKey: string, error: string | null, change?: { fact: DatasetChangeFact; fieldIds: string[] | null }) => {
           const key = [cursor.workspaceId, cursor.datasetId, automationId, cursor.hostEpoch, cursor.revision, tableId, recordKey];
@@ -450,7 +461,7 @@ export function createDatasetAutomationClaims(options: {
       // The commit transaction is synchronous, so this runs after it commits,
       // or after a rollback, where the executor finds nothing new.
       if (made && options.wake) queueMicrotask(() => {
-        try { options.wake!(scope); } catch { /* A wake is a hint. */ }
+        try { options.wake!(scope, failed.size > 0); } catch { /* A wake is a hint. */ }
       });
       return made;
     },
@@ -570,6 +581,7 @@ export function createDatasetAutomationClaims(options: {
         WHERE f.newest=1 ORDER BY f.automation_id`).all(workspaceId))
         .map(row => ({ automationId: String(row.automation_id), claimId: String(row.claim_id),
           datasetInstance: JSON.stringify([String(row.dataset_id), String(row.host_epoch)]), neverStarted: Number(row.attempts) === 0,
+          chainStopped: Number(row.attempts) === 0 && row.error === DATASET_AUTOMATION_CHAIN_STOPPED,
           error: String(row.error ?? ""), updatedAtMs: Number(row.updated_at_ms), generation: Number(row.generation) }));
     },
     /** Start the oldest pending claim in the workspace, or return null. */
@@ -613,7 +625,7 @@ export function createDatasetAutomationClaims(options: {
         if (!row) throw new Error("This automation run no longer exists.");
         const current = claim(row);
         if (current.state === "done") throw new Error("This automation run already finished.");
-        if (current.state === "failed" && current.attempts === 0) throw new Error("This automation run stopped before it started, so it cannot run again.");
+        if (current.state === "failed" && current.attempts === 0) throw new Error(AUTOMATION_NEVER_STARTED_REFUSAL);
         if (current.state !== "failed") return current;
         if (current.fact?.kind === "button" && activePress(current.workspaceId, current.fact, current.claimId) !== undefined) {
           throw new Error("This button is already running for this record.");

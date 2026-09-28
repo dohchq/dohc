@@ -98,8 +98,12 @@ export interface DatasetHostOptions<Context> {
    * transaction. It takes no context: the executor settles claims outside any request.
    */
   accountAutomations?(allocation: DatasetScope & { bytes: number }): void;
-  /** Called after a commit that made automation claims. A hint: the executor also drains at open. */
-  wakeAutomations?(scope: DatasetScope): void;
+  /**
+   * Called after a commit that made automation claims, with whether it made
+   * any failed, as a chain stop does. A hint: the executor also drains and
+   * reports failures at open.
+   */
+  wakeAutomations?(scope: DatasetScope, failed: boolean): void;
   recovery?: {
     directory: string;
     limits: RecoveryLimits;

@@ -4,6 +4,7 @@ import { dirname, join, relative } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
+import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
@@ -231,6 +232,8 @@ async function world(options: {
       return { needsHandover: false };
     },
     claimNextAutomation: async () => {
+      // As the engine does, it serves only a claim still pending, never one inserted failed.
+      while (pending[0] !== undefined && pending[0].state !== "pending") pending.shift();
       const claim = pending.shift() ?? null;
       if (claim) { claim.state = "running"; claim.attempts += 1; } else { idleDrains += 1; wake(); }
       return claim ? structuredClone(claim) : null;
@@ -1041,6 +1044,9 @@ describe("Collection automations", () => {
     expect(claim).toMatchObject({ state: "failed", error: "Mark paid changed after it was pressed. Press it again." });
     expect(w.fieldsOf(invoice)).toEqual({});
     expect(await w.executor.relayedClaim(input)).toMatchObject({ settled: { outcome: "failed" } });
+    // Its notice reaches the person who pressed.
+    await w.until(() => w.failureReports.length === 1);
+    expect(w.failureReports[0]).toMatchObject({ failure: { claimId: claim.claimId }, startedBy: "user-ana" });
   });
 
   it("holds the host while a relayed press's run writes, and runs nothing the host no longer admits", async () => {
@@ -1291,7 +1297,7 @@ describe("Collection automations", () => {
     await w.until(() => w.failureReports.length === 1);
     expect(w.failureReports[0]).toEqual({
       failure: {
-        automationId: "collection:Tasks#spend", claimId: claim.claimId, chainStopped: false,
+        automationId: "collection:Tasks#spend", claimId: claim.claimId, neverStarted: false, chainStopped: false,
         error: "ana@dohc.test cannot edit Budget.", updatedAtMs: claim.updatedAtMs, generation: 1, datasetInstance: null,
       },
       name: "Spend",
@@ -2173,7 +2179,12 @@ describe("Collection automations", () => {
     w.claims.get(claim.claimId)!.state = "failed";
     w.claims.get(claim.claimId)!.error = "chain-stopped";
     const [run] = await w.executor.runs("collection:Tasks#stamp");
-    expect(run).toMatchObject({ state: "failed", chainStopped: true, undone: false, writes: [] });
+    expect(run).toMatchObject({ state: "failed", neverStarted: true, chainStopped: true, undone: false, writes: [] });
+    // Try again by its id, as the CLI and MCP ask, is refused with a reason, not an error.
+    await w.executor.open();
+    await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: true }))
+      .resolves.toEqual({ status: "refused", reason: AUTOMATION_NEVER_STARTED_REFUSAL });
+    expect(w.claims.get(claim.claimId)).toMatchObject({ state: "failed", attempts: 0 });
   });
 
   it("keeps an automation that names a field its Collection lacks off, says why, and runs it once the field exists", async () => {

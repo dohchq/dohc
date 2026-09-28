@@ -662,6 +662,7 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
     updatedAtMs: run.updatedAtMs,
     trigger: run.trigger,
     definitionChanged: run.definitionChanged,
+    neverStarted: run.neverStarted,
     chainStopped: run.chainStopped,
     undone: run.undone,
   };

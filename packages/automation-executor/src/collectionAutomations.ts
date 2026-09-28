@@ -12,6 +12,7 @@ import {
 } from "@dohc/workspace-contracts/automations";
 import { COLLECTION_SCHEMA_FILENAME, collectionVersionError, type CollectionListResult } from "@dohc/workspace-contracts/collection";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type {
   DatasetAutomationClaim,
   DatasetAutomationFailure,
@@ -170,7 +171,7 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
   listAutomationClaims(input: { automationId: string }): Promise<{ claims: AutomationClaimSummary[] }>;
   /** Each automation's newest failed claim, the one its failure notice offers to try again. */
-  listAutomationFailures(): Promise<{ failures: Array<Omit<AutomationFailure, "datasetInstance">> }>;
+  listAutomationFailures(): Promise<{ failures: Array<Omit<AutomationFailure, "datasetInstance" | "neverStarted">> }>;
   /** When Group messages last started nothing here for a reason a person can act on, by this computer's clock. */
   readAutomationGroupSkips(): Promise<{ aheadAtMs: number | null; lateAtMs: number | null }>;
   /** Hands a running claim this computer holds back to pending, without counting an attempt. */
@@ -456,7 +457,9 @@ export interface CollectionAutomationRun {
   writes: RunWrite[];
   /** The run began under another version of the automation. */
   definitionChanged: boolean;
-  /** The chain depth cap stopped it before it ran, so Try again cannot run it. */
+  /** It failed before it started, as a chain stop or a change too large to claim, so Try again cannot run it. */
+  neverStarted: boolean;
+  /** The chain depth cap stopped it before it started. */
   chainStopped: boolean;
   /** A person undid what it changed. */
   undone: boolean;
@@ -521,7 +524,7 @@ export interface AutomationFailureReport {
   failure: AutomationFailure;
   /** The automation's name in its automations.yaml, when dohc can read it. */
   name: string | null;
-  /** The person whose Group message started the run, when the claim names one. */
+  /** The person whose Group message, button press or edit started the run, when its claim names one. */
   startedBy: string | null;
   /** The earlier failure whose notice this one replaces, or null when none is up. */
   replaces: ReportedRun | null;
@@ -680,6 +683,15 @@ function datasetRecordIdOf(text: string): DatasetRecordId | null {
   }
   return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value)) ? value : null;
 }
+/**
+ * Whether a claim failed before it started, as both ledgers insert it: failed
+ * and never served. Of those, a chain stop records its own reason.
+ */
+function stopOf(claim: Pick<AutomationClaimSummary, "state" | "attempts"> & { error?: string | null }): Pick<CollectionAutomationRun, "neverStarted" | "chainStopped"> {
+  const neverStarted = claim.state === "failed" && claim.attempts === 0;
+  return { neverStarted, chainStopped: neverStarted && claim.error === AUTOMATION_CHAIN_STOPPED };
+}
+
 /** One automation's run history and the failure its notice offers, whichever ledger holds its claims. */
 type HistoryClaim = Pick<AutomationClaimSummary, "claimId" | "state" | "createdAtMs" | "updatedAtMs" | "attempts"> & {
   error?: string | null;
@@ -692,7 +704,13 @@ type LedgerHistory = { claims: HistoryClaim[]; failure: string | null };
  * record change or a press on a dataset, the engine otherwise. `pressedBy`
  * is the person a press ran for, or undefined for anything but a press.
  */
-type LedgerClaim = { ledger: "dataset" | "engine"; state: AutomationClaimSummary["state"]; pressedBy: string | null | undefined };
+type LedgerClaim = {
+  ledger: "dataset" | "engine";
+  state: AutomationClaimSummary["state"];
+  pressedBy: string | null | undefined;
+  /** It failed before it started, so no Try again can run it. */
+  neverStarted: boolean;
+};
 /** What a released claim waits for; later drains pass it by until that clears. */
 export type PressWaitReason = "roster" | "held" | "busy" | "session";
 /** A press's reasons, or a dataset whose host has not opened, which a press never waits for. */
@@ -1290,8 +1308,9 @@ export class CollectionAutomations {
     // Null while the dataset host is closed: its failures are unknown, not gone.
     const dataset = await this.datasetFailures();
     const failures: AutomationFailure[] = [
-      ...engine.failures.map((failure) => ({ ...failure, datasetInstance: null })),
-      ...(dataset ?? []).map(({ neverStarted, ...failure }) => ({ ...failure, chainStopped: neverStarted })),
+      // The engine inserts a claim failed only for a chain stop.
+      ...engine.failures.map((failure) => ({ ...failure, neverStarted: failure.chainStopped, datasetInstance: null })),
+      ...(dataset ?? []),
     ];
     const reported = new Map((await this.options.store.readReportedFailures()).map((entry) => [automationFailureKey(entry), entry]));
     // A pass that outlived its executor saves nothing: the next executor
@@ -1313,7 +1332,7 @@ export class CollectionAutomations {
         await this.options.reportFailure({
           failure,
           name: this.nameOf(failure.automationId),
-          startedBy: failure.datasetInstance === null ? await this.messageAuthorOf(failure) : null,
+          startedBy: await this.startedByOf(failure),
           replaces: last?.open ? last : null,
         });
       } catch (error) {
@@ -1333,11 +1352,21 @@ export class CollectionAutomations {
     }
   }
 
-  /** The person whose Group message a failed claim ran for, or null for any other claim. */
-  private async messageAuthorOf(failure: AutomationFailure): Promise<string | null> {
+  /**
+   * The person a failed claim ran for, from the ledger that holds it: whose
+   * Group message or button press started it, or the named person whose
+   * edit did. Null when the claim names no person, as an app's or an agent's
+   * change does.
+   */
+  private async startedByOf(failure: AutomationFailure): Promise<string | null> {
+    if (failure.datasetInstance !== null) {
+      const claim = await this.withLiveHost((ledger) => ledger.claim(failure.automationId, failure.claimId));
+      if (!claim) return null;
+      return claim.actor.kind === "named" ? claim.actor.userId : datasetPresser(claim);
+    }
     const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: failure.automationId }));
     const claim = listed?.claims.find((candidate) => candidate.claimId === failure.claimId);
-    return claim?.change.kind === "message" ? claim.change.onBehalfOf : null;
+    return claim?.change.kind === "message" || claim?.change.kind === "button" ? claim.change.onBehalfOf : null;
   }
 
   /**
@@ -1678,7 +1707,7 @@ export class CollectionAutomations {
     const parsed = parseCollectionAutomationId(automationId);
     const automation = parsed ? this.definitionFor(parsed) : null;
     const { stored, run } = await this.runOf(automationId, claim, automation ? definitionHash(automation) : null);
-    if (run.state !== "failed" || run.chainStopped) return { ...run, steps: stepsOf(stored), failedStep: null, startsOver: false };
+    if (run.state !== "failed" || run.neverStarted) return { ...run, steps: stepsOf(stored), failedStep: null, startsOver: false };
     // The run Try again continues, and whether it starts over, by retry's own rule.
     const tryAgain = automation ? tryAgainOf(await runsForClaim(this.options.store, { automationId, claimId }, automation)) : null;
     const readable = tryAgain !== null && !("refused" in tryAgain) ? tryAgain : null;
@@ -1718,8 +1747,7 @@ export class CollectionAutomations {
         updatedAtMs: claim.updatedAtMs,
         trigger: claim.trigger,
         definitionChanged: hash !== null && live.some((run) => run.definitionHash !== hash),
-        // The engine's rule: a chain stop is inserted failed and never served.
-        chainStopped: claim.state === "failed" && claim.attempts === 0,
+        ...stopOf(claim),
         undone: stored.length > 0 && stored.every((run) => run.undo === "done"),
       },
     };
@@ -1762,6 +1790,8 @@ export class CollectionAutomations {
       if (known === "missing") {
         return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
       }
+      // A run that failed before it started has nothing to run again, whoever asks.
+      if (known.neverStarted) return { status: "refused", reason: AUTOMATION_NEVER_STARTED_REFUSAL };
       press = known.pressedBy !== undefined;
       if (press && !(await this.options.mayRetryPress(known.pressedBy ?? null))) {
         return { status: "refused", reason: "Only the person who pressed this button, or the workspace's owner, can run it again." };
@@ -2391,7 +2421,7 @@ export class CollectionAutomations {
       const inLedger = await this.withLiveHost((ledger): LedgerClaim | "missing" => {
         const claim = ledger.claim(automationId, claimId);
         if (claim === null) return "missing";
-        return { ledger: "dataset", state: claim.state, pressedBy: claim.fact?.kind === "button" ? datasetPresser(claim) : undefined };
+        return { ledger: "dataset", state: claim.state, pressedBy: claim.fact?.kind === "button" ? datasetPresser(claim) : undefined, neverStarted: stopOf(claim).neverStarted };
       }, open);
       if (inLedger !== "missing") return inLedger;
     }
@@ -2399,7 +2429,7 @@ export class CollectionAutomations {
     if (listed === null) return null;
     const claim = listed.claims.find((candidate) => candidate.claimId === claimId);
     if (claim === undefined) return "missing";
-    return { ledger: "engine", state: claim.state, pressedBy: claim.change.kind === "button" ? claim.change.onBehalfOf : undefined };
+    return { ledger: "engine", state: claim.state, pressedBy: claim.change.kind === "button" ? claim.change.onBehalfOf : undefined, neverStarted: stopOf(claim).neverStarted };
   }
 
   private stopRuns(): void {

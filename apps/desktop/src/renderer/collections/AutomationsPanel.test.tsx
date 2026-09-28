@@ -63,7 +63,7 @@ function read(automations: ValidAutomationSummary[]): ListCollectionAutomationsR
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
 const run = (overrides: Partial<Run>): Run => ({
   claimId: "atc_1", state: "done", error: null, createdAtMs: Date.now(), updatedAtMs: Date.now(),
-  trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, chainStopped: false, undone: false, ...overrides,
+  trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, ...overrides,
 });
 
 function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean; roundTripWrites?: boolean } = {}) {
@@ -762,16 +762,22 @@ describe("an automation's runs", () => {
     claimId: "atc_failed", state: "failed", error: "ana@dohc.test cannot edit Budget",
     writes: [{ kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Finished on", before: null, after: "2026-09-25" }],
   });
-  const stopped = run({ claimId: "atc_stopped", state: "failed", error: "chain-stopped", chainStopped: true });
+  const stopped = run({ claimId: "atc_stopped", state: "failed", error: "chain-stopped", neverStarted: true, chainStopped: true });
+  const TOO_LARGE = "This change was too large for dohc to start automations for every record. Change fewer records at a time.";
+  const unclaimed = run({ claimId: "atc_unclaimed", state: "failed", error: TOO_LARGE, neverStarted: true });
 
-  it("opens from a notice, offers Try again except for a chain stop, and confirms a changed automation first", async () => {
-    const { bridge } = makeBridge(read([summary(stamp, { lastRun: { state: "failed", atMs: Date.now() } })]), [failed, stopped]);
+  it("opens from a notice, offers Try again except for a run that never started, and confirms a changed automation first", async () => {
+    const { bridge } = makeBridge(read([summary(stamp, { lastRun: { state: "failed", atMs: Date.now() } })]), [failed, stopped, unclaimed]);
     bridge.retryCollectionAutomation.mockResolvedValueOnce({ status: "definition-changed", repeatsMessages: false });
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
 
     const failedRow = await screen.findByTestId("automation-run-atc_failed");
     expect(failedRow.textContent).toContain("ana@dohc.test cannot edit Budget.");
     expect(within(screen.getByTestId("automation-run-atc_stopped")).queryByRole("button", { name: "Try again" })).toBeNull();
+    // A change too large to claim keeps its own reason, and none can start it.
+    const unclaimedRow = screen.getByTestId("automation-run-atc_unclaimed");
+    expect(unclaimedRow.textContent).toContain(TOO_LARGE);
+    expect(within(unclaimedRow).queryByRole("button", { name: "Try again" })).toBeNull();
 
     await userEvent.click(within(failedRow).getByRole("button", { name: "Try again" }));
     expect(bridge.retryCollectionAutomation).toHaveBeenLastCalledWith({
