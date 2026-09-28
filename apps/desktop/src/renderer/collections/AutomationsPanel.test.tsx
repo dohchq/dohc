@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
@@ -1002,6 +1002,126 @@ describe("a schedule's next run", () => {
     expect(await screen.findByText(tomorrow)).toBeTruthy();
     expect(screen.queryByText("No computer runs this workspace's schedules.")).toBeNull();
     expect(screen.queryByText(/on Ice's laptop/)).toBeNull();
+  });
+});
+
+describe("the builder's schedule", () => {
+  const NOW = Date.UTC(2026, 8, 25, 10);
+  // The builder shows a schedule's next run in the schedule's own time zone, and names it.
+  const nextRun = (ms: number, timeZone: string) => `Next run ${new Intl.DateTimeFormat(undefined, {
+    weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone,
+  }).format(ms)}, ${timeZone}`;
+  const monthly: Automation = {
+    ...stamp,
+    id: "rent",
+    name: "Pay rent",
+    when: { kind: "schedule", every: "month", at: "08:00", days: [31], timezone: "Asia/Calcutta" },
+    do: [{ kind: "add-record", values: [{ field: "Title", value: { kind: "literal", value: "Rent" } }], collection: null, as: null, operation: null }],
+  };
+  const checkboxes = (group: string) => within(screen.getByRole("group", { name: group })).getAllByRole("checkbox");
+  const box = (group: string, name: string) => within(screen.getByRole("group", { name: group })).getByRole("checkbox", { name });
+  const value = (name: string) => (screen.getByRole("combobox", { name }) as HTMLSelectElement).value;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("builds a weekly schedule, asks for a day, and says a set step has no record to change", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { written } = makeBridge(read([]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Trigger" }), "schedule");
+    expect(value("Repeats")).toBe("day");
+    expect((screen.getByLabelText("Time") as HTMLInputElement).value).toBe("09:00");
+    expect(value("Time zone")).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    expect(within(screen.getByRole("combobox", { name: "Time zone" })).getAllByRole("option")[0]!.textContent).toBe("UTC");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Repeats" }), "week");
+    expect(checkboxes("Days").filter((day) => (day as HTMLInputElement).checked)).toEqual([box("Days", "Mon")]);
+    await user.click(box("Days", "Mon"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Choose at least one day.")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(box("Days", "Mon")));
+    expect(written).toEqual([]);
+
+    await user.click(box("Days", "Fri"));
+    await user.click(box("Days", "Wed"));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Time zone" }), "Europe/London");
+    const time = screen.getByLabelText("Time");
+    // While the time is empty there is no next run to show, and no problem with the time zone.
+    fireEvent.change(time, { target: { value: "" } });
+    expect(screen.queryByText(/Next run|does not know/u)).toBeNull();
+    fireEvent.change(time, { target: { value: "07:30" } });
+    // Wednesday 30 September, 7:30 in London, which is 6:30 UTC in summer time.
+    expect(screen.getByText(nextRun(Date.UTC(2026, 8, 30, 6, 30), "Europe/London"))).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await within(screen.getByTestId("builder-step-0")).findByText("This trigger has no record to set fields on.", undefined, SLOW)).toBeTruthy();
+    expect(written).toEqual([]);
+
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    await user.click(screen.getByRole("button", { name: "Add a record" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, field 1" }), "Title");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.when).toEqual({ kind: "schedule", every: "week", at: "07:30", days: ["wed", "fri"], timezone: "Europe/London" });
+  }, 30_000);
+
+  it("keeps a time zone the file names by an older name, and a month's last days, as written", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { written } = makeBridge(read([summary(monthly)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "Pay rent" }));
+    expect(value("Time zone")).toBe("Asia/Calcutta");
+    expect(checkboxes("Days of the month").filter((day) => (day as HTMLInputElement).checked)).toEqual([box("Days of the month", "31")]);
+    expect(screen.getByText("In a shorter month, a later day runs on the month's last day.")).toBeTruthy();
+    // 30 September is that month's last day; 8:00 in India is 2:30 UTC.
+    expect(screen.getByText(nextRun(Date.UTC(2026, 8, 30, 2, 30), "Asia/Calcutta"))).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.when).toEqual(monthly.when);
+
+    await user.click(await screen.findByRole("button", { name: "Pay rent!" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Repeats" }), "hour");
+    expect(value("Minutes past the hour")).toBe(":00");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Minutes past the hour" }), ":45");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Repeats" }), "weekday");
+    expect((screen.getByLabelText("Time") as HTMLInputElement).value).toBe("09:45");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(2), SLOW);
+    expect(written[1]!.automations[0]!.when).toEqual({ kind: "schedule", every: "weekday", at: "09:45", timezone: "Asia/Calcutta" });
+  }, 30_000);
+
+  it("asks for a formula instead of field rows on a schedule, and says when no computer runs schedules", async () => {
+    const { bridge, written } = makeBridge(read([summary({ ...monthly, if: "record.Points == 3" })]));
+    bridge.readScheduleHost.mockResolvedValue({ kind: "relay", generation: 1, hostInstallId: null, handoverFrom: null, computers: [] });
+    const onOpenScheduleSettings = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onOpenScheduleSettings={onOpenScheduleSettings} />);
+    await user.click(await screen.findByRole("button", { name: "Pay rent" }));
+    const note = await within(screen.getByRole("region", { name: "When" })).findByTestId("schedule-host-missing");
+    await user.click(within(note).getByRole("button", { name: "Choose a computer" }));
+    expect(onOpenScheduleSettings).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("This trigger has no record to compare. Choose Always, or write a formula.")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Condition" })));
+    expect(written).toEqual([]);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Condition" }), "always");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+  }, 30_000);
+
+  it("runs a new action on a schedule without the record's id", async () => {
+    makeBridge(read([]));
+    const user = userEvent.setup();
+    render(<Panel table={{ name: "Invoices", operations: new Set(), tables: new Map([["Invoices", FIELDS]]),
+      actions: [{ name: "invoices.remind", label: "Remind", table: "Invoices", reversible: true }] }} />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Trigger" }), "schedule");
+    await user.click(screen.getByRole("button", { name: "Run an action" }));
+    expect(screen.queryByRole("textbox", { name: "Step 2, input 1 name" })).toBeNull();
   });
 });
 

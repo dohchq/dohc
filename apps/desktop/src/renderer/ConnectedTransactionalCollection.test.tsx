@@ -19,6 +19,7 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined),
   checkCollectionAutomation: vi.fn(async () => ({ diagnostics: [], formulaProblems: [] })),
   readScheduleHost: vi.fn(async () => ({ kind: "this-computer" })), onScheduleHostChanged: vi.fn(() => () => undefined),
+  onCloudSessionChanged: vi.fn(() => () => undefined),
   writeCollectionAutomations: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
 vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void }) => <>
