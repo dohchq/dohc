@@ -63,7 +63,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
       if (revoked) return new Response(null, {status: 404});
       if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
-      if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
+      if (path === "/sync/link/share") return Response.json({ok: true, subjectName: "Trip", access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
       if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
       if (path === "/sync/link/log") return Response.json(servedLog);
       if (path === `/sync/link/blobs/${withdrawn}`) return new Response(null, {status: 404});
@@ -275,6 +275,8 @@ it.each([
     effectiveSelector: {versionId, paths: ["docs", "plan.md"], access}, lastSettledKnown: true, lastSettledAtMs: 123});
   const summary = asRecord(result.structuredContent)?.summary;
   expect(summary).toEqual(expect.any(String));
+  expect(summary).toContain("Trip");
+  expect(asRecord(result.structuredContent)).not.toHaveProperty("sharerName");
   expect(summary).toContain(access === "view" ? "You can read files and comments." :
     access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
   expect(summary).toContain("Included paths: docs, plan.md.");

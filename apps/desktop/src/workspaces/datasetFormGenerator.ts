@@ -1,5 +1,5 @@
 import { isPortableNamePath } from "@dohc/workspace-contracts/names";
-import { DATASET_MAX_FIELDS, datasetColumnFields, parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { DATASET_MAX_FIELDS, datasetColumnFields, parseDatasetRevision, parseDatasetPath, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
@@ -7,6 +7,7 @@ import { generateDatasetFormFrontend, type DatasetFormField } from "./datasetFor
 
 export interface DatasetFormInput {
   approvedRevision: DatasetRevision;
+  datasetPath: string;
   tableId: string;
   createOperationId: string;
   appRoot: string;
@@ -72,7 +73,8 @@ export function generateDatasetFormSources(input: DatasetFormInput): { files: Re
   if (typeof title !== "string" || !title.trim() || title.length > 200 || /[\u0000-\u001f\u007f]/u.test(title)) throw new Error("Use a form title with 1 to 200 characters.");
   const capability = resolveAppDatasetCapability({ kind: "dataset", datasetId: revision.datasetId, revision: revision.revision,
     revisionSha256: revision.revisionSha256, operationIds: [...new Set([operation.operationId, ...relationOperations])], createFields: [{ operationId: operation.operationId, fieldIds: input.fieldIds }] }, revision);
-  const { operations: _, ...binding } = capability;
+  const { operations: _, name: _name, datasetId: _id, ...reference } = capability;
+  const binding = { ...reference, datasetPath: parseDatasetPath(input.datasetPath) };
   const frontend = generateDatasetFormFrontend({ title, operation: operation.name, fields });
   return { files: {
     ...frontend,

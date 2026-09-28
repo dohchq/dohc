@@ -525,6 +525,36 @@ describe("collection folders", () => {
     }
   });
 
+
+  it("reserves pending record names and retries the same partial identity", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ files: [], folders: ["tasks"] }));
+    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", status: "valid" as const, reasons: [] }] }));
+    const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
+    bridge.createCollectionRecord.mockImplementationOnce(() => pending.promise);
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = await waitFor(() => {
+      const row = screen.getAllByTestId("tree-row").find(entry => entry.dataset.path === "tasks");
+      expect(row?.dataset.collection).toBe("true");
+      return row!;
+    });
+    await user.click(row);
+    const button = await screen.findByRole("button", { name: "New record" }, { timeout: 15_000 });
+    await user.click(button);
+    await user.click(button);
+    expect(bridge.createCollectionRecord.mock.calls[0]![0].name).toBe("Untitled");
+    expect(bridge.createCollectionRecord.mock.calls[1]![0].name).toBe("Untitled 2");
+    const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
+    await act(async () => pending.resolve({
+      kind: "partial", created: ["tasks/Untitled.md"], failedStage: "index", reason: "index unavailable",
+      retry: { mode: "resume", recordId, instruction: "Try again to finish this record." },
+    }));
+    const retry = await screen.findByRole("button", { name: "Try again" });
+    await user.click(retry);
+    expect(bridge.createCollectionRecord.mock.calls[2]![0]).toMatchObject({ name: "Untitled", recordId });
+  });
+
   it("opens a collection folder as its views tab with the settled empty state", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(async () => ({
@@ -6867,13 +6897,14 @@ describe("shared view banner", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "sam@dohc.test",
+        sharerName: "IT Security",
         access: "view",
       },
     });
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+      "Shared view from IT Security (sam@dohc.test) — read-only. Ask sam@dohc.test for changes.",
     );
     expect(banner.textContent).not.toContain("You can chat about");
   });
@@ -7015,7 +7046,7 @@ describe("shared view banner", () => {
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from another dohc user. Markdown edits save to the live host. Other file changes need their acceptance.",
+      "Shared view from the owner. Markdown edits save to the live host. Other file changes need their acceptance.",
     );
   });
 
@@ -7783,6 +7814,30 @@ describe("notices sent to you", () => {
     );
   }
 
+  it("keeps a newer refusal after an older shell dismissal finishes", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const shown: NoticeRow = { ...MENTION, store: "local", kind: "sync-refusal", noticeId: "refusal",
+      body: "A change needs review", refusalCoordinates: [{ originId: "peer", originSeq: 1 }] };
+    const dismissed = deferred<void>();
+    const notices = { ...sentNotices([shown]), dismiss: vi.fn(() => dismissed.promise) };
+    const view = renderWithNotices(bridge, { sentNotices: notices });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("notice-refusal-dismiss"));
+    expect(notices.dismiss).toHaveBeenCalledWith(shown);
+    const newer = { ...shown, body: "A newer change needs review",
+      refusalCoordinates: [{ originId: "peer", originSeq: 2 }] };
+    view.rerender(<>
+      <CollectionFieldWriteHost />
+      <DesktopWorkspaceShell workspace={WORKSPACE} workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}}
+        sentNotices={{ ...notices, notices: [newer] }} />
+    </>);
+    expect((await screen.findByTestId("notice-refusal")).textContent).toContain(newer.body);
+    await act(async () => dismissed.resolve());
+    expect(screen.getByTestId("notice-refusal").textContent).toContain(newer.body);
+  });
+
   it("opens a notice's file in this workspace and marks it read", async () => {
     const user = userEvent.setup();
     const notices = sentNotices([MENTION]);
@@ -7829,7 +7884,7 @@ describe("notices sent to you", () => {
     bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
       claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
       error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
-      trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, chainStopped: false, undone: false,
+      trigger: { kind: "changed", recordId: "rec_1", by: "human", depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
     }] }));
     return bridge;
   }

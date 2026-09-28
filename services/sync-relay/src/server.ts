@@ -56,7 +56,7 @@ import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
 import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
-import { isNoticeLine, NOTICE_SENDER_LABEL_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkReadRoutes, type LinkReadRoute } from "./linkReadRoutes";
 import { createShareSummaries } from "./shareSummaries";
@@ -286,7 +286,7 @@ export function createSyncRelayHandler({
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetExport = datasetHost ? createDatasetRecoveryExport(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
-  const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, shareSenderLabel}) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
   }
@@ -308,7 +308,7 @@ export function createSyncRelayHandler({
   }) : undefined;
   const namedDocuments = namedBrowserSessionLimits ? createNamedRecipientDocuments({
     storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
-    resolveActor: resolveNamedActor, maxFiles: linkCurrentFileLimit,
+    resolveActor: resolveNamedActor, maxFiles: linkCurrentFileLimit, shareSenderLabel,
   }) : undefined;
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
@@ -336,14 +336,11 @@ export function createSyncRelayHandler({
     linkRevisionByteLength,
   } = createShareReadQueries(storage, linkFreshnessPageSize);
 
-  // A granter's name on the notice a share sends: their display name, or
-  // the email the recipient already sees beside the share.
-  const shareSenderLabel = async (granterUserId: string): Promise<string> => {
+  async function shareSenderLabel(granterUserId: string, knownEmail?: string | null): Promise<string> {
     const name = await accountDisplayName(lookupUserDisplayName, granterUserId);
-    if (name !== null) return name;
-    const email = await lookupUserEmail?.(granterUserId);
-    return isNoticeLine(email, NOTICE_SENDER_LABEL_MAX_CHARS) ? email : "Someone";
-  };
+    const email = knownEmail === undefined ? await lookupUserEmail?.(granterUserId) : knownEmail;
+    return formatShareSender(name, email);
+  }
 
   // Delivers the share notices this person can receive now, before their
   // pull; only those look up a granter's name, once per granter. A failure
@@ -351,15 +348,18 @@ export function createSyncRelayHandler({
   // delivery work, so sharing takes the same time whether or not the
   // address has an account.
   const deliverPendingShareNotices = async (userId: string): Promise<void> => {
-    const labels = new Map<string, Promise<string>>();
+    const labels = new Map<string, Promise<{senderLabel: string; senderEmail: string | null}>>();
     for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
       try {
         let label = labels.get(granterUserId);
         if (label === undefined) {
-          label = shareSenderLabel(granterUserId);
+          label = (async () => {
+            const senderEmail = await lookupUserEmail?.(granterUserId) ?? null;
+            return {senderLabel: await shareSenderLabel(granterUserId, senderEmail), senderEmail};
+          })();
           labels.set(granterUserId, label);
         }
-        storage.noticeShareReceived({ grantId, senderLabel: await label, nowMs: nowMs() });
+        storage.noticeShareReceived({ grantId, ...await label, nowMs: nowMs() });
       } catch (error) {
         console.error("[sync-relay] share notice failed", error);
       }
@@ -498,10 +498,11 @@ export function createSyncRelayHandler({
     independentGrantSummary,
     linkInventorySummary,
     namedBrowserInvitation,
-  } = createShareSummaries(lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
+  } = createShareSummaries((shareId) => storage.getShareLabels(shareId), lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
 
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = createShareInventoryRoutes(
     storage,
+    nowMs,
     claimPendingShares,
     lookupUserEmail,
     requireShareAction,
@@ -510,6 +511,7 @@ export function createSyncRelayHandler({
     independentGrantSummary,
     linkInventorySummary,
     publicEditRelease,
+    shareSenderLabel,
   );
 
   const { respondToShareGrantTransition, respondToWorkspaceShareCreation } = createShareGrantRoutes(
@@ -1166,7 +1168,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
     if (parts.length === 6 && parts[4] === "backend" &&
         (parts[5] === "activate" || parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" || parts[5] === "attempt" ||
-         parts[5] === "descriptor")) {
+         parts[5] === "descriptor" || parts[5] === "summary")) {
       return {route:"app-backend",workspaceId,publicationId,action:parts[5]};
     }
     if (parts.length === 7 && parts[4] === "backend" && parts[5] === "blobs" && /^[0-9a-f]{64}$/.test(parts[6]!)) {

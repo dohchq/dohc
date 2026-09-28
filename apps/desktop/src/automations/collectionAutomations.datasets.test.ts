@@ -5,13 +5,14 @@ import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { JsonValue } from "@dohc/app-backend-runtime";
-import { DATASET_AUTOMATION_HISTORY } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import { AUTOMATION_NEVER_STARTED_REFUSAL, DATASET_AUTOMATION_HISTORY } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { createPressWindows, registerAutomationButtonsIpc } from "../ipc/automationButtonsIpc";
+import { retryAutomationRun } from "./automationNotices";
 import { createTestScratch } from "../workspaces/testTemp";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel } from "@dohc/automation-executor/automation-chat";
@@ -159,7 +160,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   });
   const settledChecks = async () => { while (checking.size > 0) await Promise.all([...checking]); };
   const host = await createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
-    onAutomationClaims: () => { executor?.notifyClaimed(); wake(); },
+    onAutomationClaims: (failed) => { executor?.notifyClaimed(); if (failed) executor?.failuresChanged(); wake(); },
     onDatasetsChanged: () => executor?.datasetsChanged() });
   hosts.push(host);
   drains.push(settledChecks);
@@ -209,7 +210,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const watched: unknown[] = [];
   // Claims the engine holds for this Collection's automations, as a schedule or a Group message makes them.
   const engineClaims: AutomationClaim[] = [];
-  const engineFailures: Array<Omit<AutomationFailure, "datasetInstance">> = [];
+  const engineFailures: Array<Omit<AutomationFailure, "datasetInstance" | "neverStarted">> = [];
   const engineRetries: string[] = [];
   let engineReadable = true;
   // How many claims the engine has served.
@@ -270,6 +271,17 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const messages: AutomationChatMessage[] = [];
   const notices: AutomationNotice[] = [];
   const failureReports: AutomationFailureReport[] = [];
+  // Runs once after the next run is saved, as when its plan is on disk.
+  let afterSave: (() => void) | null = null;
+  const store = (() => {
+    const base = createAutomationRunStore(root, resolveWorkspaceMetadataDir);
+    return { ...base, save: async (run: Parameters<typeof base.save>[0]) => {
+      await base.save(run);
+      const hook = afterSave;
+      afterSave = null;
+      hook?.();
+    } };
+  })();
   const makeExecutor = () => executor = new CollectionAutomations({
     personName: (userId) => `Person ${userId}`,
     mayRetryPress: async () => options.mayRetryPress ?? false,
@@ -300,7 +312,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     roster: async () => roster,
     cachedRoster: async () => roster,
     evaluator: options.evaluator ?? sharedEvaluator.forWorkspace("workspace"),
-    store: createAutomationRunStore(root, resolveWorkspaceMetadataDir),
+    // A saved record of which failures have notices wakes the test, which can wait for it.
+    store: { ...store, saveReportedFailures: async (reported) => { await store.saveReportedFailures(reported); wake(); } },
     onRunsChanged: wake,
     reportFailure: async (report) => { failureReports.push(report); wake(); },
     withdrawFailure: async () => undefined,
@@ -347,6 +360,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     dropRules: () => { rulesResolve = false; },
     keepRules: () => { rulesResolve = true; },
     fixStore: () => { storeFails = false; },
+    afterNextSave: (hook: () => void) => { afterSave = hook; },
     moveToServer: () => { unpressable = "This Collection moved to a server, so its buttons can't run here."; },
   };
 }
@@ -361,6 +375,70 @@ describe("Collection automations on a dataset", () => {
     await f.until(() => f.claims()[0]?.state === "done");
     expect(f.notices).toEqual([expect.objectContaining({ body: `Invoice ${invoice} paid, was false` })]);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+  });
+
+  it("sends a chain stop's notice as its commit makes it, with nothing else to wake it, and offers no Try again", async () => {
+    const f = await world();
+    await f.writeAutomations(closePaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    // An agent woken three automations deep writes at depth 4 through the dataset.
+    const current = await f.record(invoice);
+    await f.host.action({ ...f.rules, operationId: EDIT, input: { id: invoice, expectedVersion: current!.version, values: { [PAID]: true } },
+      idempotencyKey: "agent-deep", agent: { depth: 4 } });
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.failureReports).toEqual([{
+      failure: expect.objectContaining({ automationId: AUTOMATION, neverStarted: true, chainStopped: true, error: "chain-stopped", generation: 1 }),
+      name: "Close paid invoices",
+      // An agent's change names no person.
+      startedBy: null,
+      replaces: null,
+    }]);
+    expect(f.claims()).toEqual([expect.objectContaining({ state: "failed", attempts: 0, depth: 4 })]);
+    const [run] = await f.executor.runs(AUTOMATION);
+    expect(run).toMatchObject({ state: "failed", neverStarted: true, chainStopped: true });
+    await expect(f.executor.run(AUTOMATION, run!.claimId)).resolves.toMatchObject({ failedStep: null, startsOver: false });
+    const refused = { status: "refused", reason: AUTOMATION_NEVER_STARTED_REFUSAL };
+    await expect(f.executor.retry({ automationId: AUTOMATION, claimId: run!.claimId, startOver: true })).resolves.toEqual(refused);
+    // The CLI and MCP ask as main wires them: this computer holds the run, so its executor answers.
+    await expect(retryAutomationRun({
+      notices: { sentFailure: async () => null },
+      installId: "install-a",
+      holds: async (held) => (await f.executor.run(held.automationId, held.claimId)) !== null,
+      retry: (held) => f.executor.retry(held),
+    }, { workspaceId: "workspace", automationId: AUTOMATION, claimId: run!.claimId, startOver: false })).resolves.toEqual(refused);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+
+  it("sends a chain stop's notice at the next open when its commit's wake was lost, and once across a restart", async () => {
+    const f = await world();
+    await f.writeAutomations(closePaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    await f.executor.dispose();
+    // No executor hears this commit.
+    const deep = async (paid: boolean, key: string) => {
+      const current = await f.record(invoice);
+      await f.host.action({ ...f.rules, operationId: EDIT, input: { id: invoice, expectedVersion: current!.version, values: { [PAID]: paid } },
+        idempotencyKey: key, agent: { depth: 4 } });
+    };
+    await deep(true, "agent-deep");
+    expect(f.failureReports).toEqual([]);
+    f.makeExecutor();
+    await f.executor.open();
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.failureReports[0]?.failure).toMatchObject({ chainStopped: true, generation: 1 });
+    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    await f.until(async () => (await store.readReportedFailures()).some((entry) => entry.generation === 1 && entry.open));
+    // After a restart, only the next stop sends a notice.
+    await f.executor.dispose();
+    f.makeExecutor();
+    await f.executor.open();
+    await deep(false, "agent-deeper");
+    await f.until(() => f.failureReports.length === 2);
+    expect(f.failureReports[1]?.failure).toMatchObject({ chainStopped: true, generation: 2 });
+    await f.executor.dispose();
   });
 
   it("stops a run that must compare a value too large for its claim, instead of comparing it as empty", async () => {
@@ -381,7 +459,7 @@ describe("Collection automations on a dataset", () => {
     const { id: invoice } = await f.create({ [PAID]: false, [STATUS]: "Open" });
     await f.edit(invoice, { [PAID]: true });
     await f.until(() => f.claims()[0]?.state === "failed");
-    expect(f.claims()[0]?.error).toMatch(/Formulas can read only this record's id, not Status\./);
+    expect(f.claims()[0]?.error).toMatch(/The formula can read only this record's id, not Status\./);
     expect(f.notices).toEqual([]);
   });
 
@@ -456,6 +534,7 @@ describe("Collection automations on a dataset", () => {
     const base = sharedEvaluator.forWorkspace("workspace");
     // Someone edits the record after the run read it and before it writes.
     const evaluator: AutomationFormulaEvaluator = {
+      runCode: base.runCode,
       evaluate: async (automationId, scope, formulas) => {
         const change = interfere;
         interfere = null;
@@ -630,6 +709,7 @@ describe("Collection automations on a dataset", () => {
     const running = new Promise<void>((resolve) => { started = resolve; });
     const base = sharedEvaluator.forWorkspace("workspace");
     const evaluator: AutomationFormulaEvaluator = {
+      runCode: base.runCode,
       evaluate: async (automationId, scope, formulas) => {
         started();
         await new Promise<void>((resolve) => { release = resolve; });
@@ -653,6 +733,7 @@ describe("Collection automations on a dataset", () => {
     let fail = true;
     const base = sharedEvaluator.forWorkspace("workspace");
     const evaluator: AutomationFormulaEvaluator = {
+      runCode: base.runCode,
       evaluate: async (automationId, scope, formulas) => fail
         ? formulas.map(() => ({ ok: false as const, error: { code: "runtime" as const, message: "Not yet." } }))
         : await base.evaluate(automationId, scope, formulas),
@@ -1184,7 +1265,7 @@ ${step}`;
     expect(await f.executor.run(BUTTON_AUTOMATION, pressed.claimId)).toMatchObject({ trigger: { kind: "button", by: "agent", depth: 2 } });
     const reports = f.failureReports.length;
     const stopped = await f.executor.pressDataset({ ...input, recordId: JSON.stringify(other), pressId: pressId(2), by: agent(4) }, owner(f), () => undefined);
-    expect(stopped).toMatchObject({ busy: false, settled: { outcome: "failed", error: "dohc stops a chain of automations after 4 steps, so this press did not run." } });
+    expect(stopped).toMatchObject({ busy: false, settled: { outcome: "failed", error: "This press did not run. dohc stops a chain after automations and agents start each other 4 times in a row. Check which automations start each other." } });
     // The stop is a failure the owner hears about, without waiting for another change.
     await f.until(() => f.failureReports.length > reports);
     expect(f.failureReports.at(-1)).toMatchObject({ failure: { automationId: BUTTON_AUTOMATION, chainStopped: true } });
@@ -1211,6 +1292,27 @@ ${step}`;
     // A record the table does not hold gets no claim.
     await expect(press(f, { recordId: "missing", pressId: pressId(3) })).rejects.toThrow("This record is no longer in Invoices.");
     expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    await f.executor.dispose();
+  });
+
+  it("refuses a press of a button whose code step can use an operation the presser cannot, however little the code changes", async () => {
+    const f = await world();
+    // The code only sets Status, and Bob may use only what a Set Status step would need.
+    await f.writeAutomations(markPaid("      - run: \"return { set: { Status: 'Approved' } };\"\n"));
+    await f.executor.open();
+    const { id: invoice } = await f.create({});
+    const described = owner(f);
+    const only = (...operationIds: string[]) => ({ ...described, operations: described.operations.filter((operation) => operationIds.includes(operation.operationId)) });
+    const refusal = "Only people who can edit Invoices can use this button.";
+    for (const description of [only(LIST, STATUS_ONLY), only(LIST, STATUS_ONLY, EDIT)]) {
+      expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], description)).toEqual([{ kind: "disabled", reason: refusal }]);
+      await expect(press(f, { recordId: invoice, pressId: pressId(2) }, description)).rejects.toThrow(refusal);
+    }
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    // Someone who may use every edit, create, and read on the table can press it.
+    const pressed = await press(f, { recordId: invoice, pressId: pressId(3) }, only(LIST, STATUS_ONLY, EDIT, CREATE));
+    expect(pressed).toMatchObject({ busy: false });
+    await f.until(async () => (await f.record(invoice))?.values[STATUS] === "Approved");
     await f.executor.dispose();
   });
 
@@ -1289,6 +1391,9 @@ ${step}`;
     await f.until(() => f.settled.length === 1);
     expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "failed", error: "Mark paid changed after it was pressed. Press it again." }]);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    // Its notice goes to the person who pressed too.
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.failureReports[0]).toMatchObject({ failure: { claimId: pressed.claimId, neverStarted: false, chainStopped: false }, startedBy: PRESSER });
     await f.executor.dispose();
   });
 
@@ -1357,6 +1462,31 @@ describe("dataset automation claims in both ledgers", () => {
     await f.executor.dispose();
   });
 
+  it("tells a Group message's author when the engine stops its dataset run's chain, and refuses to run it again", async () => {
+    const f = await world();
+    await f.executor.open();
+    // The engine inserts a Group message's claim at the chain cap failed, and never serves it.
+    const stopped: AutomationClaim = {
+      ...engineClaim("atc_message", "failed", Date.now()), depth: 4, attempts: 0, error: "chain-stopped",
+      change: {
+        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: "user-ana", fields: [], fieldsOmitted: 0,
+        message: { id: "m-1", threadId: "t", groupId: "team", lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 1, body: "Pay it", authorUserId: "user-ana" },
+      },
+    };
+    f.engineClaims.push(stopped);
+    f.engineFailures.push({ automationId: AUTOMATION, claimId: "atc_message", chainStopped: true, error: "chain-stopped", updatedAtMs: stopped.updatedAtMs, generation: 1 });
+    f.executor.failuresChanged();
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.failureReports[0]).toMatchObject({
+      failure: { claimId: "atc_message", neverStarted: true, chainStopped: true, datasetInstance: null }, startedBy: "user-ana",
+    });
+    expect((await f.executor.runs(AUTOMATION))[0]).toMatchObject({ claimId: "atc_message", neverStarted: true, chainStopped: true });
+    expect(await f.executor.retry({ automationId: AUTOMATION, claimId: "atc_message", startOver: true }))
+      .toEqual({ status: "refused", reason: AUTOMATION_NEVER_STARTED_REFUSAL });
+    expect(f.engineRetries).toEqual([]);
+    await f.executor.dispose();
+  });
+
   it("refuses to undo a run made before the Collection kept its records in a dataset, and marks nothing undone", async () => {
     const f = await world();
     await f.executor.open();
@@ -1404,6 +1534,7 @@ describe("dataset automation claims in both ledgers", () => {
     let fail = false;
     const base = sharedEvaluator.forWorkspace("workspace");
     const evaluator: AutomationFormulaEvaluator = {
+      runCode: base.runCode,
       evaluate: async (automationId, scope, formulas) => fail
         ? formulas.map(() => ({ ok: false as const, error: { code: "runtime" as const, message: "Not yet." } }))
         : await base.evaluate(automationId, scope, formulas),
@@ -1846,6 +1977,237 @@ describe("a Find that compares with a value from the message", () => {
     expect(claim).toMatchObject({ state: "done" });
     expect((await f.record(first))?.values[STATUS]).toBe("Closed");
     expect((await f.record(second))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+});
+
+describe("code steps on a dataset", () => {
+  // A schedule's code, run for one due time the engine claims.
+  const nightly = (code: string) => `  - id: nightly
+    name: Nightly
+    when: {schedule: day, timezone: UTC}
+    do:
+      - run: "${code}"
+`;
+  const runNightly = async (f: Awaited<ReturnType<typeof world>>) => {
+    f.engineClaims.push(engineClaim("atc_nightly", "pending", Date.UTC(2026, 8, 27), "collection:Budget#nightly"));
+    f.executor.notifyClaimed();
+    await f.until(() => ["done", "failed"].includes(f.engineClaims.find((claim) => claim.claimId === "atc_nightly")!.state));
+    await f.executor.idle();
+    return f.engineClaims.find((claim) => claim.claimId === "atc_nightly")!;
+  };
+
+  it("runs a schedule's code in the dataset's only table, and refuses set since a schedule has no record", async () => {
+    const f = await world({ groups: true });
+    await f.writeAutomations(nightly("return { records: [{ action: 'add', collection: 'Budget', fields: { Notes: 'Nightly ' + ctx.trigger.dueAt.slice(0, 10) } }] };"));
+    await f.executor.open();
+    expect(await runNightly(f)).toMatchObject({ state: "done" });
+    expect((await f.records()).map((row) => row.values[NOTES])).toEqual(["Nightly 2026-09-27"]);
+
+    const g = await world({ groups: true });
+    await g.writeAutomations(nightly("return { set: { Status: 'Closed' } };"));
+    await g.executor.open();
+    expect(await runNightly(g)).toMatchObject({ state: "failed",
+      error: 'The code in step 1 returned "set", but a schedule starts this automation, so it has no record to set fields on. Change records by id in "records" instead.' });
+    expect(await g.records()).toEqual([]);
+    await f.executor.dispose();
+    await g.executor.dispose();
+  });
+
+  // Code that runs when Paid changes, then the steps after it.
+  const coded = (code: string, ...after: string[]) => closePaid([
+    "      - run: |",
+    ...code.split("\n").map((line) => `          ${line}`),
+    ...after,
+  ].join("\n") + "\n");
+
+  it("changes records through the operations the panel would pin, gives its value to a later step, and Undo puts the edits back", async () => {
+    const f = await world();
+    await f.writeAutomations(coded([
+      "return {",
+      "  set: { Status: 'Closed' },",
+      "  records: [",
+      "    { action: 'change', collection: 'Budget', id: ctx.record.Notes, fields: { Notes: 'touched' } },",
+      "    { action: 'add', collection: 'Budget', fields: { Notes: 'log 1' } },",
+      "    { action: 'add', collection: 'Budget', fields: { Notes: 'log 2' } },",
+      "  ],",
+      "  output: 'closed ' + ctx.record.id,",
+      "};",
+    ].join("\n"), "        as: result", "      - set:", "          Notes: =result", "        operation: invoices.edit"));
+    await f.executor.open();
+    const other = await f.create({ [NOTES]: "other" });
+    const { id: invoice } = await f.create({ [NOTES]: other.id });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    const rows = await f.records();
+    expect(rows.find((row) => row.id === invoice)?.values).toMatchObject({ [STATUS]: "Closed", [NOTES]: `closed ${invoice}` });
+    expect(rows.find((row) => row.id === other.id)?.values[NOTES]).toBe("touched");
+    expect(rows.filter((row) => String(row.values[NOTES]).startsWith("log")).map((row) => row.values[NOTES]).sort()).toEqual(["log 1", "log 2"]);
+    const claimId = f.claims()[0]!.claimId;
+    const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, claimId)).runs;
+    // Status alone goes through the edit of Status alone; Notes needs the wider edit.
+    expect(run!.applied[0]!.writes.map((write) => "operationId" in write ? write.operationId : write.kind)).toEqual([STATUS_ONLY]);
+    expect(run!.applied.slice(1, 4).map(({ writes }) => writes.map((write) => "operationId" in write ? write.operationId : write.kind))).toEqual([[EDIT], [CREATE], [CREATE]]);
+    expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: AUTOMATION, depth: 1 } });
+
+    expect(await f.executor.undo({ automationId: AUTOMATION, claimId }, async () => { throw new Error("A dataset's added records stay."); }))
+      .toMatchObject({ status: "undone", reverted: 3 });
+    expect((await f.record(invoice))?.values).toMatchObject({ [STATUS]: "Open", [NOTES]: other.id });
+    expect((await f.record(other.id))?.values[NOTES]).toBe("other");
+    await f.executor.dispose();
+  });
+
+  it.each([
+    ["a field no approved edit changes", "return { set: { 'Finished on': '2026-09-27' } };",
+      "The code in step 1 changes records in Invoices. Budget has no approved edit that changes Finished on."],
+    ["a field the table lacks", "return { set: { Nope: 1 } };", "The code in step 1 sets Nope, which is not a field in Invoices."],
+    ["another Collection", "return { records: [{ action: 'add', collection: 'Tasks', fields: {} }] };",
+      "The code in step 1 changes records in Tasks. Automations on Budget can use only its own records for now."],
+    ["a record the table does not have", "return { records: [{ action: 'change', collection: 'Budget', id: 'gone', fields: { Notes: 'x' } }] };",
+      "The code in step 1 changes record gone, which is not in Budget."],
+  ])("fails a run whose code changes %s, before anything is written", async (_problem, code, error) => {
+    const f = await world();
+    await f.writeAutomations(coded(code));
+    await f.executor.open();
+    const { id: invoice } = await f.create({});
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "failed");
+    expect(f.claims()[0]).toMatchObject({ error });
+    expect((await f.records()).map((row) => row.values)).toEqual([expect.objectContaining({ [STATUS]: "Open", [NOTES]: null })]);
+    await f.executor.dispose();
+  });
+
+  it("refuses a code step when an editor has no grant for an operation it can pick, before its code runs", async () => {
+    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+    const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
+    // Ana may read the table and set Status. The code can pick any edit or create on the table, and she cannot use those.
+    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    try {
+      store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
+        JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
+    } finally {
+      store.close();
+    }
+    await f.writeAutomations(coded("return { set: { Status: 'Closed', Notes: 'by code' } };"));
+    await f.executor.open();
+    const { id: invoice } = await f.create({});
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "failed");
+    expect(f.claims()[0]).toMatchObject({ error: "ana@dohc.test has no grant to use invoices.create in Budget." });
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+
+  it("sends a stale code edit again at the record's new version, and keeps a field someone else changed", async () => {
+    let interfere: (() => Promise<void>) | null = null;
+    const base = sharedEvaluator.forWorkspace("workspace");
+    // Someone edits the record after the run read it and before it writes.
+    const evaluator: AutomationFormulaEvaluator = {
+      evaluate: base.evaluate,
+      runCode: async (automationId, scope, source, spent) => {
+        const change = interfere;
+        interfere = null;
+        await change?.();
+        return await base.runCode(automationId, scope, source, spent);
+      },
+    };
+    const f = await world({ evaluator });
+    await f.writeAutomations(coded("return { set: { Status: 'Closed', Notes: 'by code' } };"));
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [NOTES]: "draft" });
+    interfere = async () => { await f.edit(invoice, { [NOTES]: "mine" }); };
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    expect((await f.record(invoice))?.values).toMatchObject({ [STATUS]: "Closed", [NOTES]: "mine" });
+    await f.executor.dispose();
+  });
+
+  it("runs a failed run's saved changes on Try again without running its code again", async () => {
+    let runs = 0;
+    const base = sharedEvaluator.forWorkspace("workspace");
+    const evaluator: AutomationFormulaEvaluator = {
+      evaluate: base.evaluate,
+      runCode: async (...args) => {
+        runs += 1;
+        return await base.runCode(...args);
+      },
+    };
+    const f = await world({ evaluator, mayRetryPress: true });
+    await f.writeAutomations(coded("return { set: { Status: 'Closed' }, records: [{ action: 'add', collection: 'Budget', fields: { Notes: 'log' } }] };"));
+    await f.executor.open();
+    // The approved rules stop resolving once the plan is saved, so its first write fails.
+    f.afterNextSave(() => f.dropRules());
+    const { id: invoice } = await f.create({});
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "failed");
+    expect(runs).toBe(1);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+
+    f.keepRules();
+    const claimId = f.claims()[0]!.claimId;
+    expect(await f.executor.retry({ automationId: AUTOMATION, claimId, startOver: false })).toMatchObject({ status: "queued" });
+    await f.until(() => f.claims()[0]?.state === "done");
+    expect(runs).toBe(1);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Closed");
+    expect((await f.records()).filter((row) => row.values[NOTES] === "log")).toHaveLength(1);
+    await f.executor.dispose();
+  });
+
+  it("keeps one snapshot of a record the code changes twice, so a change someone made meanwhile is kept", async () => {
+    let interfere: (() => Promise<void>) | null = null;
+    const base = sharedEvaluator.forWorkspace("workspace");
+    const evaluator: AutomationFormulaEvaluator = {
+      evaluate: base.evaluate,
+      runCode: async (automationId, scope, source, spent) => {
+        const change = interfere;
+        interfere = null;
+        await change?.();
+        return await base.runCode(automationId, scope, source, spent);
+      },
+    };
+    const f = await world({ evaluator });
+    // `set` and a change by the trigger record's own id land as one edit.
+    await f.writeAutomations(coded("return { set: { Status: 'Closed' }, records: [{ action: 'change', collection: 'Budget', id: ctx.record.id, fields: { Notes: 'by code' } }] };"));
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [NOTES]: "draft" });
+    interfere = async () => { await f.edit(invoice, { [NOTES]: "mine" }); };
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    expect((await f.record(invoice))?.values).toMatchObject({ [STATUS]: "Closed", [NOTES]: "mine" });
+    await f.executor.dispose();
+  });
+
+  it("plans every step's change to a record from one read that shows all the fields they change", async () => {
+    const f = await world();
+    await f.writeAutomations(coded(
+      "return { records: [{ action: 'change', collection: 'Budget', id: ctx.record.Notes, fields: { Status: 'Closed' } }] };",
+      "      - run: \"return { records: [{ action: 'change', collection: 'Budget', id: ctx.record.Notes, fields: { Notes: 'by code' } }] };\"",
+    ));
+    await f.executor.open();
+    const other = await f.create({ [NOTES]: "other" });
+    const { id: invoice } = await f.create({ [NOTES]: other.id });
+    // The saved plan stays readable once its first write fails.
+    f.afterNextSave(() => f.dropRules());
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "failed");
+    const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
+    expect(run!.plan!.map(({ effects }) => effects.map((effect) => effect.kind === "dataset-edit" ? effect.fields.map(({ field, before }) => [field, before]) : null)))
+      .toEqual([[[["Status", "Open"]]], [[["Notes", "other"]]]]);
+    await f.executor.dispose();
+  });
+
+  it("fails at planning when no approved read can show a code edit's fields again", async () => {
+    const f = await world();
+    await f.writeAutomations(coded("return { set: { Notes: 'by code' } };"));
+    await f.executor.open();
+    // The list stops showing Notes, so a stale edit of Notes could not be checked.
+    f.changeRules({ ...definition, operations: definition.operations.map((operation) =>
+      operation.operationId === LIST ? { ...operation, fieldIds: operation.fieldIds.filter((fieldId) => fieldId !== NOTES) } : operation) });
+    const { id: invoice } = await f.create({ [NOTES]: "draft" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "failed");
+    expect(f.claims()[0]).toMatchObject({ error: "The code in step 1 changes records in Invoices. Budget has no approved read that shows Notes." });
+    expect((await f.record(invoice))?.values[NOTES]).toBe("draft");
     await f.executor.dispose();
   });
 });

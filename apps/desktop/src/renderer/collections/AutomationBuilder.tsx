@@ -507,7 +507,8 @@ export function AutomationBuilder(props: {
   onDraftChange: (draft: { automation: Automation; dirty: boolean }) => void;
   onSave: (automation: Automation) => void;
   onCancel: () => void;
-  onOpenFile: () => void;
+  /** Opens a workspace file: the automations file, or a file a code step runs. */
+  onOpenFile: (path: string) => void;
   onError: ErrorReport;
 }) {
   const { workspaceId, collectionPath, table, onError } = props;
@@ -796,7 +797,7 @@ export function AutomationBuilder(props: {
       {props.readOnly ? (
         <StatusLine tone="danger" icon={AlertTriangle} label="Cannot save">
           <p className="m-0">dohc cannot read every automation in automations.yaml, so you cannot save this now.</p>
-          <SecondaryButton size="compact" className="mt-1" onClick={props.onOpenFile}>Open file</SecondaryButton>
+          <SecondaryButton size="compact" className="mt-1" onClick={() => props.onOpenFile(`${collectionPath}/automations.yaml`)}>Open file</SecondaryButton>
         </StatusLine>
       ) : null}
       {/* Nothing changes while a save runs, or while the file cannot be saved. */}
@@ -984,7 +985,11 @@ export function AutomationBuilder(props: {
               <div key={key} data-testid={`builder-step-${index}`} className="rounded-lg border border-line bg-bg p-2">
                 <div className="mb-1.5 flex items-center gap-1">
                   <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
-                    {editable?.kind === "set" ? "Set fields" : editable?.kind === "add-record" ? "Add a record" : action !== null ? "Run an action" : `Step ${index + 1}`}
+                    {editable?.kind === "set" ? "Set fields"
+                      : editable?.kind === "add-record" ? "Add a record"
+                      : action !== null ? "Run an action"
+                      : step.kind === "run" || step.kind === "run-file" ? "Run code"
+                      : `Step ${index + 1}`}
                   </span>
                   <IconButton
                     aria-label={`Move step ${index + 1} up`}
@@ -1088,6 +1093,20 @@ export function AutomationBuilder(props: {
                       <Plus size={12} aria-hidden />
                       Add input
                     </SecondaryButton>
+                  </div>
+                ) : step.kind === "run" ? (
+                  // Code reads here as the file holds it. People change it in the file.
+                  <pre
+                    aria-label={`Step ${index + 1}, code`}
+                    tabIndex={0}
+                    className="m-0 max-h-48 overflow-auto whitespace-pre rounded bg-panel-2 px-2 py-1.5 font-mono text-[11px] leading-snug text-ink"
+                  >
+                    {step.code}
+                  </pre>
+                ) : step.kind === "run-file" ? (
+                  <div className="flex min-w-0 items-center gap-2">
+                    <code className="min-w-0 flex-1 truncate rounded bg-panel-2 px-1 font-mono text-[11px] text-ink" title={step.file}>{step.file}</code>
+                    <SecondaryButton size="compact" onClick={() => props.onOpenFile(`${collectionPath}/${step.file}`)}>Open file</SecondaryButton>
                   </div>
                 ) : editable === null ? (
                   <p className="m-0 break-words text-[12px] leading-snug text-muted">

@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { expect, it, vi } from "vitest";
 import { fixture, limits } from "../../../../services/sync-relay/src/datasetTestFixture";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { parseDatasetDescription, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { DatasetReplicaSource } from "@dohc/app-backend-runtime/replica";
 import type { OwnerDatasetData } from "./remoteDataset";
 import { createOwnerDatasetCopy } from "./ownerDatasetCopy";
 import { DatasetCopyOfflineError } from "./remoteDatasetReplica";
-import { DatasetResult } from "@dohc/cli/dataset";
+
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 
 it("persists real owner reads across restart, catches up, and refuses offline writes and revoked access", async () => {
@@ -39,7 +39,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     await expect(copy.data(remote,source,signal).invoke({...pinned,operationId:id(6),input:{},idempotencyKey:"archived"})).rejects.toThrow(/archived/);
     offline=false;archived=false;
     const inspect=await copy.data(remote,source,signal).inspect!(id(1)); expect(inspect.copy?.offline).toBe(false);
-    expect(() => DatasetResult.parse({kind:"description",...inspect})).not.toThrow();
+    expect(() => parseDatasetDescription(inspect.dataset)).not.toThrow();
     expect(inspect.dataset.tables[0]!.fields.map(field=>field.fieldId)).toEqual([id(4)]);
     const {archived:_archived,...authorityDescription}=await remote.describe(id(1));
     expect(inspect.dataset).toEqual(authorityDescription);
@@ -47,7 +47,8 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     await copy.close(); copy=await createOwnerDatasetCopy(options); offline=true;
     expect((await copy.data(remote,source,signal).describe(id(1))).name).toBe("Entries");
     const offlineDescription=await copy.data(remote,source,signal).inspect!(id(1));
-    expect(DatasetResult.parse({kind:"description",...offlineDescription})).toMatchObject({dataset:inspect.dataset,copy:{offline:true}});
+    expect(parseDatasetDescription(offlineDescription.dataset)).toEqual(inspect.dataset);
+    expect(offlineDescription.copy).toMatchObject({offline:true});
     const read={...pinned,operationId:id(6),input:{},idempotencyKey:"read"};
     expect(await copy.data(remote,source,signal).invoke(read)).toMatchObject({result:[{id:1,name:"Mom"}],copy:{offline:true}});
     await expect(copy.data(remote,source,signal).invoke({...read,operationId:id(5)})).rejects.toThrow(/read-only/);

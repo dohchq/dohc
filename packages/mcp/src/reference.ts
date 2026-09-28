@@ -64,7 +64,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   discardRecovery: ["recovery-discarded"],
   upload: ["uploaded"],
   file: ["file"],
-  createForm: ["form-created"],
+  createForm: ["form-created", "partial"],
   prepareRelationChoices: ["migration-prepared"],
   create: ["approved"],
   prepare: ["prepared"],
@@ -494,6 +494,8 @@ Agent prompts and scripts depend on these names. Before launch, a rename replace
 - The CLI and the app must be the same build. Otherwise the CLI stops with \`CLI/app version mismatch — restart the app\`.
 
 A tool or command that cannot do what was asked returns \`{ ok: false, reason }\`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
+
+Partial form creation returns \`{ kind: "partial", created, failedStage, reason, retry }\`. The CLI exits with status 1 and keeps the structured output. MCP marks the result as an error and keeps its structured content.
 
 ## Desktop MCP tools
 

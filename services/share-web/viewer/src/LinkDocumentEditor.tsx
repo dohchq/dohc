@@ -53,7 +53,7 @@ export function LinkDocumentEditor({discriminator, path, available, onClose}: {
     else action();
   };
   return <div className="viewer">
-    <header><div><p className="eyebrow">Shared by a dohc user</p><h1>{path}</h1></div>
+    <header><div><p className="eyebrow">Shared with you</p><h1>{path}</h1></div>
       <button className="handoff-button secondary" onClick={() => leave(onClose)}>Back to shared files</button></header>
     {!available && <p role="alert">Editing is no longer available. Copy any unsynced changes before closing this file.</p>}
     {busy && <p role="status">Opening the file…</p>}

@@ -1,18 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import { dataset, type ToolContext } from "./tools";
-const request = {action:"invoke",workspaceId:"workspace",datasetId:"00000000-0000-4000-8000-000000000001",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Camera"},idempotencyKey:"add-1"};
+const request = {action:"invoke",workspaceId:"workspace",datasetPath:"equipment/dataset.json",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Camera"},idempotencyKey:"add-1"};
 describe("dataset MCP transport", () => {
+  it("rejects opaque IDs and folder paths before transport", async () => {
+    const send = vi.fn(), context: ToolContext = { root: "/workspace", home: "/home", request: send };
+    for (const selection of [{ datasetId: "00000000-0000-4000-8000-000000000001" }, { datasetPath: "equipment" }, { datasetPath: "../equipment/dataset.json" }]) {
+      expect(await dataset(context, { action: "describe", workspaceId: "workspace", ...selection })).toMatchObject({ ok: false });
+    }
+    expect(send).not.toHaveBeenCalled();
+  });
   it("requires explicit owner cancellation acknowledgement and preserves the result", async () => {
     const reply = {kind:"attempt-cancelled",cancelled:true};
     const send = vi.fn(async () => reply), context:ToolContext = {root:"/workspace",home:"/home",request:send};
-    const input = {action:"cancelAttempt",workspaceId:request.workspaceId,datasetId:request.datasetId,reference:"a".repeat(64),acknowledge:true};
+    const input = {action:"cancelAttempt",workspaceId:request.workspaceId,datasetPath:request.datasetPath,reference:"a".repeat(64),acknowledge:true};
     expect(await dataset(context,{...input,acknowledge:false})).toMatchObject({ok:false}); expect(send).not.toHaveBeenCalled();
     expect(await dataset(context,input)).toEqual(reply); expect(send).toHaveBeenCalledOnce();
   });
   it("exports only to an explicit owner-selected path without returning archive bytes", async () => {
     const reply = {kind:"exported",savedPath:"C:/private/backup.dohc-recovery"};
     const send = vi.fn(async () => reply), context:ToolContext = {root:"/workspace",home:"/home",request:send};
-    const input = {action:"export",workspaceId:request.workspaceId,datasetId:request.datasetId};
+    const input = {action:"export",workspaceId:request.workspaceId,datasetPath:request.datasetPath};
     expect(await dataset(context,input)).toMatchObject({ok:false}); expect(send).not.toHaveBeenCalled();
     expect(await dataset(context,{...input,savePath:reply.savedPath})).toEqual(reply);
     expect(send).toHaveBeenCalledOnce();

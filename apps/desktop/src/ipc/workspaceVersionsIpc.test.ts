@@ -49,7 +49,7 @@ const allRequests = [
   [ops.dismissTryInVersionReview.channel, { workspaceId }],
 ] as const;
 
-function harness() {
+function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
   const handlers = new Map<string, (event: Event, payload: unknown) => Promise<unknown>>();
   const steps: string[] = [];
   const operations = {
@@ -90,6 +90,7 @@ function harness() {
     ops,
     workspaceVersionHandlers({
       requireEngineCapture, notifyRenderer,
+      onRefusalsChanged,
       activity: { queueCloudSync }, tryInVersionSessions: sessions, desktopMarks,
     }),
   );
@@ -234,6 +235,15 @@ describe("registered workspace version handlers", () => {
     await expect(h.invoke(ops.resolveWorkspaceVersionConflict.channel, { workspaceId, conflictId: "conflict", resolution: { kind: "keep-current" } })).rejects.toBe(refusal);
     expect(h.notifyRenderer).not.toHaveBeenCalled();
     expect(h.queueCloudSync).not.toHaveBeenCalled();
+  });
+
+  it("refreshes engine Notices after a committed resolution", async () => {
+    const changed = vi.fn();
+    const h = harness(changed);
+    await expect(h.invoke(ops.resolveWorkspaceVersionConflict.channel, { workspaceId, conflictId: "conflict", resolution: { kind: "keep-current" } })).resolves.toMatchObject({ nextAfterConflictId: "next-conflict" });
+    expect(h.queueCloudSync).toHaveBeenCalledExactlyOnceWith(workspaceId);
+    expect(h.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId });
+    expect(changed).toHaveBeenCalledOnce();
   });
 
   it("keeps result parsing after the completed mutation and notification", async () => {

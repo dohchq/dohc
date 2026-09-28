@@ -453,6 +453,9 @@ function makeBaseBridge(
         contentHash: "a".repeat(64),
       }),
     ),
+    createCollectionRecord: vi.fn(async (payload: { collectionPath: string; name: string; recordId?: string }): Promise<{ path: string; recordId: string } | import("@dohc/cli/creation").CreationPartial> => ({
+      path: `${payload.collectionPath}/${payload.name}.md`, recordId: payload.recordId ?? "rec_abcdefghijklmnopqrstuvwxyz",
+    })),
     createWorkspaceFile: vi.fn(async (payload: { relativePath: string }) => ({
       path: payload.relativePath,
     })),

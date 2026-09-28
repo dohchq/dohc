@@ -324,7 +324,7 @@ describe("executeCli", () => {
       run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.",
       createdAtMs: Date.UTC(2026, 8, 27, 9), updatedAtMs: Date.UTC(2026, 8, 27, 9),
       trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, depth: 1 },
-      definitionChanged: false, chainStopped: false, undone: false,
+      definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
     };
     const list = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }] }));
     expect(await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: list })).toEqual({
@@ -332,6 +332,11 @@ describe("executeCli", () => {
       stderr: "",
       stdout: "atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · by agent · depth 1 · 1 change · The record is open elsewhere.\n",
     });
+    // A run that could not start says so, as the panel offers it no Try again.
+    const unclaimed = { ...run, error: "This change was too large for dohc to start automations for every record. Change fewer records at a time.", neverStarted: true };
+    const unstarted = vi.fn(async () => ({ ok: true, runs: [{ ...unclaimed, changes: 0 }] }));
+    expect((await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: unstarted })).stdout)
+      .toContain(" · never started · ");
     expect(list).toHaveBeenCalledWith({
       protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "automationRuns",

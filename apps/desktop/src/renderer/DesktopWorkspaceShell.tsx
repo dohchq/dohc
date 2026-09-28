@@ -1,3 +1,5 @@
+import { CreationPartialError } from "@dohc/cli/creation";
+import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
@@ -787,6 +789,7 @@ export function DesktopWorkspaceShell(props: {
     reportSearchError,
     clearSearchError,
     reportSyncFailure,
+    showSyncRefusals,
     clearSyncFailure,
     reportDriveLimit,
     reportKeptFiles,
@@ -2373,8 +2376,8 @@ export function DesktopWorkspaceShell(props: {
     };
   }, [workspaceId, reportShellError, showSuccessNotice]);
   const openDataCollection = useCallback(
-    (datasetId: string, tableId: string) => {
-      openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
+    (datasetPath: string, tableId: string) => {
+      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
     },
     [openVirtualTab],
   );
@@ -2401,9 +2404,9 @@ export function DesktopWorkspaceShell(props: {
   });
   const selectedChatsNav = focusedTabPath && isChatsTabPath(focusedTabPath)
     ? chatEditors.get(focusedTabPath).nav : undefined;
-  const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
+  const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, datasetPath: dataset.datasetPath, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
-    ...dataCollections.map(table => [transactionalCollectionTabPath(table.datasetId, table.tableId), table.name] as const),
+    ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
   const openChatsNavigator = useCallback(() => {
     mutateWb((state) => ({ ...state, chatsVisible: true }));
@@ -3003,10 +3006,8 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create an untitled text file.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
-  // New record (Phase 2 collections): an ordinary markdown file inside the
-  // collection folder, created through the same IPC every explorer create
-  // takes; the engine adopts it and mints the record id. The untitled name is
-  // unique within the collection folder, not the root.
+  // Human and agent creation share the same record identity and recovery path.
+  const pendingRecordPaths = useRef(new Set<string>());
   const createCollectionRecord = useCallback(
     async (collectionPath: string) => {
       const prefix = `${collectionPath}/`;
@@ -3016,17 +3017,30 @@ export function DesktopWorkspaceShell(props: {
       const scopedFolders = folders
         .filter((folder) => folder.startsWith(prefix))
         .map((folder) => folder.slice(prefix.length));
-      try {
-        const result = await bridge().createWorkspaceFile({
-          workspaceId,
-          relativePath: `${collectionPath}/${uniqueUntitledPath(scopedFiles, scopedFolders, "md")}`,
-          initialText: "",
-        });
-        await refreshFiles();
-        openFile(result.path);
-      } catch (error) {
-        reportShellError("Could not create a record.", error);
-      }
+      scopedFolders.push(...[...pendingRecordPaths.current].filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length)));
+      const selection = workspaceSelection.current;
+      const name = uniqueUntitledPath(scopedFiles, scopedFolders, "md").slice(0, -3);
+      const reservedPath = `${collectionPath}/${name}.md`;
+      pendingRecordPaths.current.add(reservedPath);
+      const execute = async (recordId?: string): Promise<void> => {
+        if (workspaceSelection.current !== selection) return;
+        try {
+          const result = await bridge().createCollectionRecord({ workspaceId, collectionPath, name, recordId });
+          if (workspaceSelection.current !== selection) return;
+          if ("kind" in result) {
+            reportShellError("dohc could not finish this record.", new CreationPartialError(result),
+              result.retry.mode === "resume" ? () => void execute(result.retry.recordId) : null);
+            return;
+          }
+          await refreshFiles();
+          if (workspaceSelection.current !== selection) return;
+          openFile(result.path);
+        } catch (error) {
+          if (workspaceSelection.current === selection) reportShellError("Could not create a record.", error);
+        }
+      };
+      try { await execute(); }
+      finally { pendingRecordPaths.current.delete(reservedPath); }
     },
     [files, folders, openFile, refreshFiles, reportShellError, workspaceId],
   );
@@ -3875,7 +3889,20 @@ export function DesktopWorkspaceShell(props: {
   // copy, which the recipient then sends for the granter to accept.
   const shareViewDocumentsWritable =
     !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
-  const shareGranterName = shareView?.granterEmail ?? "another dohc user";
+  const shareGranterName = shareSenderLabel(shareView?.sharerName, shareView?.granterEmail);
+  const shareBannerText = !shareView
+    ? ""
+    : shareViewEnded
+      ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
+      : shareViewDamaged
+        ? "dohc can't read what this share grants. Open the share again to restore it."
+        : shareViewDocumentsWritable
+          ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
+          : shareViewHasIndependentChat
+            ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
+            : shareView.access === "comment"
+              ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
+              : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`;
   const [shareRefreshing, setShareRefreshing] = useState(false);
   const [shareExclusions, setShareExclusions] = useState<{
     workspaceId: string;
@@ -4595,6 +4622,19 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
+  useEffect(() => {
+    showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
+      notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry);
+  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry]);
+  const hideWorkspaceError = useCallback((id: string) => {
+    hideShellError(id);
+    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+    if (!refusal) return;
+    const askedFor = workspaceId;
+    void props.sentNotices!.read([refusal]).catch(error => {
+      if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error);
+    });
+  }, [hideShellError, props.sentNotices, workspaceId, reportShellError]);
   const driveLimitNotice = useDriveLimitNotice({
     workspaceId,
     unavailable: syncStatus?.atomicPlacementUnavailable === true,
@@ -4628,17 +4668,22 @@ export function DesktopWorkspaceShell(props: {
     report: reportKeptFiles,
     openFolder: revealRecoveryWorkspace,
   });
-  // A dismissed sync failure stays dismissed until it ends, and a dismissed
-  // drive limit for the session, across remounts.
+  // Keep each notice kind's dismissal state across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
       const kind = shellErrors.find((error) => error.id === id)?.kind;
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
-      dismissShellError(id);
+      const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+      if (refusal) {
+        const askedFor = workspaceId;
+        void props.sentNotices!.dismiss(refusal).catch(error => {
+          if (workspaceIdRef.current === askedFor) reportShellError("dohc could not dismiss this Notice.", error);
+        });
+      } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, syncFailureNotice],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, syncFailureNotice, props.sentNotices, workspaceId, reportShellError],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
@@ -4682,18 +4727,10 @@ export function DesktopWorkspaceShell(props: {
           }`}
         >
           <Eye size={12} aria-hidden className="shrink-0" />
-          <span className="min-w-0 flex-1 truncate">
-            {shareViewEnded
-              ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
-              : shareViewDamaged
-                ? "dohc can't read what this share grants. Open the share again to restore it."
-                : shareViewDocumentsWritable
-                  ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
-                  : shareViewHasIndependentChat
-                    ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
-                    : shareView.access === "comment"
-                      ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
-                    : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+          {shareView.subjectName && <span className="max-w-64 truncate font-medium">{shareView.subjectName}</span>}
+          {shareView.granterEmail && <span className="shrink-0 font-mono text-[11px]">{shareView.granterEmail}</span>}
+          <span className="min-w-0 flex-1 truncate" title={shareBannerText}>
+            {shareBannerText}
           </span>
           {shareExcludedPaths.length > 0 ? (
             <span
@@ -4902,7 +4939,7 @@ export function DesktopWorkspaceShell(props: {
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
-              onHideWorkspaceError={hideShellError}
+              onHideWorkspaceError={hideWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
               {...(isShareView
@@ -5254,7 +5291,7 @@ export function DesktopWorkspaceShell(props: {
             ) : groupDataCollection ? (
               <Suspense fallback={<PanelLoading label="collection" />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
-                  datasetId={groupDataCollection.datasetId} tableId={groupDataCollection.tableId}
+                  datasetPath={groupDataCollection.datasetPath} tableId={groupDataCollection.tableId}
                   onOpenFile={(path) => openFile(path)}
                   onOpenScheduleSettings={() => openSettings("advanced")}
                   owner={!isShareView}
@@ -5789,9 +5826,9 @@ export function DesktopWorkspaceShell(props: {
       {recoveryWorkspaceId === workspaceId && !isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? (
         <ConnectedCollectionRecoveryRestore workspaceId={workspaceId} onError={reportShellError}
           onClose={() => setRecoveryWorkspaceId(null)}
-          onRestored={(datasetId, tableId) => {
+          onRestored={(datasetPath, tableId) => {
             if (workspaceIdRef.current !== workspaceId) return;
-            openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
+            openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
             showSuccessNotice("Restored the Collection. Sharing stays off.");
             void refreshDatasets().catch(error => {
               if (workspaceIdRef.current === workspaceId) reportShellError("Could not refresh Collections.", error);
@@ -5815,7 +5852,7 @@ export function DesktopWorkspaceShell(props: {
             if (ref.kind === "transactional") {
               void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
               void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
-              openVirtualTab(transactionalCollectionTabPath(ref.datasetId, ref.tableId));
+              openVirtualTab(transactionalCollectionTabPath(ref.datasetPath, ref.tableId));
               return;
             }
             const path = ref.path;

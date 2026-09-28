@@ -217,6 +217,8 @@ export function acknowledgeShareSkips(
 // refreshed from the share, never pushed. `ended` marks a revoked share —
 // the local copy stays readable but stops refreshing.
 export interface ShareViewIdentity {
+  subjectName?: string | null;
+  sharerName?: string | null;
   shareId: string;
   granterEmail: string | null;
   genericChatWritable: boolean;

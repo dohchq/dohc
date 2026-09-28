@@ -182,6 +182,7 @@ function conflictResolveFixture(workspaceId = "workspace-a"): ConflictResolveFix
       objectId: "object-a",
       predecessorClaimId: "a".repeat(64),
       predecessorStateVectorSha256: "b".repeat(64),
+      predecessorDeleteSetSha256: "c".repeat(64),
       artifactPreimageSha256: "c".repeat(64),
       successor: {
         lineageClaimId: shas.successor,
@@ -352,6 +353,7 @@ function compactConflictResolveFixture(
     lineageTransition: {
       predecessorClaimId: "a".repeat(64),
       predecessorStateVectorSha256: "b".repeat(64),
+      predecessorDeleteSetSha256: "c".repeat(64),
       artifactPreimageSha256: shas.current,
       successor: {
         lineageClaimId: shas.successor,
@@ -1308,6 +1310,68 @@ describe("sync relay handler", () => {
     expect(refs).toEqual([current.blobSha256]);
   });
 
+  it("accepts a kept-current lineage successor with a new write moment", () => {
+    const fixture = compactConflictResolveFixture();
+    const payload = structuredClone(fixture.payload);
+    const transition = payload.transition as {
+      current: Record<string, unknown>;
+      result: Record<string, unknown>;
+    };
+    const current = transition.current;
+    transition.result = {
+      ...current,
+      latestMomentId: "moment-write",
+      updatedAtMs: 21,
+    };
+    payload.chosenFrom = "current";
+    payload.resolution = "kept-current";
+    const lineage = payload.lineageTransition as {
+      successor: { resultSha256: unknown };
+    };
+    lineage.successor.resultSha256 = current.blobSha256;
+    const writeShadow = {
+      ...fixture.shadows[0],
+      operation: "write",
+      momentId: "moment-write",
+    };
+    payload.effects = [
+      {
+        kind: "write",
+        momentId: "moment-write",
+        payloadSha256: sha256(stableJsonStringify(writeShadow)),
+      },
+    ];
+    const validate = () =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      });
+    expect(new Set(validate())).toEqual(new Set(fixture.blobs.keys()));
+
+    payload.effects = [];
+    expect(validate).toThrow(/effects do not match the ordered state transition/u);
+  });
+
+  it.each([
+    ["objectId", "another-object"],
+    ["pathRef", 1],
+    ["contentKind", "binary"],
+    ["blobSha256", "f".repeat(64)],
+    ["byteLength", 999],
+  ])("rejects a kept-current resolution that changes %s", (field, value) => {
+    const payload = compactNoEffectResolvePayload();
+    const transition = payload.transition as {
+      result: Record<string, unknown>;
+    };
+    transition.result[field] = value;
+    expect(() =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      }),
+    ).toThrow(/kept-current result must equal current/u);
+  });
+
   it("accepts a text move to a new object while retiring the current lineage", () => {
     const fixture = compactConflictResolveFixture();
     const payload = structuredClone(fixture.payload);
@@ -1462,7 +1526,7 @@ describe("sync relay handler", () => {
       { opKind: "moment.append", payload: second },
     ];
     const observedBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
-    expect(observedBytes).toBe(435_942);
+    expect(observedBytes).toBe(436_038);
     expect(observedBytes).toBeGreaterThan(MAX_PAYLOAD_JSON_BYTES);
   });
 

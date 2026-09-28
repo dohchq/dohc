@@ -199,7 +199,7 @@ export function automationGuest(scopeJson: string, kind: GuestKind): GuestEvalua
   // Asking whether it has a key, or for the key's descriptor, is a read too.
   const check = (key: string | symbol) => {
     if (allowed !== undefined && typeof key === "string" && !allowed.includes(key) && !(key in Object.prototype)) {
-      throw new TypeError(`Formulas can read only this record's ${allowed.join(", ")}, not ${key}.`);
+      throw new TypeError(`${subject} can read only this record's ${allowed.join(", ")}, not ${key}.`);
     }
   };
   const sealed = (record: GuestObject | undefined): GuestObject | null => record === undefined ? null : allowed === undefined ? record

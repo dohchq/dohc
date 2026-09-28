@@ -3,6 +3,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { CreationPartial } from "./creation";
 import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
@@ -298,6 +299,7 @@ const collectionCreateRecordArgsSchema = z
         { message: "a record name is one file name, not a path" },
       ),
     fields: collectionCreateFieldsSchema,
+    recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
   })
   .strict();
 
@@ -844,9 +846,10 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
       ok: z.literal(true),
       recordId: z.string().min(1),
       recordPath: z.string().min(1),
+      kept: z.record(z.string(), z.json()).optional(),
     })
     .strict(),
-  rawFailureSchema,
+  rawFailureSchema.extend({ partial: CreationPartial.optional() }),
 ]);
 
 const documentReadResultSchema = z.discriminatedUnion("ok", [
@@ -973,6 +976,9 @@ const automationRunFields = {
   trigger: automationTriggerSchema,
   // The run began under another version of the automation.
   definitionChanged: z.boolean(),
+  // It failed before it started, as a chain stop or a change too large to
+  // start automations for, so it cannot run again.
+  neverStarted: z.boolean(),
   // The chain depth cap stopped it before it ran.
   chainStopped: z.boolean(),
   undone: z.boolean(),

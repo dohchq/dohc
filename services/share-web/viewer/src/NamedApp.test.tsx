@@ -26,6 +26,7 @@ async function fillSignIn() {
 function account(signedIn: () => boolean, rest: (path: string, init?: RequestInit) => Response | Promise<Response>) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
+    if (path === "/api/apps/summary") return jsonResponse({subjectName: "Trip planner", sharerName: "Ana (ana@example.test)", access: "comment"});
     if (path === "/api/account/session") return jsonResponse({user: signedIn() ? {id: "alice", name: "Alice"} : null});
     return rest(path, init);
   });
@@ -42,6 +43,7 @@ it("signs in, launches with only the workspace and publication ids, and submits 
   expect(container.textContent).toContain("Sign in to open this app"); expect(button("Open app")).toBeUndefined();
   await fillSignIn(); await click("Sign in");
   expect(container.textContent).toContain("Alice"); expect(container.textContent).toContain("external services");
+  expect(container.textContent).toContain("Trip planner"); expect(container.textContent).toContain("Shared by Ana (ana@example.test)"); expect(container.textContent).toContain("Comment access");
   await click("Open app"); await settle(() => submitted.length === 1);
   expect(submitted[0]).toEqual({action: `https://${"b".repeat(48)}.apps.example/bootstrap`, fields: [`handoff=${"c".repeat(43)}`]});
   expect(button("Opening app")?.disabled).toBe(true);
@@ -100,4 +102,14 @@ it("drops a launch issued for a previous route after the target changes", async 
   await render({workspaceId: "ws_2", publicationId});
   await act(async () => held.release(launch())); await settle(ready);
   expect(submitted).toHaveLength(0); expect(button("Open app")?.disabled).toBe(false);
+});
+
+it("keeps the complete account email when the sender label exceeds the subject limit", async () => {
+  const sharerName = "Ana (" + "a".repeat(64) + "@" + "b".repeat(63) + "." + "c".repeat(63) + ".test)";
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input) === "/api/apps/summary"
+    ? jsonResponse({subjectName: "Trip", sharerName, access: "view"})
+    : jsonResponse({user: {id: "alice", name: "Alice"}})));
+  await render();
+  await settle(() => container.textContent?.includes(sharerName) ?? false);
+  expect(container.textContent).toContain("Shared by " + sharerName);
 });

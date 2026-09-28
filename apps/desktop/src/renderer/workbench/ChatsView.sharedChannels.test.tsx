@@ -22,6 +22,21 @@ describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
     channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
 
+  it("keeps the account email visible beside long invitation labels", async () => {
+    const subject = "Long group subject ".repeat(8), name = "Long sender name ".repeat(8), email = "account@example.test";
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({received: [{
+      shareId: "share-invite", subjectName: subject, sharerName: name,
+      channelWireId: "wire-invite", access: "read-write", granterEmail: email,
+    }]}));
+    renderView();
+    const address = await screen.findByText(`(${email})`);
+    expect(address.classList.contains("shrink-0")).toBe(true);
+    expect(address.classList.contains("break-all")).toBe(true);
+    expect(address.closest(".truncate")).toBeNull();
+    expect(address.parentElement?.title).toBe(`${name.trim()} (${email})`);
+    expect(address.parentElement?.parentElement?.title).toBe(`${subject} · ${name.trim()} (${email})`);
+  });
+
   it("fails closed when sharing metadata is unavailable", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [teamChannel()],
@@ -62,6 +77,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
         received: [
           {
             shareId: "share-invite",
+            subjectName: "Trip group", sharerName: "Ana",
             channelWireId: "wire-invite",
             access: "read-write",
             granterEmail: "owner@example.com",
@@ -71,7 +87,9 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [] });
     renderView();
-    await screen.findByTestId("chats-join-shared");
+    const invite = await screen.findByTestId("chats-join-shared");
+    expect(invite.closest("li")?.textContent).toContain("Trip group · Ana (owner@example.com)");
+    expect(invite.closest("li")?.textContent).toContain("Read-write");
 
     // The first read cannot name an invitation it has not been told about
     // yet, so it names the channels it shows and main adds the invitations to

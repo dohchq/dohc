@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
@@ -20,6 +21,7 @@ export type ShellErrorKind =
   | "tab-limit"
   | "workspace-search"
   | "cloud-sync"
+  | "sync-refusal"
   | "import-files"
   | "share-refresh"
   | "kept-copies-summary"
@@ -54,6 +56,7 @@ export interface ShellError {
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
   keptCopyId?: number;
+  creationIdentity?: string;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
@@ -83,10 +86,11 @@ export function useShellError(workspaceId: string) {
           ? `${error.message.slice(0, SHELL_ERROR_MAX_CHARS - 1)}…`
           : error.message;
       setShellErrors((current) => {
-        const replaced =
-          error.kind === undefined
-            ? undefined
-            : current.find((existing) => existing.kind === error.kind);
+        const matches = (existing: ShellError) =>
+          error.creationIdentity !== undefined || existing.creationIdentity !== undefined
+            ? error.creationIdentity === existing.creationIdentity
+            : existing.message === message || (error.kind !== undefined && existing.kind === error.kind);
+        const replaced = current.find(matches);
         const next: ShellError = {
           ...error,
           message,
@@ -95,11 +99,7 @@ export function useShellError(workspaceId: string) {
           seen: seen === "keep" ? (replaced?.seen ?? true) : seen,
         };
         return [
-          ...current.filter(
-            (existing) =>
-              existing.message !== next.message &&
-              (next.kind === undefined || existing.kind !== next.kind),
-          ),
+          ...current.filter((existing) => !matches(existing)),
           next,
         ];
       });
@@ -155,9 +155,20 @@ export function useShellError(workspaceId: string) {
       kind?: ShellErrorKind,
     ) => {
       const { cause } = readError(error);
+      const partial = error instanceof CreationPartialError ? error.partial : undefined;
+      const details: ReadonlyArray<ErrorDetailField> = partial ? [
+        ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
+        ["Stage", partial.failedStage],
+        ["Record ID", partial.retry.recordId],
+        ["Reason", partial.reason, partial.reason.length],
+        ["Next", partial.retry.instruction, partial.retry.instruction.length],
+      ] : cause ? [["Cause", cause]] : [];
       push({
-        message: withErrorWords(fallback, error),
-        ...(cause ? { details: [["Cause", cause]] } : {}),
+        message: partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
+        ...(partial ? { creationIdentity: partial.retry.recordId
+          ? `record:${partial.retry.recordId}`
+          : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : {}),
+        ...(details.length ? { details } : {}),
         retry,
         ...(kind ? { kind } : {}),
       });
@@ -222,6 +233,16 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
+  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void) => {
+    setShellErrors(current => [
+      ...current.filter(error => error.kind !== "sync-refusal"),
+      ...notices.map(notice => {
+        const prior = current.find(error => error.id === notice.noticeId);
+        return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
+          details: [["Detail", notice.detail ?? notice.body]] as const, atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null, retry };
+      }),
+    ]);
+  }, []);
   // A drive limit: one row that a remount files again without a toast.
   const reportDriveLimit = useCallback(
     (notice: { message: string; toast: boolean }) =>
@@ -425,7 +446,9 @@ export function useShellError(workspaceId: string) {
     // Clearing first is what shows the control took: the read is on its
     // way, and a failure that is being retried is no longer the newest
     // thing this surface knows. The retry runs once, outside the updater.
-    setShellErrors((current) => current.filter((error) => error.id !== id));
+    setShellErrors(current => target?.kind === "sync-refusal"
+      ? current
+      : current.filter(error => error.id !== id));
     target?.retry?.();
   }, []);
 
@@ -438,6 +461,7 @@ export function useShellError(workspaceId: string) {
     reportSearchError,
     clearSearchError,
     reportSyncFailure,
+    showSyncRefusals,
     clearSyncFailure,
     reportDriveLimit,
     reportKeptFiles,

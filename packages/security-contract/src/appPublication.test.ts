@@ -46,7 +46,7 @@ describe("dataset publication inventory", () => {
     value.inputs = [identity("app/main.ts")];
     value.dependencies = ["app/main.ts"];
     value.files = value.files.filter(file => file.path === "bundle.js");
-    value.capabilities = [{ kind: "dataset", datasetId, revision: 1, revisionSha256: hash, operationIds: [operationId],
+    value.capabilities = [{ kind: "dataset", name: "Orders", datasetId, revision: 1, revisionSha256: hash, operationIds: [operationId],
       operations: [{ operationId, name: "submit", access: "link", readOnly: false }] }];
     return value;
   }

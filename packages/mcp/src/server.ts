@@ -93,7 +93,7 @@ function text(structuredContent: Record<string, unknown>) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
     structuredContent,
-    ...(structuredContent.ok === false ? { isError: true } : {}),
+    ...(structuredContent.ok === false || structuredContent.kind === "partial" ? { isError: true } : {}),
   };
 }
 
@@ -127,7 +127,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const registerAutomation = registerWrite;
 
   registerWrite("dohc_dataset", {
-    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
+    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its workspace-relative dataset.json path. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
     inputSchema: {request: DatasetRequest},
   }, async ({request}) => text(await dataset(ctx, request)));
 
@@ -558,10 +558,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_record",
     {
       description:
-        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. A name already taken in the folder is refused.",
+        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. The kept map reports current values of seed fields preserved after someone edited them. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.",
       inputSchema: {
         collectionPath: z.string().min(1).max(4096),
         name: z.string().min(1).max(200),
+        recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
         fields: z.record(z.string().min(1).max(200), z.unknown()).optional(),
       },
     },

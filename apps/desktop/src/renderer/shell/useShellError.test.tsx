@@ -4,6 +4,8 @@ import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
+import { CreationPartialError } from "@dohc/cli/creation";
+import { errorDetails } from "./copyDetails";
 
 afterEach(cleanup);
 
@@ -12,6 +14,90 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it.each([true, false])("keeps separate partial creations and replaces only the retried creation (record: %s)", record => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const firstRetry = vi.fn();
+    const secondRetry = vi.fn();
+    const updatedRetry = vi.fn();
+    const partial = (name: string, failedStage: "settle" | "close" = "settle") => new CreationPartialError({
+      kind: "partial", created: [record ? `tasks/${name}.md` : `${name}/frontend.js`],
+      failedStage, reason: `${name}: ${failedStage} failed`,
+      retry: { mode: "resume", instruction: "Try again.",
+        ...(record ? { recordId: `rec_${name.repeat(26)}` } : {}),
+      },
+    });
+    act(() => {
+      result.current.reportShellError("Creation failed.", partial("a"), firstRetry);
+      result.current.reportShellError("Creation failed.", partial("b"), secondRetry);
+    });
+    expect(result.current.shellErrors).toHaveLength(2);
+    act(() => result.current.reportShellError("Creation failed.", partial("a", "close"), updatedRetry));
+    expect(result.current.shellErrors).toHaveLength(2);
+    const [second, updated] = result.current.shellErrors;
+    expect(errorDetails(second!.details!)).toContain("Reason: b: settle failed");
+    expect(errorDetails(updated!.details!)).toContain("Reason: a: close failed");
+    act(() => result.current.retryShellError(second!.id));
+    act(() => result.current.retryShellError(updated!.id));
+    expect(secondRetry).toHaveBeenCalledOnce();
+    expect(updatedRetry).toHaveBeenCalledOnce();
+    expect(firstRetry).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("keeps partial creation facts in copy details and offers the human retry (record: %s)", record => {
+    const retry = vi.fn();
+    const partial = { kind: "partial" as const, created: [record ? "tasks/retry.md" : "form/frontend.js"],
+      failedStage: "settle" as const, reason: "settle failed", retry: { mode: "resume" as const,
+        ...(record ? { recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" } : {}),
+        instruction: "Try again with the same record ID and fields." } };
+    const error = new CreationPartialError(partial);
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellError("Creation failed.", error, retry));
+    const notice = result.current.shellErrors[0]!;
+    expect(notice.message).toBe(record
+      ? "dohc created the record file but could not finish the record."
+      : "dohc created form files but could not finish the form.");
+    const copied = errorDetails(notice.details!);
+    expect(copied).toContain(`Created: ${partial.created[0]}`);
+    expect(copied).toContain("Reason: settle failed");
+    expect(copied).toContain(`Next: ${partial.retry.instruction}`);
+    if (record) expect(copied).toContain(`Record ID: ${partial.retry.recordId}`);
+    expect(notice.message).not.toContain("rec_");
+    act(() => result.current.retryShellError(notice.id));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("offers copy details as the next action when creation cannot resume", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const paths = Array.from({ length: 4 }, (_, index) => `${"long-folder/".repeat(20)}file-${index}.js`);
+    const error = new CreationPartialError({ kind: "partial", created: paths, failedStage: "revision",
+      reason: "Collection rules changed.", retry: { mode: "remove-and-retry", instruction: "Review the listed files in Files, then remove them." } });
+    act(() => result.current.reportShellError("Creation failed.", error));
+    expect(result.current.shellErrors[0]).toMatchObject({
+      message: "dohc created form files; copy the details to review them in Files.", retry: null,
+    });
+    const copied = errorDetails(result.current.shellErrors[0]!.details!);
+    for (const path of paths) expect(copied).toContain(`Created: ${path}`);
+    expect(copied).toContain(`Next: ${error.partial.retry.instruction}`);
+  });
+
+  it("shows each persisted refusal as a toast and keeps its row through retry", () => {
+    const retry = vi.fn();
+    const { result, rerender } = renderHook(({workspace}) => useShellError(workspace), {initialProps: {workspace: "ws-a"}});
+    const notice = { noticeId: "refusal-1", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "A change needs your review",
+      body: 'dohc could not apply the resolution for "doc.md". Review its conflict.', target: {}, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry));
+    expect(result.current.shellErrors[0]).toMatchObject({message: notice.body, seen: false, retry});
+    act(() => result.current.hideShellError(notice.noticeId));
+    act(() => result.current.showSyncRefusals([notice], retry));
+    expect(result.current.shellErrors[0]!.seen).toBe(true);
+    act(() => result.current.retryShellError(notice.noticeId));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(result.current.shellErrors).toHaveLength(1);
+    rerender({workspace: "ws-b"});
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
   it("runs a retry exactly once, even under Strict Mode, and drops the row", () => {
     const retry = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"), { wrapper: strict });

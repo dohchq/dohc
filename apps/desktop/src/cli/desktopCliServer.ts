@@ -25,10 +25,11 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
+import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import {
-  createCollectionRecord,
+  runCollectionRecordCreation,
   setCollectionRecordFields,
   type CollectionRecordEditContext,
 } from "../workspaces/collectionRecordEdits";
@@ -61,7 +62,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
-  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   /** The executor calls the Automations panel makes, for one workspace. */
@@ -183,11 +184,11 @@ export function createDesktopCliServer<State>(
       });
     return {
       workspaceId: workspace.workspaceId,
-      ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest) =>
+      ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
           if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The Collection workspace attachment changed.");
           if (request.action === "prepareRecovery" && !request.sourcePath) throw new Error("Collection recovery requires an explicit sourcePath.");
-          return dependencies.dataset!(request);
+          return dependencies.dataset!(request, agent);
         }) } : {}),
       ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
@@ -244,7 +245,7 @@ export function createDesktopCliServer<State>(
           setFields: (input) =>
             cliCollectionEdit((context) => setCollectionRecordFields(context, input)),
           createRecord: (input) =>
-            cliCollectionEdit((context) => createCollectionRecord(context, input)),
+            runCollectionRecordCreation(cliCollectionEdit, input),
         },
         query: async (params) => {
           const result = await withEngineAdapter(

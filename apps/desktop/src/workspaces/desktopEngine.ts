@@ -53,6 +53,8 @@ interface CollectionAutomationsLifecycle {
 }
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
+  onWorkspaceOpened?(workspaceId: string): void;
+  onRefusalsChanged?: () => void;
   serverOwnerDelivery?: ServerOwnerDelivery;
   ownerDeliveryCredentials?(): {bearer: string; relayUrl: string; signal: AbortSignal} | null;
   existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
@@ -484,9 +486,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // with headroom. The renderer names the wait.
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
         workspaceOpenDeadlineMs: 120_000,
+        onOpened: workspace => dependencies.onWorkspaceOpened?.(workspace.workspaceId),
       });
       const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
+        onRefusalsChanged: dependencies.onRefusalsChanged,
         sessions,
         routes: relayTransportRoutes,
         closeWorkspaceBinding: workspace => withOwnerHostPaused(

@@ -46,7 +46,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     const fileField = table.fields.find(field => field.name === "Receipt")!;
     const readOperation = description.operations.find(operation => operation.kind === "read")!;
     const editOperation = description.operations.find(operation => operation.kind === "edit")!;
-    const scope = { workspaceId, datasetId: description.datasetId };
+    const scope = { workspaceId, datasetPath: description.datasetPath! };
     const pinned = { ...scope, revision: description.revision, revisionSha256: description.revisionSha256 };
     const readRequest = { ...pinned, action: "invoke" as const, operationId: readOperation.operationId, idempotencyKey: "recovery-read", input: { limit: 50 } };
     const initial = await dataset(page, readRequest);
@@ -127,7 +127,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     await expect(recovered.getByRole("button", { name: "Download Receipt", exact: true })).toBeVisible();
     assertDesktopEngineHealthy(restoredDesktop.logs);
     expect(restoredDesktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
-    await test.info().attach("recovery-scope", { body: JSON.stringify({ workspaceId, datasetId: description.datasetId, recordId: row.id, fileId,
+    await test.info().attach("recovery-scope", { body: JSON.stringify({ workspaceId, datasetPath: description.datasetPath!, recordId: row.id, fileId,
       scope: "Visible export and clean-target restore; same workspace and dataset identity, exact records/history/attachment bytes, agent retry receipt, owner History Undo.",
       seams: "Native file picker returns and clean target workspace manifest identity only. Old source stays stopped; no internal database repair." }), contentType: "application/json" });
   } finally {

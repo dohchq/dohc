@@ -231,7 +231,7 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
 }
 
 export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRelayStorage,
-  options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number}) {
+  options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number; shareSenderLabel?: (userId: string) => Promise<string>}) {
   const admit = createAppBackendAdmission(options.limits);
   return async (request: Request, route: AppBackendRoute, auth: AppBackendAuth): Promise<Response> => {
     const published = host.publication(auth, route.publicationId);
@@ -248,7 +248,7 @@ export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRela
     }
     const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(30_000)]);
     try {
-      const get = route.action === "descriptor" || route.action === "blob";
+      const get = route.action === "descriptor" || route.action === "summary" || route.action === "blob";
       if (request.method !== (get ? "GET" : "POST")) throw relayError("method_not_allowed");
       const query = new URL(request.url).searchParams;
       if (route.action === "blob") {
@@ -263,6 +263,20 @@ export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRela
       if (query.size) throw badRequest("App operations do not accept a query.");
       return await response(async () => {
         signal.throwIfAborted();
+        if (route.action === "summary") {
+          if (auth.kind !== "named") throw notFound();
+          if (authority.caller.kind === "owner") return {subjectName: published.candidate.appRoot, sharerName: null, access: "owner"};
+          if (authority.caller.kind !== "named") throw notFound();
+          const grant = storage.getShareGrant(authority.caller.grantId);
+          if (!grant) throw notFound();
+          const share = storage.getShare(grant.shareId);
+          if (!share) throw notFound();
+          const sharerName = await options.shareSenderLabel?.(share.granterUserId).catch(() => null) ?? null;
+          signal.throwIfAborted();
+          const current = host.publication(auth, route.publicationId);
+          if (!current || current.authority.caller.kind !== "named") throw notFound();
+          return {...storage.getShareLabels(grant.shareId), sharerName, access: current.authority.caller.access};
+        }
         if (route.action === "descriptor") {
           if (auth.kind !== "named") throw notFound();
           return {publicationId: route.publicationId, authorityRevision, files: published.candidate.files};
