@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -13,7 +14,8 @@ const events = join(directory, "events.jsonl");
 const aged = join(parent, "fixture-123-0000000000000001");
 // A recent run of a live process, and an empty one its dead process abandoned.
 const recent = join(parent, `fixture-${process.pid}-0000000000000002`);
-const abandoned = join(parent, "fixture-123-0000000000000003");
+const deadPid = spawnSync(process.execPath, ["-e", ""]).pid;
+const abandoned = join(parent, `fixture-${deadPid}-0000000000000003`);
 mkdirSync(aged, { recursive: true });
 mkdirSync(recent);
 mkdirSync(abandoned);
