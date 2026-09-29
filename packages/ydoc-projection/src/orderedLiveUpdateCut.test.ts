@@ -2298,8 +2298,8 @@ describe('validateOrderedLiveUpdateCut', () => {
         )],
       },
     ])
-    const totalIndexOperations = 215
-    const graphIndexOperations = 100
+    const totalIndexOperations = 223
+    const graphIndexOperations = 104
     const exact = accepted(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint }, highPolicy(),
     ))
@@ -2536,10 +2536,10 @@ describe('validateOrderedLiveUpdateCut', () => {
     const cut = accepted(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint }, highPolicy(),
     ))
-    const evidenceAndFrontierOperations = 114
-    const finalProofOperations = 125
+    const evidenceAndFrontierOperations = 116
+    const finalProofOperations = 127
     const exactIndexOperations = evidenceAndFrontierOperations + finalProofOperations
-    expect(exactIndexOperations).toBe(239)
+    expect(exactIndexOperations).toBe(243)
     expect(cut.usage.indexOperations).toBe(exactIndexOperations)
     expect(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint }, highPolicy({
@@ -2589,7 +2589,7 @@ describe('validateOrderedLiveUpdateCut', () => {
     const cut = accepted(validateOrderedLiveUpdateCut({
       mode: 'journal-candidate', checkpoint, suffix: [suffix], candidate: deletion,
     }, highPolicy()))
-    const exactIndexOperations = 504
+    const exactIndexOperations = 490
     expect(cut.usage.indexOperations).toBe(exactIndexOperations)
     expect(validateOrderedLiveUpdateCut({
       mode: 'journal-candidate', checkpoint, suffix: [suffix], candidate: deletion,
