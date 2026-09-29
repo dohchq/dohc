@@ -53,7 +53,7 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {} } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {}, beforeDesktopScripts } = {}) {
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
@@ -100,9 +100,12 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (failure) throw failure;
     if (packages.status === "rejected") throw packages.reason;
     const tasks = packages.value;
-    // Packaging tests rebuild runtime output. No package may read dist during
-    // that rebuild, even when its own tests finished much earlier.
-    if (tasks.some(task => task.name === "@dohc/desktop")) await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts"]);
+    // Packaging rebuilds dist, which package tests and Rust's public-collection
+    // recovery fixture read. Both must finish before the rebuild.
+    if (tasks.some(task => task.name === "@dohc/desktop")) {
+      await beforeDesktopScripts?.();
+      await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts"]);
+    }
     await cancellation.checkpoint();
     report.verdict = "PASS";
   } catch (error) {
