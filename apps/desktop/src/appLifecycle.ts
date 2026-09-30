@@ -157,10 +157,20 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       .then(async () => await shutdown.closeRelay())
       .catch(() => undefined)
       .then(async () => await shutdown.stopEngine());
+    let budgetExpired = false;
+    let shutdownTimer: ReturnType<typeof setTimeout>;
     void Promise.race([
       workspaceShutdown,
-      new Promise<void>((resolve) => setTimeout(resolve, shutdown.budgetMs)),
-    ]).finally(() => app.exit(0));
+      new Promise<void>((resolve) => {
+        shutdownTimer = setTimeout(() => {
+          budgetExpired = true;
+          resolve();
+        }, shutdown.budgetMs);
+      }),
+    ]).finally(() => {
+      clearTimeout(shutdownTimer);
+      app.exit(budgetExpired ? 1 : 0);
+    });
   });
 
   function collectOpenWorkspaceArgs(argv: string[]): string[] {

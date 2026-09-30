@@ -16,6 +16,9 @@ export function runEarlyCloseDebugFixture(source, closed) {
     put("scripts/verification/process.mjs", "import {resolve} from 'node:path';export const repoRoot=resolve(import.meta.dirname,'../..');export const git=()=> 'fixture-head';");
     copyFileSync(source, join(root, "scripts/verification/debug.mjs"));
     copyFileSync(new URL("./close-electron.mjs", import.meta.url), join(root, "scripts/verification/close-electron.mjs"));
+    copyFileSync(new URL("./desktop-close-policy.mjs", import.meta.url), join(root, "scripts/verification/desktop-close-policy.mjs"));
+    mkdirSync(join(root, "apps/desktop/src"), { recursive: true });
+    copyFileSync(new URL("../../apps/desktop/src/shutdownBudgets.ts", import.meta.url), join(root, "apps/desktop/src/shutdownBudgets.ts"));
     put("node_modules/electron/index.js", "module.exports='fixture-electron';");
     put("node_modules/playwright/index.js", `
       const {EventEmitter}=require('node:events');

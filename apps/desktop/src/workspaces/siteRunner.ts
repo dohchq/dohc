@@ -1,4 +1,5 @@
 import { errorMessage } from "./workspaceError";
+import { BUILD_HARD_KILL_GRACE_MS } from "../shutdownBudgets";
 import { spawn, type ChildProcess } from "node:child_process";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
@@ -58,20 +59,12 @@ export const MAX_LOG_ENTRIES = 500;
 const MAX_LOG_TEXT_CHARS = 10_000;
 const LOG_TRUNCATION_MARKER = "...[truncated]";
 const BUILD_TIMEOUT_MS = 120000;
-const BUILD_HARD_KILL_GRACE_MS = 5000;
 // How often a running dev server's descendant tree is polled (POSIX only)
 // so stopChild can still reach a backgrounded descendant after its wrapper
 // has already exited. Frequent enough that a typical preview session (left
 // open for minutes) gets several captures; infrequent enough to keep the
 // idle cost of an open preview negligible.
 const DESCENDANT_CAPTURE_INTERVAL_MS = 5000;
-// The will-quit teardown's own budget must cover this site-preview stop
-// path's worst case (SIGTERM, then this grace, then the SIGKILL
-// round-trip) or an unref'd preview process can survive with no kill
-// signal ever sent. Computed here, not duplicated as an independent
-// literal in main.ts — a hard-coded, independently-drifting duplicate is
-// exactly how the two fell out of sync before.
-export const WILL_QUIT_BUDGET_MS = BUILD_HARD_KILL_GRACE_MS + 1000;
 const DEV_URL_RE =
   /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s]*)?)(?=$|[\s.)"'`,\]>])/i;
 const DEV_URL_TRAILING_PUNCTUATION_RE = /[.,)"'`,\]>]+$/;

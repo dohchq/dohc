@@ -1,8 +1,12 @@
 import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
-import { createQuitGuard } from "./quitGuard";
+import { createExitRounds, createQuitGuard } from "./quitGuard";
+import { QUIT_ASK_TIMEOUT_MS, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
+import { closeElectronApplication } from "../../../scripts/verification/close-electron.mjs";
+import { DESKTOP_CLOSE_GRACE_MS } from "../../../scripts/verification/desktop-close-policy.mjs";
 import { beginLaunch, finishLaunch, type MarkerFileSystem } from "./launch/launchMarker";
 import { createShareHandoffIntentSlot } from "./shareHandoffIngress";
 import { deferred } from "./testing/deferred";
@@ -533,6 +537,54 @@ describe("desktop open intents", () => {
 });
 
 describe("desktop shutdown", () => {
+  it("lets renderer approval and accepted-write drain finish beyond the old helper deadline", async () => {
+    vi.useFakeTimers();
+    const heldWrite = deferred();
+    const exited = deferred();
+    const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null });
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.settleYDocs = () => heldWrite.promise;
+    });
+    const rounds = createExitRounds({
+      participants: () => [{ id: 1 }],
+      participantId: (participant) => participant.id,
+      send: vi.fn(),
+      confirmProceed: async () => false,
+    });
+    const guard = createQuitGuard({
+      ask: () => { void rounds.begin("quit").outcome.then(() => guard.resume()); },
+      quit: () => f.app.quit(),
+      forceQuit: vi.fn(),
+    });
+    f.dependencies.beforeQuit = (quitEvent) => { guard.beforeQuit(quitEvent); };
+    f.app.quit.mockImplementation(() => {
+      const quitEvent = event();
+      f.app.emit("before-quit", quitEvent);
+      if (!quitEvent.preventDefault.mock.calls.length) f.app.emit("will-quit", event());
+    });
+    f.app.exit.mockImplementation((code: number) => {
+      child.exitCode = code;
+      child.emit("exit", code, null);
+      exited.resolve();
+    });
+    await boot(f);
+    const closing = closeElectronApplication({ close: () => { f.app.quit(); return exited.promise; } }, child as unknown as ChildProcess, DESKTOP_CLOSE_GRACE_MS)
+      .then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
+    await vi.advanceTimersByTimeAsync(QUIT_ASK_TIMEOUT_MS - 1);
+    expect(f.dependencies.shutdown.beginEngineShutdown).not.toHaveBeenCalled();
+    rounds.answer(1, rounds.current()!.roundId, "clear");
+    await vi.advanceTimersByTimeAsync(5_000 - (QUIT_ASK_TIMEOUT_MS - 1));
+    expect(f.dependencies.shutdown.beginEngineShutdown).toHaveBeenCalledOnce();
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(QUIT_ASK_TIMEOUT_MS + WILL_QUIT_BUDGET_MS - 2 - 5_000);
+    heldWrite.resolve();
+    expect(await closing).toEqual({ ok: true });
+    expect(f.dependencies.shutdown.closeWorkspaces).toHaveBeenCalledOnce();
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
   it.each(["search", "sitePreviews", "dispatch", "ydoc", "integration", "cli"] as const)(
     "waits for %s before releasing workspace authority",
     async (heldProducer) => {
@@ -652,15 +704,18 @@ describe("desktop shutdown", () => {
   it("exits once at the shutdown budget without closing a store beneath a held producer", async () => {
     vi.useFakeTimers();
     const held = deferred();
-    const f = fixture((d) => { d.shutdown.settleYDocs = () => held.promise; });
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.settleYDocs = () => held.promise;
+    });
     f.app.emit("will-quit", event());
     const repeated = event();
     f.app.emit("will-quit", repeated);
     expect(repeated.preventDefault).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(2999);
+    await vi.advanceTimersByTimeAsync(WILL_QUIT_BUDGET_MS - 1);
     expect(f.app.exit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(1);
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     held.resolve();
     await vi.advanceTimersByTimeAsync(0);

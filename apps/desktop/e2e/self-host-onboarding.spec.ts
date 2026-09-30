@@ -98,6 +98,10 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     const status = await right.page.evaluate(() => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.cloudStatus({}));
     expect(status).toMatchObject({ connected: true, email: account.email, serverUrl: stack.account.origin, relayUrl: stack.relayUrl });
     expect(left.logs.concat(joinedLogs, right.logs).filter(entry => entry.level === "pageerror")).toEqual([]);
+    await right.close();
+    right = undefined;
+    await left.close();
+    left = undefined;
   } finally {
     const cleanup = await Promise.allSettled([
       otherBrowser?.close(), ownerBrowser?.close(),
