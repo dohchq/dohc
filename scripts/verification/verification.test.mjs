@@ -1038,6 +1038,7 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), { rust: false, js: true });
   assert.deepEqual(selectedGates(["patches/prosemirror-view@1.42.2.patch"], workflow), { rust: true, js: true });
   assert.deepEqual(selectedGates([".config/nextest.toml"], workflow), { rust: true, js: false });
+  assert.deepEqual(selectedGates(["packages/excalidraw-scene/fixtures/canonical-json.json"], workflow), { rust: true, js: true });
   for (const file of ["examples/fundraiser/backend.ts", "examples/stock-orders/schema.sql"]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: false, js: true }, file);
   }
