@@ -955,6 +955,33 @@ const fn materialize_outcome_severity(outcome: PostCommitMaterializeOutcome) -> 
     }
 }
 
+fn reconcile_settlement_attempts(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    let unresolved: bool = store.read_with(|conn| {
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND settle_prior_update_seq IS NOT NULL)",
+            [workspace_id], |row| row.get(0)).map_err(StorageError::persist_public)
+    })?;
+    if unresolved
+        && matches!(
+            store.write_with(faults, |tx| {
+                dohc_engine_collab::author_coverage::reconcile_workspace_in(
+                    tx,
+                    workspace_id,
+                    now_ms,
+                )
+            })?,
+            dohc_engine_storage::TxnOutcome::Crashed { .. }
+        )
+    {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod rollback_identity_tests {
     use super::*;
@@ -1015,31 +1042,4 @@ mod rollback_identity_tests {
             "a non-rollback job takes the ordinary replay path."
         );
     }
-}
-
-fn reconcile_settlement_attempts(
-    store: &mut EngineStore,
-    workspace_id: &str,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
-) -> Result<(), RuntimeError> {
-    let unresolved: bool = store.read_with(|conn| {
-        conn.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND settle_prior_update_seq IS NOT NULL)",
-            [workspace_id], |row| row.get(0)).map_err(StorageError::persist_public)
-    })?;
-    if unresolved
-        && matches!(
-            store.write_with(faults, |tx| {
-                dohc_engine_collab::author_coverage::reconcile_workspace_in(
-                    tx,
-                    workspace_id,
-                    now_ms,
-                )
-            })?,
-            dohc_engine_storage::TxnOutcome::Crashed { .. }
-        )
-    {
-        return Err(RuntimeError::OperationCrashed);
-    }
-    Ok(())
 }

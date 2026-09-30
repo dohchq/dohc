@@ -710,11 +710,9 @@ async fn an_automations_write_replicated_to_the_live_host_keeps_its_depth_and_cl
 
 const CRASH_CLAIM: &str = "atc_crash_recovery_claim";
 
-/// A record created in a document session is its creator's change: the
-/// settle that creates its file names the author of the lineage's first
-/// update, which compaction cannot fold away, whoever edited it after.
-/// Reconcile then adds the record for every automation but an automation
-/// in its unsettled interval, at the maximum recorded chain depth.
+/// The creating settle credits every author in its unsettled interval.
+/// Compaction preserves those authors and their maximum chain depth.
+/// Reconcile skips each automation that contributed to the interval.
 /// An interval at the depth cap stops the chain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_record_created_in_a_document_session_credits_its_interval_authors() {

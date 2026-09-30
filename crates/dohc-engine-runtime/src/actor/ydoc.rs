@@ -1368,12 +1368,13 @@ fn seed_scene_from_artifact_on_store(
         "ydoc-scene-seed-{}",
         hex_sha256(
             format!(
-                "{}\0{}\0{}\0{}\0{}",
+                "{}\0{}\0{}\0{}\0{}\0{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
                 artifact_moment_id,
-                hex_sha256(artifact.as_bytes())
+                hex_sha256(artifact.as_bytes()),
+                hex_sha256(&seed_update)
             )
             .as_bytes()
         )

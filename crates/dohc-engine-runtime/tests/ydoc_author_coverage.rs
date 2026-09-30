@@ -622,6 +622,22 @@ async fn exact_head_noop_restores_close_proof_across_crash_and_restart() {
             .await
             .is_err()
         );
+        let saved = coverage(&db);
+        let store = EngineStore::open(&db, 4).expect("inspect failed no-op");
+        let sha = dohc_engine_collab::read_last_settled_sha(&store, &reopened.key)
+            .expect("artifact proof");
+        match point {
+            FaultPoint::StorageBeforePersist => {
+                assert_eq!(saved.1, None);
+                assert_eq!(sha, None);
+            }
+            FaultPoint::StorageAfterCommitBeforeAck => {
+                assert_eq!(saved.1, Some(1));
+                assert_eq!(sha, Some(dohc_engine_storage::hex_sha256(b"same bytes")));
+            }
+            _ => unreachable!("only no-op storage boundaries are tested"),
+        }
+        drop(store);
         supervisor.close(&db).expect("stop");
         drop(actor);
         let actor = supervisor.open(&db, 5).expect("restart").actor;
