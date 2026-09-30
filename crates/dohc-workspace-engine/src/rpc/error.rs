@@ -95,6 +95,14 @@ fn store_busy(error: &RuntimeError) -> bool {
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
+    if matches!(
+        &error,
+        RuntimeError::Sync(SyncError::RetryableState {
+            reason: "settlement-materialization-pending"
+        })
+    ) {
+        return WireError::new(ErrorCode::Overloaded, "settlement-materialization-pending");
+    }
     if let RuntimeError::Domain(DomainError::WritePreconditionFailed { .. }) = &error {
         return WireError::new(ErrorCode::Conflict, "write-precondition-failed");
     }
@@ -511,6 +519,20 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pending_settlement_has_a_retryable_wire_error() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "settlement-materialization-pending",
+            },
+        ));
+        assert_eq!(
+            error.code,
+            dohc_engine_protocol::error::ErrorCode::Overloaded
+        );
+        assert_eq!(error.message, "settlement-materialization-pending");
+    }
+
     use super::*;
     use dohc_engine_collab::CollabError;
     use dohc_engine_domain::DomainError;

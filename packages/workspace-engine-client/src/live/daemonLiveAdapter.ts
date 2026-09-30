@@ -225,8 +225,12 @@ export function isYdocAuthorCapacityRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "LIMIT_EXCEEDED") === "ydoc-author-capacity";
 }
 
+function isYdocSettlementPendingRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") === "settlement-materialization-pending";
+}
+
 export function isTransientEngineRefusal(error: unknown): boolean {
-  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error);
+  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error);
 }
 
 // The store refusals the desktop names and recovers from. Each is the

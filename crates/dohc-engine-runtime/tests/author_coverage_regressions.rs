@@ -347,8 +347,8 @@ async fn reset_cannot_leave_an_attempt_or_authors_on_a_replacement_lineage() {
         })
         .expect("pending jobs");
     assert_eq!(
-        pending, 0,
-        "retired attempt must not replay into the replacement"
+        pending, 1,
+        "the file job must preserve the committed head preimage for later writes"
     );
     drop(store);
     let actor = supervisor.open(&db, 6).expect("restart").actor;
@@ -359,6 +359,10 @@ async fn reset_cannot_leave_an_attempt_or_authors_on_a_replacement_lineage() {
     supervisor.close(&db).expect("stop");
     let store = EngineStore::open(&db, 8).expect("inspect restart");
     assert_eq!(coverage(&store, &state.key), reset);
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(FILE)).expect("replayed head"),
+        "ab"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

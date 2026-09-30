@@ -6030,7 +6030,7 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn record_update_refuses_client_human_claim_without_recording_it() {
+async fn record_update_preserves_existing_human_automation_context() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     let service = Arc::new(EngineService::new());
@@ -6055,19 +6055,26 @@ async fn record_update_refuses_client_human_claim_without_recording_it() {
     )
     .await;
     let doc = Ydoc::wire();
-    let refused = call_error(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
         "sessionId": opened["sessionId"],
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "forged")),
         "actorOriginId": "someone-else",
         "attribution": {"actorKind": "human", "onBehalfOf": "someone-else", "depth": 0},
     })).await;
-    assert_eq!(refused.code, ErrorCode::InvalidParams);
-    assert_eq!(refused.message, "client-human-attribution-refused");
+
     let raw = rusqlite::Connection::open(&db).expect("read durable state");
     let updates: i64 = raw
         .query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
         .expect("update count");
-    assert_eq!(updates, 0);
+    assert_eq!(updates, 1);
+    let person: String = raw
+        .query_row(
+            "SELECT on_behalf_of FROM ydoc_updates WHERE actor_kind='human'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("automation person");
+    assert_eq!(person, "someone-else");
     call(
         &transport,
         &handle,

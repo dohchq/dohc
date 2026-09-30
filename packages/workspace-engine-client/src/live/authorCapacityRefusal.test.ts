@@ -8,3 +8,10 @@ it("retries only the author-capacity limit refusal", () => {
   expect(isTransientEngineRefusal(capacity)).toBe(true);
   expect(isTransientEngineRefusal(oversized)).toBe(false);
 });
+
+it("retries only the pending settlement discriminator", () => {
+  const pending = new DaemonRefusalError({code: "OVERLOADED", message: "settlement-materialization-pending", retry: "afterBackoff"}, null);
+  const other = new DaemonRefusalError({code: "OVERLOADED", message: "another failure", retry: "no"}, null);
+  expect(isTransientEngineRefusal(pending)).toBe(true);
+  expect(isTransientEngineRefusal(other)).toBe(false);
+});

@@ -62,9 +62,6 @@ impl Authors {
         if author.to_string().len() > MAX_AUTHOR_ENTRY_BYTES {
             return Err(CollabError::AuthorEntryTooLarge);
         }
-        if !self.0.contains_key(&identity) && self.len() == MAX_INTERVAL_AUTHORS {
-            return Err(CollabError::AuthorCapacity);
-        }
         self.0.insert(identity, author);
         Ok(())
     }
@@ -127,6 +124,9 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
         .map_err(sql)?;
     for row in rows {
         let (actor, kind, on_behalf_of, depth) = row.map_err(sql)?;
+        if kind.as_deref() == Some("human") {
+            continue;
+        }
         let attribution = kind
             .as_deref()
             .and_then(ChangeActorKind::parse)
@@ -191,11 +191,18 @@ pub fn check_admission_in(
     actor: Option<&str>,
     attribution: Option<&ChangeAttribution>,
 ) -> Result<bool, CollabError> {
+    if attribution.is_some_and(|value| value.actor_kind == ChangeActorKind::Human) {
+        return Ok(false);
+    }
     let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
         return Ok(false);
     };
     let mut authors = reserved_in(conn, key)?;
+    let before = authors.len();
     authors.union_json(&json)?;
+    if authors.len() > MAX_INTERVAL_AUTHORS && authors.len() > before {
+        return Err(CollabError::AuthorCapacity);
+    }
     let unresolved: bool = conn.query_row(
         "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
@@ -266,31 +273,25 @@ pub fn reset_in(conn: &Connection, key: &DocKey, retain_content: bool) -> Result
     let Some(now_ms) = updated else {
         return Ok(());
     };
-    if !reconcile_in(conn, key, now_ms)? {
-        if retain_content {
-            return Err(CollabError::UnsettledClose);
-        }
-        conn.execute(
-            "UPDATE materialization_jobs SET status='cancelled',completed_at_ms=?4 \
-             WHERE status='pending' AND job_id IN (SELECT 'ydoc-mat_'||m.moment_id \
-             FROM ydoc_docs d JOIN moments m ON m.workspace_id=d.workspace_id \
-             AND m.version_id=d.version_id AND m.object_id=d.object_id AND m.moment_order=d.settle_seq \
-             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3)",
-            params![key.workspace_id,key.version_id,key.object_id,now_ms],
-        ).map_err(sql)?;
-        if retain_content {
-            compensate_in(conn, key, None, now_ms)?;
-        }
+    if retain_content && !reconcile_in(conn, key, now_ms)? {
+        return Err(CollabError::UnsettledClose);
     }
     if retain_content {
         fold_in(conn, key, i64::MAX)?;
     }
     conn.execute(
-        "UPDATE ydoc_docs SET settled_update_seq=NULL,settle_prior_update_seq=NULL,last_settled_sha=NULL, \
+        "UPDATE ydoc_docs SET settled_update_seq=NULL,settle_prior_update_seq=NULL, \
+         last_settled_sha=CASE WHEN ?4 THEN last_settled_sha ELSE NULL END, \
          pending_authors_json=CASE WHEN ?4 THEN pending_authors_json ELSE '[]' END \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id,key.version_id,key.object_id,retain_content],
-    ).map_err(sql)?;
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            retain_content
+        ],
+    )
+    .map_err(sql)?;
     Ok(())
 }
 

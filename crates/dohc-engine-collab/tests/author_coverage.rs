@@ -282,3 +282,78 @@ fn winning_base_replacement_clears_compacted_losing_authors() {
         "winning base"
     );
 }
+
+#[test]
+fn human_automation_context_is_not_enabled_as_settlement_authorship() {
+    let mut ts = fresh_store("human-context-coverage");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    let attribution = ChangeAttribution {
+        actor_kind: ChangeActorKind::Human,
+        on_behalf_of: Some("person".into()),
+        depth: 0,
+    };
+    let admitted = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(0, "human edit"),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some("authors.txt"),
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            actor_origin_id: Some("device"),
+            attribution: Some(&attribution),
+            ..LocalAppend::default()
+        },
+        &NoFaults,
+        2,
+        |_, _, _| Ok(()),
+    )
+    .expect("main automation context remains admissible");
+    assert!(matches!(admitted, TxnOutcome::Committed(outcome) if !outcome.settlement_requested));
+    maybe_compact(&mut ts.store, &key, 0, &NoFaults, 3).expect("fold");
+    assert!(ts
+        .store
+        .read_with(|conn| author_coverage::reserved_in(conn, &key))
+        .expect("coverage")
+        .is_empty());
+}
+
+#[test]
+fn already_admitted_remote_authors_never_wedge_coverage_readers() {
+    let mut ts = fresh_store("remote-author-summary");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let entries: Vec<serde_json::Value> = (0..1025)
+        .map(|index| serde_json::json!({"kind":"agent","agentId":format!("remote-{index}")}))
+        .collect();
+    ts.store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms,pending_authors_json) VALUES (?1,?2,?3,1,?4)",
+            rusqlite::params![key.workspace_id,key.version_id,key.object_id,serde_json::to_string(&entries).expect("summary")]).map_err(dohc_engine_storage::StorageError::persist_public)?;
+        Ok::<_,dohc_engine_storage::StorageError>(())
+    }).expect("remote summary");
+    let known = author("person");
+    ts.store
+        .read_with(|conn| {
+            assert_eq!(author_coverage::reserved_in(conn, &key)?.len(), 1025);
+            assert!(author_coverage::check_admission_in(
+                conn,
+                &key,
+                Some("remote-0"),
+                Some(&ChangeAttribution {
+                    on_behalf_of: None,
+                    ..known.clone()
+                })
+            )?);
+            assert!(matches!(
+                author_coverage::check_admission_in(conn, &key, Some("new"), Some(&known)),
+                Err(CollabError::AuthorCapacity)
+            ));
+            Ok::<_, CollabError>(())
+        })
+        .expect("known authors and readers stay usable");
+}

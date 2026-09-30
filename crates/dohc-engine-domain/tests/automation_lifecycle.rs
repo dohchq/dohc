@@ -859,3 +859,31 @@ fn a_record_added_with_only_its_id_claims_its_first_values_as_a_change() {
         ]
     );
 }
+
+#[test]
+fn every_author_in_a_shared_creation_keeps_the_automation_self_skip() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe(&mut store, LIFECYCLE, 5);
+    subscribe(&mut store, "collection:tasks#other", 5);
+    seed_collection(&mut store);
+    write_as(
+        &mut store,
+        "tasks/alpha.md",
+        &record(ALPHA, "open"),
+        "shared-created",
+        11,
+        Some(
+            json!([
+                {"kind":"automation","automationId":LIFECYCLE,"onBehalfOf":"user:ice","depth":2},
+                {"kind":"agent","agentId":"collaborator","onBehalfOf":"user:ice"}
+            ])
+            .to_string(),
+        ),
+    );
+    let claims = reconcile(&mut store, 20);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].automation_id, "collection:tasks#other");
+    assert_eq!(claims[0].depth, 2);
+    assert_eq!(claims[0].change.author_origin_id, None);
+}

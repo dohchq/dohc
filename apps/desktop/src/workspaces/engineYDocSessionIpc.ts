@@ -739,6 +739,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         owned.provider.applyLocalUpdate(
           input.update,
           () => noteLocalEdit(owned.saveSeq, input.seq),
+          // A renderer editor update is this computer's person typing:
+          // agent and automation writes take the collection write seam,
+          // never this IPC. The declared kind and person ride beside the
+          // device attribution.
+          { attribution: { actorKind: "human", onBehalfOf: this.#localPersonId() } },
         );
         return { accepted: true };
       },

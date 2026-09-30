@@ -2011,7 +2011,7 @@ describe("YdocLiveAdapter", () => {
     text: string,
     options?: {
       settleDebounceMs?: number;
-      blocker?: "file-locked" | "engine-store-busy";
+      blocker?: "file-locked" | "engine-store-busy" | "settlement-materialization-pending";
     },
   ) {
     const engine = seedPlaintextEngine();
@@ -2072,6 +2072,22 @@ describe("YdocLiveAdapter", () => {
       delays: scheduler.delays,
     };
   }
+
+  it("retries materialization pending until the prior settlement finishes", async () => {
+    const {provider, blocked, refusal, settleErrors, settled, scheduler} =
+      await openAgainstABlockedSettle("typed after a pending settlement", {blocker: "settlement-materialization-pending"});
+    scheduler.fire();
+    await drain();
+    expect(settleErrors).toEqual([refusal]);
+    expect(settled).toEqual([]);
+    expect(scheduler.armed).toHaveLength(1);
+    blocked.held = false;
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({content: expect.stringContaining("typed after a pending settlement")});
+    await provider.close({settle: false});
+  });
 
   it("retries a file-locked settle on a doubling delay until the lock releases", async () => {
     // A settle refused `file-locked` leaves the write durably pending

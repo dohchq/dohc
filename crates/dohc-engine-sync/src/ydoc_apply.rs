@@ -145,10 +145,7 @@ fn valid_actor_origin_id(value: Option<&str>) -> bool {
 }
 
 fn valid_attribution(value: Option<&dohc_engine_domain::ChangeAttribution>) -> bool {
-    value.is_none_or(|attribution| {
-        attribution.actor_kind != dohc_engine_domain::ChangeActorKind::Human
-            && attribution.validate().is_ok()
-    })
+    value.is_none_or(|attribution| attribution.validate().is_ok())
 }
 
 /// Admit a valid base only for authenticated, exact-coordinate repair.
@@ -4838,13 +4835,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_live_admission_refuses_client_human_attribution() {
+    fn remote_live_admission_preserves_human_automation_attribution() {
         let human = dohc_engine_domain::ChangeAttribution {
             actor_kind: dohc_engine_domain::ChangeActorKind::Human,
             on_behalf_of: Some("forged-person".into()),
             depth: 0,
         };
-        assert!(!valid_attribution(Some(&human)));
+        assert!(valid_attribution(Some(&human)));
         let agent = dohc_engine_domain::ChangeAttribution {
             actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
             ..human
