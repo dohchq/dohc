@@ -2700,7 +2700,7 @@ it("retires an unanswered deletion whose clocks are durable but whose delete set
     else expect((await session.settleNow()).content).toBe("Keep me");
   }
   expect(notices).toHaveBeenCalledTimes(1);
-  expect(notices.mock.calls[0]?.[1]).toContain("dohc got no answer after three attempts");
+  expect(notices.mock.calls[0]?.[1]).toContain("No answer after three attempts.");
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
 });
 
@@ -2747,7 +2747,7 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
   expect(fixture.state.journalKeys).toEqual(["independent"]);
   expect(notices).toHaveBeenCalledTimes(1);
   expect(notices.mock.calls[0]?.[0]).toBe("refused");
-  expect(notices.mock.calls[0]?.[1]).toContain("dohc got no answer after three attempts to save this edit.");
+  expect(notices.mock.calls[0]?.[1]).toContain("No answer after three attempts.");
   expect(notices.mock.calls[0]?.[1]).not.toContain("dohc refused");
   expect(replacements).toHaveBeenCalled();
   await session.settleNow();
@@ -2801,7 +2801,7 @@ it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s rep
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain('could not save edits to "note.md"');
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
-  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit." : "dohc got no answer after three attempts");
+  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit." : "No answer after three attempts.");
   expect(fixture.state.journalKeys).toContain("other-client");
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
 });

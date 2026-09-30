@@ -2166,7 +2166,7 @@ export function createWorkspaceEngineCapture(
           : reason.includes("share-read-only")
             ? "This file is read-only."
             : unanswered
-              ? "dohc got no answer after three attempts to save this edit."
+              ? "No answer after three attempts."
               : "dohc refused this edit.";
       const what = refusedUpdates.length > 1 ? "edits" : "an edit";
       const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices. Use Save copy on this file's recovery row.`;
