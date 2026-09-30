@@ -3609,8 +3609,7 @@ mod scene_seed_transaction_tests {
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("version");
         let key = DocKey::new("workspace", "main", "drawing-object").expect("key");
-        let artifact =
-            r#"{"type":"excalidraw","version":2,"elements":[],"appState":{},"files":{}}"#;
+        let artifact = r#"{"type":"excalidraw","version":2,"elements":[{"id":"rect","type":"rectangle","version":1,"versionNonce":1,"isDeleted":false,"index":"a0"}],"appState":{},"files":{}}"#;
         let mut cache = WriterDocCache::new();
         let crash = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
         let first = seed_scene_from_artifact_on_store(
