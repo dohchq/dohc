@@ -7,19 +7,29 @@ const connectEntry = fileURLToPath(new URL("../src/deviceHostConnectCommand.ts",
 const deploymentEntry = fileURLToPath(new URL("../src/relayDeploymentCommand.ts", import.meta.url));
 const credentialEntry = fileURLToPath(new URL("../src/deviceHostCredentialCommand.ts", import.meta.url));
 
+/** @type {import("esbuild").BuildOptions} */
+const buildOptions = {
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node24",
+  sourcemap: true,
+  external: ["@dohc/app-backend-runtime", "better-auth", "better-auth/*", "pg", "ws"],
+  logLevel: "info",
+};
+
 /** @param {string} outdir */
 export function buildRelay(outdir) {
   return build({
+    ...buildOptions,
     entryPoints: { main: entry, liveValidationWorker: fileURLToPath(new URL("../src/liveValidationWorker.ts", import.meta.url)), "device-host-connect": connectEntry, "relay-deployment": deploymentEntry, "device-host-credential": credentialEntry },
     outdir,
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    target: "node24",
-    sourcemap: true,
-    external: ["@dohc/app-backend-runtime", "better-auth", "better-auth/*", "pg", "ws"],
-    logLevel: "info",
   });
+}
+
+/** @param {string} entry @param {string} outfile */
+export function buildRelayFixture(entry, outfile) {
+  return build({ ...buildOptions, entryPoints: [entry], outfile });
 }
 
 if (import.meta.main) {
