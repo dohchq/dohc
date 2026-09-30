@@ -73,8 +73,8 @@ rustix = { version = "1.1", features = ["fs"] }
 [target.'cfg(windows)'.dependencies]
 # Read identity from the pinned restoration handle without unsafe code.
 winapi-util = "0.1"
-# Direct exclusive Windows rename.
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+# Safe exclusive Windows rename wrapper.
+dohc-windows-files = { path = "../dohc-windows-files" }
 
 [dev-dependencies]
 # The differential harness parses the workspace-kernel golden fixtures under tests/fixtures
@@ -86,9 +86,5 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] 
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 
-# Only the Windows rename wrapper permits an unsafe FFI call.
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = { level = "warn", priority = -1 }
+[lints]
+workspace = true

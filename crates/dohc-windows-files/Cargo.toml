@@ -1,0 +1,18 @@
+[package]
+name = "dohc-windows-files"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Safe wrapper for exclusive Windows file renames."
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+# Only the exclusive rename function may call Windows FFI.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

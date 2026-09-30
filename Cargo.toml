@@ -8,6 +8,7 @@ members = [
     "crates/dohc-engine-storage",
     "crates/dohc-engine-domain",
     "crates/dohc-engine-files",
+    "crates/dohc-windows-files",
     "crates/dohc-engine-runtime",
     "crates/dohc-engine-testkit",
     "crates/dohc-test-scratch",

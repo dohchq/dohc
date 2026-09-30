@@ -63,6 +63,7 @@ const refusedFor = (method: string, path: string) => (request: Request) => {
 };
 
 async function fixture(options: {
+  nativeMove?: boolean;
   beforeRequest?: (request: Request) => void | Promise<void>;
   afterRequest?: (request: Request) => void | Promise<void>;
 } = {}) {
@@ -75,7 +76,7 @@ async function fixture(options: {
   let capture: WorkspaceEngineCapture | undefined;
   const engine = () => {
     capture ??= createWorkspaceEngineCapture({ workspaceId, rootPath, attachmentId: Symbol("attachment"),
-      rustEngineSessions: mockDaemonSessions({ rootPath, workspaceId, loopback: new VersionedLoopbackEngine(), nativeMove: true,
+      rustEngineSessions: mockDaemonSessions({ rootPath, workspaceId, loopback: new VersionedLoopbackEngine(), nativeMove: options.nativeMove ?? true,
         ...(options.beforeRequest ? { beforeRequest: options.beforeRequest } : {}),
         ...(options.afterRequest ? { afterRequest: options.afterRequest } : {}) }) });
     return capture;
@@ -108,6 +109,35 @@ async function fixture(options: {
 }
 
 describe("agent moves and deletes", () => {
+  it("stages the source when the filesystem refuses an exclusive rename", async () => {
+    const requests: string[] = [];
+    const f = await fixture({ nativeMove: false, beforeRequest: request => { requests.push(request.method); } });
+    await write(f.rootPath, "source.txt", "original");
+    const seen = await f.start();
+    const links: string[] = [];
+    faults.link = async (from, to) => {
+      if (to !== join(f.rootPath, "target.txt")) return;
+      links.push(from);
+      expect(dirname(from)).toBe(join(f.rootPath, ".dohc/trash"));
+      expect(existsSync(join(f.rootPath, "source.txt"))).toBe(false);
+      // A save at the vacated source name must survive placement.
+      await write(f.rootPath, "source.txt", "new save");
+    };
+    try {
+      expect(await f.move("source.txt", "target.txt")).toEqual({ ok: true, fromPath: "source.txt", toPath: "target.txt" });
+      expect(requests).toContain("capture.moveFile");
+      expect(links).toHaveLength(1);
+      expect(await readFile(join(f.rootPath, "target.txt"), "utf8")).toBe("original");
+      expect(await readFile(join(f.rootPath, "source.txt"), "utf8")).toBe("new save");
+      expect(await f.workspaceTrash()).toEqual([]);
+      await f.settle();
+      expect(await f.added(seen)).toContainEqual({ operation: "rename", path: "target.txt", agentId: "Client name" });
+    } finally {
+      delete faults.link;
+      await f.engine().stop();
+    }
+  });
+
   it("records one row per file under the agent, named or not, and none for a person's own move", async () => {
     const f = await fixture();
     await write(f.rootPath, "a.txt", "a");

@@ -24,7 +24,7 @@
 //!   forcing a full bounded rescan; coalescing may reduce work but never drops
 //!   the only evidence of a change.
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 pub mod actor;
 pub mod bounds;

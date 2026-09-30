@@ -369,6 +369,7 @@ dependencies = [
  "dohc-engine-storage",
  "dohc-engine-testkit",
  "dohc-test-scratch",
+ "dohc-windows-files",
  "file-id",
  "notify",
  "rustix",
@@ -382,7 +383,6 @@ dependencies = [
  "toml",
  "unicode-normalization",
  "winapi-util",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -498,6 +498,13 @@ name = "dohc-test-scratch"
 version = "0.1.0"
 dependencies = [
  "filetime",
+]
+
+[[package]]
+name = "dohc-windows-files"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

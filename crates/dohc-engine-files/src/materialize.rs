@@ -376,45 +376,60 @@ fn rename_no_replace_atomic(incoming: &Path, target: &Path) -> std::io::Result<(
     }
 }
 
-/// Move a file without replacing an existing destination.
-/// Windows uses MoveFileExW without replacement or cross-volume copying.
-/// Other platforms reuse the exclusive rename or link-then-unlink placement.
+/// Rename a visible file to an empty name in one kernel operation that
+/// refuses to replace, so bytes another program writes at either name are
+/// never lost: a writer that opens the source name after the rename makes a
+/// new file, and a file that appears at the target first stays.
+///
+/// Answers [`ErrorKind::Unsupported`] wherever no such rename exists, and the
+/// caller stages the file and places a private copy instead. Some SMB and
+/// FUSE mounts refuse the exclusive rename flag. Windows uses the safe
+/// MoveFileExW wrapper without replacement or cross-volume copying. This never
+/// claims the target through a hard link from the visible source, as
+/// [`AtomicReplacer::place`] may for a private staged name: a program writing
+/// into the source between link and unlink would write into the destination.
 pub fn move_file_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        exclusive_move_result(renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE))
+    }
     #[cfg(windows)]
     {
-        move_file_windows(from, to)
+        dohc_windows_files::move_file_no_replace(from, to)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(
+        windows,
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple"
+    )))]
     {
-        rename_no_replace_atomic(from, to)
+        let _ = (from, to);
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "this platform has no rename that refuses to replace",
+        ))
     }
 }
 
-#[cfg(windows)]
-#[allow(unsafe_code)]
-fn move_file_windows(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-
-    let wide = |path: &Path| -> std::io::Result<Vec<u16>> {
-        let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if value.contains(&0) {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "a file path contains a null character",
-            ));
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn exclusive_move_result(result: Result<(), rustix::io::Errno>) -> std::io::Result<()> {
+    use rustix::io::Errno;
+    match result {
+        Ok(()) => Ok(()),
+        Err(err)
+            if err == Errno::INVAL
+                || err == Errno::NOSYS
+                || err == Errno::NOTSUP
+                || err == Errno::OPNOTSUPP =>
+        {
+            Err(std::io::Error::new(
+                ErrorKind::Unsupported,
+                "this filesystem has no rename that refuses to replace",
+            ))
         }
-        value.push(0);
-        Ok(value)
-    };
-    let from = wide(from)?;
-    let to = wide(to)?;
-    // SAFETY: Both buffers remain alive and end with one null. The API
-    // reads these paths synchronously and retains neither pointer.
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -4830,6 +4845,28 @@ mod tests {
             std::fs::metadata(&target).expect("target").len(),
             4 * 1024 * 1024
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn visible_file_move_reports_unsupported_exclusive_rename() {
+        use rustix::io::Errno;
+        for err in [Errno::INVAL, Errno::NOSYS, Errno::NOTSUP, Errno::OPNOTSUPP] {
+            assert_eq!(
+                exclusive_move_result(Err(err))
+                    .expect_err("unsupported rename")
+                    .kind(),
+                ErrorKind::Unsupported
+            );
+        }
+        for err in [Errno::EXIST, Errno::ACCES, Errno::XDEV] {
+            assert_eq!(
+                exclusive_move_result(Err(err))
+                    .expect_err("rename refusal")
+                    .raw_os_error(),
+                Some(err.raw_os_error())
+            );
+        }
     }
 
     #[cfg(windows)]
