@@ -23,7 +23,11 @@ function childProcess() {
     child.emit("exit", code, null);
   };
   cleanup.finish = () => exit(1);
-  return { child: child as unknown as ChildProcess, exit };
+  const signalExit = () => {
+    child.signalCode = "SIGKILL";
+    child.emit("exit", null, "SIGKILL");
+  };
+  return { child: child as unknown as ChildProcess, exit, signalExit };
 }
 
 beforeEach(() => {
@@ -88,13 +92,9 @@ test("an already exited desktop with nonzero status cannot pass a second close",
 });
 
 test.each([false, true])("a signal exit cannot pass a desktop close (already exited: %s)", async (alreadyExited) => {
-  const { child } = childProcess();
-  const exit = () => {
-    child.signalCode = "SIGKILL";
-    child.emit("exit", null, "SIGKILL");
-  };
-  const close = vi.fn(async () => { exit(); });
-  if (alreadyExited) exit();
+  const { child, signalExit } = childProcess();
+  const close = vi.fn(async () => { signalExit(); });
+  if (alreadyExited) signalExit();
   await expect(closeElectronApplication({ close }, child, DESKTOP_CLOSE_GRACE_MS)).rejects.toThrow("Electron exited with signal SIGKILL");
   expect(close).toHaveBeenCalledTimes(alreadyExited ? 0 : 1);
   expect(cleanup.calls).toBe(0);
