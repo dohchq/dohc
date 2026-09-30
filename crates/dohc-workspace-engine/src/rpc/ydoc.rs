@@ -2807,23 +2807,52 @@ mod tests {
                     json!({ "workspaceId": workspace_id }),
                 )
                 .await?;
-            let mut id = Value::Null;
-            for index in 0..3 {
-                let mut params = owner_outbox_append_params(workspace_id, &format!("page-{index}"));
-                params["baseUpdateBase64"] =
-                    json!(base64::engine::general_purpose::STANDARD.encode(vec![17; 1_200_000]));
-                params["updateBase64"] = json!(
-                    base64::engine::general_purpose::STANDARD.encode(vec![23 + index; 1_200_000])
-                );
-                params["limits"]["maxPendingBytes"] = json!(10_000_000);
-                id = service
+            let mut params = owner_outbox_append_params(workspace_id, "page-0");
+            params["baseUpdateBase64"] =
+                json!(base64::engine::general_purpose::STANDARD.encode(vec![17; 1_200_000]));
+            params["updateBase64"] =
+                json!(base64::engine::general_purpose::STANDARD.encode(vec![23; 1_200_000]));
+            params["limits"]["maxPendingBytes"] = json!(10_000_000);
+            let binding: dohc_engine_collab::LiveObjectBinding =
+                serde_json::from_value(params["binding"].clone()).expect("fixture binding");
+            let limits: OwnerYDocOutboxLimitsParams =
+                serde_json::from_value(params["limits"].clone()).expect("fixture limits");
+            let first = service
+                .owner_ydoc_outbox_append(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    params,
+                )
+                .await?;
+            let id = first["outboxId"].clone();
+            let first_at_ms = first["oldestEntryAtMs"]
+                .as_i64()
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "missing-oldest-entry-time"))?;
+            let open = service.open(Some(&handle))?;
+            // Pin queue age while checking negotiated response frames.
+            for index in 1..3 {
+                let appended = open
+                    .actor
                     .owner_ydoc_outbox_append(
-                        &RequestContext::unbounded(),
-                        Some(handle.clone()),
-                        params,
+                        workspace_id.into(),
+                        dohc_engine_collab::OwnerOutboxAppendInput {
+                            binding: binding.clone(),
+                            base_update: vec![17; 1_200_000],
+                            append_key: format!("page-{index}"),
+                            update: vec![23 + index; 1_200_000],
+                            limits: dohc_engine_collab::OwnerOutboxLimits {
+                                max_pending_bytes: limits.max_pending_bytes,
+                                max_pending_age_ms: limits.max_pending_age_ms,
+                            },
+                            created_at_ms: first_at_ms + i64::from(index),
+                        },
+                        CancellationToken::new(),
                     )
-                    .await?["outboxId"]
-                    .clone();
+                    .await
+                    .map_err(map_runtime)?
+                    .map_err(map_owner_outbox)?;
+                assert_eq!(appended.outbox_id, id.as_str().expect("outbox id"));
+                assert_eq!(appended.state, dohc_engine_collab::OwnerOutboxState::Active);
             }
             let ctx = RequestContext::unbounded().with_max_frame_bytes(1_048_576);
             let mut cursor = Value::Null;
