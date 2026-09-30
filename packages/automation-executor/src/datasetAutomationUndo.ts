@@ -56,6 +56,7 @@ export interface DatasetUndoHost extends Pick<DatasetRunHost, "revision" | "reso
 export interface DatasetUndoReach {
   roster: ReachRoster;
   collection: ReachCollection;
+  codeFiles?: readonly string[];
 }
 
 type Edit = Extract<RunWrite, { kind: "dataset-edit" }>;
@@ -165,18 +166,18 @@ function additionsOf(runs: readonly StoredRun[]): Map<string, Addition> {
 }
 
 /** The deletes an Undo may use on an addition under `roster`: those its plan recorded that every editor can still use. */
-function usableDeletes(host: Pick<DatasetUndoHost, "revision" | "dataGrants">, roster: ReachRoster, collection: ReachCollection, addition: Addition): DatasetOperation[] {
+function usableDeletes(host: Pick<DatasetUndoHost, "revision" | "dataGrants">, roster: ReachRoster, collection: ReachCollection, addition: Addition, codeFiles: readonly string[] = []): DatasetOperation[] {
   const { datasetId } = addition.rules;
-  return datasetUndoDeletes(roster, collection, host.revision(datasetId).definition, addition.tableId, host.dataGrants(datasetId))
+  return datasetUndoDeletes(roster, collection, host.revision(datasetId).definition, addition.tableId, host.dataGrants(datasetId), codeFiles)
     .filter((operation) => addition.deletes.includes(operation.operationId));
 }
 
 export function datasetUndoPreviewReads(
   host: Pick<DatasetUndoHost, "revision" | "dataGrants">,
-  reach: { roster: ReachRoster; collection: ReachCollection }, runs: readonly StoredRun[],
+  reach: DatasetUndoReach, runs: readonly StoredRun[],
 ): Array<{ datasetId: string; operationId: string }> {
   return [...additionsOf(runs).values()].flatMap((addition) => {
-    if (addition.changed || usableDeletes(host, reach.roster, reach.collection, addition).length === 0) return [];
+    if (addition.changed || usableDeletes(host, reach.roster, reach.collection, addition, reach.codeFiles).length === 0) return [];
     const read = datasetUndoRead(host.revision(addition.rules.datasetId).definition, addition.tableId);
     return read === undefined ? [] : [{ datasetId: addition.rules.datasetId, operationId: read.operationId }];
   });
@@ -311,7 +312,7 @@ export async function planDatasetUndo(
   let kept = 0, keptChanged = 0, gone = 0, unchecked = 0;
   for (const [key, addition] of additionsOf(runs)) {
     if (!addedHere.has(key)) continue;
-    const operations = usableDeletes(host, reach.roster, reach.collection, addition);
+    const operations = usableDeletes(host, reach.roster, reach.collection, addition, reach.codeFiles);
     if (addition.changed) {
       keptChanged += 1;
       continue;
@@ -476,6 +477,7 @@ export async function undoDatasetAutomationRuns(
   signal: AbortSignal,
   only?: { kind: "record"; datasetId: string; tableId: string; recordId: string | number } | { kind: "action"; datasetId: string; revision: number; operationId: string },
   prepared?: ReturnType<typeof datasetUndoChanges>,
+  codeFiles: readonly string[] = [],
 ): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
   const saved = runs.flatMap((run) => run.undoRequests);
   // Each call once, though two saved lists may hold it: the same content has the same key.
@@ -530,7 +532,7 @@ export async function undoDatasetAutomationRuns(
     if (request === undefined) {
       // No delete was saved for it: none qualified, or the preview found it changed or gone.
       if (addition.changed) undone.keptChanged += 1;
-      else if (addition.deletes.length === 0 || usableDeletes(host, await rosterNow(), collection, addition).length === 0) undone.kept += 1;
+      else if (addition.deletes.length === 0 || usableDeletes(host, await rosterNow(), collection, addition, codeFiles).length === 0) undone.kept += 1;
       else {
         const version = await versionNow(host, addition, signal);
         undone[version === null ? "gone" : version !== undefined && version !== addition.version ? "keptChanged" : "kept"] += 1;
@@ -539,7 +541,7 @@ export async function undoDatasetAutomationRuns(
     }
     // Just before it is sent, the delete must still be one every editor can
     // use, under rules that still resolve, as a run checks each record effect.
-    const usable = usableDeletes(host, await rosterNow(), collection, addition);
+    const usable = usableDeletes(host, await rosterNow(), collection, addition, codeFiles);
     if (!host.resolves(request.rules) || !usable.some((operation) => operation.operationId === request.operationId)) {
       undone.kept += 1;
       continue;

@@ -81,14 +81,16 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 // `ctx.person`, `ctx.message`, each earlier step's result by its `as` name,
 // and the formula helpers. It returns nothing, or an object with any of
 // `set`, the fields to set on the trigger record; `records`, a list of
-// `{ action: "add", collection, fields }` and
-// `{ action: "change", collection, id, fields }`; and `output`, the value
+// `{ action: "add", collection, table?, fields }` and
+// `{ action: "change", collection, table?, id, fields }`; and `output`, the value
 // `as` binds. It runs synchronously, for at most 1 second, with no network
 // or files. The executor applies its changes with the checks a set or
-// add-record step gets. On a dataset Collection, the changes stay in the
-// table the automation watches, or the dataset's only table for a schedule
-// or a Group message, and each goes through the approved operation the ⚡
-// panel would pin for a step with the same fields. A schedule or a Group
+// add-record step gets. Records can belong to other Collections. `table`
+// names a dataset table; another Collection with several tables requires it.
+// Without `table`, the source uses the watched table, or its only table for
+// a schedule or Group message. Each dataset change uses an approved generated
+// operation for its fields. Authored datasets require an invoke step.
+// Every destination must pass the editors' reach checks. A schedule or a Group
 // message has no trigger record: `ctx.record` is null, and "set" fails.
 //
 //       - run: |

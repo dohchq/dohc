@@ -22,6 +22,7 @@ const empty = (): CollectionAutomationUndone => ({ reverted: 0, removed: 0, kept
 export async function undoAutomationRuns(
   documents: CollectionAutomationUndoDependencies, host: DatasetUndoHost | null, collection: import("./automationReach").ReachCollection, rosterNow: () => Promise<import("./automationReach").ReachRoster>, claimId: string, runs: readonly StoredRun[],
   saveRequest: (request: DatasetUndoRequest) => Promise<void>, signal: AbortSignal,
+  codeFiles: readonly string[] = [],
 ): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
   if (host !== null && datasetUndoRulesChanged(host, runs)) throw new Error(DATASET_UNDO_RULES_CHANGED);
   const targets = new Map<string, Target>();
@@ -79,7 +80,7 @@ export async function undoAutomationRuns(
     }
     if (host === null) throw new Error("The dataset host is unavailable.");
     const only = target.kind === "dataset" ? { ...target, kind: "record" as const } : target;
-    const dataset = await undoDatasetAutomationRuns(host, collection, rosterNow, claimId, runs, saveRequest, signal, only, datasetChanges);
+    const dataset = await undoDatasetAutomationRuns(host, collection, rosterNow, claimId, runs, saveRequest, signal, only, datasetChanges, codeFiles);
     accumulate(dataset.undone);
     keptFields.push(...dataset.keptFields);
   }
@@ -89,7 +90,7 @@ export async function undoAutomationRuns(
 /** Reach and descriptor checks come from recorded writes, not the source Collection's current storage kind. */
 export async function automationUndoReach(
   runs: readonly StoredRun[], resolver: AutomationTargets, datasetPath: (datasetId: string) => string | null,
-  source: { roster: import("./automationReach").ReachRoster; collection: import("./automationReach").ReachCollection } | null,
+  source: { roster: import("./automationReach").ReachRoster; collection: import("./automationReach").ReachCollection; codeFiles?: readonly string[] } | null,
   host: Pick<DatasetUndoHost, "resolves"> | null,
 ): Promise<ReachStep[]> {
   const paths = new Map<string, { datasetId: string | null; operations: Set<string> }>();

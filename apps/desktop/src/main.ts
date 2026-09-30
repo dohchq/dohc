@@ -4022,6 +4022,7 @@ function createCollectionAutomationsFor(
       (await linkedChatStoreFor(lease).listChannels({ workspaceId }))
         .flatMap((channel) => (channel.kind === "channel" ? [{ name: channel.name, slug: channel.slug }] : []))),
     personName: (userId) => (userId === localUserId() ? localUserDisplayName() : userId),
+    localPersonId: localUserId,
     mayRetryPress: async (pressedBy) => pressedBy === (await pressingPerson()) || (await localPersonOwns(workspaceId)),
     onPressSettled: (event) => {
       pressWindows.settled(workspaceId, event);

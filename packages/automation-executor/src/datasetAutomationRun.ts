@@ -8,16 +8,14 @@ import type {
 } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
-import type { DatasetColumnFieldType, DatasetDefinition, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
+import type { DatasetColumnFieldType, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import {
-  codeRecordKey,
   codeStepOrdinals,
   definitionDigest,
   definitionHash,
-  type CodeChange,
   type PlannedEffect,
   type RunClaim,
   type RunRecord,
@@ -34,7 +32,6 @@ import type { DatasetEffect, DatasetReplan, RunWrite, StoredRun, StoredStep } fr
 import {
   KEPT_CHANGING_ERROR,
   MAX_REREADS,
-  unfinishedStep,
 } from "./automationStepRun";
 import {
   claimPerson,
@@ -45,7 +42,6 @@ import {
 import {
   datasetButtonOf,
   datasetCodeOperation,
-  datasetCodeTable,
   datasetEffectKey,
   datasetRecordKey,
   datasetRunClaim,
@@ -69,18 +65,16 @@ import {
 // before value is sent again under a new key at the new version, and a
 // field someone changed to anything else keeps their change.
 //
-// A code step's changes land in the table the automation watches, or for a
-// schedule or a Group message, which watch none, the dataset's only table,
-// each through the approved edit or create the panel would pin for a step
-// with its fields; code never runs an action. The step picks them once the
-// code has run. Reach, and a presser's access, already counted every edit,
-// create, and read on that table, and reach is checked again before each
-// record effect lands. A record the code changes by id is read through an
+// A code step can change records in other Collections and named tables.
+// The shared backend selects and authorizes each generated edit or create
+// after the code returns. It checks editors and the button caller again
+// before each effect. A record the code changes by id is read through an
 // approved read that shows the fields it changes, which also reads it again
 // when it is stale. Undo treats the code's changes as a Set fields or Add
 // record step's: a field goes back only through a reversible edit, and an
-// added record stays. On a dataset whose operations someone wrote, a code
-// step reads only the record's id and changes no record; an action it feeds
+// added record can be deleted through a recorded, still-authorized delete.
+// On a dataset whose operations someone wrote, code reads only the record's
+// id and changes none of that dataset's records; an action it feeds
 // through an invoke step undoes as any action does.
 //
 // A due time or a Group message has no record: the engine claims it, as
@@ -331,113 +325,12 @@ export async function runDatasetAutomation(
   return coordinateSourceRun(dependencies, { ...input, claim: input.held.claim }, datasetSource(input));
 }
 
-/**
- * Why the approved rules cannot finish code steps' effects, or null: an
- * operation a change goes through is gone, or no approved read could show
- * an edited record again when it is stale. Reach already checked every
- * operation a code step can pick.
- */
-export function codeStepProblem(automation: Automation, definition: DatasetDefinition, plan: readonly StoredStep[]): string | null {
-  const code = codeStepOrdinals(automation);
-  for (const { ordinal, effects } of plan) {
-    if (!code.has(ordinal)) continue;
-    for (const effect of effects) {
-      if (effect.kind !== "dataset-edit" && effect.kind !== "dataset-create") continue;
-      const table = definition.tables.find((candidate) => candidate.tableId === effect.tableId);
-      if (table === undefined || !definition.operations.some((candidate) => candidate.operationId === effect.operationId)) return RULES_CHANGED_ERROR;
-      // Reach and presses count only the operations of the table code uses
-      // under these rules. A saved change to another table, such as the only
-      // one before a second was added, would land unchecked.
-      if (datasetCodeTable(automation, definition)?.tableId !== effect.tableId) return RULES_CHANGED_ERROR;
-      if (effect.kind !== "dataset-edit") continue;
-      // A stale edit reads its record again, so the read must exist before anything lands.
-      const reader = datasetCodeOperation(definition, table, "read", effect.fields.map(({ field }) => field));
-      if ("problem" in reader) return `The code in step ${ordinal + 1} changes records in ${table.name}. ${reader.problem}`;
-    }
-  }
-  return null;
-}
-
 /** A record id the code wrote as text, as `table`'s primary key holds it, or null when it cannot be one. */
-function datasetRecordIdOf(table: DatasetTable, text: string): DatasetRecordId | null {
+export function datasetRecordIdOf(table: DatasetTable, text: string): DatasetRecordId | null {
   const key = table.fields.find((field) => field.type !== "button" && field.sqlColumn === table.primaryKey);
   if (key?.type !== "number") return text;
   const id = /^-?\d+$/u.test(text) ? Number(text) : NaN;
   return Number.isSafeInteger(id) ? id : null;
-}
-
-/**
- * Checks each change a code step asked for against the table the automation
- * watches, then reads each record it changes, once, through a read that shows
- * every field the step changes on it. A record the step already read keeps
- * that snapshot and its version: the new read only adds the fields it shows,
- * and a record that changed in between makes the step read again. A record
- * that is not in the table is left out, and the step says so.
- */
-async function codeRecords(
-  input: DatasetAutomationRunInput,
-  definition: DatasetDefinition,
-  datasetRules: DatasetRules,
-  changes: readonly CodeChange[],
-  record: RunRecord | null,
-  readable: ReadonlySet<string>,
-  snapshots: ReadonlyMap<string, RunRecord>,
-  read: (operation: DatasetOperation, table: DatasetTable, id: DatasetRecordId) => Promise<Row | null>,
-  remember: (row: Row, table: DatasetTable) => RunRecord,
-): Promise<{ records: Map<string, RunRecord> } | { outcome: CollectionAutomationRunOutcome }> {
-  const { automation, collection, held } = input;
-  const first = `The code in step ${changes[0]!.ordinal + 1}`;
-  if (!datasetRules.generated) {
-    // Only an action changes records on a dataset whose operations someone wrote.
-    return { outcome: failed(`${first} changes records in ${definition.name}. Its operations were written or changed outside dohc, so only an action can change its records. Run one with an invoke step.`) };
-  }
-  const table = datasetCodeTable(automation, definition);
-  if (table === undefined) {
-    return { outcome: failed(`${first} changes records, and ${definition.name} has several tables, so dohc cannot tell which one. Start the automation from a change in one table.`) };
-  }
-  const datasetId = datasetIdOf(held);
-  // Each record the code changes, with every field it changes there, and
-  // each text the code named it by. The trigger record's `set` counts.
-  const changed = new Map<string, { ordinal: number; texts: Set<string>; id: DatasetRecordId; fields: Set<string> }>();
-  const add = (ordinal: number, id: DatasetRecordId, text: string | null, fields: JsonObject) => {
-    const key = datasetRecordKey(datasetId, table.tableId, id);
-    const entry = changed.get(key) ?? { ordinal, texts: new Set<string>(), id, fields: new Set<string>() };
-    if (text !== null) entry.texts.add(text);
-    for (const field of Object.keys(fields)) entry.fields.add(field);
-    changed.set(key, entry);
-  };
-  for (const change of changes) {
-    const step = `The code in step ${change.ordinal + 1}`;
-    if (change.collection !== collection.path) {
-      return { outcome: failed(`${step} changes records in ${change.collection}. Automations on ${definition.name} can use only its own records for now.`) };
-    }
-    const missing = Object.keys(change.fields).find((name) => !table.fields.some((field) => field.name === name && field.type !== "button"));
-    if (missing !== undefined) return { outcome: failed(`${step} sets ${missing}, which is not a field in ${table.name}.`) };
-    if (change.action === "add") continue;
-    if (change.id === null) {
-      // `set` without a trigger record fails when the step is planned.
-      if (record?.key !== undefined) add(change.ordinal, record.key, null, change.fields);
-      continue;
-    }
-    const id = datasetRecordIdOf(table, change.id);
-    if (id === null) return { outcome: failed(`${step} changes record ${change.id}, which is not in ${table.name}.`) };
-    add(change.ordinal, id, change.id, change.fields);
-  }
-  const records = new Map<string, RunRecord>();
-  for (const [key, { ordinal, texts, id, fields }] of changed) {
-    // A snapshot that already shows every field the code may see needs no second read.
-    const earlier = snapshots.get(key);
-    const unseen = [...fields].some((name) => readable.has(datasetFieldKey(definition.datasetId, table.tableId, table.fields.find((field) => field.name === name)!.fieldId)) && !Object.hasOwn(earlier?.values ?? {}, name));
-    let snapshot = earlier;
-    if (earlier === undefined || unseen) {
-      const operation = datasetCodeOperation(definition, table, "read", [...fields]);
-      if ("problem" in operation) return { outcome: failed(`The code in step ${ordinal + 1} changes records in ${table.name}. ${operation.problem}`) };
-      const row = await read(operation, table, id);
-      snapshot = row === null ? undefined : remember(row, table);
-    }
-    if (snapshot !== undefined) for (const text of texts) records.set(codeRecordKey(collection.path, text), snapshot);
-  }
-  return { records };
 }
 
 /**
@@ -471,12 +364,10 @@ function datasetNotice(effect: Extract<PlannedEffect, { kind: "notice" }>, colle
  * carries the version the step read its record at.
  */
 export function datasetStepEffects(
-  automation: Automation,
   ordinal: number,
   planned: readonly PlannedEffect[],
   steps: DatasetSteps,
-  definition: DatasetDefinition,
-  isCode: boolean,
+  codeOperation: ((effect: Extract<PlannedEffect, { kind: "add" | "set" }>) => { table: DatasetTable; operation: DatasetOperation }) | null,
   rules: Rules,
   versions: ReadonlyMap<string, { id: DatasetRecordId; version: number }>,
   collectionPath: string,
@@ -499,13 +390,8 @@ export function datasetStepEffects(
       return { kind: "dataset-action", collectionPath, rules, operationId: operation.operationId, tableId: table.tableId, input: effect.input };
     }
     let operation: DatasetOperation, table: DatasetTable;
-    if (isCode) {
-      const code = datasetCodeTable(automation, definition);
-      if (code === undefined) return { problem: RULES_CHANGED_ERROR };
-      table = code;
-      const chosen = datasetCodeOperation(definition, table, effect.kind === "add" ? "create" : "edit", effect.fields.map(({ field }) => field));
-      if ("problem" in chosen) return { problem: `The code in step ${ordinal + 1} changes records in ${table.name}. ${chosen.problem}` };
-      operation = chosen;
+    if (codeOperation !== null) {
+      ({ operation, table } = codeOperation(effect));
     } else {
       ({ operation, table } = steps.steps.get(ordinal)!);
     }
@@ -603,7 +489,7 @@ export async function applyDatasetEffect(
     const table = context.datasetRules.definition.tables.find((candidate) => candidate.tableId === effect.tableId);
     if (table === undefined) throw new Error(RULES_CHANGED_ERROR);
     const code = codeStepOrdinals(automation).has(ordinal)
-      ? datasetCodeOperation(context.datasetRules.definition, table, "read", effect.fields.map(({ field }) => field))
+      ? datasetCodeOperation(context.datasetRules.definition, table, "read", effect.fields.map(({ fieldId }) => table.fields.find((field) => field.fieldId === fieldId)!.name))
       : null;
     const reader = context.reader ?? (code === null ? datasetStepsOf(automation, context.datasetRules).rereads.get(ordinal) : "problem" in code ? undefined : code);
     if (reader === undefined) throw new Error(`${table.name} changed, and dohc has no approved read of it to check the record again.`);
@@ -669,12 +555,7 @@ function datasetSource(input: DatasetAutomationRunInput): RunSource {
       const problem = rules.generated ? null : unreadComparison(automation, claim);
       return problem === null ? claim : { outcome: failed(problem) };
     },
-    validate(inventory, run) {
-      const unfinished = run === null ? null : unfinishedStep(run);
-      const problem = unfinished === null ? null : codeStepProblem(automation, inventory.datasets.get(collection.path)!.rules.definition, [unfinished]);
-      return problem === null ? null : failed(problem);
-    },
-    reads({ dataset, remember, snapshots }, inventory, readable) {
+    reads({ dataset, remember }, inventory) {
       const { rules, steps } = inventory.datasets.get(collection.path)!;
       const read = (operation: DatasetOperation, table: DatasetTable, id: DatasetRecordId) => dataset(collection.path, operation, table, id);
       const keep = (row: DatasetRow, table: DatasetTable) => remember(collection.path, row, table);
@@ -688,7 +569,6 @@ function datasetSource(input: DatasetAutomationRunInput): RunSource {
           const row = await read(operation, table, fact.recordId);
           return row === null ? null : keep(row, table);
         },
-        codeRecords: (changes, { record }) => codeRecords(input, rules.definition, rules, changes, record, readable, snapshots, read, keep),
       };
     },
   };

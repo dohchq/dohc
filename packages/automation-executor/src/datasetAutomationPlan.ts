@@ -501,10 +501,11 @@ export function datasetUndoDeletes(
   definition: DatasetDefinition,
   tableId: string,
   grants: ReachDatasetGrants,
+  codeFiles: readonly string[] = [],
 ): DatasetOperation[] {
   const deletes = definition.operations.filter((operation) => operation.kind === "delete" && operation.tableId === tableId);
   const verdicts = checkAutomationReach(roster, {
-    id: "", collection, codeFiles: [],
+    id: "", collection, codeFiles,
     steps: deletes.map((operation): ReachStep => ({
       kind: "dataset-operation", collection, datasetId: definition.datasetId, grants,
       operation: { operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access },

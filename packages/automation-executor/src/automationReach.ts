@@ -203,6 +203,10 @@ function pathProblem(path: string, name: string, role: "source" | "target"): str
   return isCanonical(path) ? null : `"${path}" is not a path in this workspace.`;
 }
 
+export function automationTargetPathProblem(path: string): string | null {
+  return pathProblem(path, path, "target");
+}
+
 function within(path: string, folder: string): boolean {
   return path === folder || path.startsWith(`${folder}/`);
 }
@@ -242,6 +246,15 @@ function holdsDatasetGrant(person: Person, grants: ReachDatasetGrants, lists: (o
   if (person.userId === null) return false;
   const keys = new Set(person.grants.map((grant) => datasetPrincipalKey(grants.workspaceId, grant.grantId, person.userId!)));
   return grants.grants.some((grant) => keys.has(grant.principalKey) && lists(grant.operationIds));
+}
+
+/** A button's verified caller must hold the destination operation independently of the editors. */
+export function personHoldsOperation(roster: ReachRoster, userId: string | null, step: Extract<ReachStep, { kind: "dataset-operation" }>, localPersonId?: string): boolean {
+  if (roster.kind !== "owner" || userId === null) return false;
+  if (userId === roster.ownerUserId || userId === roster.localPersonId || userId === localPersonId) return true;
+  if (step.operation.access === "owner") return false;
+  return holdsDatasetGrant({ userId, email: null, grants: roster.grants.filter((grant) => grant.recipientUserId === userId) }, step.grants,
+    (ids) => ids.includes(step.operation.operationId));
 }
 
 function canPost(person: Person, channelWireId: string | null): boolean {

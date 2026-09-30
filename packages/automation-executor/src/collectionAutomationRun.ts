@@ -13,11 +13,9 @@ import type {
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import type { AutomationTargets, TargetResolution } from "./automationTargets";
+import type { AutomationTargets } from "./automationTargets";
 import {
   codeFilesOf,
-  codeRecordKey,
-  codeStepOrdinals,
   conditionsHold,
   conditionsRequest,
   definitionHash,
@@ -25,7 +23,6 @@ import {
   runRecordOf,
   stepKey,
   triggerMatches,
-  type CodeChange,
   type PlannedEffect,
   type PlannedField,
   type RunClaim,
@@ -44,7 +41,6 @@ import {
 import type { AutomationRunStore, RunWrite, StoredRun, StoredStep } from "./automationRunStore";
 import {
   KEPT_CHANGING_ERROR,
-  unfinishedStep,
   type EffectMode,
   type StepBackend,
 } from "./automationStepRun";
@@ -155,6 +151,8 @@ export interface CollectionAutomationRunDependencies {
   readCode(path: string): Promise<{ text: string; truncated: boolean } | null>;
   /** The name a formula's `person` shows for the person who pressed a button. */
   personName(userId: string): string;
+  /** The local caller accepted as owner by the dataset host, including its signed-out identity. */
+  localPersonId?(): string;
   evaluator: AutomationFormulaEvaluator;
   store: AutomationRunStore;
   nowMs(): number;
@@ -188,7 +186,7 @@ interface RecipientReach {
   step: number;
   id: string;
   name: string;
-  action: "post" | "notify" | "change";
+  action: "post" | "notify" | "change" | "find";
   reach: StepReach;
 }
 
@@ -246,16 +244,6 @@ const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped
 
 /** A Collection as reach and messages name it, from its workspace path. */
 const collectionNamed = (path: string): ReachCollection => ({ path, name: path.split("/").at(-1) ?? path });
-
-/** Why a step cannot read or change a Collection's records through this executor, or null. */
-function targetProblem(resolved: TargetResolution): string | null {
-  if (resolved.kind === "problem") return resolved.problem;
-  // A dataset's records change only through its approved operations.
-  if (resolved.kind === "dataset") {
-    return `Automations cannot use ${resolved.collection.name} yet, because its records change only through its Collection actions.`;
-  }
-  return null;
-}
 
 export type ClaimRuns =
   | { unreadable: true }
@@ -357,7 +345,7 @@ export async function runCollectionAutomation(
   dependencies: CollectionAutomationRunDependencies,
   input: CollectionAutomationRunInput,
 ): Promise<CollectionAutomationRunOutcome> {
-  return coordinateSourceRun(dependencies, input, documentSource(dependencies, input));
+  return coordinateSourceRun(dependencies, input, documentSource(input));
 }
 
 /**
@@ -462,87 +450,6 @@ export async function readDocumentRecord(reads: CollectionAutomationReads, colle
  */
 export function claimPerson(claim: AutomationClaim): string | null {
   return claim.change.kind === "schedule" ? null : claim.change.onBehalfOf;
-}
-
-/** A Collection a code step changes records in, and the fields it sets there. */
-type CodeTarget = { ordinal: number; collection: string; fields: readonly string[] };
-
-/** The Collections a saved code step changes records in. */
-function savedCodeTargets(automation: Automation, { ordinal, effects }: StoredStep): CodeTarget[] {
-  if (!codeStepOrdinals(automation).has(ordinal)) return [];
-  return effects.flatMap((effect): CodeTarget[] => {
-    if (effect.kind === "add") return [{ ordinal, collection: effect.collectionPath, fields: effect.fields.map(({ field }) => field) }];
-    if (effect.kind === "set") return [{ ordinal, collection: effect.target.collectionPath, fields: effect.fields.map(({ field }) => field) }];
-    return [];
-  });
-}
-
-/**
- * Checks each Collection and field the code steps change, as a Set fields
- * or Add record step's are checked on every attempt, or answers why the run
- * cannot go on. Reach (ADR 0012) applies to what the code named: nobody
- * reaches more by writing code. Each code step keeps a verdict for each
- * Collection it named, as for a person a formula named, before anything
- * fails. So a stop is remembered, and removing an editor never switches on
- * a change they could not make.
- */
-async function checkCodeTargets(
-  dependencies: CollectionAutomationRunDependencies,
-  input: CollectionAutomationRunInput,
-  targets: readonly CodeTarget[],
-): Promise<CollectionAutomationRunOutcome | null> {
-  const { automation, collection, roster } = input;
-  const named = new Map<string, { step: number; target: ReachCollection }>();
-  for (const { ordinal, collection: path } of targets) named.set(JSON.stringify([ordinal, path]), { step: ordinal, target: collectionNamed(path) });
-  if (named.size === 0) return null;
-  const verdicts = checkAutomationReach(roster, {
-    id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path),
-    steps: [...named.values()].map(({ target }): ReachStep => ({ kind: "change-records", collection: target })),
-  });
-  const recipients = [...named.values()].map(({ step, target }, index): RecipientReach => ({
-    step, id: target.path, name: target.name, action: "change", reach: verdicts[index]!,
-  }));
-  const kept = await dependencies.recipientVerdicts({ automationId: input.claim.automationId, definitionHash: definitionHash(automation), recipients });
-  const stop = (step: number, name: string, reason: string) => failed(`The code in step ${step + 1} changes records in ${name}. ${reason}`);
-  for (const { step, name, reach } of recipients) {
-    if (!reach.allowed) return stop(step, name, reach.reason);
-  }
-  if (kept.includes("held")) return { kind: "wait", reason: "held" };
-  for (const { step, target } of named.values()) {
-    const resolved = await dependencies.targets.resolve(target.path);
-    if (resolved.kind !== "document") return stop(step, target.name, targetProblem(resolved)!);
-    const fields = resolved.fields;
-    if (fields === null) continue;
-    for (const change of targets) {
-      if (change.ordinal !== step || change.collection !== target.path) continue;
-      const missing = change.fields.find((field) => !fields.has(field));
-      if (missing !== undefined) return failed(`The code in step ${step + 1} sets ${missing}, which is not a field in ${target.name}.`);
-    }
-  }
-  return null;
-}
-
-/**
- * Checks what a code step changes, then reads each record it changes. A
- * record that is not in its Collection is left out, and the step says so.
- */
-async function codeRecords(
-  dependencies: CollectionAutomationRunDependencies,
-  input: CollectionAutomationRunInput,
-  read: (collectionPath: string, recordId: string) => Promise<RunRecord | null>,
-  changes: readonly CodeChange[],
-): Promise<{ records: Map<string, RunRecord> } | { outcome: CollectionAutomationRunOutcome }> {
-  const checked = await checkCodeTargets(dependencies, input, changes.map(({ ordinal, collection, fields }) => ({ ordinal, collection, fields: Object.keys(fields) })));
-  if (checked !== null) return { outcome: checked };
-  const records = new Map<string, RunRecord>();
-  for (const change of changes) {
-    if (change.action !== "change" || change.id === null) continue;
-    const key = codeRecordKey(change.collection, change.id);
-    if (records.has(key)) continue;
-    const record = await read(change.collection, change.id);
-    if (record !== null) records.set(key, record);
-  }
-  return { records };
 }
 
 /**
@@ -795,23 +702,14 @@ export function rebaseRun(run: StoredRun, collectionPathOf: (collectionId: strin
   return { moved: true, lost };
 }
 
-function documentSource(dependencies: CollectionAutomationRunDependencies, input: CollectionAutomationRunInput): RunSource {
+function documentSource(input: CollectionAutomationRunInput): RunSource {
   const { claim, collection } = input;
   return {
     kind: "document", engineClaim: claim, personId: claim.change.kind === "message" ? null : claimPerson(claim),
     writeAuthorId: claimPerson(claim),
     decode: () => ({ ...claim, collectionPath: collection.path }),
-    validate: async (_inventory, run) => {
-      const unfinished = run === null ? null : unfinishedStep(run);
-      return unfinished === null ? null : checkCodeTargets(dependencies, input, savedCodeTargets(input.automation, unfinished));
-    },
-    checkEffect: async (effect, ordinal, roster) => {
-      const targets = savedCodeTargets(input.automation, { ordinal, effects: [effect] });
-      return checkCodeTargets(dependencies, { ...input, roster }, targets);
-    },
     reads: ({ document }) => ({
       trigger: () => claim.change.kind === "removed" || claim.recordId === null ? Promise.resolve(null) : document(collection.path, claim.recordId),
-      codeRecords: (changes) => codeRecords(dependencies, input, document, changes),
     }),
   };
 }
