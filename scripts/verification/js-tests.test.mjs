@@ -84,8 +84,8 @@ test("file selection reaches Vitest and refuses unsupported or empty scopes", ()
   assert.throws(() => testPlan([{name: "fixture", manifest: {scripts: {test: "node tests.js"}}}], {fixture: files}), /Invalid test file selection/);
 });
 
-for (const {name, cancel = false, selectedPackages, testFiles, repository = "full", desktopScripts = true, missingFile = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false} of [
-  {name:"repository tests run beside the package tests and finish before the packaging step",overlap:true},
+for (const {name, cancel = false, selectedPackages, testFiles, repository = "full", desktopScripts = true, missingFile = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false, scriptOverlap = false, scriptFail = false, scriptCancel = false} of [
+  {name:"isolated scripts reuse the repository lane while packages continue, before runtime packaging",overlap:true,scriptOverlap:true},
   {name:"cancellation rejects queued packages before launching their commands",cancel:true,overlap:true},
   {name:"selected packages run without unrelated desktop or runtime tests",selectedPackages:["@dohc/new-package"]},
   {name:"selected desktop tests retain their final script tests",selectedPackages:["@dohc/desktop"]},
@@ -100,6 +100,8 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
   {name:"a missing selected test file fails before any package runs",selectedPackages:["@dohc/new-package"],testFiles:{"@dohc/new-package":["src/selected.test.ts"]},missingFile:true},
   {name:"a repository failure stops new commands and skips the packaging step",repoFail:true,overlap:true},
   {name:"the first failure in time is the one reported",repoFail:true,packageFail:true,overlap:true},
+  {name:"isolated script failure stops package admission and skips runtime packaging",overlap:true,scriptOverlap:true,scriptFail:true},
+  {name:"isolated script cancellation settles running packages and skips runtime packaging",overlap:true,scriptOverlap:true,scriptCancel:true},
 ]) test(name, () => {
   const missing = selectedPackages?.includes("@dohc/missing");
   const expectedPackages = (selectedPackages ?? ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"])
@@ -112,7 +114,7 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
       mkdirSync(join(root, "scripts/verification"), {recursive:true});
       copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
     }
-    put("apps/desktop/package.json", JSON.stringify({scripts:{test:"unused", "test:unit":"vitest run", "test:scripts":"scripts"}}));
+    put("apps/desktop/package.json", JSON.stringify({scripts:{test:"unused", "test:unit":"vitest run", "test:scripts":"scripts", "test:scripts:isolated":"isolated", "test:scripts:runtime":"runtime"}}));
     put("packages/app-backend-runtime/package.json", JSON.stringify({scripts:{test:"unused", "test:prepared":"vitest run"}}));
     put("packages/new-package/package.json", JSON.stringify({scripts:{test:"vitest run"}}));
     if (!missingFile) put("packages/new-package/src/selected.test.ts", "// fixture test\n");
@@ -126,7 +128,14 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
       export const pnpm=args=>['pnpm',args];
       const completed=new Set();
       const waitFor=async file=>{for(let i=0;i<200&&!existsSync(file);i++)await new Promise(r=>setTimeout(r,50));};
+      let active=0, peak=0;
       export async function run(command,args) {
+        active++;peak=Math.max(peak,active);
+        assert.ok(active<=3,'no more than two package commands and the repository/script lane');
+        try{return await execute(command,args);}
+        finally{active--;writeFileSync('command-counts.json',JSON.stringify({active,peak}));}
+      }
+      async function execute(command,args) {
         appendFileSync('commands.jsonl',JSON.stringify(args)+'\\n');
         if(args.includes('build')){completed.add(args[1]);return {stdout:''};}
         assert.ok(completed.has('@dohc/app-backend-runtime'));
@@ -145,6 +154,17 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
           {name:'@dohc/new-package',path:resolve('packages/new-package')},
           {name:'@dohc/no-tests',path:resolve('packages/no-tests')}
         ])};
+        if(args.includes('test:scripts:isolated')) {
+          assert.ok(existsSync('repository-complete'));
+          writeFileSync('isolated-started','yes');
+          if(process.env.FIXTURE_SCRIPT_FAIL==='1'){writeFileSync('isolated-finished','yes');throw Error('fixture isolated script failed');}
+          if(process.env.FIXTURE_SCRIPT_CANCEL==='1'){writeFileSync('isolated-finished','yes');process.emit('SIGTERM');throw Error('fixture isolated script interrupted');}
+          writeFileSync('isolated-complete','yes');writeFileSync('isolated-finished','yes');return {stdout:''};
+        }
+        if(args.includes('test:scripts:runtime')) {
+          assert.ok(existsSync('isolated-complete') && ${JSON.stringify(expectedPackages)}.every(name=>completed.has('test:'+name)));
+          return {stdout:''};
+        }
         if(args[2]==='run')writeFileSync('package-started','yes');
         // Hold the running packages until the repository fails, so the queued one must not start.
         if(args[2]==='run' && process.env.FIXTURE_REPO_FAIL==='1' && process.env.FIXTURE_PACKAGE_FAIL!=='1')await waitFor('repository-failed');
@@ -153,8 +173,12 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
           process.emit('SIGINT');
           throw Error('fixture command interrupted');
         }
-        if(args.includes('test:scripts'))assert.ok(existsSync('repository-complete') && ${JSON.stringify(expectedPackages)}.every(name=>completed.has('test:'+name)));
-        else completed.add('test:'+args[1]);
+        if(args[2]==='run' && process.env.FIXTURE_SCRIPT_OVERLAP==='1'){
+          await waitFor('isolated-finished');
+          assert.ok(existsSync('isolated-started'));
+          writeFileSync('package-saw-isolated','yes');
+        }
+        completed.add('test:'+args[1]);
         return {stdout:''};
       }
     `);
@@ -167,7 +191,7 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
         writeFileSync('barrier-entered','yes');
         // Drain command admission while the reader remains unresolved.
         for(let i=0;i<4;i++)await setImmediate();
-        assert.ok(!readFileSync('commands.jsonl','utf8').includes('test:scripts'));
+        assert.ok(!readFileSync('commands.jsonl','utf8').includes('test:scripts:runtime'));
         if(${barrierCancel})process.emit('SIGTERM');
       } : undefined;
       try {await testWorkspace({output:'evidence',selectedPackages:${JSON.stringify(selectedPackages)},testFiles:${JSON.stringify(testFiles)},repository:${JSON.stringify(repository)},desktopScripts:${desktopScripts},beforeDesktopScripts});}
@@ -175,15 +199,18 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
     `];
     const result = spawnSync(process.execPath, args, {
       cwd:root, encoding:"utf8", timeout:20_000, env:{...process.env, FIXTURE_CANCEL:cancel ? "1" : "0", FIXTURE_REPO_FAIL:repoFail ? "1" : "0",
-        FIXTURE_PACKAGE_FAIL:packageFail ? "1" : "0", FIXTURE_OVERLAP:overlap ? "1" : "0"},
+        FIXTURE_PACKAGE_FAIL:packageFail ? "1" : "0", FIXTURE_OVERLAP:overlap ? "1" : "0",
+        FIXTURE_SCRIPT_OVERLAP:scriptOverlap ? "1" : "0", FIXTURE_SCRIPT_FAIL:scriptFail ? "1" : "0", FIXTURE_SCRIPT_CANCEL:scriptCancel ? "1" : "0"},
     });
     assert.equal(result.error, undefined);
-    const failed = missing || missingFile || repoFail || packageFail;
-    assert.equal(result.status, barrierCancel ? 143 : cancel ? 130 : failed ? 1 : 0, result.stderr);
+    const failed = missing || missingFile || repoFail || packageFail || scriptFail;
+    assert.equal(result.status, barrierCancel || scriptCancel ? 143 : cancel ? 130 : failed ? 1 : 0, result.stderr);
     const report = JSON.parse(readFileSync(join(root, "evidence/result.json"), "utf8"));
-    assert.equal(report.verdict, cancel || barrierCancel || failed ? "FAIL" : "PASS");
+    assert.equal(report.verdict, cancel || barrierCancel || scriptCancel || failed ? "FAIL" : "PASS");
+    assert.equal(JSON.parse(readFileSync(join(root,"command-counts.json"),"utf8")).active,0,"all commands must settle before the runner exits");
     if(barrier)assert.equal(existsSync(join(root,'barrier-entered')), desktopScripts);
     if (overlap && !cancel) assert.ok(existsSync(join(root, "repository-saw-package")), "the repository lane must still be open when a package starts");
+    if (scriptOverlap) assert.ok(existsSync(join(root,"package-saw-isolated")),"isolated scripts must start while package commands remain active");
     const commands = readFileSync(join(root,"commands.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
     assert.equal(report.repository, repository);
     assert.equal(report.desktopScripts, desktopScripts);
@@ -194,19 +221,24 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
     } else assert.deepEqual(report.packages.map(pkg=>pkg.name).sort(),expectedPackages.toSorted());
     if (barrierCancel) {
       assert.match(report.error, /interrupted by SIGTERM/);
-      assert.equal(commands.some(args => args.includes("test:scripts")), false);
+      assert.equal(commands.some(args => args.includes("test:scripts:runtime")), false);
     } else if (cancel) {
       assert.match(report.error, /interrupted/);
-      assert.equal(commands.some(args => args.includes("test:scripts") || args.includes("test:prepared") || args.includes("test")), false);
+      assert.equal(commands.some(args => args.some(arg=>arg.startsWith("test:scripts:")) || args.includes("test:prepared") || args.includes("test")), false);
       assert.equal(report.steps.at(-1).verdict, "FAIL");
     } else if (repoFail) {
       assert.match(report.error, packageFail ? /fixture package failed/ : /fixture repository failed/);
       if (!packageFail) assert.equal(commands.filter(args=>args[2]==="run").length, 2, "the queued package must not start after the failure");
-      assert.equal(commands.some(args=>args.includes("test:scripts")),false);
+      assert.equal(commands.some(args=>args.some(arg=>arg.startsWith("test:scripts:"))),false);
+    } else if (scriptFail || scriptCancel) {
+      assert.match(report.error,scriptCancel ? /interrupted/ : /fixture isolated script failed/);
+      assert.equal(commands.filter(args=>args[2]==="run" && !args[3].startsWith("test:scripts:")).length,2,"queued packages must not start after an isolated script fails");
+      assert.equal(commands.some(args=>args.includes("test:scripts:runtime")),false);
     } else if (!missing && !missingFile) {
       if (selectedPackages !== undefined) assert.deepEqual(report.selectedPackages,selectedPackages);
-      assert.deepEqual(commands.filter(args=>args[2]==="run" && args[3]!=="test:scripts").map(args=>args[1]).sort(),expectedPackages.toSorted());
-      assert.equal(commands.some(args=>args.includes("test:scripts")),desktopScripts && expectedPackages.includes("@dohc/desktop"));
+      assert.deepEqual(commands.filter(args=>args[2]==="run" && !args[3].startsWith("test:scripts:")).map(args=>args[1]).sort(),expectedPackages.toSorted());
+      assert.equal(commands.some(args=>args.includes("test:scripts:isolated")),desktopScripts && expectedPackages.includes("@dohc/desktop"));
+      assert.equal(commands.some(args=>args.includes("test:scripts:runtime")),desktopScripts && expectedPackages.includes("@dohc/desktop"));
       assert.ok(report.steps.every(step => step.verdict === "PASS"));
       if (testFiles) {
         for (const [name, files] of Object.entries(testFiles)) {

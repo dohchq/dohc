@@ -458,7 +458,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
         }});
       `);
       put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
-      put("apps/desktop/package.json", '{"name":"@dohc/desktop","scripts":{"test":"unused","test:unit":"vitest run","test:scripts":"scripts"}}');
+      put("apps/desktop/package.json", '{"name":"@dohc/desktop","scripts":{"test":"unused","test:unit":"vitest run","test:scripts":"scripts","test:scripts:isolated":"isolated","test:scripts:runtime":"runtime"}}');
       for (const file of siteFiles) put(`apps/desktop/${file}`, "// fixture compatibility test\n");
       for (const name of ["fixture", "mcp", "share-web", "site", "unrelated", "workspace-api"]) {
         const path = `${name === "workspace-api" ? "services" : name === "site" ? "apps" : "packages"}/${name}`;
@@ -483,7 +483,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
       `);
       const adapterPath = "scripts/verification/process.mjs";
       put(adapterPath, readFileSync(join(root, adapterPath), "utf8").replace("export async function run(", "async function prepareRun(") + `
-        let releaseRust, releaseJavascript, runtimeBuilt = false, rustFinished = false;
+        let releaseRust, releaseJavascript, runtimeBuilt = false, rustFinished = false, repositoryFinished = false, isolatedScriptsFinished = false;
         const javascriptStarted=new Promise(resolve=>{releaseRust=resolve;});
         const rustStarted=new Promise(resolve=>{releaseJavascript=resolve;});
         export const finishRuntimeReader = () => releaseRust();
@@ -560,6 +560,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
             if(args[1]==='typecheck' && ['js','rust-and-js'].includes(process.env.FIXTURE_FAULT))throw Error('fixture JS failed');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
             assert.equal(options.env.DOHC_TEST_ENGINE_BINARY,stagedEnginePath);
+            if(args[1]!=='typecheck')repositoryFinished = true;
             return {stdout:''};
           }
           if(command==='pnpm' && args.includes('list')) {
@@ -568,9 +569,17 @@ test("verification selects packages and proofs and prepares before parallel jobs
               ...['fixture','mcp','share-web','site','unrelated','workspace-api'].map(name=>({name:'@dohc/'+name,path:join(repoRoot,name==='workspace-api'?'services':name==='site'?'apps':'packages',name)}))
             ])};
           }
-          if(command==='pnpm' && args[2]==='run' && args[3]==='test:scripts') {
+          if(command==='pnpm' && args[2]==='run' && ['test:scripts:isolated','test:scripts:runtime'].includes(args[3])) {
             assert.ok(${desktop}, 'Unselected desktop scripts');
-            assert.ok(!${rust} || rustFinished, 'Packaging raced the Rust runtime reader');
+            assert.ok(repositoryFinished, 'Desktop scripts started before repository checks finished');
+            if(args[3]==='test:scripts:isolated') {
+              assert.ok(!isolatedScriptsFinished, 'Isolated scripts ran twice');
+              if(${rust})assert.equal(rustFinished, false, 'Isolated scripts unnecessarily waited for Rust');
+              isolatedScriptsFinished = true;
+            } else {
+              assert.ok(isolatedScriptsFinished, 'Runtime packaging started before isolated scripts finished');
+              assert.ok(!${rust} || rustFinished, 'Packaging raced the Rust runtime reader');
+            }
             return {stdout:''};
           }
           if(command==='pnpm' && args[2]==='run' && ['test','test:unit'].includes(args[3])) {
@@ -739,7 +748,10 @@ test("verification selects packages and proofs and prepares before parallel jobs
           assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),selected);
           const calls=readFileSync(join(root,".dohc-dev/all-calls.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
           assert.deepEqual(calls.filter(({args})=>args[2]==="run" && ["test","test:unit"].includes(args[3])).map(({args})=>args[1]).sort(),tests.packages.map(pkg=>pkg.name).sort());
-          assert.equal(calls.some(({args}) => args[3] === "test:scripts"), desktop);
+          for (const script of ["test:scripts:isolated", "test:scripts:runtime"]) {
+            assert.equal(calls.filter(({args}) => args[3] === script).length, desktop ? 1 : 0);
+          }
+          assert.equal(calls.some(({args}) => args[3] === "test:scripts"), false);
           if (siteOnly) assert.deepEqual(tests.packages.find(pkg => pkg.name === "@dohc/desktop").files, siteFiles);
         }
       }

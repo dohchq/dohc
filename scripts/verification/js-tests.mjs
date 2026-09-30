@@ -71,7 +71,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     return timed(row, () => run(...pnpm(args), { env, log: row.log }), save)
       .catch(error => { failure ??= error; throw error; });
   }
-  async function runPackages() {
+  async function planPackages() {
     const inventory = await command("inventory", ["-r", "list", "--depth", "-1", "--json"]);
     const packages = JSON.parse(inventory.stdout).filter(pkg => relative(repoRoot, pkg.path) !== "")
       .map(pkg => ({ ...pkg, manifest: JSON.parse(readFileSync(join(pkg.path, "package.json"), "utf8")) }));
@@ -87,26 +87,37 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     report.selectedPackages = selectedPackages ?? packages.map(pkg => pkg.name);
     report.packages = tasks.map(({name, script, resource, files}) => ({name, script, resource, ...(files ? {files} : {})}));
     save();
-    await runBounded(tasks, task => command(task.name, task.args), report.concurrency);
     return tasks;
   }
   try {
     if (!prepared) {
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
-    // Repository tests write only temporary fixtures and read only tracked
-    // source and this checkout's HEAD, which package tests never change, so
-    // they run beside the package lanes. Both lanes settle before any failure
-    // is reported, so no command outlives cleanup.
-    const [, packages] = await Promise.allSettled([command("repository", ["run", repository === "full" ? "test:repo" : "test:repo:source"]), runPackages()]);
+    const repositoryChecks = command("repository", ["run", repository === "full" ? "test:repo" : "test:repo:source"]);
+    const plan = planPackages().catch(error => { failure ??= error; throw error; });
+    // Isolated scripts take over the repository lane without adding another
+    // concurrent command. Only the runtime packaging fixture rewrites dist.
+    const runRepository = async () => {
+      await repositoryChecks;
+      const tasks = await plan;
+      if (desktopScripts && tasks.some(task => task.name === "@dohc/desktop")) {
+        await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"]);
+      }
+    };
+    const packages = plan.then(async tasks => {
+      await runBounded(tasks, task => command(task.name, task.args), report.concurrency);
+      return tasks;
+    });
+    // Every lane settles before cleanup, including after a sibling fails.
+    const results = await Promise.allSettled([runRepository(), packages]);
     if (failure) throw failure;
-    if (packages.status === "rejected") throw packages.reason;
-    const tasks = packages.value;
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    const tasks = results[1].value;
     // Packaging rebuilds dist, which package tests and Rust's public-collection
     // recovery fixture read. Both must finish before the rebuild.
     if (desktopScripts && tasks.some(task => task.name === "@dohc/desktop")) {
       await beforeDesktopScripts?.();
-      await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts"]);
+      await command("desktop-runtime-packaging", ["--filter", "@dohc/desktop", "run", "test:scripts:runtime"]);
     }
     await cancellation.checkpoint();
     report.verdict = "PASS";

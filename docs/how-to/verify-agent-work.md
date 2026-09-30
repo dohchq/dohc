@@ -84,7 +84,7 @@ When a contract gains a real package input, add that input to full selection bef
 `pnpm test:repo` retains the complete repository suite.
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
-The JavaScript gate typechecks the whole workspace and runs repository checks before selected package tests.
+The JavaScript gate typechecks the whole workspace, then runs repository checks alongside selected package tests.
 It installs Electron only when desktop preparation is selected.
 On headless Linux hosts, only the desktop proof runs under Xvfb.
 It starts a dedicated Postgres container when selected tests or proofs need one.
@@ -115,12 +115,14 @@ The `timings` rows record the queue wait, source checks, preparation, and databa
 Preparation finishes before the Rust and JavaScript jobs start together. Their step rows can overlap, as can failed startup cleanup.
 Do not add step durations to estimate elapsed time.
 
-`pnpm test` builds the SDK and app runtime before testing packages.
-It runs repository tests first, then at most two packages concurrently, then desktop packaging tests.
+`pnpm test` builds the app runtime before testing packages.
+Repository checks run beside at most two package commands.
+Isolated desktop script tests then use the repository lane.
+The runtime packaging test waits for all three lanes because it rebuilds shared runtime files.
 Database consumers share one slot. Vitest uses at most four workers per package and retains stricter existing limits.
 Package results and durations are in the JS test report referenced by `result.json`.
 The canonical verifier supplies the prerequisites once before running this test schedule.
-It holds desktop packaging until Rust finishes because both use the built app runtime.
+It also holds runtime packaging until Rust finishes because both use the built app runtime.
 The `packaging-wait` timing records that wait, which also contributes to the `tests` step.
 
 ## Measure performance
