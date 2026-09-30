@@ -382,8 +382,6 @@ List an automation's runs on this computer, 20 at a time, newest first: each run
 
 A shared view keeps no automation runs, so it does not offer this tool.
 
-Automations admit at most five Finds per definition and 500 matches per Find. A run can supply 1,000 field assignments, including Add fields. Each step reserves journal bytes before its effects. Refusing a later step leaves earlier changes recorded and undoable. The assignment cap excludes hidden writes inside invoked operations.
-
 - `collectionPath`: `string`. Required.
 - `automation`: `string`. Required.
 - `page`: `string`
@@ -392,7 +390,7 @@ Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigge
 
 ### `dohc_read_automation_run`
 
-Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
+Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed. Automations admit at most five Finds per definition and 500 matches per Find. A run can supply 1,000 field assignments, including Add fields. Each step reserves journal bytes before its effects. Refusing a later step leaves earlier changes recorded and undoable. The assignment cap excludes hidden writes inside invoked operations.
 
 A shared view keeps no automation runs, so it does not offer this tool.
 
@@ -1264,9 +1262,7 @@ With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, so
 
 Press Button fields, read an automation's runs, and try a failed run again.
 
-Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml. Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.
-
-An automation can use five Finds, each matching at most 500 records, and supply at most 1,000 field assignments per run, including Add fields. Invoked operations have their own runtime limits.
+Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml. Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc. An automation can use five Finds, each matching at most 500 records, and supply at most 1,000 field assignments per run, including Add fields. Invoked operations have their own runtime limits.
 
 #### `dohc automation runs`
 

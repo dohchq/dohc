@@ -1352,12 +1352,27 @@ describe("Find limits and admission", () => {
     f.hooks.readPage = () => {
       pages += 1;
       return { result: { rows: [{ id: mode === "identity" ? 1 : pages, version: 1, values: { status: "Open" } }],
-        nextCursor: { id: 7, value: "same" } }, revision: 1, replayed: false };
+        nextCursor: pages === 1 ? { id: 7, value: "same" } : { value: "same", id: 7 } }, revision: 1, replayed: false };
     };
     expect(await f.run(automation(find("Target", true) + set(true, "found")))).toMatchObject({ kind: "failed",
       error: expect.stringContaining(mode === "cursor" ? "repeated cursor" : "duplicate record identity") });
     expect(pages).toBe(2);
     expect(f.calls.every((call) => call.operationId === "read")).toBe(true);
+    expect(await f.runs()).toEqual([]);
+  });
+
+  it("reduces the final page to remaining capacity and stops at its overflow cursor", async () => {
+    const f = await fixture();
+    populate(f, true, 501);
+    f.hooks.readPage = (request, found) => {
+      const input = request.input as { limit: number; after?: { id: number } };
+      const start = input.after === undefined ? 0 : input.after.id + 1;
+      const page = found.slice(start, start + Math.min(37, input.limit));
+      return { result: { rows: page, nextCursor: { id: page.at(-1)!.id } }, revision: 1, replayed: false };
+    };
+    expect(await f.run(automation(find("Target", true)))).toMatchObject({ kind: "failed", error: expect.stringContaining("matched more than 500 records") });
+    expect(f.calls).toHaveLength(14);
+    expect(f.calls.at(-1)!.input).toMatchObject({ limit: 19, after: { id: 480 } });
     expect(await f.runs()).toEqual([]);
   });
 
@@ -1392,6 +1407,7 @@ describe("Find limits and admission", () => {
   it.each([false, true])("admits 1000 assignments across repeated fields and refuses an Add before effects, dataset=%s", async (dataset) => {
     const f = await fixture(false, dataset);
     populate(f, dataset, 500);
+    if (dataset) f.hooks.beforeEffect = () => { f.hooks.beforeEffect = undefined; f.rows.get("Target-dataset")!.get(0)!.version += 1; };
     const rule = automation(find("Target", dataset) + set(dataset, "found", "First") + set(dataset, "found", "Last") + add("Target", dataset));
     f.hooks.crashAppend = true;
     await expect(f.run(rule)).rejects.toThrow("crash before journal append");
@@ -1403,4 +1419,33 @@ describe("Find limits and admission", () => {
     if (dataset) expect([...f.rows.get("Target-dataset")!.values()].map((row) => row.values.status)).toEqual(Array(500).fill("Open"));
     else expect([...f.docs.values()].filter((doc) => doc.collection === "Target").map((doc) => doc.status)).toEqual(Array(500).fill("Open"));
   }, 120_000);
+
+  it("reserves dataset replan bytes before admitting a wide later step", async () => {
+    const f = await fixture();
+    populate(f, true, 500);
+    const big = "x".repeat(1500);
+    for (const row of f.rows.get("Target-dataset")!.values()) row.values.status = big;
+    const rule = automation("      - set: {Status: Started}\n" + find("Target", true).replace('record.Status == "Open"', "'true'") + set(true, "found"));
+    expect(await f.run(rule)).toMatchObject({ kind: "failed", error: "Step 3 would make this run change more data than dohc can save for it. Narrow its Find steps, or split it into smaller automations." });
+    expect(f.calls.every((call) => call.operationId === "read")).toBe(true);
+    expect((await f.runs())[0]?.steps).toHaveLength(2);
+    expect(f.docs.get("Source/same")!.status).toBe("Started");
+    expect([...f.rows.get("Target-dataset")!.values()].every((row) => row.values.status === big)).toBe(true);
+    expect(await f.undo()).toMatchObject({ undone: { reverted: 1 } });
+    expect(f.docs.get("Source/same")!.status).toBe("Open");
+  });
+
+  it("retires a Find-only run before another definition writes, so reverting cannot revive it", async () => {
+    const f = await fixture();
+    const first = automation(find("Target", true) + "      - set: {Status: '=\"A\"'}\n");
+    const evaluator = f.dependencies.evaluator;
+    f.dependencies.evaluator = { ...evaluator, evaluate: async () => "busy" };
+    expect(await f.run(first)).toEqual({ kind: "wait", reason: "busy" });
+    f.dependencies.evaluator = evaluator;
+    const other = automation("      - set: {Status: B}\n      - set: {Status: '=missing()'}\n");
+    expect(await f.run(other)).toMatchObject({ kind: "failed" });
+    expect((await f.runs()).find((run) => run.steps[0]?.output?.kind === "find")?.superseded).toBe(true);
+    expect(await f.run(first)).toMatchObject({ kind: "failed", error: expect.stringContaining("changed after this run began") });
+    expect(f.docs.get("Source/same")!.status).toBe("B");
+  });
 });

@@ -158,6 +158,11 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   const runClaim = decoded;
   const personId = source.personId;
   const state = current ?? { ...newRun(claim, automation, definitionHash(automation) + "-" + claim.run, deps.nowMs()), rules: sourceRules, readableFields: [...visible] };
+  // Retire effect-free runs before this definition can save or write. A
+  // later edit back to their hash must not revive an old Find binding.
+  for (const prior of saved.replaceable) {
+    await deps.store.save({ ...prior, superseded: true, finishedAtMs: prior.finishedAtMs ?? deps.nowMs() });
+  }
   let message: RunContext["message"] = null;
   if (source.engineClaim?.change.kind === "message") {
     const got = await groupMessage(deps, source.engineClaim, automation, chat);

@@ -433,7 +433,18 @@ describe("a stepwise run", () => {
     expect(run!.applied).toHaveLength(1);
     expect(space.records.get("rec_t")!.values).toMatchObject({ Early: 1, A: big });
     expect(await undoCollectionAutomationRuns(space.undo([]), [run!], new AbortController().signal)).toMatchObject({ undone: { reverted: 1 } });
-    expect(space.records.get("rec_t")!.values.Early).toBeUndefined();
+    expect(space.records.get("rec_t")!.values.Early).toBeNull();
+  });
+
+  it("starts an edited definition without a repeat-changes refusal when only its Find was saved", async () => {
+    const source = "id: chain\nname: Chain\nwhen: record-added\ndo: [{find: 'true', as: all}, {set: {Count: '=missing()'}}]";
+    const space = workspace([task("rec_t", {})]);
+    const store = await scratchStore();
+    expect(await runToEnd(space, automation(source), undefined, store)).toMatchObject({ kind: "failed" });
+    expect(space.keys.size).toBe(0);
+    space.records.set("rec_new", task("rec_new", {}));
+    expect(await runToEnd(space, automation(source.replace("missing()", "all.length")), undefined, store)).toEqual({ kind: "done" });
+    expect(space.records.get("rec_t")!.values.Count).toBe(2);
   });
 });
 

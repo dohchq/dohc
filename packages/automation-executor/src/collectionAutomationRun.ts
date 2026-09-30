@@ -263,6 +263,8 @@ export type ClaimRuns =
        * one from the start could repeat what that one did.
        */
       changedSince: StoredRun | null;
+      /** Effect-free runs to retire when a different definition starts. */
+      replaceable: StoredRun[];
     };
 
 export async function runsForClaim(
@@ -279,9 +281,10 @@ export async function runsForClaim(
     undo: runs.some((run) => run.undo !== null),
     done: live.find((run) => run.outcome?.state === "done") ?? null,
     current: live.find((run) => run.definitionHash === hash) ?? null,
-    // A run is saved only once its plan is ready to write, so any saved run
-    // of another definition may have written.
-    changedSince: live.find((run) => run.definitionHash !== hash) ?? null,
+    // A saved Find alone cannot have changed anything. Only a prepared
+    // effect could repeat a change if another definition starts over.
+    changedSince: live.find((run) => run.definitionHash !== hash && run.steps.some((step) => step.effects.length > 0)) ?? null,
+    replaceable: live.filter((run) => run.definitionHash !== hash && run.steps.every((step) => step.effects.length === 0)),
   };
 }
 
@@ -293,7 +296,7 @@ export async function savedRunOf(
   store: AutomationRunStore,
   claim: Pick<AutomationClaim, "automationId" | "claimId" | "run">,
   automation: Automation,
-): Promise<{ outcome: CollectionAutomationRunOutcome } | { current: StoredRun | null }> {
+): Promise<{ outcome: CollectionAutomationRunOutcome } | { current: StoredRun | null; replaceable: StoredRun[] }> {
   const runs = await runsForClaim(store, claim, automation);
   // Never start over as if nothing had run.
   if (runs.unreadable) return { outcome: failed(UNREADABLE_RUN_ERROR) };
@@ -310,7 +313,7 @@ export async function savedRunOf(
   if (current?.outcome?.state === "failed" && current.outcome.run === claim.run) {
     return { outcome: { kind: "failed-before", error: current.outcome.error } };
   }
-  return { current };
+  return { current, replaceable: current === null ? runs.replaceable : [] };
 }
 
 /** A new run's record, before anything of it is saved. */

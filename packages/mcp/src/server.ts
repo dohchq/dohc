@@ -588,7 +588,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_automation_run",
     {
       description:
-        "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
+        "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed. Automations admit at most five Finds per definition and 500 matches per Find. A run can supply 1,000 field assignments, including Add fields. Each step reserves journal bytes before its effects. Refusing a later step leaves earlier changes recorded and undoable. The assignment cap excludes hidden writes inside invoked operations.",
       inputSchema: { ...automationInput, run: z.string().min(1).max(256) },
     },
     async (args) => text(await readAutomationRun(ctx, args)),

@@ -3,7 +3,7 @@ import { appendFile, readdir, readFile, rename, rm, writeFile } from "node:fs/pr
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTestScratch, metadataDirAt, testMetadataDir } from "./testScratch";
-import { createAutomationRunStore, type ClaimStanding, type ExpiringClaim, type StoredRun } from "./automationRunStore";
+import { createAutomationRunStore, MAX_RUN_FILE_BYTES, type ClaimStanding, type ExpiringClaim, type StoredRun } from "./automationRunStore";
 
 const AUTOMATION = "collection:Tasks#bump";
 // Thirty days after 1000, when runs that ended before 1000 expire.
@@ -23,6 +23,18 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  it("refuses an oversized first progress line before creating an unreadable file", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("atc_one", null, 1);
+    await expect(store.appendStep(saved, { ordinal: 0, effects: [{ ...setA,
+      fields: [{ field: "A", before: null, after: "x".repeat(MAX_RUN_FILE_BYTES) }] }] })).rejects.toThrow("too large");
+    const base = join(root, ".dohc", "automations", "runs");
+    const [folder] = await readdir(base);
+    expect(await readdir(join(base, folder!))).toEqual([]);
+    expect(await store.runsOf(AUTOMATION, "atc_one")).toEqual({ runs: [], unreadable: false });
+  });
+
   it.each([7, 8])("rejects v%s history without the required kept fields", async (version) => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
