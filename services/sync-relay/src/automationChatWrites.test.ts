@@ -1,3 +1,4 @@
+import type { StoredRun } from "@dohc/automation-executor/automation-run-store";
 import { afterEach, describe, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { NoticeNotSentError, type AutomationChatMessage, type AutomationNotice } from "@dohc/automation-executor/automation-chat";
@@ -5,7 +6,6 @@ import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
 import {
   replicaAutomationChat,
   replicaNoticePoster,
-  WAKE_ON_SERVER,
   type ReplicaChatStore,
 } from "./automationChatWrites";
 import type { SyncRelayStorage } from "./storage";
@@ -53,20 +53,27 @@ function chatStore(options: { refuse?: Error; sent?: Sent[] } = {}) {
 }
 
 const message = (target: AutomationChatMessage["target"]): AutomationChatMessage => ({
-  target, effectId: "effect-1", messageId: "message-auto-1", threadId: "thread-auto-1", automation, body: "Packed.",
+  target, effectId: "claim/hash/0/wake", messageId: "message-auto-1", threadId: "thread-auto-1", automation, body: "Packed.",
 });
+
+const savedRun = (): StoredRun => ({
+  version: 8, rules: null, collections: [], undoCalls: [], undoCovers: [], claimId: "claim", automationId: automation.automationId, definitionHash: "hash", keySeed: "hash",
+  startedAtMs: 10_000, finishedAtMs: 10_000, steps: [], applied: [], created: [], replans: [], undoRequests: [],
+  readableFields: null, superseded: false, undo: null, undoKept: [], settled: true, outcome: { state: "done" },
+});
+const runStore = { supersedeWake: async () => undefined };
 
 describe("an automation's messages on this server", () => {
   it("posts in a Group as the automation, for the owner, at its depth, under its effect id", async () => {
     const { store, writes } = chatStore();
-    const chat = replicaAutomationChat({ replica: replica(), store, ownerName: async () => "Ice" });
+    const chat = replicaAutomationChat({ runStore, storage: { postAutomationWake: () => { throw new Error("unexpected wake"); } }, nowMs: () => 10_000, replica: replica(), store, ownerName: async () => "Ice" });
     const directory = await chat.directory(OWNER_ROSTER, { groups: new Set(["Planning"]), people: new Set() });
     const group = directory?.group("Planning");
     expect(group).toMatchObject({ channelId: "channel-planning", wireId: "wire-planning", lane: "posts" });
-    await chat.write(new AbortController().signal, message({ kind: "group", channelId: "channel-planning", lane: "posts" }));
+    await chat.write(new AbortController().signal, message({ kind: "group", channelId: "channel-planning", lane: "posts" }), savedRun());
     expect(writes).toEqual([{ method: "startChannelThread", input: {
       workspaceId: WORKSPACE, channelId: "channel-planning", lane: "posts", threadId: "thread-auto-1",
-      messageId: "message-auto-1", idempotencyKey: "effect-1",
+      messageId: "message-auto-1", idempotencyKey: "claim/hash/0/wake",
       author: { kind: "automation", displayName: "Tell the group" }, authorOwnerDisplayName: "Ice", authorUserId: "owner",
       automation: { automationId: "collection:Tasks#tell", chainDepth: 2 }, body: "Packed.",
     } }]);
@@ -74,10 +81,10 @@ describe("an automation's messages on this server", () => {
 
   it("sends a direct message into its running conversation", async () => {
     const { store, writes } = chatStore();
-    const chat = replicaAutomationChat({ replica: replica(), store, ownerName: async () => "Ice" });
-    await chat.write(new AbortController().signal, message({ kind: "direct-message", threadId: "thread-dm" }));
+    const chat = replicaAutomationChat({ runStore, storage: { postAutomationWake: () => { throw new Error("unexpected wake"); } }, nowMs: () => 10_000, replica: replica(), store, ownerName: async () => "Ice" });
+    await chat.write(new AbortController().signal, message({ kind: "direct-message", threadId: "thread-dm" }), savedRun());
     expect(writes).toEqual([{ method: "sendMessage", input: expect.objectContaining({
-      threadId: "thread-dm", idempotencyKey: "effect-1", authorUserId: "owner",
+      threadId: "thread-dm", idempotencyKey: "claim/hash/0/wake", authorUserId: "owner",
       author: { kind: "automation", displayName: "Tell the group" },
     }) }]);
   });
@@ -86,9 +93,9 @@ describe("an automation's messages on this server", () => {
     // The owner renamed themselves after the first attempt landed.
     const refused = new Error("idempotency-key-reuse-mismatch");
     const group = message({ kind: "group", channelId: "channel-planning", lane: "posts" });
-    const writeWith = (sent?: Sent[]) => replicaAutomationChat({
+    const writeWith = (sent?: Sent[]) => replicaAutomationChat({ runStore, storage: { postAutomationWake: () => { throw new Error("unexpected wake"); } }, nowMs: () => 10_000,
       replica: replica(), store: chatStore({ refuse: refused, ...(sent ? { sent } : {}) }).store, ownerName: async () => "Ice",
-    }).write(new AbortController().signal, group);
+    }).write(new AbortController().signal, group, savedRun());
     await expect(writeWith([sentByTell("message-auto-1")])).resolves.toMatchObject({ id: "message-auto-1" });
     await expect(writeWith()).rejects.toBe(refused);
     // Only this automation's message, in the Group the effect named, counts.
@@ -97,22 +104,72 @@ describe("an automation's messages on this server", () => {
     await expect(writeWith([sentByTell("message-auto-1", "thread-elsewhere")])).rejects.toBe(refused);
   });
 
-  it("does not wake an agent, and says where to run the automation instead", async () => {
+  it("hands the wake to the owner once without writing chat on the server", async () => {
+    const storage = await testStorage();
+    storage.claimWorkspace({ workspaceId: WORKSPACE, ownerUserId: "owner", createdAtMs: 10_000 });
     const { store, writes } = chatStore();
-    const chat = replicaAutomationChat({ replica: replica(), store, ownerName: async () => "Ice" });
-    await expect(chat.write(new AbortController().signal, message({ kind: "agent" }))).rejects.toThrow(WAKE_ON_SERVER);
+    const chat = replicaAutomationChat({ runStore, replica: replica(), store, storage, nowMs: () => 10_000, ownerName: async () => "Ice" });
+    expect(await chat.write(new AbortController().signal, message({ kind: "agent" }), savedRun())).toMatchObject({ name: "Ice" });
+    await chat.write(new AbortController().signal, message({ kind: "agent" }), savedRun());
+    const notices = storage.readNoticeChanges({ recipientUserId: "owner", cursor: null, limit: 50, nowMs: 10_000 }).notices;
+    expect(notices).toEqual([expect.objectContaining({
+      kind: "automation-wake", senderUserId: "owner", originInstallId: "server",
+      wake: { ...automation, body: "Packed." },
+    })]);
     expect(writes).toEqual([]);
+  });
+
+  it("posts a wake with an opaque effect id using its explicit run metadata", async () => {
+    const storage = await testStorage();
+    storage.claimWorkspace({ workspaceId: WORKSPACE, ownerUserId: "owner", createdAtMs: 10_000 });
+    const chat = replicaAutomationChat({ runStore, replica: replica(), store: chatStore().store, storage, nowMs: () => 10_000, ownerName: async () => "Ice" });
+    await expect(chat.write(new AbortController().signal,
+      { ...message({ kind: "agent" }), effectId: "opaque-effect" }, savedRun())).resolves.toMatchObject({ name: "Ice" });
+    expect(storage.readNoticeChanges({ recipientUserId: "owner", cursor: null, limit: 50, nowMs: 10_000 }).notices[0]?.wake?.body).toBe("Packed.");
+  });
+
+  it("records supersession in the older run and retries that record after a failed save", async () => {
+    const storage = await testStorage();
+    storage.claimWorkspace({ workspaceId: WORKSPACE, ownerUserId: "owner", createdAtMs: 10_000 });
+    const old = { ...savedRun(), claimId: "claim/with/slashes", keySeed: "seed/with/slashes" };
+    const latest = { ...savedRun(), claimId: "new" };
+    const kept = new Map([[old.claimId, old], ["new", latest]]);
+    let failSave = true;
+    const chat = replicaAutomationChat({
+      replica: replica(), store: chatStore().store, storage, nowMs: () => 10_000, ownerName: async () => "Ice",
+      runStore: {
+        supersedeWake: async (_automationId, claimId, _keySeed, noticeId, supersededBy) => {
+          if (failSave) { failSave = false; throw new Error("disk unavailable"); }
+          const run = kept.get(claimId)!;
+          run.applied = run.applied.map(step => ({ ...step, writes: step.writes.map(write =>
+            write.kind === "notice" && write.noticeId === noticeId && !write.supersededBy
+              ? { ...write, supersededBy, name: write.name + "; agent wake superseded by a later run" } : write) }));
+        },
+      },
+    });
+    const sent = await chat.write(new AbortController().signal, { ...message({ kind: "agent" }), effectId: "opaque-old-effect" }, old) as { noticeId: string };
+    old.applied = [{ ordinal: 0, writes: [{ kind: "notice", noticeId: sent.noticeId, name: "Ice" }] }];
+    const next = { ...message({ kind: "agent" }), effectId: "opaque-next-effect" };
+    await expect(chat.write(new AbortController().signal, next, latest)).rejects.toThrow("disk unavailable");
+    await chat.write(new AbortController().signal, next, latest);
+    expect(await chat.write(new AbortController().signal, { ...message({ kind: "agent" }), effectId: "opaque-old-effect" }, old)).toMatchObject({
+      name: "Ice; agent wake superseded by a later run", supersededBy: expect.stringMatching(/^automation-wake:/),
+    });
+    expect(kept.get(old.claimId)!.applied[0]!.writes[0]).toMatchObject({
+      supersededBy: expect.stringMatching(/^automation-wake:/), name: "Ice; agent wake superseded by a later run",
+    });
+    expect(storage.readNoticeChanges({ recipientUserId: "owner", cursor: null, limit: 50, nowMs: 10_000 }).notices.filter((row) => row.wake)).toHaveLength(1);
   });
 
   it("writes nothing once its run ends or the replica closes", async () => {
     const run = new AbortController();
     const { store, writes } = chatStore();
-    const chat = replicaAutomationChat({ replica: replica(), store, ownerName: async () => { run.abort(); return "Ice"; } });
-    await expect(chat.write(run.signal, message({ kind: "group", channelId: "channel-planning", lane: "posts" }))).rejects.toThrow();
+    const chat = replicaAutomationChat({ runStore, storage: { postAutomationWake: () => { throw new Error("unexpected wake"); } }, nowMs: () => 10_000, replica: replica(), store, ownerName: async () => { run.abort(); return "Ice"; } });
+    await expect(chat.write(run.signal, message({ kind: "group", channelId: "channel-planning", lane: "posts" }), savedRun())).rejects.toThrow();
     const closed = new AbortController();
     closed.abort();
-    const onClosed = replicaAutomationChat({ replica: replica(closed.signal), store, ownerName: async () => "Ice" });
-    await expect(onClosed.write(new AbortController().signal, message({ kind: "direct-message", threadId: "thread-dm" }))).rejects.toThrow();
+    const onClosed = replicaAutomationChat({ runStore, storage: { postAutomationWake: () => { throw new Error("unexpected wake"); } }, nowMs: () => 10_000, replica: replica(closed.signal), store, ownerName: async () => "Ice" });
+    await expect(onClosed.write(new AbortController().signal, message({ kind: "direct-message", threadId: "thread-dm" }), savedRun())).rejects.toThrow();
     await expect(onClosed.directory(OWNER_ROSTER, { groups: new Set(), people: new Set() })).resolves.toBeNull();
     expect(writes).toEqual([]);
   });

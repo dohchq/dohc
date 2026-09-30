@@ -265,6 +265,8 @@ import { createAutomationRunStore } from "@dohc/automation-executor/automation-r
 import { resolveWorkspaceMetadataDir } from "./workspaces/workspaceMetadata";
 import { readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent } from "./automations/automationAgentWake";
+import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
+import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 import { configuredRunnerCommand } from "./agents/agentToolCatalog";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import {
@@ -929,6 +931,7 @@ async function noticeSession(): Promise<NoticeSession | null> {
   };
 }
 function notifyNoticesChanged(): void {
+  if (app.isReady()) void automationWakeConsumer.resume();
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send(CHANNELS.noticesChanged);
   }
@@ -3321,6 +3324,105 @@ const automationScheduler = new AutomationScheduler({
 const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
 const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
 
+async function agentRunnerReady(): Promise<boolean> {
+  const runner = (await readCachedUserSettingsFile(stateDir())).settings.runner;
+  return runner.enabled && configuredRunnerCommand(runner) !== "";
+}
+
+async function wakeAutomationAgent(
+  workspace: { workspaceId: string; rootPath: string; attachmentId?: symbol },
+  signal: AbortSignal,
+  message: AutomationChatMessage,
+  waitForDispatch = false,
+): Promise<void> {
+  const { workspaceId } = workspace;
+  await withWorkspaceAttachmentAsync(workspace, async (lease) => {
+    signal.throwIfAborted();
+    const place = { workspaceId, store: linkedChatStoreFor(lease) };
+    const local = {
+      writer: { via: "automation" as const, ...message.automation, local: true as const },
+      signal, body: message.body, messageId: message.messageId, idempotencyKey: message.effectId,
+      resolveAttachments: async () => [],
+    };
+    await wakeAgent({
+      runnerReady: agentRunnerReady,
+      agentChannelId: async () => {
+        signal.throwIfAborted();
+        return (await place.store.ensureAgentChannel({ workspaceId })).id;
+      },
+      threadExists: async (threadId) => (await place.store.findThreadChannelId({ workspaceId, threadId })) !== null,
+      start: ({ channelId, message: wake }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId }),
+      send: ({ message: wake }) => chatWrites.sendMessage(place, { ...local, threadId: wake.threadId }),
+      recordTrigger: ({ triggerMessageId, threadId }) => {
+        signal.throwIfAborted();
+        return agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId });
+      },
+      scan: () => {
+        signal.throwIfAborted();
+        const scan = chatDispatchService.scanWorkspace(workspaceId, lease.binding.attachmentId);
+        if (waitForDispatch) return scan;
+        void scan.catch((error: unknown) => console.error("[desktop] chat dispatch scan:", error));
+      },
+    }, message);
+  });
+}
+
+const automationWakeConsumer = createAutomationWakeConsumer({
+  intents: createAutomationWakeIntents(join(stateDir(), "automation-wakes.json")),
+  pending: () => noticeStore().pendingAutomationWakes(),
+  ready: async (intent, needsRunner) => {
+    const session = await noticeSession();
+    return session !== null && session.account.key === intent.account &&
+      session.reachFor(intent.workspaceId)?.workspaceId === intent.workspaceId &&
+      (!needsRunner || await agentRunnerReady()) && session.isCurrent();
+  },
+  enabledIfOpen: async (intent) => {
+    const workspace = findWorkspace(intent.workspaceId);
+    if (!workspace || workspace.shareView !== undefined) return undefined;
+    return await withWorkspaceAttachment(workspace, (held) => {
+      if (!workspaceActivity.isOpen(held.state.activity) || held.state.activityClosing) return undefined;
+      return held.state.collectionAutomations.enabledForWake(intent.wake.automationId);
+    });
+  },
+  enabled: async (intent) => {
+    const workspace = findWorkspace(intent.workspaceId);
+    if (!workspace || workspace.shareView !== undefined) return false;
+    await desktopEngine.startup;
+    const release = await acquireDispatchRunActivity(workspace);
+    try {
+      const automations = withWorkspaceAttachment(workspace, (held) => held.state.collectionAutomations);
+      if (!automations) throw new Error("dohc could not read this workspace's automations.");
+      if (!activity.engineCaptureFor(workspace.workspaceId)) throw new Error("dohc could not open this workspace's automations.");
+      await automations.open();
+      return await automations.enabledForWake(intent.wake.automationId);
+    } finally { await release(); }
+  },
+  dismiss: (intent) => noticeStore().dismissFirst({ store: "account", noticeId: intent.noticeId }, intent.account),
+  wake: async (intent, message) => {
+    const session = await noticeSession();
+    const signal = ownerDeliveryCredentialLifetime.signal;
+    const workspace = findWorkspace(intent.workspaceId);
+    if (!session || session.account.key !== intent.account || !session.isCurrent() ||
+      session.reachFor(intent.workspaceId)?.workspaceId !== intent.workspaceId ||
+      !workspace || workspace.shareView !== undefined) throw new Error("The wake's account or workspace changed.");
+    await desktopEngine.startup;
+    signal.throwIfAborted();
+    const release = await acquireDispatchRunActivity(workspace);
+    try {
+      signal.throwIfAborted();
+      if (!session.isCurrent() || session.reachFor(intent.workspaceId)?.workspaceId !== intent.workspaceId) {
+        throw new Error("The wake's account or workspace changed.");
+      }
+      const automations = withWorkspaceAttachment(workspace, (held) => held.state.collectionAutomations);
+      if (!automations) throw new Error("dohc could not read this workspace's automations.");
+      if (!activity.engineCaptureFor(workspace.workspaceId)) throw new Error("dohc could not open this workspace's automations.");
+      await automations.open();
+      if (await automations.enabledForWake(intent.wake.automationId)) await wakeAutomationAgent(workspace, signal, message, true);
+    } finally { await release(); }
+  },
+  onError: (error) => console.error("[desktop] agent wake:", error),
+});
+
 // At start, every workspace this computer ran schedules for waits for its
 // next due time, open or not.
 async function watchRecordedSchedules(): Promise<void> {
@@ -3896,24 +3998,7 @@ function createCollectionAutomationsFor(
           idempotencyKey: message.effectId,
           resolveAttachments: async () => [],
         };
-        if (message.target.kind === "agent") {
-          // A wake stays in this computer's "My agent", so it never waits for a session.
-          const local = { ...common, writer: { ...common.writer, local: true as const } };
-          return await wakeAgent({
-            runnerReady: async () => {
-              const runner = (await readCachedUserSettingsFile(stateDir())).settings.runner;
-              return runner.enabled && configuredRunnerCommand(runner) !== "";
-            },
-            agentChannelId: async () => (await place.store.ensureAgentChannel({ workspaceId })).id,
-            threadExists: async (threadId) => (await place.store.findThreadChannelId({ workspaceId, threadId })) !== null,
-            start: ({ channelId, message: wake }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId }),
-            send: ({ message: wake }) => chatWrites.sendMessage(place, { ...local, threadId: wake.threadId }),
-            recordTrigger: ({ triggerMessageId, threadId }) =>
-              agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId }),
-            scan: () => void chatDispatchService.scanWorkspace(workspaceId).catch((error: unknown) =>
-              console.error("[desktop] chat dispatch scan:", error)),
-          }, message);
-        }
+        if (message.target.kind === "agent") return wakeAutomationAgent(workspace, signal, message);
         return message.target.kind === "group"
           ? await chatWrites.startThread(place, {
               ...common, channelId: message.target.channelId, lane: message.target.lane, threadId: message.threadId,
@@ -4813,7 +4898,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       void watchRecordedSchedules().catch((error: unknown) =>
         console.warn("[desktop] Schedules: read the recorded schedules:", error));
       resumeRunNow();
-      app.on("browser-window-focus", () => resumeRunNow());
+      void automationWakeConsumer.resume();
+      app.on("browser-window-focus", () => { resumeRunNow(); void automationWakeConsumer.resume(); });
+      powerMonitor.on("resume", () => void automationWakeConsumer.resume());
       powerMonitor.on("suspend", () => automationScheduler.suspended());
       powerMonitor.on("resume", () => automationScheduler.resumed());
       powerMonitor.on("unlock-screen", () => automationScheduler.wake());
@@ -5089,7 +5176,10 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
   applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
-  broadcastUserSettings,
+  broadcastUserSettings: (settings) => {
+    broadcastUserSettings(settings);
+    void automationWakeConsumer.resume();
+  },
   openPath: (path) => shell.openPath(path),
   knownWorkspaceIds: () => workspaceSummaries().map((workspace) => workspace.workspaceId),
 });

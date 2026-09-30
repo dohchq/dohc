@@ -2,6 +2,7 @@ import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import {
   AUTOMATION_SERVER_INSTALL_ID,
   SERVER_RUN_FAILED_NOTICE_PREFIX,
+  AUTOMATION_WAKE_PREFIX,
   isNoticeBody,
   isNoticeLine,
   isNoticeTarget,
@@ -121,6 +122,7 @@ export function parsePostNotice(body: Record<string, unknown>): PostedNotice {
     throw badRequest("kind is not a notice kind anyone may post");
   }
   if (!isNoticeLine(body.noticeId, NOTICE_POSTED_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
+  if (body.noticeId.startsWith(AUTOMATION_WAKE_PREFIX)) throw badRequest("noticeId is reserved for agent wakes");
   if (!isNoticeLine(body.title, NOTICE_TITLE_MAX_CHARS)) throw badRequest("title is invalid");
   if (!isNoticeBody(body.body)) throw badRequest("body is invalid");
   if (!isNoticeTarget(body.target)) throw badRequest("target is invalid");

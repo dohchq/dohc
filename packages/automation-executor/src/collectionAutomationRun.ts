@@ -34,6 +34,7 @@ import {
 } from "./automationPlan";
 import { checkAutomationReach, type ReachCollection, type ReachRoster, type ReachStep, type StepReach } from "./automationReach";
 import {
+  AutomationWakeSent,
   NoticeNotSentError,
   type AutomationChatMessage,
   type AutomationNotice,
@@ -199,7 +200,7 @@ export interface AutomationChatDependencies {
    * Writes one message as the automation, ending at `signal`. Throws
    * AutomationChatSessionWait when a synced workspace has no session.
    */
-  write(signal: AbortSignal, message: AutomationChatMessage): Promise<unknown>;
+  write(signal: AbortSignal, message: AutomationChatMessage, run: Pick<StoredRun, "claimId" | "keySeed" | "startedAtMs">): Promise<unknown>;
 }
 
 /** Whether any step posts, sends a direct message, or notifies someone. */
@@ -722,19 +723,21 @@ export async function applyChatEffect(
       threadId: effect.threadId,
       automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
       body: effect.body,
-    });
+    }, run);
     return [{ kind: "message", messageId: effect.messageId, name: effect.name }];
   }
   if (effect.kind === "wake") {
-    await dependencies.chat.write(signal, {
+    const result = await dependencies.chat.write(signal, {
       target: { kind: "agent" },
       effectId: effect.effectId,
       messageId: effect.messageId,
       threadId: effect.threadId,
       automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
       body: effect.body,
-    });
-    return [{ kind: "message", messageId: effect.messageId, name: WAKE_TARGET_NAME }];
+    }, run);
+    return result instanceof AutomationWakeSent
+      ? [{ kind: "notice", noticeId: result.noticeId, name: result.name, ...(result.supersededBy ? { supersededBy: result.supersededBy } : {}) }]
+      : [{ kind: "message", messageId: effect.messageId, name: WAKE_TARGET_NAME }];
   }
   // Each person's notice is its own effect, recorded once it is sent, so a
   // retry resumes with the people not yet notified. The outbox and the

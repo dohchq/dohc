@@ -159,14 +159,14 @@ it.skipIf(engine.missing)("writes an automation's records and posts on the serve
     recordPath: "Tasks/one.md", fields: { Status: "Done" }, author: AUTOMATION, idempotencyKeyPrefix: "claim-1/1/1",
   })).resolves.toEqual({ path: "Tasks/one.md", replaced: { Status: "Doing" }, kept: {} });
   // It posts in the Group, found by its name, as the automation.
-  const chat = replicaAutomationChat({ replica: { ...replica, ownerUserId: "owner" }, store: replicaChatStore(replica), ownerName: async () => "Owner" });
+  const chat = replicaAutomationChat({ runStore: { supersedeWake: async () => undefined }, storage: { postAutomationWake: () => { throw new Error("unexpected wake"); } }, nowMs: Date.now, replica: { ...replica, ownerUserId: "owner" }, store: replicaChatStore(replica), ownerName: async () => "Owner" });
   const directory = await chat.directory({ kind: "owner", ownerUserId: "owner", grants: [] }, { groups: new Set(["Planning"]), people: new Set() });
   const group = directory?.group("Planning");
   if (!group || "problem" in group) throw new Error("The server did not find the Group.");
   await chat.write(new AbortController().signal, {
     target: { kind: "group", channelId: group.channelId, lane: group.lane }, effectId: "claim-1/1/2", messageId: "message-auto-e2e",
     threadId: "thread-auto-e2e", automation: { automationId: AUTOMATION.automationId, name: "Stamp", depth: 1 }, body: "Two is open.",
-  });
+  }, { claimId: "claim-1", keySeed: "1", startedAtMs: Date.now() });
   await server.sync();
 
   // The owner's computer receives both, with the automation as their author.

@@ -240,6 +240,19 @@ describe("a server that runs a workspace's automations", () => {
     }
   });
 
+  it("passes the run metadata to a wake with an opaque effect id", async () => {
+    clock = at(8);
+    const { storage, h } = await relay();
+    const s = await server(storage, h);
+    const fake = await s.openReplica();
+    await expect(fake.options.chat.write(new AbortController().signal, {
+      target: { kind: "agent" }, effectId: "opaque-effect", messageId: "message", threadId: "thread",
+      automation: { automationId: HOURLY.automationId, name: "Hourly", depth: 1 }, body: "Check Tasks",
+    }, { claimId: "claim/with/slashes", keySeed: "seed/with/slashes", startedAtMs: clock }))
+      .resolves.toMatchObject({ name: "Ice" });
+    expect(notices(storage, OWNER)[0]?.wake?.body).toBe("Check Tasks");
+  });
+
   it("takes the schedules, Group coverage, and reach verdicts from a computer, and hands them back", async () => {
     clock = at(8);
     const { storage, h, host } = await relay();

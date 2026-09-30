@@ -201,7 +201,7 @@ export const WriteSchema = z.union([
   // A post or direct message the automation wrote, and where it went.
   z.object({ kind: z.literal("message"), messageId: z.string(), name: z.string() }),
   // A notice the automation sent, and to whom.
-  z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string() }),
+  z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string(), supersededBy: z.string().optional() }),
 ]);
 // A record the run created: the id its plan gave it, which finds it again on
 // a retry, and the id and path the engine gave it.
@@ -625,6 +625,7 @@ export interface AutomationRunStore {
    * with a copy read before it. Throws when the saved run cannot be read.
    */
   updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoKept">>): Promise<void>;
+  supersedeWake(automationId: string, claimId: string, keySeed: string, noticeId: string, supersededBy: string): Promise<void>;
   /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
   /**
@@ -1005,6 +1006,26 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         if (next.undo === "started") await noteUndo(next, name);
         await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify(header(next))}\n`);
         if (next.undo !== "started") await noteUndo(next, name);
+      });
+    },
+    supersedeWake(automationId, claimId, keySeed, noticeId, supersededBy) {
+      return serial(async () => {
+        const folder = await runsFolder(automationId);
+        const name = runName(claimId, keySeed);
+        if (await readBounded(join(folder, `${name}${HEADER_SUFFIX}`)) === undefined) return;
+        const saved = await readRun(folder, name, automationId);
+        if (saved === null) throw new Error("This server could not record the superseded agent wake.");
+        let changed = false;
+        const applied = saved.applied.map((step) => ({ ...step, writes: step.writes.map((write) => {
+          if (write.kind !== "notice" || write.noticeId !== noticeId || write.supersededBy) return write;
+          changed = true;
+          return { ...write, supersededBy, name: write.name + "; agent wake superseded by a later run" };
+        }) }));
+        if (changed) {
+          const progress = progressText({ ...saved, applied });
+          if (Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
+          await writeDurably(join(folder, `${name}${PROGRESS_SUFFIX}`), progress);
+        }
       });
     },
     appendEffect(run, applied) {

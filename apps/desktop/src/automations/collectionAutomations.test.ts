@@ -42,6 +42,7 @@ import {
   automationMessageId,
   automationNoticeId,
   automationWakeThreadId,
+  AutomationWakeSent,
   chatDirectoryOf,
   NoticeNotSentError,
   type AutomationChatMessage,
@@ -757,6 +758,29 @@ const BUMP = [
 ].join("\n");
 
 describe("Collection automations", () => {
+  it("keeps a wake pending until the index opens, including a rename while closed", async () => {
+    const w = await world({ automations: { Tasks: BUMP } });
+    await expect(w.executor.enabledForWake(TASKS)).rejects.toThrow("still opening");
+    await w.executor.open();
+    expect(await w.executor.enabledForWake(TASKS)).toBe(true);
+    await w.executor.close();
+    await w.renameCollection("Tasks", "Moved");
+    await expect(w.executor.enabledForWake(TASKS)).rejects.toThrow("still opening");
+    await w.executor.open();
+    expect(await w.executor.enabledForWake(TASKS)).toBe(true);
+  });
+  it("rechecks a parked wake against disabled and deleted definitions without waiting for the watcher", async () => {
+    const w = await world({ automations: { Tasks: BUMP } });
+    await w.executor.open();
+    expect(await w.executor.enabledForWake(TASKS)).toBe(true);
+    await w.renameCollection("Tasks", "Moved");
+    expect(await w.executor.enabledForWake(TASKS)).toBe(true);
+    await w.writeAutomations("Moved", BUMP.replace("    name: Bump", "    name: Bump\n    enabled: false"));
+    expect(await w.executor.enabledForWake(TASKS)).toBe(false);
+    await w.writeAutomations("Moved", "[]");
+    expect(await w.executor.enabledForWake(TASKS)).toBe(false);
+  });
+
   it.each([false, true])("uses otherwise when a guarded formula has no Details (Only if: %s)", async (onlyIf) => {
     const w = await world({ automations: { Tasks: [
       "  - id: guarded", "    name: Guarded", "    when: {field-changed: Status}",
@@ -3835,19 +3859,31 @@ describe("Collection automations that wake your agent", () => {
     expect(run!.writes).toEqual([{ kind: "message", messageId: w.messages[0]!.messageId, name: "your agent" }]);
   });
 
-  it("does not run an automation that wakes an agent where the host cannot wake one, and says so before it runs", async () => {
-    const cannot = "This server cannot wake your agent.";
-    const w = await world({ automations: { Tasks: `${ask}
-  - id: stamp
-    name: Stamp
-    when: {field-changed: Status}
-    do: [{set: {Stamped: true}}]` } });
-    const executor = w.makeExecutor({ wakeUnavailable: cannot });
+  it.each([undefined, "automation-wake:later"])("records a server hand-off after reach, including supersession (%s)", async (supersededBy) => {
+    const w = await world({ automations: { Tasks: ask } });
+    const writes: AutomationChatMessage[] = [];
+    const executor = w.makeExecutor({
+      chat: {
+        directory: async (roster) => chatDirectoryOf([], roster),
+        write: async (_signal, message) => {
+          writes.push(message);
+          return new AutomationWakeSent("automation-wake:receipt", "Ice", supersededBy);
+        },
+      },
+    });
+    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }));
     await executor.open();
-    const { automations } = await executor.automationsIn("Tasks") as { automations: Array<{ automation: { id: string }; cannotRun: string | null }> };
-    expect(automations.map(({ automation, cannotRun }) => [automation.id, cannotRun])).toEqual([["ask", cannot], ["stamp", null]]);
-    expect(w.subscriptions.has("collection:Tasks#ask")).toBe(false);
-    expect(w.subscriptions.has("collection:Tasks#stamp")).toBe(true);
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(writes).toHaveLength(1);
+    const [run] = (await executor.runs("collection:Tasks#ask")).runs;
+    expect(run!.writes).toEqual([{ kind: "notice", noticeId: "automation-wake:receipt", name: "Ice", ...(supersededBy ? { supersededBy } : {}) }]);
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    const stopped = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "two", { Status: "Done" }));
+    executor.notifyClaimed();
+    await w.settledClaim(stopped);
+    expect(stopped.state).toBe("failed");
+    expect(writes).toHaveLength(1);
   });
 
   it("wakes the agent for a change an agent or another automation made, one level deeper", async () => {

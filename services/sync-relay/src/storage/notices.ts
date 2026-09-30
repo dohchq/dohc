@@ -1,6 +1,9 @@
 import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
 import { createHash } from "node:crypto";
 import {
+  AUTOMATION_WAKE_PREFIX,
+  isAutomationWake,
+  type AutomationWake,
   NOTICE_DISMISSED_RETENTION_MS,
   NOTICE_FROM_PREFIX,
   NOTICE_ID_MAX_CHARS,
@@ -119,6 +122,7 @@ export function noticeIdFrom(senderUserId: string, noticeId: string): string {
  * nothing.
  */
 export function postNotice(storage: StorageContext, input: PostNoticeInput): void {
+  if (input.noticeId.startsWith(AUTOMATION_WAKE_PREFIX)) throw badRequest("noticeId is reserved for agent wakes");
   const self = input.recipientUserId === input.senderUserId;
   const noticeId = self ? input.noticeId : noticeIdFrom(input.senderUserId, input.noticeId);
   if ([...noticeId].length > NOTICE_ID_MAX_CHARS) throw badRequest("noticeId is too long for this sender");
@@ -137,6 +141,83 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
     sweepExpiredNotices(storage, input.recipientUserId, input.nowMs);
     makeRoom(storage, input.recipientUserId, self ? null : input.senderUserId, input.nowMs);
     insertNotice(storage, { ...input, noticeId, placement });
+  });
+}
+
+export interface PostAutomationWakeInput {
+  workspaceId: string;
+  ownerUserId: string;
+  effectId: string;
+  claimId: string;
+  keySeed: string;
+  startedAtMs: number;
+  wake: AutomationWake;
+  senderLabel: string;
+  nowMs: number;
+}
+
+// A saved server run can send its wake for 30 days after it began.
+export const AUTOMATION_WAKE_RETRY_MS = 30 * 24 * 60 * 60 * 1000;
+export interface PostedAutomationWake {
+  noticeId: string;
+  superseded: Array<{ noticeId: string; claimId: string; keySeed: string }>;
+  supersededBy: string | null;
+}
+
+/** Called in process by the server executor after its personal-step reach check. */
+export function postAutomationWake(storage: StorageContext, input: PostAutomationWakeInput): PostedAutomationWake {
+  if (!isAutomationWake(input.wake)) throw badRequest("invalid automation wake");
+  const noticeId = AUTOMATION_WAKE_PREFIX + createHash("sha256")
+    .update(JSON.stringify([input.workspaceId, input.effectId])).digest("hex");
+  return storage.tx(() => {
+    if (!storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId)) throw relayError("notice_refused");
+    if (!Number.isSafeInteger(input.startedAtMs) || input.startedAtMs > input.nowMs || input.nowMs - input.startedAtMs > AUTOMATION_WAKE_RETRY_MS) {
+      throw badRequest("This server run is too old to send an agent wake. Start a new run.");
+    }
+    const result = (): PostedAutomationWake => ({ noticeId,
+      supersededBy: (storage.db.prepare("SELECT superseded_by FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND notice_id = ?")
+        .get(input.ownerUserId, noticeId)?.superseded_by as string | null | undefined) ?? null,
+      superseded: storage.db.prepare(
+      "SELECT notice_id, claim_id, key_seed FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND superseded_by = ?",
+    ).all(input.ownerUserId, noticeId).map((row) => ({ noticeId: String(row.notice_id), claimId: String(row.claim_id), keySeed: String(row.key_seed) })) });
+    if (storage.db.prepare("SELECT 1 FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND notice_id = ?")
+      .get(input.ownerUserId, noticeId)) return result();
+    if (storage.db.prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
+      .get(input.ownerUserId, noticeId)) return result();
+    const nextSeq = changeSequence(storage, input.ownerUserId);
+    const older = storage.db.prepare(
+      `SELECT n.notice_id, w.claim_id, w.key_seed FROM sync_relay_notices n JOIN sync_relay_automation_wakes w
+       USING (recipient_user_id, notice_id) WHERE n.recipient_user_id = ? AND n.workspace_id = ?
+       AND n.dismissed_at_ms IS NULL AND n.removed_at_ms IS NULL AND json_extract(w.payload_json, '$.automationId') = ?
+       AND json_extract(w.payload_json, '$.body') = ?`,
+    ).all(input.ownerUserId, input.workspaceId, input.wake.automationId, input.wake.body);
+    const supersede = storage.db.prepare(
+      `INSERT INTO sync_relay_automation_wake_receipts
+       (recipient_user_id, notice_id, workspace_id, claim_id, key_seed, superseded_by, dismissed_at_ms, winner_install_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+    );
+    const remove = storage.db.prepare(
+      `UPDATE sync_relay_notices SET removed_at_ms = ?, body = '', target_json = NULL, expires_at_ms = ?, change_seq = ?
+       WHERE recipient_user_id = ? AND notice_id = ?`,
+    );
+    const removeWake = storage.db.prepare("DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+    for (const row of older) {
+      supersede.run(input.ownerUserId, row.notice_id, input.workspaceId, row.claim_id, row.key_seed, noticeId, input.nowMs);
+      remove.run(input.nowMs, input.nowMs + NOTICE_REMOVED_RETENTION_MS, nextSeq(), input.ownerUserId, row.notice_id);
+      removeWake.run(input.ownerUserId, row.notice_id);
+    }
+    sweepExpiredNotices(storage, input.ownerUserId, input.nowMs);
+    makeRoom(storage, input.ownerUserId, null, input.nowMs);
+    insertNotice(storage, {
+      recipientUserId: input.ownerUserId, noticeId,
+      placement: { workspaceId: input.workspaceId, recipientShareId: null },
+      kind: "automation-wake", senderUserId: input.ownerUserId, senderLabel: input.senderLabel,
+      title: "Your agent has work waiting", body: "Open dohc on a computer with your agent set up to run this step.",
+      target: { automation: input.wake.automationId }, originInstallId: "server", nowMs: input.nowMs,
+    });
+    storage.db.prepare("INSERT INTO sync_relay_automation_wakes (recipient_user_id, notice_id, payload_json, claim_id, key_seed) VALUES (?, ?, ?, ?, ?)")
+      .run(input.ownerUserId, noticeId, JSON.stringify(input.wake), input.claimId, input.keySeed);
+    return result();
   });
 }
 
@@ -321,7 +402,7 @@ function insertNotice(storage: StorageContext, row: NoticeRowInput): void {
     JSON.stringify(row.target),
     row.originInstallId,
     row.nowMs,
-    row.nowMs + NOTICE_UNREAD_RETENTION_MS,
+    row.kind === "automation-wake" ? Number.MAX_SAFE_INTEGER : row.nowMs + NOTICE_UNREAD_RETENTION_MS,
   );
   // A row placed through a share was checked against the grants of this
   // moment, which a stored digest may not describe, so the next pull checks
@@ -349,6 +430,7 @@ export function readNoticeChanges(
   storage: StorageContext,
   input: ReadNoticeChangesInput,
 ): RelayNoticePage {
+  settleLostWakeOwnership(storage, input.recipientUserId, input.nowMs);
   settleLostReach(storage, input.recipientUserId, input.nowMs);
   return storage.readTx(() => {
     const list = storage.db.prepare(
@@ -381,7 +463,17 @@ export function readNoticeChanges(
        ORDER BY change_seq LIMIT ?`,
     ).all(input.recipientUserId, since, input.nowMs, snapshotHead ?? 0, input.limit + 1);
     const hasMore = rows.length > input.limit;
-    const notices = rows.slice(0, input.limit).map(rowToNotice);
+    const readWake = storage.db.prepare("SELECT payload_json FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+    const notices = rows.slice(0, input.limit).map((row) => {
+      const notice = rowToNotice(row);
+      if (notice.kind === "automation-wake" && !notice.removed && notice.workspaceId !== null &&
+        storage.workspaceIsOwnedBy(notice.workspaceId, input.recipientUserId)) {
+        const payload = readWake
+          .get(input.recipientUserId, notice.noticeId);
+        if (payload) notice.wake = JSON.parse(String(payload.payload_json)) as AutomationWake;
+      }
+      return notice;
+    });
     // Every change after the last row served is expired or replaced by a
     // later change, so a finished pull can move its cursor to the head.
     const nextCursor = hasMore
@@ -399,6 +491,7 @@ export function readNoticeChanges(
  */
 export function markNotices(storage: StorageContext, input: MarkNoticesInput): string[] {
   return storage.tx(() => {
+    const nextSeq = changeSequence(storage, input.recipientUserId);
     const dismissed: string[] = [];
     let receipts = 0;
     const receipt = storage.db.prepare(
@@ -408,6 +501,14 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): s
     const winner = storage.db.prepare(
       `SELECT winner_install_id FROM sync_relay_notice_dismissals WHERE recipient_user_id = ? AND notice_id = ?`,
     );
+    // Wake receipts cover the retry window independently of ordinary notices.
+    const wakeReceipt = storage.db.prepare(
+      `INSERT OR IGNORE INTO sync_relay_automation_wake_receipts
+       (recipient_user_id, notice_id, workspace_id, dismissed_at_ms, winner_install_id) VALUES (?, ?, ?, ?, ?)`,
+    );
+    const wakeWinner = storage.db.prepare(
+      "SELECT winner_install_id, workspace_id FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND notice_id = ?",
+    );
     // A skipped-schedule notice at or below its schedule's floor may be one
     // whose earlier receipt went: its dismissal is never first.
     const floored = (noticeId: string) => {
@@ -415,33 +516,48 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): s
       return skipped !== null && reclaimedFor(storage, input.recipientUserId, skipped) !== null;
     };
     const read = storage.db.prepare(
-      `SELECT read_at_ms, dismissed_at_ms FROM sync_relay_notices
+      `SELECT read_at_ms, dismissed_at_ms, kind, workspace_id FROM sync_relay_notices
        WHERE recipient_user_id = ? AND notice_id = ? AND expires_at_ms > ? AND removed_at_ms IS NULL`,
     );
+    const markRow = (column: string) => storage.db.prepare(
+      `UPDATE sync_relay_notices SET ${column} = ?, expires_at_ms = ?, change_seq = ?
+       WHERE recipient_user_id = ? AND notice_id = ?`,
+    );
+    const markRead = markRow("read_at_ms");
+    const markDismissed = markRow("dismissed_at_ms");
+    const removeWake = storage.db.prepare("DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
     for (const { noticeId, mark } of input.marks) {
+      const wake = noticeId.startsWith(AUTOMATION_WAKE_PREFIX);
+      if (wake && mark === "dismissed" && input.installId === undefined) {
+        throw relayError("notice_refused", "Only a computer consuming this agent wake can dismiss it.");
+      }
+      if (wake && input.installId === "server") continue;
       if (mark === "dismissed" && input.installId !== undefined && !dismissed.includes(noticeId)) {
-        const held = winner.get(input.recipientUserId, noticeId) as { winner_install_id: string | null } | undefined;
-        if (held?.winner_install_id === input.installId && !floored(noticeId)) dismissed.push(noticeId);
+        const held = (wake ? wakeWinner : winner).get(input.recipientUserId, noticeId);
+        if (wake && held && !storage.workspaceIsOwnedBy(String(held.workspace_id), input.recipientUserId)) throw relayError("notice_refused");
+        const authorized = !wake || !!held;
+        if (held?.winner_install_id === input.installId && authorized && !floored(noticeId)) dismissed.push(noticeId);
       }
       const row = read.get(input.recipientUserId, noticeId, input.nowMs);
       if (!row || row.dismissed_at_ms !== null || (mark === "read" && row.read_at_ms !== null)) continue;
-      const [column, retentionMs] = mark === "read"
-        ? ["read_at_ms", NOTICE_READ_RETENTION_MS]
-        : ["dismissed_at_ms", NOTICE_DISMISSED_RETENTION_MS];
-      storage.db.prepare(
-        `UPDATE sync_relay_notices SET ${column} = ?, expires_at_ms = ?, change_seq = ?
-         WHERE recipient_user_id = ? AND notice_id = ?`,
-      ).run(
+      if (row.kind === "automation-wake" && !storage.workspaceIsOwnedBy(String(row.workspace_id), input.recipientUserId)) {
+        if (mark === "read") continue;
+        throw relayError("notice_refused");
+      }
+      const retentionMs = mark === "read" ? NOTICE_READ_RETENTION_MS : NOTICE_DISMISSED_RETENTION_MS;
+      (mark === "read" ? markRead : markDismissed).run(
         input.nowMs,
-        input.nowMs + retentionMs,
-        nextChangeSeq(storage, input.recipientUserId),
-        input.recipientUserId,
-        noticeId,
+        wake && mark === "read" ? Number.MAX_SAFE_INTEGER : input.nowMs + retentionMs,
+        nextSeq(), input.recipientUserId, noticeId,
       );
-      const inserted = mark === "dismissed" &&
-        Number(receipt.run(input.recipientUserId, noticeId, input.nowMs, input.installId ?? null).changes ?? 0) === 1;
+      const inserted = mark === "dismissed" && Number((wake
+        ? wakeReceipt.run(input.recipientUserId, noticeId, row.workspace_id, input.nowMs, input.installId ?? null)
+        : receipt.run(input.recipientUserId, noticeId, input.nowMs, input.installId ?? null)).changes ?? 0) === 1;
+      if (mark === "dismissed" && row.kind === "automation-wake") {
+        removeWake.run(input.recipientUserId, noticeId);
+      }
       if (inserted) {
-        receipts += 1;
+        if (!wake) receipts += 1;
         if (!floored(noticeId) && !dismissed.includes(noticeId)) dismissed.push(noticeId);
       }
     }
@@ -658,6 +774,30 @@ function reachToken(storage: StorageContext, userId: string): string {
   return createHash("sha256").update(JSON.stringify(noticeReachReads(storage, userId))).digest("hex");
 }
 
+function settleLostWakeOwnership(storage: StorageContext, recipientUserId: string, nowMs: number): void {
+  const readLost = storage.db.prepare(
+    `SELECT notice_id FROM sync_relay_notices n
+     WHERE recipient_user_id = ? AND kind = 'automation-wake'
+       AND dismissed_at_ms IS NULL AND removed_at_ms IS NULL
+       AND NOT EXISTS (SELECT 1 FROM sync_relay_workspaces w
+         WHERE w.workspace_id = n.workspace_id AND w.owner_user_id = n.recipient_user_id)`,
+  );
+  if (storage.readTx(() => readLost.all(recipientUserId)).length === 0) return;
+  storage.tx(() => {
+    const lost = readLost.all(recipientUserId);
+    const remove = storage.db.prepare(
+      `UPDATE sync_relay_notices SET removed_at_ms = ?, body = '', target_json = NULL, expires_at_ms = ?, change_seq = ?
+       WHERE recipient_user_id = ? AND notice_id = ?`,
+    );
+    const removeWake = storage.db.prepare("DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+    const nextSeq = changeSequence(storage, recipientUserId);
+    for (const row of lost) {
+      remove.run(nowMs, nowMs + NOTICE_REMOVED_RETENTION_MS, nextSeq(), recipientUserId, row.notice_id);
+      removeWake.run(recipientUserId, row.notice_id);
+    }
+  });
+}
+
 // Rechecks rows read through a share, in one pass inside the write
 // transaction, and only when the reads behind the recipient's access
 // changed since the last check. Each row whose recipient no longer reads
@@ -761,6 +901,7 @@ function removeRows(
   const pick = (sender: string | null, state: string, limit: number) => storage.db.prepare(
     `SELECT notice_id FROM sync_relay_notices
      WHERE recipient_user_id = ? AND removed_at_ms IS NULL AND ${state}
+       AND NOT (kind = 'automation-wake' AND dismissed_at_ms IS NULL)
        ${sender === null ? "" : "AND sender_user_id = ?"}
      ORDER BY created_at_ms, notice_id LIMIT ?`,
   ).all(recipientUserId, ...(sender === null ? [] : [sender]), limit).map((row) => String(row.notice_id));
@@ -771,9 +912,14 @@ function removeRows(
      SET removed_at_ms = ?, body = '', target_json = NULL, expires_at_ms = ?, change_seq = ?
      WHERE recipient_user_id = ? AND notice_id = ?`,
   );
+  const removeWake = storage.db.prepare("DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+  const nextSeq = changeSequence(storage, recipientUserId);
   for (const noticeId of noticeIds) {
-    tombstone.run(nowMs, nowMs + NOTICE_REMOVED_RETENTION_MS, nextChangeSeq(storage, recipientUserId),
+    tombstone.run(nowMs, nowMs + NOTICE_REMOVED_RETENTION_MS, nextSeq(),
       recipientUserId, noticeId);
+    if (noticeId.startsWith(AUTOMATION_WAKE_PREFIX)) {
+      removeWake.run(recipientUserId, noticeId);
+    }
   }
   return noticeIds.length;
 }
@@ -782,6 +928,8 @@ function removeRows(
 // recipient's expired rows go first so they never count against the list's
 // limit, then a bounded batch from every list.
 function sweepExpiredNotices(storage: StorageContext, recipientUserId: string, nowMs: number): void {
+  storage.db.prepare("DELETE FROM sync_relay_automation_wake_receipts WHERE dismissed_at_ms < ?")
+    .run(nowMs - AUTOMATION_WAKE_RETRY_MS);
   raiseFloors(storage, storage.db.prepare(
     `DELETE FROM sync_relay_notices WHERE recipient_user_id = ? AND expires_at_ms <= ?
      RETURNING recipient_user_id, change_seq`,
@@ -808,13 +956,17 @@ function raiseFloors(storage: StorageContext, deleted: readonly Record<string, u
 }
 
 function nextChangeSeq(storage: StorageContext, recipientUserId: string): number {
-  const row = storage.db.prepare(
+  return changeSequence(storage, recipientUserId)();
+}
+
+function changeSequence(storage: StorageContext, recipientUserId: string): () => number {
+  const increment = storage.db.prepare(
     `INSERT INTO sync_relay_notice_lists (recipient_user_id, change_seq, floor_seq, reach_token)
      VALUES (?, 1, 0, NULL)
      ON CONFLICT (recipient_user_id) DO UPDATE SET change_seq = change_seq + 1
      RETURNING change_seq`,
-  ).get(recipientUserId);
-  return Number(row!.change_seq);
+  );
+  return () => Number(increment.get(recipientUserId)!.change_seq);
 }
 
 function rowToNotice(row: Record<string, unknown>): RelayNotice {

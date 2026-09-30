@@ -49,6 +49,33 @@ describe("the automation run store", () => {
     await store.updateState(saved, { undo: "done", undoKept });
     expect((await store.runsOf(AUTOMATION, "atc_one")).runs).toEqual([{ ...saved, undo: "done", undoKept }]);
   });
+  it("keeps the later run that superseded a server wake", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("old", "done", 1);
+    saved.applied = [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice; agent wake superseded by a later run", supersededBy: "new/hash/0/wake" }] }];
+    await store.save(saved);
+    expect((await store.runsOf(AUTOMATION, "old")).runs).toEqual([saved]);
+  });
+
+  it("marks a superseded wake without overwriting newer step progress or Undo state", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-automation-runs-"), testMetadataDir);
+    const saved = run("old", "done", 1);
+    saved.applied = [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice" }] }];
+    await store.save(saved);
+    const later = { ordinal: 1, writes: [{ kind: "field" as const, recordId: "rec_a", path: "Tasks/a.md", field: "A", before: null, after: 1 }] };
+    await Promise.all([
+      store.appendEffect(saved, later),
+      store.updateState(saved, { undo: "started" }),
+      store.supersedeWake(AUTOMATION, saved.claimId, saved.keySeed, "wake", "new"),
+    ]);
+    await store.supersedeWake(AUTOMATION, saved.claimId, saved.keySeed, "wake", "new");
+    expect((await store.runsOf(AUTOMATION, "old")).runs).toEqual([{
+      ...saved, undo: "started", applied: [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice; agent wake superseded by a later run", supersededBy: "new" }] }, later],
+    }]);
+    await expect(store.supersedeWake(AUTOMATION, "expired", saved.keySeed, "wake", "new")).resolves.toBeUndefined();
+  });
+
   it("keeps each claim's runs under the workspace's metadata folder and reads them back as written", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);

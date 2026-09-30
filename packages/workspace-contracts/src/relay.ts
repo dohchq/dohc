@@ -444,6 +444,7 @@ export const NOTICE_KINDS = {
   "automation-notify": { senderKind: "automation", recipients: "readers" },
   // Someone switched off an automation you last changed.
   "automation-switched-off": { senderKind: "person", recipients: "readers" },
+  "automation-wake": { senderKind: "automation", recipients: "relay" },
   // A share reached you. The relay writes it from the granter when a named
   // grant becomes active for you.
   "share-received": { senderKind: "person", recipients: "relay" },
@@ -567,9 +568,30 @@ export type PostNoticeRequest = NoticeReach & NoticeRecipient & {
   originInstallId: string;
 };
 
+export const AUTOMATION_WAKE_PREFIX = "automation-wake:";
+
+/** A checked personal step, with no executable or destination authority. */
+export interface AutomationWake {
+  automationId: string;
+  name: string;
+  depth: number;
+  body: string;
+}
+
+export function isAutomationWake(value: unknown): value is AutomationWake {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const wake = value as Record<string, unknown>;
+  return isNoticeLine(wake.automationId, 1024) && isNoticeLine(wake.name, 120) &&
+    Number.isInteger(wake.depth) && Number(wake.depth) >= 1 && Number(wake.depth) <= 4 &&
+    typeof wake.body === "string" && new TextEncoder().encode(wake.body).byteLength <= 65_536 &&
+    Object.keys(wake).every((key) => ["automationId", "name", "depth", "body"].includes(key));
+}
+
 // One row of GET /sync/notices?cursor=<nextCursor>. `changeSeq` rises on every
 // change to the row, including read and dismissed, and counts per person.
 export interface RelayNotice {
+  /** Only the relay creates wake payloads. */
+  wake?: AutomationWake;
   noticeId: string;
   changeSeq: number;
   // Exactly one of these is set. `workspaceId` is the workspace when the
