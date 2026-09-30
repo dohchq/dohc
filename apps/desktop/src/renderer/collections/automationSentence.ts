@@ -62,7 +62,9 @@ export function triggerParts(trigger: AutomationTrigger): SentencePart[] {
     case "record-removed":
       return [text("When a record is removed")];
     case "record-changed":
-      return [text(trigger.fields === null ? "When a record changes" : `When ${orList(trigger.fields)} changes`)];
+      // The builder's Chosen fields holds no field until someone ticks one.
+      return [text(trigger.fields === null ? "When a record changes"
+        : trigger.fields.length === 0 ? "When a chosen field changes" : `When ${orList(trigger.fields)} changes`)];
     case "field-changed":
       if (trigger.to === null) return [text(`When ${trigger.field} changes`)];
       if (trigger.to.kind === "literal" && trigger.to.value === null) return [text(`When ${trigger.field} is cleared`)];

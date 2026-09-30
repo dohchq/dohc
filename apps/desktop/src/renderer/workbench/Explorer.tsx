@@ -119,10 +119,10 @@ export interface ExplorerProps {
   // keyboard expand/collapse is untouched.
   collectionFolders: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
-  dataCollections?: Array<{ datasetId: string; tableId: string; name: string; archived?: boolean }>;
+  dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
   includeArchivedCollections?: boolean;
   onIncludeArchivedCollections?(enabled: boolean): void;
-  onOpenDataCollection?: (datasetId: string, tableId: string) => void;
+  onOpenDataCollection?: (datasetPath: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
   onRestoreCollection?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
@@ -160,7 +160,7 @@ type EditingState =
   | { mode: "create"; kind: "file" | "folder"; parentPath: string }
   | { mode: "rename"; path: string; isFolder: boolean };
 
-type VisibleRow = FlatRow & {
+export type VisibleRow = FlatRow & {
   kind: WorkspaceFileEntry["kind"] | null;
   positionInSet: number;
   setSize: number;
@@ -308,8 +308,9 @@ function rangeAroundIndex(index: number, itemCount: number): VirtualRange {
 }
 
 // Memoized row: primitives + stable callbacks only, so a selection change
-// re-renders the rows whose state changed, not the whole tree.
-const TreeRow = memo(function TreeRow(props: {
+// re-renders the rows whose state changed, not the whole tree. Exported for
+// the states page, which shows it in each of its states.
+export const TreeRow = memo(function TreeRow(props: {
   row: VisibleRow;
   // The engine lists this folder as a collection, so a row click opens its
   // views. Exposed as data-collection so tests can gate on the state before
@@ -1643,10 +1644,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       >
         {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
           <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
-          {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`}
+          {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
             className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
-            onClick={() => props.onOpenDataCollection?.(collection.datasetId, collection.tableId)}>
-            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
+            onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
+            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
           </button>)}
           {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
           {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}

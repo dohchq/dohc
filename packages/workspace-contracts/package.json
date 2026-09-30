@@ -20,8 +20,11 @@
     "./engine": "./src/engine.ts",
     "./file-version": "./src/fileVersion.ts",
     "./live-documents": "./src/liveDocuments.ts",
+    "./path-floor": "./src/pathFloor.ts",
     "./relay": "./src/relay.ts",
     "./relay-values": "./src/relayValues.ts",
+    "./workspace-paths": "./src/workspacePaths.ts",
+    "./dataset-path": "./src/datasetPath.ts",
     "./workspace-settings": "./src/workspaceSettings.ts",
     "./workspace-settings-values": "./src/workspaceSettingsValues.ts"
   },

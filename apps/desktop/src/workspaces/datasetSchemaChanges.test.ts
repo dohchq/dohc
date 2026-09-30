@@ -1,9 +1,8 @@
-import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { datasetColumnFields, datasetRevisionsPreserveAccess, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
@@ -14,7 +13,6 @@ import { createDatasetHandler } from "../ipc/datasetIpc";
 import { datasetDefinitionFromDrafts } from "../renderer/collections/datasetDefinitionFromDrafts";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const digest = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js",
   tables: [{ tableId: id(2), name: "People", sqlName: "people", primaryKey: "id", fields: [
     { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
@@ -29,19 +27,10 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const run of cleanup.splice(0).reverse()) await run(); });
 async function fixture(initial: DatasetDefinition = definition, remote = false) {
   const root = await mkdtemp(join(tmpdir(), "dohc-schema-evolution-"));
-  const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024 });
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024 });
   cleanup.push(async () => { await host.close(); await rm(root, { recursive: true, force: true }); });
-  const files = new Map(Object.entries(generateDatasetSources(initial).files)), blobs = new Map<string, Uint8Array>();
-  const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
-    const input = request.params as Record<string, unknown>;
-    if (request.method === "versionedText.captureSources") {
-      const selected = [...input.paths as string[]].sort().map(path => { const bytes = Buffer.from(files.get(path)!); const sha256 = digest(bytes); blobs.set(sha256, bytes);
-        return { path, objectId: path, contentKind: "text", sha256, byteLength: bytes.byteLength, latestMomentId: "m" }; });
-      return { id: request.id, result: { workspaceId: "w", versionId: "main", files: selected, totalBytes: selected.reduce((n, f) => n + f.byteLength, 0), sourceDigest: digest(JSON.stringify(["dohc-source-capture-v1", "w", "main", selected])) } };
-    }
-    const bytes = blobs.get(String(input.sha256))!;
-    return { id: request.id, result: { bytesBase64: Buffer.from(bytes).toString("base64"), byteLength: bytes.byteLength } };
-  } }, "owner", { workspaceId: "w" });
+  const files = new Map(Object.entries(generateDatasetSources(initial).files));
+  const adapter = sourceCaptureAdapter(files);
   const first = await host.prepare({ descriptorPath: "people/dataset.json", adapter });
   const revision = await host.approve({ preparationId: first.preparationId, revisionSha256: first.revision.revisionSha256 });
   const workspace = { workspaceId: "w" };
@@ -60,10 +49,10 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
       alterSources?.(Object.keys(sources));
     } });
   async function prepare(change: DatasetSchemaChange, current = host.approvedArtifacts(id(1)).revision) {
-    const result = await handler("owner", { action: "prepareSchemaChange", workspaceId: "w", datasetId: id(1), revision: current.revision, revisionSha256: current.revisionSha256, change });
+    const result = await handler("owner", { action: "prepareSchemaChange", workspaceId: "w", datasetPath: "people/dataset.json", revision: current.revision, revisionSha256: current.revisionSha256, change });
     if (result.kind !== "migration-prepared") throw new Error("Expected a review"); return result;
   }
-  return { host, files, revision, prepare, handler, tamper(fn: (paths: string[]) => void) { alterSources = fn; },
+  return { host, files, adapter, revision, prepare, handler, tamper(fn: (paths: string[]) => void) { alterSources = fn; },
     changeCredentials() { credentialGeneration++; }, changeScope() { scope = "window:2"; }, changeLifetime() { signal = new AbortController().signal; } };
 }
 const call = (revision: DatasetRevision, operationId: string, input = {}, key = "read") => ({ datasetId: id(1), revision: revision.revision,
@@ -132,9 +121,9 @@ it("refuses a button from a shared view before writing any source", async () => 
     grantedSelector: { paths: ["people"], versionId: null, access: "edit" } };
   const recipient = createDatasetHandler({ flushSourceCapture: async () => {}, hostForWorkspace: async () => f.host,
     withWorkspaceOperation: async (_caller, _id, work) => work({ workspace: { workspaceId: "w", shareView }, signal: new AbortController().signal, assertCurrent() {} }),
-    withAdapter: async () => { throw new Error("A shared view has no source to capture."); },
+    withAdapter: async (_workspace, work) => work(f.adapter),
     createSources: async (_workspace, sources) => { written.push(...Object.keys(sources)); } });
-  await expect(recipient("editor", { action: "prepareSchemaChange", workspaceId: "w", datasetId: id(1), revision: f.revision.revision,
+  await expect(recipient("editor", { action: "prepareSchemaChange", workspaceId: "w", datasetPath: "people/dataset.json", revision: f.revision.revision,
     revisionSha256: f.revision.revisionSha256, change: { kind: "addButton", tableId: id(2), name: "Send receipt" } })).rejects.toThrow("Open the original workspace to manage this Collection.");
   expect(written).toEqual([]);
   expect(f.host.describe(id(1)).revision).toBe(1);
@@ -347,7 +336,7 @@ it.each([false, true])("reviews public relation choices on the current authority
     relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } });
   const f = await fixture(initial, remote);
   const added = await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Ada" } }, "relation-choice-record"));
-  const result = await f.handler("owner", { action: "prepareRelationChoices", workspaceId: "w", datasetId: id(1),
+  const result = await f.handler("owner", { action: "prepareRelationChoices", workspaceId: "w", datasetPath: "people/dataset.json",
     revision: f.revision.revision, revisionSha256: f.revision.revisionSha256, tableId: id(2), fieldId: id(10), labelFieldId: id(4) });
   if (result.kind !== "migration-prepared") throw Error("Expected explicit choice review");
   const choice = result.revision.definition.operations.at(-1)!;
@@ -364,7 +353,7 @@ it.each([false, true])("reviews public relation choices on the current authority
 it("refuses stale relation exposure requests before writing source", async () => {
   const f = await fixture();
   const before = f.files.size;
-  await expect(f.handler("owner", { action: "prepareRelationChoices", workspaceId: "w", datasetId: id(1), revision: 1,
+  await expect(f.handler("owner", { action: "prepareRelationChoices", workspaceId: "w", datasetPath: "people/dataset.json", revision: 1,
     revisionSha256: "0".repeat(64), tableId: id(2), fieldId: id(4), labelFieldId: id(4) })).rejects.toThrow("Collection rules changed");
   expect(f.files.size).toBe(before);
 });

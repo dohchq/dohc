@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, matchesGlob, resolve } from "node:path";
-import { prepare, assertPrepared, sourceFingerprint, buildEnvironment, enginePath, hashFile } from "./build.mjs";
+import { prepare, assertPrepared, assertIndependentStagedEngine, sourceFingerprint, buildEnvironment, stagedEnginePath, hashFile } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
@@ -11,6 +11,7 @@ import { startTiming, timed } from "./timing.mjs";
 import { testWorkspace } from "./js-tests.mjs";
 import { readWorkspacePackages, selectJavaScript } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
+import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
@@ -175,8 +176,8 @@ export async function verify(args) {
     });
   }
   let database;
-  let rustFailure;
-  let desktopEnvironment = process.env;
+  let lane;
+  let desktopEnvironment = {...process.env, DOHC_TEST_ENGINE_BINARY: stagedEnginePath};
   async function checkedStep(row, action) {
     await cancellation.checkpoint();
     report.steps.push(row); save();
@@ -205,6 +206,8 @@ export async function verify(args) {
       report.verdict = "PASS";
       return report;
     }
+    // One PR gate at a time per host; the wait is recorded as `queue`.
+    if (mode === "pr") lane = await measure("queue", () => acquireVerificationSlot());
     const needs = mode === "pr" ? (javascript?.needs ?? {engine: false, desktop: false, postgres: false}) : {engine: true, desktop: true};
     const proofs = mode === "pr" ? (javascript?.proofs ?? {}) : {desktop: true};
     const native = gates.rust || needs.engine || needs.desktop;
@@ -216,76 +219,83 @@ export async function verify(args) {
     await cancellation.checkpoint();
     if (report.doctor.checks.some((check) => check.state === "FAIL")) throw new Error("Preflight failed. Read result.json and run pnpm setup:worktree.");
     await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
-    if (mode === "pr" && gates.rust) {
+    const preparedOptions = {engineOnly: !needs.desktop, engineBinary: stagedEnginePath};
+    if (needs.engine || needs.desktop) {
+      await measure("prepare", () => prepare({ ...preparedOptions, output, install: mode !== "pr" }));
+      report.build = await measure("prepared-build", () => assertPrepared(preparedOptions)); save();
+      if (gates.rust) assertIndependentStagedEngine();
+      await checkTree("prepare");
+    }
+    async function rustJob() {
+      if (mode !== "pr" || !gates.rust) return;
       try {
         const pins = require("js-yaml").load(workflow).env;
         for (const [tool, variable] of [["deny", "CARGO_DENY_VERSION"], ["audit", "CARGO_AUDIT_VERSION"], ["nextest", "CARGO_NEXTEST_VERSION"]]) {
           const result = await step(`cargo-${tool}-version`, "cargo", [tool, "--version"]);
           if (result.stdout.split(/\r?\n/)[0].split(/\s+/)[1] !== pins[variable]) throw new Error(`Install cargo-${tool} ${pins[variable]} to match the workflow.`);
         }
-        await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs"], buildEnvironment());
+        await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
         await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
       } catch (error) {
-        if (!gates.js) throw error;
-        // Keep the Rust cause visible while JS runs, and in result.json if JS fails too.
         report.rustError = error.message; save();
-        console.error(`[verification] Rust job failed; running the JS job anyway: ${error.message}`);
         await checkTree("rust-failure");
-        rustFailure = error;
+        throw error;
       }
     }
-    const preparedOptions = {engineOnly: !needs.desktop};
-    if (needs.engine || needs.desktop) {
-      await measure("prepare", () => prepare({ ...preparedOptions, output, install: mode !== "pr" }));
-      report.build = await measure("prepared-build", () => assertPrepared(preparedOptions)); save();
-      await checkTree("prepare");
+    async function javascriptJob() {
+      if (mode === "pr" && gates.js) {
+        if (needs.postgres) {
+          database = await measure("postgres-start", () => postgres(output, run, measure));
+          report.postgres = { id: database.id }; save();
+        }
+        const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
+        desktopEnvironment = env;
+        await step("typecheck", ...pnpm(["run", "typecheck"]), env);
+        report.jsTests = join(output, "js-tests", "result.json");
+        // Keep package groups under this owner so cancellation finishes their
+        // escalation before database cleanup, without a competing parent timer.
+        await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
+          () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages, testFiles: javascript.testFiles,
+            beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled) }));
+        if (proofs.selfHostNative) {
+          const nativeOutput = join(output, "self-host-native");
+          mkdirSync(nativeOutput, {recursive: true});
+          const nativeHash = hashFile(stagedEnginePath);
+          await step("self-host-native", ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
+            "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`]),
+            {...env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
+          report.selfHostNative = readSelfHostNativeProof(nativeOutput, stagedEnginePath, nativeHash); save();
+        }
+        if (proofs.accounts || proofs.desktop) {
+          await step("browser-install", ...pnpm(["exec", "playwright", "install", ...(process.platform === "linux" ? ["--with-deps"] : []), "chromium"]), env);
+        }
+        if (proofs.accounts) {
+          const accountReport = join(output, "accounts-playwright.json");
+          await step("accounts", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "services/workspace-api/playwright.config.ts", "--output", join(output, "accounts"), "--reporter=list,json"], { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: accountReport });
+          report.accounts = JSON.parse(readFileSync(accountReport, "utf8")).stats;
+          if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
+        }
+      }
+      if (proofs.desktop) {
+        const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", mode === "pr" ? "@verification-smoke|@self-host-onboarding" : "@verification-smoke"];
+        const jsonReport = join(output, "playwright.json");
+        await step("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env: desktopEnvironment }), { ...desktopEnvironment, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
+        const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
+        report.desktop = desktopReport.stats;
+        report.desktopProofs = passedSpecTitles(desktopReport.suites);
+        if (!report.desktop?.expected || report.desktop.unexpected || report.desktop.flaky) throw new Error("Desktop verification did not complete a passing test run.");
+        if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
+        if (mode === "pr" && ["@verification-smoke", "@self-host-onboarding"].some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error("The desktop gate did not pass both persistence and self-host onboarding proofs.");
+      }
     }
-    if (mode === "pr" && gates.js) {
-      if (needs.postgres) {
-        database = await measure("postgres-start", () => postgres(output, run, measure));
-        report.postgres = { id: database.id }; save();
-      }
-      const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1" };
-      desktopEnvironment = env;
-      await step("typecheck", ...pnpm(["run", "typecheck"]), env);
-      report.jsTests = join(output, "js-tests", "result.json");
-      // Keep package groups under this owner so cancellation finishes their
-      // escalation before database cleanup, without a competing parent timer.
-      await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
-        () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages, testFiles: javascript.testFiles }));
-      if (proofs.selfHostNative) {
-        const nativeOutput = join(output, "self-host-native");
-        mkdirSync(nativeOutput, {recursive: true});
-        const nativeHash = hashFile(enginePath);
-        await step("self-host-native", ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
-          "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`]),
-          {...env, DOHC_SERVICE_HOST_PROOF_BINARY: enginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
-        report.selfHostNative = readSelfHostNativeProof(nativeOutput, enginePath, nativeHash); save();
-      }
-      if (proofs.accounts || proofs.desktop) {
-        await step("browser-install", ...pnpm(["exec", "playwright", "install", ...(process.platform === "linux" ? ["--with-deps"] : []), "chromium"]), env);
-      }
-      if (proofs.accounts) {
-        const accountReport = join(output, "accounts-playwright.json");
-        await step("accounts", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "services/workspace-api/playwright.config.ts", "--output", join(output, "accounts"), "--reporter=list,json"], { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: accountReport });
-        report.accounts = JSON.parse(readFileSync(accountReport, "utf8")).stats;
-        if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
-      }
-    }
-    if (proofs.desktop) {
-      const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", mode === "pr" ? "@verification-smoke|@self-host-onboarding" : "@verification-smoke"];
-      const jsonReport = join(output, "playwright.json");
-      await step("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env: desktopEnvironment }), { ...desktopEnvironment, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
-      const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
-      report.desktop = desktopReport.stats;
-      report.desktopProofs = passedSpecTitles(desktopReport.suites);
-      if (!report.desktop?.expected || report.desktop.unexpected || report.desktop.flaky) throw new Error("Desktop verification did not complete a passing test run.");
-      if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
-      if (mode === "pr" && ["@verification-smoke", "@self-host-onboarding"].some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error("The desktop gate did not pass both persistence and self-host onboarding proofs.");
-    }
+    const rustWork = rustJob();
+    const rustSettled = rustWork.then(() => {}, () => {});
+    const [rustResult, javascriptResult] = await Promise.allSettled([rustWork, javascriptJob()]);
+    await cancellation.checkpoint();
+    if (javascriptResult.status === "rejected") throw javascriptResult.reason;
+    if (rustResult.status === "rejected") throw rustResult.reason;
     if (needs.engine || needs.desktop) await measure("prepared-build:finish", () => assertPrepared(preparedOptions));
     await checkTree("finish");
-    if (rustFailure) throw rustFailure;
     report.verdict = "PASS";
   } catch (error) {
     report.verdict = "FAIL"; report.error = error.message;
@@ -296,6 +306,7 @@ export async function verify(args) {
     try { await database?.stop(); }
     catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
     const interrupted = await cancellation.dispose();
+    lane?.release();
     if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
     finishTiming(); Object.assign(report, total);
     save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);

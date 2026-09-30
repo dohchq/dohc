@@ -62,7 +62,12 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 //
 // `as` names a step's result for later steps and formulas. A find step binds
 // a list of records, an add-record step binds the one record it added, and a
-// run step binds the value its code returns. A name is a JavaScript
+// run step binds the value its code returns. Each step starts once the steps
+// before it have landed and reads records as they are then, so it sees what
+// those steps changed, in the trigger record and in the records a find or an
+// add-record step bound. A later find queries again. A step can use only the
+// results of steps that ran before it, and a formula gets a result only by
+// writing its name; code gets every one. A name is a JavaScript
 // identifier that is not in AUTOMATION_RESERVED_NAMES: a formula name, a
 // reserved word, or a standard global such as Math.
 //
@@ -70,6 +75,26 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 // workspace-relative folder paths. A code file is relative to the
 // Collection's folder and cannot leave it, so the people who can edit the
 // automation are the people who can edit its code.
+//
+// A run step's code, or a run-file step's file, is the body of a function
+// that reads `ctx`: `ctx.record`, `ctx.previous`, `ctx.trigger`,
+// `ctx.person`, `ctx.message`, each earlier step's result by its `as` name,
+// and the formula helpers. It returns nothing, or an object with any of
+// `set`, the fields to set on the trigger record; `records`, a list of
+// `{ action: "add", collection, fields }` and
+// `{ action: "change", collection, id, fields }`; and `output`, the value
+// `as` binds. It runs synchronously, for at most 1 second, with no network
+// or files. The executor applies its changes with the checks a set or
+// add-record step gets. On a dataset Collection, the changes stay in the
+// table the automation watches, or the dataset's only table for a schedule
+// or a Group message, and each goes through the approved operation the ⚡
+// panel would pin for a step with the same fields. A schedule or a Group
+// message has no trigger record: `ctx.record` is null, and "set" fails.
+//
+//       - run: |
+//           const total = ctx.record.Price * ctx.record.Quantity;
+//           return { set: { Total: total }, output: total };
+//         as: total
 //
 // A dataset Collection changes its records only through its approved
 // operations. A set, add-record, or find step on one names the operation it
@@ -1268,6 +1293,12 @@ function splitTemplate(template: string): AutomationTextPart[] | TemplateProblem
   }
   if (text.length > 0) parts.push({ kind: "text", text });
   return parts;
+}
+
+/** Why a message template cannot be read, as the file contract's code, or null when it can. */
+export function automationTextProblem(template: string): TemplateProblem | null {
+  const split = splitTemplate(template);
+  return typeof split === "string" ? split : null;
 }
 
 /**

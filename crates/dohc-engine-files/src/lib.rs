@@ -54,13 +54,13 @@ pub use diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 pub use error::FilesError;
 pub use hash::{HashOutcome, HashPool, PoolGauge};
 pub use materialize::{
-    AtomicReplacer, CheckThenRenameFailed, DurabilityPolicy, JobOutcome, JobResult,
+    AtomicReplacer, CheckThenRenameFailed, DurabilityPolicy, JobOutcome, JobResult, KeptCopySave,
     MaterializeError, MaterializeOptions, NoBackoff, Placement, ProjectionTargetKind,
     ProjectionTargetState, ReplaceBackoff, StdBackoff, StdReplacer, backoff_delay, materialize_one,
     materialize_secret_delete_one, materialize_secret_one, path_is_displaced,
     probe_projection_target, recover_displacements, recover_path_displacements,
-    remove_empty_directory_target, run_pending_jobs, workspace_lacks_atomic_placement,
-    workspace_recovery_unavailable,
+    remove_empty_directory_target, run_pending_jobs, save_kept_displacement,
+    workspace_lacks_atomic_placement, workspace_recovery_unavailable,
 };
 pub use policy::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification,

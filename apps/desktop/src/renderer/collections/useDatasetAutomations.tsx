@@ -26,14 +26,15 @@ type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | nul
 const FIND_FAILED = "dohc could not read this Collection's automations.";
 
 /**
- * A dataset table's fields as the builder offers them. A button holds no
- * value and a file needs an upload, so neither is offered. A relation holds
- * the related record's key, which the builder takes as text.
+ * A dataset table's fields as the builder offers them. A file needs an
+ * upload, so it is not offered. A button stays for the button trigger. A
+ * relation holds the related record's key, which the builder takes as text.
  */
 export function builderFields(fields: readonly DatasetDescribedField[]): FieldDefinition[] {
   return fields.flatMap((field): FieldDefinition[] => {
     switch (field.type) {
       case "button":
+        return [{ name: field.name, type: "button" }];
       case "attachment":
         return [];
       case "select":
@@ -61,6 +62,8 @@ export function useDatasetAutomations(props: {
   onNotice: (message: string, undo?: () => void) => void;
   onOpenFile: (path: string) => void;
   onOpenScheduleSettings: () => void;
+  /** Opens the dialog that adds fields, such as a Button field; undefined where this person cannot. */
+  onOpenFields?: () => void;
 }): {
   button: ReactNode;
   panel: ReactNode;
@@ -74,8 +77,11 @@ export function useDatasetAutomations(props: {
   const described = dataset?.tables.find((candidate) => candidate.tableId === tableId);
   const table = useMemo((): AutomationTable | undefined => described && {
     name: described.name,
-    operations: new Set(dataset?.operations.flatMap((operation) => (operation.tableId === tableId ? [operation.name] : []))),
-    tables: new Set(dataset?.tables.map((candidate) => candidate.name)),
+    tables: new Map(dataset?.tables.map((candidate) => [candidate.name, {
+      fields: builderFields(candidate.fields),
+      operations: dataset.operations.flatMap((operation) =>
+        (operation.tableId === candidate.tableId ? [{ name: operation.name, kind: operation.kind }] : [])),
+    }])),
     actions: (dataset?.operations ?? []).flatMap((operation) => operation.kind === "action"
       ? [{ name: operation.name, label: operation.label, table: dataset?.tables.find((candidate) => candidate.tableId === operation.tableId)?.name ?? "", reversible: operation.reversedBy !== undefined }]
       : []),
@@ -96,8 +102,8 @@ export function useDatasetAutomations(props: {
     }
   }, [workspaceId, datasetId, onError]);
   useEffect(() => {
-    void find();
-  }, [find]);
+    if (datasetId) void find();
+  }, [find, datasetId]);
   const collectionPath = found !== null && found !== "failed" && found.status === "found" ? found.collectionPath : null;
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [open, setOpen] = useState(false);
@@ -152,6 +158,7 @@ export function useDatasetAutomations(props: {
       onClose={close}
       onOpenFile={props.onOpenFile}
       onOpenScheduleSettings={props.onOpenScheduleSettings}
+      onOpenFields={props.onOpenFields}
       onError={onError}
       onNotice={props.onNotice}
       onRunUndone={props.onRecordsChanged}

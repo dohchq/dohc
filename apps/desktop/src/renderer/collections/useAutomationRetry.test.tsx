@@ -4,7 +4,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RetryCollectionAutomationResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { PROGRESS_GONE_SENTENCE, REPEATS_MESSAGES_SENTENCE, useAutomationRetry } from "./useAutomationRetry";
+import { REPEATS_MESSAGES_SENTENCE, useAutomationRetry } from "./useAutomationRetry";
 
 afterEach(() => {
   cleanup();
@@ -63,22 +63,6 @@ describe("Try again for an automation run", () => {
     expect(screen.getByTestId("automation-start-over").textContent?.includes(REPEATS_MESSAGES_SENTENCE)).toBe(repeatsMessages);
     await act(async () => screen.getByTestId("automation-start-over-confirm").click());
     expect(retryCollectionAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "ws-a", startOver: true }));
-    expect(onQueued).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([false, true])("confirms lost progress and warns when it repeats messages: %s", async (repeatsMessages) => {
-    const retryCollectionAutomation = vi.fn(async (payload: { startOver: boolean }): Promise<RetryCollectionAutomationResult> =>
-      payload.startOver ? { status: "queued", press: false } : { status: "progress-gone", repeatsMessages });
-    vi.stubGlobal("dohcDesktop", { retryCollectionAutomation });
-    const onQueued = vi.fn();
-    render(<Retry workspaceId="ws-a" onError={() => undefined} onQueued={onQueued} />);
-
-    await act(async () => screen.getByRole("button", { name: "Try again" }).click());
-    expect(onQueued).not.toHaveBeenCalled();
-    expect(screen.getByTestId("automation-start-over").textContent).toContain(PROGRESS_GONE_SENTENCE);
-    expect(screen.getByTestId("automation-start-over").textContent?.includes(REPEATS_MESSAGES_SENTENCE)).toBe(repeatsMessages);
-    await act(async () => screen.getByTestId("automation-start-over-confirm").click());
-    expect(retryCollectionAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ startOver: true }));
     expect(onQueued).toHaveBeenCalledTimes(1);
   });
 });

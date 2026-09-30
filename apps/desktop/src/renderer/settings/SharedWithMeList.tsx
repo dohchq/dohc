@@ -1,3 +1,5 @@
+import {shareSubjectFallback} from "@dohc/security-contract/share-labels";
+import {ShareSender} from "../ShareSender";
 import { ipcErrorMessage } from "../ipcError";
 import { useEffect, useRef, useState } from "react";
 import type {
@@ -63,12 +65,7 @@ const FOLDER_LEFT_NOTICE =
 
 function selectorLabel(share: RelayShareReceivedRow): string {
   if (!share.selector) return "Unreadable share";
-  if (share.selector.versionId) {
-    const suffix =
-      share.selector.paths.length > 0 ? ` (${share.selector.paths.join(", ")})` : "";
-    return `Version ${share.selector.versionId === "main" ? "Main" : share.selector.versionId}${suffix}`;
-  }
-  return share.selector.paths.join(", ") || "Everything";
+  return share.subjectName ?? shareSubjectFallback(share.selector);
 }
 
 // Ops this mount's pulls skipped, from the mount RECORD. The skip is durable
@@ -413,7 +410,7 @@ export function SharedWithMeList(props: {
           >
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <span className="truncate font-mono text-[11px] text-ink">
+                <span className="truncate font-mono text-[11px] text-ink" title={selectorLabel(share)}>
                   {selectorLabel(share)}
                 </span>
                 {/* The PINNED level wins whenever this share is mounted. The
@@ -431,8 +428,11 @@ export function SharedWithMeList(props: {
                   <ShareAccessBadge access={share.access} />
                 ) : null}
               </div>
+              <div className="flex min-w-0 items-baseline gap-1 text-[11px] text-muted">
+                <span>From </span>
+                <ShareSender name={share.sharerName} email={share.granterEmail} />
+              </div>
               <div className="truncate text-[11px] text-subtle">
-                {`From ${share.granterEmail ?? "another dohc user"}`}
                 {mounted
                   ? ` — in this workspace as shared-with-me/${mounted.label}${
                       mounted.damaged

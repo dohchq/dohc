@@ -297,6 +297,31 @@ impl EngineStore {
         blob::get_binary_blob(&self.conn, sha256)
     }
 
+    /// Read a materialization payload from its existing text or binary blob.
+    pub fn get_materialization_blob(&self, sha256: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let row: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT byte_length, text FROM blobs WHERE sha256 = ?1",
+                [sha256],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::corrupt)?;
+        if let Some((byte_length, text)) = row {
+            if byte_length as usize != text.len()
+                || text.len() > crate::limits::MAX_BLOB_BYTES
+                || blob::hex_sha256(text.as_bytes()) != sha256
+            {
+                return Err(StorageError::BlobIntegrity {
+                    sha256: sha256.to_owned(),
+                });
+            }
+            return Ok(Some(text.into_bytes()));
+        }
+        self.get_binary_blob(sha256)
+    }
+
     /// Whether a binary blob with this key exists.
     pub fn has_binary_blob(&self, sha256: &str) -> Result<bool, StorageError> {
         blob::has_binary_blob(&self.conn, sha256)
@@ -346,6 +371,15 @@ impl EngineStore {
         now_ms: i64,
     ) -> Result<(), StorageError> {
         materialize::mark_complete(&self.conn, job_id, now_ms)
+    }
+
+    /// Mark an unpublished job superseded by a newer durable generation.
+    pub fn mark_materialization_cancelled(
+        &self,
+        job_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        materialize::mark_cancelled(&self.conn, job_id, now_ms)
     }
 
     /// Mark a job in conflict (newer external content was preserved).

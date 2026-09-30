@@ -84,6 +84,50 @@ fn read_doc(store: &EngineStore, name: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn materialization_reads_text_without_copy_and_checks_integrity() {
+    let scratch = Scratch::new("materialization-text");
+    let store = EngineStore::open(&scratch.db_path(), 1).unwrap();
+    let sha = hex_sha256(b"text");
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO blobs (sha256, byte_length, text) VALUES (?1, 4, 'text')",
+                [&sha],
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        store.get_materialization_blob(&sha).unwrap(),
+        Some(b"text".to_vec())
+    );
+    assert_eq!(store.binary_blob_count().unwrap(), 0);
+    store
+        .read_with(|conn| conn.execute("UPDATE blobs SET text='oops' WHERE sha256=?1", [&sha]))
+        .unwrap();
+    assert!(matches!(
+        store.get_materialization_blob(&sha),
+        Err(StorageError::BlobIntegrity { .. })
+    ));
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE blobs SET text='text', byte_length=3 WHERE sha256=?1",
+                [&sha],
+            )
+        })
+        .unwrap();
+    assert!(matches!(
+        store.get_materialization_blob(&sha),
+        Err(StorageError::BlobIntegrity { .. })
+    ));
+    let binary = store.put_binary_blob(&[0, 255]).unwrap();
+    assert_eq!(
+        store.get_materialization_blob(&binary).unwrap(),
+        Some(vec![0, 255])
+    );
+}
+
+#[test]
 fn binary_blob_dedup_and_readback() {
     let scratch = Scratch::new("blob");
     let store = EngineStore::open(&scratch.db_path(), 1).expect("open");

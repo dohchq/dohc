@@ -612,6 +612,7 @@ where
             bind_alias: false,
             known_object: resolved.known_object,
         }),
+        None,
     )?;
     if result.moment.moment_order != next_order {
         return Err(DomainError::StateCorrupt {
@@ -1332,7 +1333,16 @@ pub fn write_text_in_tx(
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, false, None, None)
+    write_normalized_text_in_tx(tx, input, false, None, None, None)
+}
+
+pub fn write_published_text_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+    conditions: &str,
+) -> Result<WriteResult, DomainError> {
+    let input = normalized_write_input(input.into())?;
+    write_normalized_text_in_tx(tx, input, false, None, None, Some(conditions))
 }
 
 /// Copy a stored text preimage forward without changing its object identity.
@@ -1340,6 +1350,15 @@ pub fn write_history_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
     restore_before_moment_id: &str,
+) -> Result<WriteResult, DomainError> {
+    write_published_history_text_in_tx(tx, input, restore_before_moment_id, None)
+}
+
+pub fn write_published_history_text_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+    restore_before_moment_id: &str,
+    conditions: Option<&str>,
 ) -> Result<WriteResult, DomainError> {
     validate_moment_id(restore_before_moment_id)?;
     let source = get_moment(tx, &input.workspace_id, restore_before_moment_id)?.ok_or(
@@ -1363,7 +1382,7 @@ pub fn write_history_text_in_tx(
     }
     let mut normalized = normalized;
     normalized.object_id = &source.object_id;
-    write_normalized_text_in_tx(tx, normalized, false, Some(&source), None)
+    write_normalized_text_in_tx(tx, normalized, false, Some(&source), None, conditions)
 }
 
 /// Persist a text projection inside the caller's transaction.
@@ -1386,7 +1405,7 @@ pub fn write_projected_text_in_tx<'a>(
     // alias exists — the settle that follows is binding its own object,
     // not colliding with another.
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, true, None, None)
+    write_normalized_text_in_tx(tx, input, true, None, None, None)
 }
 
 fn write_normalized_text_in_tx(
@@ -1395,6 +1414,7 @@ fn write_normalized_text_in_tx(
     allow_preallocated_object: bool,
     history_source: Option<&MomentRecord>,
     prepared: Option<PreparedTextWrite>,
+    conditions: Option<&str>,
 ) -> Result<WriteResult, DomainError> {
     let ws = input.workspace_id;
     if prepared.is_none() && !version_exists(tx, ws, input.version_id)? {
@@ -1426,6 +1446,15 @@ fn write_normalized_text_in_tx(
             author_json,
         ],
     );
+    let payload_hash = if let Some(conditions) = conditions {
+        hash_fields(&[
+            payload_hash.as_bytes(),
+            ws.as_bytes(),
+            conditions.as_bytes(),
+        ])
+    } else {
+        payload_hash
+    };
     let payload_hash = if let Some(source) = history_source {
         hash_request_fields(
             input.request_id,
@@ -1457,7 +1486,7 @@ fn write_normalized_text_in_tx(
             && existing.metadata_summary.as_deref() == input.metadata_summary
             && existing.metadata_correlation_id.as_deref() == input.metadata_correlation_id
             && existing.author_json.as_deref() == input.author_json;
-        if exact {
+        if exact && conditions.is_none() {
             return write_result_from_moment(tx, ws, existing, true);
         }
         // The oracle's contract: a caller-supplied moment id reused with

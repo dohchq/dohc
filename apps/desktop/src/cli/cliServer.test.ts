@@ -403,6 +403,7 @@ describe("CLI socket server", () => {
     };
     agentRunDepth = 0;
     serverOptions = {
+      localPersonId: () => "person-local",
       stateDir,
       listWorkspaces() {
         calls.listWorkspaces += 1;
@@ -539,12 +540,22 @@ describe("CLI socket server", () => {
 
   it("routes dataset actions through the same owner workspace attachment for humans and agents", async () => {
     context.dataset = vi.fn(async () => ({kind:"invoked" as const,result:{accepted:true},revision:1,replayed:false}));
-    const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetId:"00000000-0000-4000-8000-000000000001",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};
+    const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetPath:"data/dataset.json",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};
     for (const actor of ["human","agent"] as const) expect(await invoke("dataset",{cwd:workspaceRoot,actor,request})).toEqual({kind:"invoked",result:{accepted:true},revision:1,replayed:false});
+    // The person invokes as the owner; an agent that names itself is the agent, at 0 outside a chain.
+    expect(vi.mocked(context.dataset).mock.calls.map(call => call[1])).toEqual([null,{depth:0}]);
     await expect(invoke("dataset",{cwd:workspaceRoot,actor:"agent",request:{...request,workspaceId:"elsewhere"}})).rejects.toThrow("owning workspace");
     context.readOnly = true;
     await expect(invoke("dataset",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
     expect(context.dataset).toHaveBeenCalledTimes(2);
+  });
+
+  it("invokes a dataset action as the run's agent during a run an automation started, whoever the caller names", async () => {
+    context.dataset = vi.fn(async () => ({kind:"invoked" as const,result:{accepted:true},revision:1,replayed:false}));
+    const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetPath:"data/dataset.json",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};
+    agentRunDepth = 3;
+    for (const actor of ["human","agent"] as const) await invoke("dataset",{cwd:workspaceRoot,actor,request});
+    expect(vi.mocked(context.dataset).mock.calls.map(call => call[1])).toEqual([{depth:3},{depth:3}]);
   });
 
   it("writes a random capability endpoint descriptor for a Windows named pipe", async (ctx) => {
@@ -1166,8 +1177,8 @@ describe("CLI socket server", () => {
     const unsupported = state !== "valid";
     const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
     const collection: Awaited<ReturnType<CliCollectionsPort["query"]>>["collection"] = unsupported
-      ? { path: "tasks", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }] }
-      : { path: "tasks", status: "valid", reasons: [] };
+      ? { path: "tasks", objectId: "object-test", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }] }
+      : { path: "tasks", objectId: "object-test", status: "valid", reasons: [] };
     const queries: Array<Parameters<CliCollectionsPort["query"]>[0]> = [];
     const recordReads: Array<Parameters<CliCollectionsPort["getRecord"]>[0]> = [];
     context.collections = {
@@ -1221,7 +1232,7 @@ describe("CLI socket server", () => {
               next: { present: true, value: 9007199254740993n },
               authorOriginId: "origin_agent",
               actorKind: "agent" as const,
-              onBehalfOf: "local",
+              onBehalfOf: "person-local",
               depth: 0,
               recordedAtMs: SERVER_NOW_MS,
             },
@@ -1295,12 +1306,12 @@ describe("CLI socket server", () => {
   });
 
   it("answers the automation verbs from the Automations panel's calls", async () => {
-    const AUTOMATION = "collection:tasks#stamp";
-    const trigger = { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, depth: 1 };
+    const AUTOMATION = "collection:object-tasks#stamp";
+    const trigger = { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 };
     const field = { kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" };
     const run = {
       claimId: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
-      trigger, definitionChanged: true, chainStopped: false, undone: false,
+      trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false,
     };
     const retries: unknown[] = [];
     const answers: Array<Awaited<ReturnType<NonNullable<CliWorkspaceContext["automations"]>["retry"]>>> = [
@@ -1313,7 +1324,11 @@ describe("CLI socket server", () => {
       },
     ];
     context.automations = {
-      runs: vi.fn(async () => [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }]),
+      automationIdAt: vi.fn(async (collectionPath: string, id: string) => (collectionPath === "tasks" ? `collection:object-tasks#${id}` : null)),
+      runs: vi.fn(async (_automationId: string, _before?: string) => ({
+        runs: [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }],
+        next: "1:atc_1",
+      })),
       run: vi.fn(async (_automationId: string, claimId: string) =>
         claimId === "atc_1" ? { ...run, steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
       retry: vi.fn(async (input) => {
@@ -1327,10 +1342,14 @@ describe("CLI socket server", () => {
       ok: true,
       runs: [{
         run: "atc_1", state: "failed", error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
-        trigger, definitionChanged: true, chainStopped: false, undone: false, changes: 2,
+        trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false, changes: 2,
       }],
+      next: "1:atc_1",
     });
-    expect(context.automations.runs).toHaveBeenCalledWith(AUTOMATION);
+    expect(context.automations!.runs).toHaveBeenCalledWith(AUTOMATION, undefined);
+    // The next page names where the last one ended.
+    await invoke("automationRuns", { ...args, page: "1:atc_1" });
+    expect(context.automations!.runs).toHaveBeenLastCalledWith(AUTOMATION, "1:atc_1");
     await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
       ok: true,
       run: { run: "atc_1", trigger, steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },
@@ -1364,6 +1383,23 @@ describe("CLI socket server", () => {
       reason: "A shared view has no automation runs. The owner's computer runs this workspace's automations.",
     });
     expect(retries).toHaveLength(3);
+  });
+
+
+  it("returns partial record facts and passes the retry identity to the write seam", async () => {
+    const partial = {
+      kind: "partial" as const, created: ["tasks/retry.md"], failedStage: "settle" as const, reason: "settle failed",
+      retry: { mode: "resume" as const, recordId: "rec_abcdefghijklmnopqrstuvwxyz", instruction: "Try again with this record ID." },
+    };
+    const createRecord = vi.fn<CliCollectionWriteSeam["createRecord"]>()
+      .mockResolvedValueOnce(partial).mockResolvedValue({ path: "tasks/retry.md", recordId: partial.retry.recordId, kept: { status: "done" } });
+    context.collections = { query: vi.fn(), getRecord: vi.fn(), writes: { setFields: vi.fn(), createRecord } };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", name: "retry", fields: { status: "open" } };
+    const result = await invoke("collectionCreateRecord", args);
+    expect(result).toMatchObject({ ok: false, partial });
+    expect(result).toHaveProperty("reason", expect.stringContaining("tasks/retry.md"));
+    await expect(invoke("collectionCreateRecord", { ...args, recordId: partial.retry.recordId })).resolves.toMatchObject({ ok: true, recordId: partial.retry.recordId, kept: { status: "done" } });
+    expect(createRecord.mock.calls[1]![0]).toMatchObject({ recordId: partial.retry.recordId, fields: args.fields });
   });
 
   it("presses a button through the press path and reports the run, asking before actions dohc cannot undo", async () => {
@@ -1505,7 +1541,7 @@ describe("CLI socket server", () => {
         input: {
           recordPath: "tasks/a.md",
           fields: { status: "done", notes: null },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
         },
       },
       {
@@ -1514,7 +1550,7 @@ describe("CLI socket server", () => {
           collectionPath: "tasks",
           name: "write-brief",
           fields: { status: "open" },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
         },
       },
       {
@@ -1526,6 +1562,42 @@ describe("CLI socket server", () => {
         },
       },
     ]);
+  });
+
+  it("lists kept copies and saves one for an agent, the step a person takes from Notices", async () => {
+    let kept = [{ id: 3, path: "notes/plan.md", keptAtMs: 10 }];
+    context.keptCopies = {
+      async list() {
+        return { keptCopies: kept, more: false };
+      },
+      async save(id) {
+        const found = kept.some((copy) => copy.id === id);
+        kept = kept.filter((copy) => copy.id !== id);
+        return found
+          ? { status: "saved", path: "notes/plan (kept copy).md" }
+          : { status: "gone" };
+      },
+    };
+
+    await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
+      ok: true,
+      keptCopies: [{ id: 3, path: "notes/plan.md", keptAtMs: 10 }],
+      more: false,
+    });
+    await expect(invoke("saveKeptCopy", { cwd: workspaceRoot, actor: "agent", id: 3 }))
+      .resolves.toEqual({ ok: true, status: "saved", path: "notes/plan (kept copy).md" });
+    expect(calls.writes).toBe(1);
+    await expect(invoke("saveKeptCopy", { cwd: workspaceRoot, actor: "agent", id: 3 }))
+      .resolves.toEqual({ ok: true, status: "gone" });
+    expect(calls.writes).toBe(1);
+    await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toEqual({ ok: true, keptCopies: [], more: false });
+
+    delete context.keptCopies;
+    await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
+      ok: false,
+      reason: "kept copies are not available in this workspace",
+    });
   });
 
   it("reads and edits documents with provenance the door derives", async () => {
@@ -1564,7 +1636,7 @@ describe("CLI socket server", () => {
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
     // An agent that names itself is recorded under that name, and one that
     // does not stays an agent with no name.
-    const agent = { actorKind: "agent", onBehalfOf: "local", depth: 0 };
+    const agent = { actorKind: "agent", onBehalfOf: "person-local", depth: 0 };
     expect(edits).toEqual([
       {
         path: "notes/plan.md",
@@ -1646,8 +1718,8 @@ describe("CLI socket server", () => {
     agentRunDepth = 0;
     await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "open" } });
 
-    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 3 };
-    const attribution = { actorKind: "agent", onBehalfOf: "local", depth: 3 };
+    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 };
+    const attribution = { actorKind: "agent", onBehalfOf: "person-local", depth: 3 };
     expect(authors).toEqual([
       woken,
       woken,
@@ -1724,7 +1796,7 @@ describe("CLI socket server", () => {
       markdown: "# New",
       origin: {
         actorOriginId: "claude-code",
-        attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+        attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 },
       },
     }]);
   });
@@ -2031,7 +2103,7 @@ describe("CLI socket server", () => {
     context.collections = {
       async query() {
         return {
-          collection: { path: "tasks", status: "valid", reasons: [] },
+          collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
           records: [],
           groups: null,
           nextCursor: null,

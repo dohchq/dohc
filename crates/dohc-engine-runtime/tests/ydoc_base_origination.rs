@@ -1482,7 +1482,6 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
         cursor: 0,
         replication_epoch: "epoch-local".to_owned(),
         stream_identity: "stream-local".to_owned(),
-        refusal_report_id: None,
         settlement_report_id: None,
     };
     commit_relay_cursor(
@@ -3414,4 +3413,110 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
         doc.plaintext_string().len(),
         "the base reconstructs the document"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opening_a_document_with_a_deferred_different_seed_requires_conflict_review() {
+    const PATH: &str = "notes/seed-conflict.md";
+    const OBJECT: &str = "seed-conflict";
+    let a_scratch = ScratchDir::new().unwrap();
+    let b_scratch = ScratchDir::new().unwrap();
+    let a = engine_db_path(&a_scratch).unwrap();
+    let b = engine_db_path(&b_scratch).unwrap();
+    for (db, text, moment) in [
+        (&a, "local seed", "local-head"),
+        (&b, "remote seed", "remote-head"),
+    ] {
+        enable_sync(db, WS_TWO_DEVICES);
+        seed_shared_file(db, OBJECT, PATH, moment, text);
+    }
+    let key = open_and_type(&a, PATH, " plus local edit").await;
+    open_and_type(&b, PATH, " plus remote edit").await;
+    let a_ops = local_ydoc_ops(&a);
+    let b_ops = local_ydoc_ops(&b);
+    let remote = relayed(&b, &b_ops, "device-b", &[1, 3]);
+    {
+        let mut store = EngineStore::open(&a, 300).unwrap();
+        settle_head(&mut store, &key, PATH);
+        learn_own_base_position(&mut store, &key, &a_ops[0], 2);
+        deliver(&mut store, &remote, &AlwaysLive);
+        assert_eq!(deferred_rows(&store, &key), 2);
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&a, 400).unwrap().actor;
+    let opened = handle
+        .ydoc_open_state(
+            WS_TWO_DEVICES.to_owned(),
+            500,
+            true,
+            Some(key.clone()),
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(opened, Err(RuntimeError::YdocOpenConflict { .. })));
+    supervisor.close(&a).unwrap();
+    let store = EngineStore::open(&a, 600).unwrap();
+    assert_eq!(
+        deferred_rows(&store, &key),
+        0,
+        "refused opens finish the drain so resolution can proceed"
+    );
+    let sides: (String, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+        "SELECT c.text,i.text FROM conflicts f JOIN blobs c ON c.sha256=f.current_blob_sha256
+         JOIN blobs i ON i.sha256=f.incoming_blob_sha256 WHERE f.status='open'", [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+        })
+        .unwrap();
+    assert_eq!(
+        sides,
+        (
+            "local seed plus local edit".to_owned(),
+            "remote seed plus remote edit".to_owned()
+        )
+    );
+    let conflict_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT conflict_id FROM conflicts WHERE status='open'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    drop(store);
+    let actor = supervisor.open(&a, 700).unwrap().actor;
+    let resolved = actor
+        .conflict_resolve(
+            dohc_engine_domain::ResolveTextConflict {
+                workspace_id: WS_TWO_DEVICES.into(),
+                conflict_id,
+                resolution: dohc_engine_domain::ResolveConflictKind::ApplyIncoming,
+                object_id: OBJECT.into(),
+                write_moment_id: "resolve-after-open".into(),
+                delete_moment_id: "delete-after-open".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 800,
+                request_id: None,
+                conflict_answer_budget_bytes: usize::MAX,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            std::sync::Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved.conflict.status,
+        dohc_engine_domain::ConflictStatus::Resolved
+    );
+    supervisor.close(&a).unwrap();
 }

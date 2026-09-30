@@ -292,6 +292,13 @@ export async function listFiles(
 
 // An existing file at the path is left as it is. By default the create then
 // succeeds; with `exclusive` it rejects with the EEXIST error.
+export class CreatedFileWriteError extends Error {
+  constructor(readonly path: string, cause: unknown) {
+    super(`Created ${path}, but dohc could not finish writing it.`, { cause });
+    this.name = "CreatedFileWriteError";
+  }
+}
+
 export async function createFile(
   rootPath: string,
   relativePath: string,
@@ -328,11 +335,18 @@ export async function createFile(
   if (!isInside(realRoot, await realpath(dirname(target)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
-  await writeFile(target, initialText, { flag: "wx" }).catch((error: unknown) => {
-    if (options.exclusive || (error as NodeJS.ErrnoException).code !== "EEXIST") {
-      throw error;
-    }
+  const handle = await open(target, "wx").catch((error: unknown) => {
+    if (options.exclusive || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return null;
   });
+  if (handle) {
+    try {
+      try { await handle.writeFile(initialText); }
+      finally { await handle.close(); }
+    } catch (error) {
+      throw new CreatedFileWriteError(validated.normalized, error);
+    }
+  }
   return validated.normalized;
 }
 

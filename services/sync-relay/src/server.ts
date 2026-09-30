@@ -18,7 +18,10 @@ import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   createCollectionWriteRateLimiter,
   createCollectionWriteRoutes,
+  createLinkCollectionWriteAdmission,
+  createLinkCollectionWriteRoute,
   type CollectionWriteRoute,
+  type LinkCollectionWriteAdmission,
   readOwnerCollectionWrites,
   type OwnerCollectionWriteRoute,
 } from "./collectionWriteRoutes";
@@ -56,7 +59,7 @@ import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
 import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
-import { isNoticeLine, NOTICE_SENDER_LABEL_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkReadRoutes, type LinkReadRoute } from "./linkReadRoutes";
 import { createShareSummaries } from "./shareSummaries";
@@ -155,6 +158,8 @@ export interface CreateSyncRelayHandlerOptions {
   publicEditRelease?: PublicEditRelease;
   // Rate limit for direct writes to a Collection's own files under Edit.
   collectionWriteRateLimiter?: TokenBucketLimiter;
+  // Link direct-write bodies the relay holds in memory at once.
+  linkCollectionWriteAdmission?: LinkCollectionWriteAdmission;
   linkExchangeRateLimiter?: TokenBucketLimiter;
   linkExchangeGlobalRateLimiter?: TokenBucketLimiter;
   linkExchangeGrantRateLimiter?: TokenBucketLimiter;
@@ -195,6 +200,7 @@ type SyncRelayRoute =
   | LinkReadRoute
   | { route: "link-discussion" }
   | { route: "link-discussion-activity" }
+  | { route: "link-collection-writes" }
   | { route: "workspaces" }
   | NoticeRoute
   | AutomationHostRoute
@@ -242,6 +248,7 @@ export function createSyncRelayHandler({
   namedBrowserSessionLimits,
   publicEditRelease: releaseInput,
   collectionWriteRateLimiter = createCollectionWriteRateLimiter(),
+  linkCollectionWriteAdmission = createLinkCollectionWriteAdmission(),
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
   linkExchangeGlobalRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY, LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1),
   linkExchangeGrantRateLimiter = new TokenBucketLimiter(LINK_GRANT_READ_BUCKET_CAPACITY, LINK_GRANT_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
@@ -286,7 +293,7 @@ export function createSyncRelayHandler({
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetExport = datasetHost ? createDatasetRecoveryExport(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
-  const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, shareSenderLabel}) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
   }
@@ -308,7 +315,7 @@ export function createSyncRelayHandler({
   }) : undefined;
   const namedDocuments = namedBrowserSessionLimits ? createNamedRecipientDocuments({
     storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
-    resolveActor: resolveNamedActor, maxFiles: linkCurrentFileLimit,
+    resolveActor: resolveNamedActor, maxFiles: linkCurrentFileLimit, shareSenderLabel,
   }) : undefined;
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
@@ -336,14 +343,11 @@ export function createSyncRelayHandler({
     linkRevisionByteLength,
   } = createShareReadQueries(storage, linkFreshnessPageSize);
 
-  // A granter's name on the notice a share sends: their display name, or
-  // the email the recipient already sees beside the share.
-  const shareSenderLabel = async (granterUserId: string): Promise<string> => {
+  async function shareSenderLabel(granterUserId: string, knownEmail?: string | null): Promise<string> {
     const name = await accountDisplayName(lookupUserDisplayName, granterUserId);
-    if (name !== null) return name;
-    const email = await lookupUserEmail?.(granterUserId);
-    return isNoticeLine(email, NOTICE_SENDER_LABEL_MAX_CHARS) ? email : "Someone";
-  };
+    const email = knownEmail === undefined ? await lookupUserEmail?.(granterUserId) : knownEmail;
+    return formatShareSender(name, email);
+  }
 
   // Delivers the share notices this person can receive now, before their
   // pull; only those look up a granter's name, once per granter. A failure
@@ -351,15 +355,18 @@ export function createSyncRelayHandler({
   // delivery work, so sharing takes the same time whether or not the
   // address has an account.
   const deliverPendingShareNotices = async (userId: string): Promise<void> => {
-    const labels = new Map<string, Promise<string>>();
+    const labels = new Map<string, Promise<{senderLabel: string; senderEmail: string | null}>>();
     for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
       try {
         let label = labels.get(granterUserId);
         if (label === undefined) {
-          label = shareSenderLabel(granterUserId);
+          label = (async () => {
+            const senderEmail = await lookupUserEmail?.(granterUserId) ?? null;
+            return {senderLabel: await shareSenderLabel(granterUserId, senderEmail), senderEmail};
+          })();
           labels.set(granterUserId, label);
         }
-        storage.noticeShareReceived({ grantId, senderLabel: await label, nowMs: nowMs() });
+        storage.noticeShareReceived({ grantId, ...await label, nowMs: nowMs() });
       } catch (error) {
         console.error("[sync-relay] share notice failed", error);
       }
@@ -498,10 +505,11 @@ export function createSyncRelayHandler({
     independentGrantSummary,
     linkInventorySummary,
     namedBrowserInvitation,
-  } = createShareSummaries(lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
+  } = createShareSummaries((shareId) => storage.getShareLabels(shareId), lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
 
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = createShareInventoryRoutes(
     storage,
+    nowMs,
     claimPendingShares,
     lookupUserEmail,
     requireShareAction,
@@ -510,6 +518,7 @@ export function createSyncRelayHandler({
     independentGrantSummary,
     linkInventorySummary,
     publicEditRelease,
+    shareSenderLabel,
   );
 
   const { respondToShareGrantTransition, respondToWorkspaceShareCreation } = createShareGrantRoutes(
@@ -550,6 +559,17 @@ export function createSyncRelayHandler({
     if (!capability) throw invalidLinkCapability();
     return {capabilityToken, capability};
   };
+  const respondToLinkCollectionWrites = linkKey ? createLinkCollectionWriteRoute({
+    storage,
+    rateLimiter: collectionWriteRateLimiter,
+    admission: linkCollectionWriteAdmission,
+    linkKey,
+    publicEditRelease,
+    requireLinkCapability,
+    nowMs,
+    newId,
+    discussionActivity,
+  }) : null;
   const requireLinkRead = (
     request: Request,
     capabilityRateLimiter: TokenBucketLimiter,
@@ -720,6 +740,10 @@ export function createSyncRelayHandler({
       }
       if (route.route === "link-discussion-activity") {
         return await respondToLinkDiscussionActivity(request);
+      }
+      if (route.route === "link-collection-writes") {
+        if (!respondToLinkCollectionWrites) throw notFound();
+        return await respondToLinkCollectionWrites(request);
       }
       if (route.route === "share-discussion") {
         return await respondToShareDiscussion(request, route.shareId);
@@ -964,7 +988,7 @@ export function createSyncRelayHandler({
     const result = await dispatch(request);
     const path = new URL(request.url).pathname;
     if (!/^\/sync\/link(?:[/-]|$)/.test(path) || result.status < 400) return result;
-    return normalizeLinkRefusal(result);
+    return normalizeLinkRefusal(result, path);
   };
   return Object.assign(handle, {
     resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
@@ -980,7 +1004,7 @@ export function streamsRequestBody(url: URL, method: string): boolean {
   try {
     const route = parseRoute({ url: url.href });
     return (route.route === "dataset" && route.action === "import" && method === "POST") ||
-      route.route === "share-collection-writes";
+      route.route === "share-collection-writes" || route.route === "link-collection-writes";
   } catch { return false; }
 }
 
@@ -1017,6 +1041,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts[2] === "current") return { route: "link-current" };
     if (parts[2] === "log") return { route: "link-log" };
     if (parts[2] === "discussion") return { route: "link-discussion" };
+    if (parts[2] === "collection-writes") return { route: "link-collection-writes" };
   }
   if (
     parts.length === 4 &&
@@ -1166,7 +1191,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
     if (parts.length === 6 && parts[4] === "backend" &&
         (parts[5] === "activate" || parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" || parts[5] === "attempt" ||
-         parts[5] === "descriptor")) {
+         parts[5] === "descriptor" || parts[5] === "summary")) {
       return {route:"app-backend",workspaceId,publicationId,action:parts[5]};
     }
     if (parts.length === 7 && parts[4] === "backend" && parts[5] === "blobs" && /^[0-9a-f]{64}$/.test(parts[6]!)) {

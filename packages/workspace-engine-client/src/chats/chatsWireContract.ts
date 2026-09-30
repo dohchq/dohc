@@ -474,7 +474,6 @@ const ChatActorSchema = mutableStruct({
 });
 const ChatMessageAutomationSchema = mutableStruct({
   automationId: Schema.String,
-  collectionPath: Schema.String,
 });
 const ThreadLaneSchema = Schema.Literals(["posts", "chat"]);
 const ChatLinkedFileSchema = mutableStruct({

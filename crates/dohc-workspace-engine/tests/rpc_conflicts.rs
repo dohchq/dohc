@@ -640,7 +640,7 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
     let (_scratch, transport, handle, workspace_id) = fixture("past-frame-limit").await;
     let path =
         open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
-    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let frame = 8 * 1024 * 1024;
     // Every newline encodes as two bytes, so this body is 4 MiB raw and 8 MiB
     // once encoded: under any raw-byte budget, past the frame that has to
     // carry it. A raw-byte check would accept it here and let the client's own
@@ -855,7 +855,7 @@ async fn metadata_beside_a_large_body_is_measured_against_the_same_frame() {
     let (_scratch, transport, handle, workspace_id) = fixture("metadata-headroom").await;
     let path =
         open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
-    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let frame = 8 * 1024 * 1024;
     let metadata = "\"".repeat(16 * 1024 - 1);
     // Comfortably inside the frame on its own, past it beside the metadata.
     let merged = "x".repeat(frame - 40 * 1024);
@@ -921,7 +921,7 @@ async fn a_request_that_exactly_fills_the_frame_is_applied_and_one_byte_more_is_
     // bytes, and everything inside that band is valid work refused with a size
     // that never existed.
     //
-    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let frame = 8 * 1024 * 1024;
     let (_scratch, transport, handle, workspace_id) = fixture("frame-boundary").await;
     let path =
         open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
@@ -1035,7 +1035,7 @@ async fn the_largest_accepted_request_crosses_as_one_control_frame() {
     // be one the transport can carry. This pins that: a resolve request built
     // to sit just inside the budget encodes into one control frame.
     //
-    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let frame = 8 * 1024 * 1024;
     let envelope = Envelope::Request(request(
         12,
         "conflicts.resolve",
@@ -1238,8 +1238,8 @@ async fn oversized_conflict_inventory_is_wire_safe_across_pages_and_session_surv
         result: Value::Array(all_rows),
     });
     assert!(
-        encode_control(&legacy, &WireLimits::default()).is_err(),
-        "the same inventory as one legacy array must exceed the wire frame"
+        serde_json::to_vec(&legacy).unwrap().len() > 8 * 1024 * 1024,
+        "the same inventory as one legacy array must exceed the response budget"
     );
 
     let status = transport
@@ -2500,5 +2500,124 @@ async fn a_conflict_row_at_the_hard_cap_ships_in_band_and_one_byte_more_degrades
     assert_eq!(
         past_cap["current"]["snapshot"]["inbandLimitBytes"],
         json!(128 * 1024)
+    );
+}
+
+/// A file a replace kept at its hidden displaced name is listed until it is
+/// saved as a visible copy beside its path, and saving it twice finds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
+    let (scratch, transport, handle, workspace_id) = fixture("kept-copy").await;
+    write_file(scratch.path(), "notes/a.md", b"a newer save");
+    write_file(
+        scratch.path(),
+        ".dohc/engine/displaced/6a6f62.0",
+        b"bytes another program wrote",
+    );
+    let store =
+        dohc_engine_storage::EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 10)
+            .expect("store");
+    // Older orphan rows remain accessible through watcher.status, but cannot
+    // consume the page of named copies or violate its nonempty-path contract.
+    for n in 0..100 {
+        let job_id = format!("orphan-{n}");
+        let name = format!("h{}.0", dohc_engine_storage::hex_sha256(job_id.as_bytes()));
+        write_file(
+            scratch.path(),
+            &format!(".dohc/engine/displaced/{name}"),
+            b"orphan bytes",
+        );
+        store
+            .keep_displacement(
+                &dohc_engine_storage::DisplacementSpec {
+                    job_id,
+                    workspace_id: workspace_id.clone(),
+                    target_path: String::new(),
+                    displaced_name: name,
+                    expected_sha256: String::new(),
+                    content_sha256: None,
+                    now_ms: 9,
+                },
+                Some(&dohc_engine_storage::hex_sha256(b"orphan bytes")),
+            )
+            .expect("keep orphan");
+    }
+    let id = store
+        .open_displacement(&dohc_engine_storage::DisplacementSpec {
+            job_id: "job".to_owned(),
+            workspace_id: workspace_id.clone(),
+            target_path: "notes/a.md".to_owned(),
+            displaced_name: "6a6f62.0".to_owned(),
+            expected_sha256: dohc_engine_storage::hex_sha256(b"ours before"),
+            content_sha256: Some(dohc_engine_storage::hex_sha256(b"ours")),
+            now_ms: 10,
+        })
+        .expect("open displacement");
+    store
+        .resolve_displacement(
+            id,
+            dohc_engine_storage::DisplacementResolution::Keep {
+                displaced_sha256: Some(&dohc_engine_storage::hex_sha256(
+                    b"bytes another program wrote",
+                )),
+            },
+            None,
+            11,
+        )
+        .expect("keep");
+    drop(store);
+
+    let status = call(&transport, &handle, 9, "watcher.status", json!({})).await;
+    let recovery = status["keptFiles"].as_array().expect("recovery copies");
+    assert_eq!(recovery.iter().filter(|copy| copy[0] == "").count(), 100);
+    let listed = call(&transport, &handle, 10, "keptCopies.list", json!({})).await;
+    assert_eq!(
+        listed,
+        json!({
+            "keptCopies": [{ "id": id, "path": "notes/a.md", "keptAtMs": 10 }],
+            "more": false,
+        })
+    );
+
+    let saved = call(
+        &transport,
+        &handle,
+        11,
+        "keptCopies.save",
+        json!({ "id": id }),
+    )
+    .await;
+    assert_eq!(
+        saved,
+        json!({ "status": "saved", "path": "notes/a (kept copy).md" })
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("notes/a (kept copy).md")).expect("copy"),
+        b"bytes another program wrote"
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("notes/a.md")).expect("file"),
+        b"a newer save"
+    );
+    assert!(
+        !scratch
+            .path()
+            .join(".dohc/engine/displaced/6a6f62.0")
+            .exists()
+    );
+    assert_eq!(
+        call(&transport, &handle, 12, "keptCopies.list", json!({})).await,
+        json!({ "keptCopies": [], "more": false })
+    );
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            13,
+            "keptCopies.save",
+            json!({ "id": id })
+        )
+        .await,
+        json!({ "status": "gone" })
     );
 }

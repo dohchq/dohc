@@ -12,7 +12,7 @@ import { mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promise
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { mockLiveSessions } from "../testing/liveEngineSessions";
+import { mockDaemonSessions, mockLiveSessions } from "../testing/liveEngineSessions";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import {
   DAEMON_CAPTURE_HEALTH_POLL_MS,
@@ -169,24 +169,33 @@ function liveCapture(
   options: Omit<CaptureOptions, "rustEngineSessions"> & { requests?: Request[] } = {},
 ): WorkspaceEngineCapture {
   const { requests, ...rest } = options;
-  return capture(root, {
-    rustEngineSessions: mockLiveSessions(loopback, requests, undefined, async (request) => {
-      const params = request.params as { createOnly?: boolean; path: string; text: string };
-      if (request.method !== VERSIONED_METHOD.textWrite || params.createOnly !== true) return;
-      const target = join(root, params.path);
-      await mkdir(dirname(target), { recursive: true });
-      try {
-        await writeFile(target, params.text, { flag: "wx" });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-          requests?.push(request);
-          throw new VersionedTextStoreError("target-path-exists", "target-path-exists");
+  const completed = new Set<string>();
+  const publishing = new Proxy(loopback, {
+    get(target, property, receiver) {
+      if (property !== "sendRequest") return Reflect.get(target, property, receiver);
+      return async (request: Request) => {
+        const params = request.params as { createOnly?: boolean; path: string; text?: string; bytesBase64?: string; expectedSha256?: string; requestId?: string };
+        const writing = request.method === VERSIONED_METHOD.textWrite || request.method === VERSIONED_METHOD.textWriteBlob;
+        const key = params.requestId ?? String(request.id);
+        if (writing && !completed.has(key)) {
+          const current = await readFile(join(root, params.path)).catch(() => null);
+          if (params.createOnly && current !== null) throw new VersionedTextStoreError("target-path-exists", "target-path-exists");
+          if (params.expectedSha256 !== undefined && (current === null || createHash("sha256").update(current).digest("hex") !== params.expectedSha256)) {
+            throw new VersionedTextStoreError("write-precondition-failed", "write-precondition-failed");
+          }
         }
-        throw error;
-      }
-    }),
-    ...rest,
+        const response = await target.sendRequest(request);
+        if (writing && !completed.has(key)) {
+          const path = join(root, params.path);
+          await mkdir(dirname(path), { recursive: true });
+          await writeFile(path, params.text ?? Buffer.from(params.bytesBase64!, "base64"), { flag: params.createOnly ? "wx" : "w" });
+          completed.add(key);
+        }
+        return response;
+      };
+    },
   });
+  return capture(root, { rustEngineSessions: mockLiveSessions(publishing, requests), ...rest });
 }
 
 // The daemon-path equivalent of readEngineMoments: the same six facts, read
@@ -1199,9 +1208,36 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("preserves the outside file when History restore publication conflicts", async () => {
+    const root = await createTestScratch("dohc-restore-conflict-");
+    const loopback = new VersionedLoopbackEngine();
+    let conflict = false;
+    const send = loopback.sendRequest.bind(loopback);
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async request => {
+      const response = await send(request);
+      if (conflict && request.method === VERSIONED_METHOD.textWrite) {
+        await write(root, "note.txt", "outside edit");
+        return { ...response, result: { ...(response.result as Record<string, JsonValue>), materialized: false, materializeOutcome: "conflict" } };
+      }
+      return response;
+    });
+    const sessions = mockLiveSessions(loopback);
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "note.txt", metadata: { origin: "api" as const } };
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    await store.writeTextFile({ ...target, text: "original" });
+    const changed = await store.writeTextFile({ ...target, text: "current" });
+    await write(root, target.path, "current");
+    conflict = true;
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    await expect(engine.restoreFileToBeforeMoment(changed.moment.id)).rejects.toBeInstanceOf(AuthoredTextChangedError);
+    expect(await readFile(join(root, target.path), "utf8")).toBe("outside edit");
+    await engine.stop();
+  });
+
   it("does not save a Collection file stored as binary as an edit when its bytes are unchanged", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
-    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const sessions = mockDaemonSessions({ rootPath: root, workspaceId: WORKSPACE_ID, loopback: new VersionedLoopbackEngine() });
     const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
     const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "trip/automations.yaml", metadata: { origin: "api" as const } };
     const current = "version: 1\nautomations: []\n";
@@ -2728,6 +2764,21 @@ describe("createDefaultDiskWriter symlink containment", () => {
 describe("workspaceEngineCapture agent attribution", () => {
   const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1", depth: 0 };
 
+  it("publishes large authored text through the engine and replays a create", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = liveCapture(root, loopback, { requests });
+    const text = "a".repeat(128 * 1024 - 1) + "€";
+    const author = { kind: "agent", agentId: "agent", onBehalfOf: "local" } as const;
+    await engine.writeAuthoredTextFile(join(root, "large.txt"), text, author, { createOnly: true, requestId: "stable" });
+    expect(await readFile(join(root, "large.txt"), "utf8")).toBe(text);
+    expect(requests.find(request => request.method === VERSIONED_METHOD.textWriteBlob)?.idempotencyKey).toBe("stable");
+    await engine.writeAuthoredTextFile(join(root, "large.txt"), text, author, { createOnly: true, requestId: "stable" });
+    expect(await liveMomentAuthors(engine)).toEqual([author]);
+    await engine.stop();
+  });
+
   it("records an authored write under its own author, not the ambient run", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
@@ -2896,7 +2947,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     await engine.stop();
   });
 
-  it("enforces the authored capture size limit and reports observed UTF-8 bytes", async () => {
+  it("accepts authored text beyond the capture inline boundary", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const engine = liveCapture(root, new VersionedLoopbackEngine());
     const author = {
@@ -2919,9 +2970,7 @@ describe("workspaceEngineCapture agent attribution", () => {
         "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1),
         author,
       ),
-    ).rejects.toThrow(
-      `Authored text exceeds the in-band write limit: limit ${MAX_DESKTOP_CAPTURE_TEXT_BYTES} bytes, observed ${MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1} bytes.`,
-    );
+    ).resolves.toEqual({ resolvedAbsolutePath: join(root, "over-limit.txt") });
     await engine.stop();
   });
 

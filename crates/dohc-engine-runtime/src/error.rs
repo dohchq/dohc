@@ -63,6 +63,12 @@ pub enum RuntimeError {
     #[error("a linked artifact asset is invalid")]
     YdocArtifactAssetsInvalid,
 
+    /// An open drained remote changes that require conflict review.
+    #[error("ydoc-conflict-open")]
+    YdocOpenConflict {
+        record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    },
+
     /// Sync delivered a drawing delete before one of its owned asset deletes.
     /// The rollback must wait so its normal compensation can converge on peers.
     #[error(
@@ -137,6 +143,7 @@ impl RuntimeError {
             RuntimeError::ActiveVersionMaterializationIncomplete { .. } => "materialize-failed",
             RuntimeError::YdocArtifactAssetsPending => "ydoc-artifact-assets-pending",
             RuntimeError::YdocArtifactAssetsInvalid => "ydoc-artifact-assets-invalid",
+            RuntimeError::YdocOpenConflict { .. } => "ydoc-conflict-open",
             RuntimeError::SceneAssetDeletePending => "scene-asset-delete-pending",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",

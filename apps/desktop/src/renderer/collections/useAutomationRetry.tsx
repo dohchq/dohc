@@ -6,13 +6,11 @@ import { useRequestSequence } from "../useRequestSequence";
 // Try again for a failed automation run, from the ⚡ panel or from its
 // notice. `request` asks main, which queues the claim and wakes the
 // executor's drain; `onQueued` re-reads what the caller shows. A run whose
-// automation changed since it failed, or whose progress dohc no longer has,
-// is not a retry: it starts over, so the person confirms that first.
+// automation changed since it failed is not a retry: it starts over, so the
+// person confirms that first.
 
 export const START_OVER_SENTENCE =
   "This automation changed since it failed. Running it again starts from the beginning and can repeat changes it already made.";
-export const PROGRESS_GONE_SENTENCE =
-  "dohc no longer has this run's progress. Running it again starts from the beginning and can repeat changes it already made.";
 export const REPEATS_MESSAGES_SENTENCE = "Posts, direct messages, and notices it already sent may be sent again.";
 
 export function useAutomationRetry<Target>(options: {
@@ -25,7 +23,7 @@ export function useAutomationRetry<Target>(options: {
   // Rises when the workspace changes: an answer for another workspace, and
   // a confirmation it opened, never reach this one.
   const workspace = useRequestSequence([workspaceId]);
-  const [confirming, setConfirming] = useState<{ target: Target; epoch: number; why: string; repeatsMessages: boolean } | null>(null);
+  const [confirming, setConfirming] = useState<{ target: Target; epoch: number; repeatsMessages: boolean } | null>(null);
   useEffect(() => setConfirming(null), [workspaceId]);
 
   const run = useCallback(
@@ -35,8 +33,7 @@ export function useAutomationRetry<Target>(options: {
       void request(target, startOver)
         .then((result) => {
           if (!workspace.isCurrent(epoch)) return;
-          if (result.status === "definition-changed") setConfirming({ target, epoch, why: START_OVER_SENTENCE, repeatsMessages: result.repeatsMessages });
-          else if (result.status === "progress-gone") setConfirming({ target, epoch, why: PROGRESS_GONE_SENTENCE, repeatsMessages: result.repeatsMessages });
+          if (result.status === "definition-changed") setConfirming({ target, epoch, repeatsMessages: result.repeatsMessages });
           else if (result.status === "refused") onError(result.reason, new Error(result.reason));
           else onQueued();
         })
@@ -61,7 +58,7 @@ export function useAutomationRetry<Target>(options: {
         run(confirming.target, true);
       }}
     >
-      <p className="m-0 mt-2 text-[13px] text-muted">{confirming.why}{confirming.repeatsMessages ? ` ${REPEATS_MESSAGES_SENTENCE}` : ""}</p>
+      <p className="m-0 mt-2 text-[13px] text-muted">{START_OVER_SENTENCE}{confirming.repeatsMessages ? ` ${REPEATS_MESSAGES_SENTENCE}` : ""}</p>
     </ConfirmDialog>
   ) : null;
   return { retry, dialog };

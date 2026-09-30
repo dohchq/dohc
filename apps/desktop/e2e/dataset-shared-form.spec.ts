@@ -122,13 +122,13 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await form.getByRole("button", { name: "Submit", exact: true }).click();
     await expect(form.getByRole("status")).toHaveText("Response received.");
     await guest.screenshot({ path: info.outputPath("shared-generated-form.png") });
-    const path = `dohc://data-collection/${dataset.datasetId}/${table.tableId}`;
+    const path = `dohc://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
     await page.getByTestId(`tab-${path}`).click();
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
     const names = collection.getByRole("button", { name: /^Edit Name for record / });
     await expect(names).toHaveCount(2);
     expect(await names.allTextContents()).toEqual(expect.arrayContaining(["Before sharing", "Shared browser participant"]));
-    const request = { action: "invoke" as const, workspaceId, datasetId: dataset.datasetId, revision: dataset.revision,
+    const request = { action: "invoke" as const, workspaceId, datasetPath: dataset.datasetPath!, revision: dataset.revision,
       revisionSha256: dataset.revisionSha256, operationId: dataset.operations.find(operation => operation.kind === "read")!.operationId,
       input: { limit: 50 }, idempotencyKey: "read-shared-copy" };
     const online = await page.evaluate(async request => window.dohcDesktop!.dataset(request), request);
@@ -190,7 +190,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     expect(reopened).toMatchObject({ kind: "invoked", result: current.result, copy: { offline: true } });
     expect(shared.failures).toEqual([]);
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
-    await info.attach("scope", { body: JSON.stringify({ workspaceId, datasetId: dataset.datasetId,
+    await info.attach("scope", { body: JSON.stringify({ workspaceId, datasetPath: dataset.datasetPath!,
       identity: "Test identity seeded into isolated profile; account onboarding is outside this proof.",
       transport: "Real relay HTTP, real share-web handler over temporary TLS, browser-local DNS and certificate trust.",
       browserDispatch: "Only Electron shell.openExternal is intercepted; the local URL returned by production launch opens in a real browser.",

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import { validateUserWritePath } from "@dohc/workspace-core/paths";
+import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
@@ -156,6 +156,7 @@ const MUTATION_OPTIONAL_STRINGS = [
   "summary",
   "correlationId",
   "requestId",
+  "expectedSha256",
 ] as const;
 const WRITE_OPTIONAL_STRINGS = [
   ...MUTATION_OPTIONAL_STRINGS,
@@ -178,7 +179,13 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["versionId", "path", "text"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
     optionalI64: ["nowMs"],
-    optionalJson: ["author", "createOnly"],
+    optionalJson: ["author", "createOnly", "publish"],
+  },
+  [VERSIONED_METHOD.textWriteBlob]: {
+    requiredStrings: ["versionId", "path", "sha256", "bytesBase64"],
+    optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
+    optionalI64: ["nowMs"],
+    optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
   [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"] },
@@ -214,13 +221,13 @@ const VERSIONED_PARAM_SHAPES = {
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
     optionalI64: ["nowMs"],
     optionalBytes: ["bytes"],
-    optionalJson: ["author"],
+    optionalJson: ["author", "createOnly"],
   },
   [VERSIONED_METHOD.binaryWriteBlob]: {
     requiredStrings: ["versionId", "path", "sha256"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
     optionalI64: ["nowMs"],
-    optionalJson: ["author"],
+    optionalJson: ["author", "createOnly"],
   },
   [VERSIONED_METHOD.binaryRead]: { requiredStrings: ["versionId", "path"] },
   [VERSIONED_METHOD.binaryReadBlob]: {
@@ -809,8 +816,7 @@ function validateRustPathFloor(path: string): void {
     path.includes("\\") ||
     bytes[1] === 0x3a ||
     path.includes("..") ||
-    path === ".dohc" ||
-    path.startsWith(".dohc/")
+    hasIgnoredSegment(path)
   ) {
     throw new Error("invalid-path");
   }
@@ -1132,6 +1138,18 @@ export class VersionedLoopbackEngine implements EngineTransport {
     let parsedSecretWrite: ParsedSecretWriteFields | undefined;
     let parsedSecretDelete: ParsedSecretDeleteFields | undefined;
     switch (request.method) {
+      case VERSIONED_METHOD.textWriteBlob: {
+        const bytes = Buffer.from(serdeRequiredParamString(params, "bytesBase64"), "base64");
+        if (sha256([...bytes]) !== params.sha256 || bytes.byteLength > 10 * 1024 * 1024) throw new Error("invalid-input");
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        const decoded: JsonObject = { ...params, text };
+        delete decoded.sha256;
+        delete decoded.bytesBase64;
+        const parsed = parseTextWriteFields(decoded, request);
+        const workspace = this.requireWorkspaceHandle(request);
+        this.validateWorkspaceParam(decoded, workspace);
+        return this.textWrite(this.workspace(workspace), workspace, decoded, parsed, false);
+      }
       case VERSIONED_METHOD.textWrite:
         parsedTextWrite = parseTextWriteFields(params, request);
         break;
@@ -1261,6 +1279,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const addressablePath = normalizedEnginePath(parsed.path, "addressable");
     if (parsed.momentId !== undefined) validateTextMomentId(parsed.momentId);
     const path = normalizedEnginePath(addressablePath, "storable");
+    if (params.publish !== undefined && typeof params.publish !== "boolean") throw new Error("invalid-params");
+    if (params.publish === true && versionId !== (state.activeVersionId ?? "main")) throw new Error("invalid-version");
+    if (params.publish !== true && (params.createOnly === true || params.expectedSha256 !== undefined)) throw new Error("invalid-params");
     const knownVersion = state.versions.get(versionId);
     if (knownVersion === undefined && versionId !== "main") {
       this.version(state, versionId);
@@ -1300,6 +1321,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
       const replay = this.replay(state, requestId, params, replayFingerprint);
       if (replay) return replay;
     }
+    if (typeof params.expectedSha256 === "string" && knownVersion?.files.get(path) &&
+        sha256(Buffer.from(knownVersion.files.get(path)!.text ?? "")) !== params.expectedSha256) {
+      throw new Error("write-precondition-failed");
+    }
     const existingMoment = momentId === undefined ? undefined : state.moments.get(momentId);
     const authorFingerprint = this.writeAuthorFingerprint(params);
     if (existingMoment) {
@@ -1327,6 +1352,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
           snapshot: this.textSnapshot(workspace, versionId, path, recorded),
           moment: this.capMoment(existingMoment.wire),
           deduped: true,
+          materialized: params.publish === true, materializeOutcome: params.publish === true ? "applied" : "skipped",
         };
       }
     }
@@ -1388,6 +1414,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       snapshot: this.textSnapshot(workspace, version.id, path, file),
       moment: this.capMoment(moment),
       deduped: false,
+      materialized: params.publish === true, materializeOutcome: params.publish === true ? "applied" : "skipped",
     };
     this.recordReplay(state, requestId, params, result, replayFingerprint);
     return result;
@@ -1503,6 +1530,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (parsed.objectId === "" && versionId === "main" && !state.versions.has(versionId)) {
       throw new Error("invalid-input");
     }
+    if (versionId !== (state.activeVersionId ?? "main")) throw new Error("invalid-version");
     const version = this.mutationVersion(state, workspace, versionId);
     const requestId = parsed.requestId;
     const objectId = parsed.objectId ??
@@ -1522,15 +1550,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       momentId,
     );
     const replay = this.replay(state, requestId, params, replayFingerprint);
-    if (replay) {
-      return {
-        ...replay,
-        materializeEnqueued: false,
-        materialized: false,
-        materializeOutcome: "skipped",
-      };
-    }
+    if (replay) return replay;
     const before = version.files.get(path);
+    if (params.createOnly === true && before) throw new Error("target-path-exists");
+    if (typeof params.expectedSha256 === "string" && (!before ||
+        (before.contentKind === "binary" ? before.binarySha : sha256(Buffer.from(before.text ?? ""))) !== params.expectedSha256)) {
+      throw new Error("write-precondition-failed");
+    }
     const binarySha = sha256(bytes);
     // Daemon parity: writing the same bytes over an equal binary head is a
     // content-equality dedup — no new moment, no materialization work.
@@ -2799,7 +2825,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
       versionId: params.versionId,
       path: params.path,
       text: params.text,
+      publish: params.publish === true,
       createOnly: params.createOnly === true,
+      expectedSha256: params.expectedSha256 ?? null,
       momentId,
       objectId,
       metadataOrigin: origin,
@@ -2820,6 +2848,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   ): string {
     return JSON.stringify({
       operation: "versioned-binary-write",
+      createOnly: params.createOnly === true,
+      expectedSha256: params.expectedSha256 ?? null,
       workspaceId: workspace,
       versionId: params.versionId,
       path: params.path,

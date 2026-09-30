@@ -95,6 +95,10 @@
 use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
 use crate::floor::is_excluded_file;
 use crate::media::{is_text_media_type, media_type_for_path};
+use crate::policy::{
+    MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification, classify_engine_file_path,
+    classify_engine_file_path_normalized,
+};
 use dohc_engine_storage::{
     Displacement, DisplacementResolution, DisplacementSpec, DisplacementState, EngineStore,
     FaultInjector, FaultPoint, JobStatus, MaterializationJob, MaterializationOperation, Preimage,
@@ -497,190 +501,6 @@ pub enum ProjectionTargetKind {
     Secret,
 }
 
-/// Private evidence for an authored create. Publication links this complete file
-/// into an absent workspace path; the link preserves identity across restart.
-pub struct AuthoredCreateStage {
-    root: PathBuf,
-    stage: PathBuf,
-    target: PathBuf,
-}
-
-#[derive(Debug)]
-pub struct AuthoredCreatePublishError {
-    pub error: MaterializeError,
-    pub may_be_published: bool,
-}
-
-impl AuthoredCreateStage {
-    pub fn open(root: &Path, path: &str, id: &str) -> Result<Self, MaterializeError> {
-        if id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
-            return Err(MaterializeError::UnsafeTargetPath);
-        }
-        let root = std::fs::canonicalize(root).map_err(|e| MaterializeError::io(root, &e))?;
-        let target = resolve_target(&root, path)?;
-        walk_target_components(
-            &root,
-            target.parent().ok_or(MaterializeError::UnsafeTargetPath)?,
-            reject_link_or_reparse,
-        )?;
-        let stage = root
-            .join(".dohc/engine/authored-create")
-            .join(format!("{id}.stage"));
-        prepare_target_parent_symlink_free(&root, &stage)?;
-        Ok(Self {
-            root,
-            stage,
-            target,
-        })
-    }
-
-    pub fn prepare(&self, text: &str) -> Result<(), MaterializeError> {
-        if text.len() > MAX_MATERIALIZE_BYTES {
-            return Err(MaterializeError::TooLarge { actual: text.len() });
-        }
-        prepare_target_parent_symlink_free(&self.root, &self.target)?;
-        let sibling = self.preparation_sibling();
-        let prepared = (|| {
-            // Create in the destination directory to inherit its security metadata.
-            let file = write_temp(&sibling, text.as_bytes())?;
-            file.sync_all()
-                .map_err(|error| MaterializeError::io(&sibling, &error))?;
-            std::fs::hard_link(&sibling, &self.stage)
-                .map_err(|error| MaterializeError::io(&self.stage, &error))?;
-            sync_parent_dir(self.stage.parent(), DurabilityPolicy::per_os())
-        })();
-        let removed = remove_authored_preparation(&sibling);
-        prepared?;
-        removed?;
-        sync_parent_dir(sibling.parent(), DurabilityPolicy::per_os())
-    }
-
-    fn preparation_sibling(&self) -> PathBuf {
-        temp_sibling(
-            &self.target,
-            &format!(
-                "authored-create-{}",
-                self.stage.file_stem().expect("stage ID").to_string_lossy()
-            ),
-        )
-    }
-
-    /// False means an existing entry won. Never overwrite or follow that entry.
-    pub fn publish(&self) -> Result<bool, AuthoredCreatePublishError> {
-        self.publish_with_link(|from, to| std::fs::hard_link(from, to))
-    }
-
-    fn publish_with_link(
-        &self,
-        link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
-    ) -> Result<bool, AuthoredCreatePublishError> {
-        let unpublished = |error| AuthoredCreatePublishError {
-            error,
-            may_be_published: false,
-        };
-        walk_target_components(
-            &self.root,
-            self.target
-                .parent()
-                .ok_or(MaterializeError::UnsafeTargetPath)
-                .map_err(unpublished)?,
-            ensure_real_directory,
-        )
-        .map_err(unpublished)?;
-        if let Err(error) = link(&self.stage, &self.target) {
-            // A remote server can create the link before losing its reply.
-            // Unsupported is a definitive refusal; other outcomes need identity evidence.
-            if error.kind() == ErrorKind::Unsupported {
-                return Err(unpublished(MaterializeError::io(&self.target, &error)));
-            }
-            match self.is_published() {
-                Ok(true) => {}
-                Ok(false) if error.kind() == ErrorKind::AlreadyExists => return Ok(false),
-                Ok(false) => return Err(unpublished(MaterializeError::io(&self.target, &error))),
-                Err(_) => {
-                    return Err(AuthoredCreatePublishError {
-                        error: MaterializeError::io(&self.target, &error),
-                        may_be_published: true,
-                    });
-                }
-            }
-        }
-        sync_parent_dir(self.target.parent(), DurabilityPolicy::per_os()).map_err(|error| {
-            AuthoredCreatePublishError {
-                error,
-                may_be_published: true,
-            }
-        })?;
-        Ok(true)
-    }
-
-    pub fn is_published(&self) -> Result<bool, MaterializeError> {
-        // Missing evidence cannot prove either publication or a collision.
-        let stage = same_file::Handle::from_path(&self.stage)
-            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
-        let metadata = match std::fs::symlink_metadata(&self.target) {
-            Ok(metadata) => metadata,
-            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
-                return Ok(false);
-            }
-            Err(e) => return Err(MaterializeError::io(&self.target, &e)),
-        };
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata_is_reparse_point(&metadata)
-        {
-            return Ok(false);
-        }
-        let target = same_file::Handle::from_path(&self.target)
-            .map_err(|e| MaterializeError::io(&self.target, &e))?;
-        Ok(stage == target)
-    }
-
-    pub fn cleanup(&self) -> Result<(), MaterializeError> {
-        remove_authored_preparation(&self.preparation_sibling())?;
-        match std::fs::remove_file(&self.stage) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(MaterializeError::io(&self.stage, &e)),
-        }
-    }
-}
-
-fn remove_authored_preparation(path: &Path) -> Result<(), MaterializeError> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
-            Ok(())
-        }
-        Err(error) => Err(MaterializeError::io(path, &error)),
-    }
-}
-
-/// No intent remains when this runs. Only this subsystem owns these private files.
-pub fn cleanup_authored_create_stages(root: &Path) -> Result<(), MaterializeError> {
-    let root = std::fs::canonicalize(root).map_err(|e| MaterializeError::io(root, &e))?;
-    let dir = root.join(".dohc/engine/authored-create");
-    ensure_target_symlink_free(&root, &dir)?;
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(MaterializeError::io(&dir, &e)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|e| MaterializeError::io(&dir, &e))?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.len() == 70
-            && name.ends_with(".stage")
-            && name[..64].bytes().all(|c| c.is_ascii_hexdigit())
-        {
-            std::fs::remove_file(entry.path())
-                .map_err(|e| MaterializeError::io(&entry.path(), &e))?;
-        }
-    }
-    Ok(())
-}
-
 /// Read a prospective projection target without treating foreign or
 /// transiently unreadable content as an overwrite preimage.
 pub fn probe_projection_target(
@@ -758,6 +578,20 @@ pub fn probe_projection_target(
             }
         }
     }
+}
+
+/// Hash a write precondition without applying capture's text or binary caps.
+pub fn write_precondition_sha256(
+    root: &Path,
+    rel: &str,
+) -> Result<Option<String>, MaterializeError> {
+    let root = std::fs::canonicalize(root).map_err(|error| MaterializeError::io(root, &error))?;
+    let target = resolve_target(&root, rel)?;
+    ensure_target_symlink_free(&root, &target)?;
+    Ok(match read_current_no_follow(&target)? {
+        CurrentTarget::Present(bytes) => Some(hex_sha256(&bytes)),
+        CurrentTarget::Absent | CurrentTarget::Oversized => None,
+    })
 }
 
 fn existing_ancestor_is_contained(root: &Path, target: &Path) -> bool {
@@ -957,12 +791,12 @@ fn materialize_one_ordinary(
     }
 
     // Load the content blob (integrity-verified on read).
-    let content = store.get_binary_blob(&job.content_sha256)?.ok_or_else(|| {
-        MaterializeError::MissingBlob {
+    let content = store
+        .get_materialization_blob(&job.content_sha256)?
+        .ok_or_else(|| MaterializeError::MissingBlob {
             job_id: job.job_id.clone(),
             sha256: job.content_sha256.clone(),
-        }
-    })?;
+        })?;
     if content.len() > MAX_MATERIALIZE_BYTES {
         return Err(MaterializeError::TooLarge {
             actual: content.len(),
@@ -2757,6 +2591,228 @@ pub fn recover_path_displacements(
     Ok(())
 }
 
+/// What [`save_kept_displacement`] did with a kept file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeptCopySave {
+    /// The kept file is now this visible workspace-relative path.
+    Saved(String),
+    /// The workspace has no kept row under that id, or its file was already
+    /// gone. A row whose file is gone is ended too.
+    Gone,
+    /// No free sibling name fits the engine's name and path limits and keeps
+    /// the original's classification, so capture could not record a copy.
+    /// The file stays at its hidden name, and its row stays.
+    NoValidName,
+}
+
+/// Move a kept file from staging to a visible copy beside
+/// its path, `name (kept copy).ext`, and end its row. Capture then records
+/// the copy like any new file, and the person or an agent can open, compare
+/// or delete it.
+///
+/// The move never replaces a file, and the row ends only once the hidden
+/// name is gone, so kept bytes are never left under two names unreported.
+/// Where no sibling name would be recorded by capture, the file and its row
+/// stay.
+pub fn save_kept_displacement(
+    store: &EngineStore,
+    root: &Path,
+    workspace_id: &str,
+    displacement_id: i64,
+    options: &MaterializeOptions<'_>,
+) -> Result<KeptCopySave, MaterializeError> {
+    let Some(row) = store
+        .list_kept_displacements(workspace_id)?
+        .into_iter()
+        .find(|row| row.displacement_id == displacement_id)
+    else {
+        return Ok(KeptCopySave::Gone);
+    };
+    if !is_staged_name(&row.displaced_name) {
+        return Err(MaterializeError::UnsafeTargetPath);
+    }
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let staging = staging_dir(&canonical_root, false)?;
+    let kept = staging.join(&row.displaced_name);
+    if !entry_exists(&kept)? {
+        store.resolve_displacement(
+            displacement_id,
+            DisplacementResolution::Discard,
+            None,
+            options.now_ms,
+        )?;
+        return Ok(KeptCopySave::Gone);
+    }
+    // Orphan staging files have no original path. Keep them available through
+    // the recovery folder rather than guessing a name or file classification.
+    if row.target_path.is_empty() {
+        return Ok(KeptCopySave::NoValidName);
+    }
+    let target = resolve_target(&canonical_root, &row.target_path)?;
+    ensure_target_symlink_free(&canonical_root, &target)?;
+    let (parent, file_name) = match row.target_path.rsplit_once('/') {
+        Some((parent, name)) => (Some(parent), name),
+        None => (None, row.target_path.as_str()),
+    };
+    let original_class = classify_engine_file_path(&row.target_path);
+    let name_budget = MAX_KEPT_COPY_NAME_BYTES.min(
+        MAX_CANONICAL_WORKSPACE_PATH_BYTES
+            .saturating_sub(parent.map_or(0, |parent| parent.len() + 1)),
+    );
+    for n in 1..=MAX_DISPLACED_NAMES {
+        let Some(name) = kept_copy_name(file_name, n, name_budget) else {
+            return Ok(KeptCopySave::NoValidName);
+        };
+        let copy_path = match parent {
+            Some(parent) => format!("{parent}/{name}"),
+            None => name.clone(),
+        };
+        // The copy must be a path capture records, under the same rule as the
+        // original: never ignored, and never a secret turned plain or back.
+        let (class, normalized) = classify_engine_file_path_normalized(&copy_path);
+        if class == PathClassification::Ignored
+            || class != original_class
+            || normalized.as_deref() != Some(copy_path.as_str())
+        {
+            return Ok(KeptCopySave::NoValidName);
+        }
+        let copy = sibling_with_name(&target, &name);
+        // A copy that is the kept file itself, linked before a crash or a
+        // failed unlink, is this save's own: finish it. Anything else at the
+        // name, even with the same bytes, is another file.
+        if entry_exists(&copy)? {
+            if !is_same_file(&kept, &copy).map_err(|err| MaterializeError::io(&copy, &err))? {
+                continue;
+            }
+            #[cfg(windows)]
+            remove_placement_link(&kept, &copy).map_err(|err| MaterializeError::io(&kept, &err))?;
+            #[cfg(not(windows))]
+            std::fs::remove_file(&kept).map_err(|err| MaterializeError::io(&kept, &err))?;
+        } else {
+            match move_kept_copy(&kept, &copy, options) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(MaterializeError::Io {
+                    kind: ErrorKind::InvalidFilename,
+                    ..
+                }) => return Ok(KeptCopySave::NoValidName),
+                Err(err) => return Err(err),
+            }
+        }
+        sync_parent_dir(copy.parent(), options.policy)?;
+        sync_staged(&staging, options.policy)?;
+        store.resolve_displacement(
+            displacement_id,
+            DisplacementResolution::Discard,
+            None,
+            options.now_ms,
+        )?;
+        return Ok(KeptCopySave::Saved(copy_path));
+    }
+    Ok(KeptCopySave::NoValidName)
+}
+
+/// Move the kept file to `copy` without replacing anything there. `false`
+/// when something is already at `copy`.
+///
+/// Linux and macOS try one exclusive rename first. A Unix filesystem without
+/// it links the copy and then unlinks the hidden name; unlike
+/// [`rename_no_replace`], a failed unlink is an error, so the row stays and
+/// the next save finishes it. Windows and Unix filesystems with neither
+/// use [`place_attempt`], so a
+/// check-then-rename is recorded like any other placement's.
+fn move_kept_copy(
+    kept: &Path,
+    copy: &Path,
+    options: &MaterializeOptions<'_>,
+) -> Result<bool, MaterializeError> {
+    #[cfg(not(windows))]
+    {
+        #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+        {
+            use rustix::fs::{CWD, RenameFlags, renameat_with};
+            use rustix::io::Errno;
+            match renameat_with(CWD, kept, CWD, copy, RenameFlags::NOREPLACE) {
+                Ok(()) => return Ok(true),
+                Err(err) if err == Errno::EXIST => return Ok(false),
+                Err(err)
+                    if err == Errno::INVAL
+                        || err == Errno::NOSYS
+                        || err == Errno::NOTSUP
+                        || err == Errno::OPNOTSUPP => {}
+                Err(err) => return Err(MaterializeError::io(copy, &std::io::Error::from(err))),
+            }
+        }
+        match std::fs::hard_link(kept, copy) {
+            Ok(()) => {
+                std::fs::remove_file(kept).map_err(|err| MaterializeError::io(kept, &err))?;
+                return Ok(true);
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(false),
+            Err(err) if hard_links_unsupported(&err) => {}
+            Err(err) => return Err(MaterializeError::io(copy, &err)),
+        }
+    }
+    match place_attempt(options.replacer, kept, copy)? {
+        Attempt::Done(placed) => Ok(placed),
+        Attempt::Locked(err) => Err(MaterializeError::io(copy, &err)),
+    }
+}
+
+/// Whether the visible copy is the same regular file as the staged copy,
+/// left under both names by an interrupted hard-link placement.
+fn is_same_file(kept: &Path, copy: &Path) -> std::io::Result<bool> {
+    for path in [kept, copy] {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_file() || metadata_is_reparse_point(&metadata) {
+            return Ok(false);
+        }
+    }
+    same_file::is_same_file(kept, copy)
+}
+
+fn has_multiple_links(path: &Path) -> std::io::Result<bool> {
+    let file = open_displaced(path)?;
+    #[cfg(windows)]
+    let count = winapi_util::file::information(&file)?.number_of_links();
+    #[cfg(unix)]
+    let count = {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata()?.nlink()
+    };
+    Ok(count > 1)
+}
+
+/// `notes (kept copy).md`, then `notes (kept copy 2).md`, within `budget`
+/// bytes. A name with no extension, or only a leading dot, takes the suffix
+/// at its end. The stem gives up bytes, never splitting a character; the
+/// suffix and the extension stay whole. `None` when not one stem byte fits.
+fn kept_copy_name(file_name: &str, n: u32, budget: usize) -> Option<String> {
+    let suffix = match n {
+        1 => " (kept copy)".to_owned(),
+        n => format!(" (kept copy {n})"),
+    };
+    let (stem, extension) = match file_name.rfind('.') {
+        Some(dot) if dot > 0 && file_name.len() - dot + suffix.len() < budget => {
+            file_name.split_at(dot)
+        }
+        _ => (file_name, ""),
+    };
+    let mut keep = budget
+        .checked_sub(suffix.len() + extension.len())?
+        .min(stem.len());
+    while !stem.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    (keep > 0).then(|| format!("{}{suffix}{extension}", &stem[..keep]))
+}
+
+/// The longest file name, in UTF-8 bytes, a kept copy takes. Most file
+/// systems allow 255 bytes or 255 UTF-16 units per name, and 255 bytes of
+/// UTF-8 never needs more than 255 UTF-16 units.
+const MAX_KEPT_COPY_NAME_BYTES: usize = 255;
+
 /// Whether a replace left `path`'s file staged where it may still go back:
 /// an open row names it, or a pending job that targets it staged a file no
 /// row names yet. Capture must not record such a path as deleted.
@@ -2962,6 +3018,14 @@ fn recover_displacement(
         )?;
         return Ok(false);
     }
+    // Save may have linked the visible copy but stopped before unlinking
+    // staging. Leave both names and the row for the next Save to finish. A
+    // kept file that cannot be opened is also left staged.
+    if displacement.state == DisplacementState::Kept
+        && has_multiple_links(&moved.path).unwrap_or(true)
+    {
+        return Ok(true);
+    }
     if displacement.target_path.is_empty() {
         let inspected = moved.inspect(store)?;
         store.resolve_displacement(
@@ -3134,7 +3198,7 @@ fn preimage_matches(preimage: &Preimage, current: &CurrentTarget) -> bool {
 /// Resolve a workspace-relative forward-slash path to an absolute target under
 /// `root`, rejecting escapes, absolute inputs, and path-floor entries.
 fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
-    if rel.is_empty() || is_excluded_file(rel) {
+    if rel.is_empty() || is_excluded_file(rel) || crate::policy::is_shared_with_me_path(rel) {
         return Err(MaterializeError::UnsafeTargetPath);
     }
     let mut out = root.to_path_buf();
@@ -3150,6 +3214,43 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
             return Err(MaterializeError::UnsafeTargetPath);
         }
         out.push(segment);
+    }
+    #[cfg(windows)]
+    {
+        // Check links before resolving aliases. Resolve the deepest existing
+        // path once, including an existing leaf so file aliases cannot bypass
+        // the sidecar and conflict-artifact floor.
+        let mut existing = root.to_path_buf();
+        for component in out.strip_prefix(root).unwrap().components() {
+            let candidate = existing.join(component);
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+                        return Err(MaterializeError::SymlinkTarget);
+                    }
+                    existing = candidate;
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => break,
+                Err(err) => return Err(MaterializeError::io(&candidate, &err)),
+            }
+        }
+        if existing != root {
+            let resolved = std::fs::canonicalize(&existing)
+                .map_err(|err| MaterializeError::io(&existing, &err))?;
+            let suffix = out.strip_prefix(&existing).unwrap();
+            out = if suffix.as_os_str().is_empty() {
+                resolved
+            } else {
+                resolved.join(suffix)
+            };
+        }
+        let relative = out
+            .strip_prefix(root)
+            .map_err(|_| MaterializeError::UnsafeTargetPath)?;
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if is_excluded_file(&relative) || crate::policy::is_shared_with_me_path(&relative) {
+            return Err(MaterializeError::UnsafeTargetPath);
+        }
     }
     Ok(out)
 }
@@ -4255,177 +4356,6 @@ mod tests {
         assert!(root.join("real/sub").is_dir());
     }
 
-    #[test]
-    fn authored_create_preparation_retains_only_private_identity() {
-        let root =
-            dohc_test_scratch::ScratchDir::new_named("authored-preparation").expect("scratch");
-        let stage =
-            super::AuthoredCreateStage::open(root.path(), "nested/record.md", &"d".repeat(64))
-                .expect("stage");
-        stage.prepare("authored").expect("prepare");
-        assert!(!stage.preparation_sibling().exists());
-        assert!(!stage.target.exists());
-        assert_eq!(
-            std::fs::read_to_string(&stage.stage).expect("private bytes"),
-            "authored"
-        );
-        std::fs::remove_dir(stage.target.parent().expect("parent"))
-            .expect("destination removed after preparation");
-        assert!(stage.stage.exists());
-        let reopened =
-            super::AuthoredCreateStage::open(root.path(), "nested/record.md", &"d".repeat(64))
-                .expect("reopen");
-        assert!(reopened.publish().expect("publish"));
-        assert!(reopened.is_published().expect("retained identity"));
-    }
-
-    #[test]
-    fn authored_create_failed_preparation_removes_sibling_and_preserves_existing_evidence() {
-        let root =
-            dohc_test_scratch::ScratchDir::new_named("authored-prepare-failure").expect("scratch");
-        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"e".repeat(64))
-            .expect("stage");
-        std::fs::write(&stage.stage, "prior evidence").expect("existing stage");
-        assert!(stage.prepare("new attempt").is_err());
-        assert!(!stage.preparation_sibling().exists());
-        assert_eq!(
-            std::fs::read_to_string(&stage.stage).expect("private bytes"),
-            "prior evidence"
-        );
-        stage.cleanup().expect("discard abandoned preparation");
-        stage.prepare("retry").expect("retry");
-    }
-
-    #[test]
-    fn authored_create_abandoned_sibling_never_becomes_user_content() {
-        let root =
-            dohc_test_scratch::ScratchDir::new_named("authored-orphan-sibling").expect("scratch");
-        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"f".repeat(64))
-            .expect("stage");
-        let sibling = stage.preparation_sibling();
-        std::fs::write(&sibling, "partial preparation").expect("crash before evidence link");
-        assert!(crate::floor::is_excluded_file(
-            sibling.file_name().unwrap().to_str().unwrap()
-        ));
-        stage.cleanup().expect("retry cleanup before intent");
-        assert!(!sibling.exists());
-        stage.prepare("complete").expect("prepare");
-        std::fs::hard_link(&stage.stage, &sibling).expect("crash after private evidence link");
-        stage.cleanup().expect("cleanup both private names");
-        assert!(!sibling.exists());
-        assert!(!stage.stage.exists());
-        assert!(!stage.target.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn authored_create_uses_ordinary_restrictive_mode() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = dohc_test_scratch::ScratchDir::new_named("authored-mode").expect("scratch");
-        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"1".repeat(64))
-            .expect("stage");
-        stage.prepare("authored").expect("prepare");
-        let mode = std::fs::metadata(&stage.stage)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode & !0o600, 0);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn authored_create_inherits_destination_acl() {
-        fn powershell(path: &std::path::Path, script: &str) {
-            let output = std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                .env("DOHC_ACL_PROBE", path)
-                .output()
-                .expect("powershell");
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let root = dohc_test_scratch::ScratchDir::new_named("authored-acl").expect("scratch");
-        let destination = root.path().join("destination");
-        std::fs::create_dir(&destination).expect("directory");
-        powershell(
-            &destination,
-            r#"$ErrorActionPreference='Stop'; $acl=[System.IO.Directory]::GetAccessControl($env:DOHC_ACL_PROBE); $sid=[System.Security.Principal.SecurityIdentifier]::new('S-1-1-0'); $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,[System.Security.AccessControl.FileSystemRights]::Read,[System.Security.AccessControl.InheritanceFlags]'ObjectInherit,ContainerInherit',[System.Security.AccessControl.PropagationFlags]::None,[System.Security.AccessControl.AccessControlType]::Allow); $acl.AddAccessRule($rule); [System.IO.Directory]::SetAccessControl($env:DOHC_ACL_PROBE,$acl)"#,
-        );
-        let stage =
-            super::AuthoredCreateStage::open(root.path(), "destination/record.md", &"2".repeat(64))
-                .expect("stage");
-        stage.prepare("authored").expect("prepare");
-        stage.publish().expect("publish");
-        powershell(
-            &stage.target,
-            r#"$ErrorActionPreference='Stop'; $rules=([System.IO.File]::GetAccessControl($env:DOHC_ACL_PROBE)).GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); if (-not ($rules | Where-Object { $_.IdentityReference.Value -eq 'S-1-1-0' -and $_.IsInherited -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Read) })) { throw 'Destination inherited Read ACE is missing' }"#,
-        );
-        assert!(stage.is_published().expect("same inode"));
-        assert!(!stage.preparation_sibling().exists());
-    }
-
-    #[test]
-    fn authored_create_resolves_ambiguous_link_outcomes_by_identity() {
-        for kind in [
-            std::io::ErrorKind::TimedOut,
-            std::io::ErrorKind::Other,
-            std::io::ErrorKind::AlreadyExists,
-        ] {
-            let root = dohc_test_scratch::ScratchDir::new_named("ambiguous-link").expect("scratch");
-            let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"a".repeat(64))
-                .expect("stage");
-            stage.prepare("authored").expect("prepare");
-            let result = stage.publish_with_link(|from, to| {
-                std::fs::hard_link(from, to)?;
-                Err(std::io::Error::from(kind))
-            });
-            assert!(result.expect("own link is published"));
-            assert!(stage.is_published().expect("identity"));
-        }
-    }
-
-    #[test]
-    fn authored_create_keeps_unknown_link_evidence_but_refuses_known_failures() {
-        for kind in [
-            std::io::ErrorKind::TimedOut,
-            std::io::ErrorKind::AlreadyExists,
-            std::io::ErrorKind::Unsupported,
-        ] {
-            let root = dohc_test_scratch::ScratchDir::new_named("unknown-link").expect("scratch");
-            let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"b".repeat(64))
-                .expect("stage");
-            stage.prepare("authored").expect("prepare");
-            let error = stage
-                .publish_with_link(|from, _| {
-                    std::fs::remove_file(from)?;
-                    Err(std::io::Error::from(kind))
-                })
-                .expect_err("failed link");
-            assert_eq!(
-                error.may_be_published,
-                kind != std::io::ErrorKind::Unsupported
-            );
-        }
-    }
-
-    #[test]
-    fn authored_create_link_collision_preserves_foreign_file() {
-        let root = dohc_test_scratch::ScratchDir::new_named("foreign-link").expect("scratch");
-        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"c".repeat(64))
-            .expect("stage");
-        stage.prepare("authored").expect("prepare");
-        std::fs::write(root.path().join("record.md"), "foreign").expect("foreign");
-        assert!(!stage.publish().expect("collision"));
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("record.md")).expect("read"),
-            "foreign"
-        );
-    }
-
     use super::*;
     use dohc_engine_storage::{
         FaultAction, JobStatus, MaterializationJobSpec, NoFaults, StorageError, enqueue_job,
@@ -4691,6 +4621,124 @@ mod tests {
         assert!(reads.check(&target, &expected).expect("check") == TargetHolds::Nothing);
     }
 
+    #[test]
+    fn kept_copy_names_keep_the_extension() {
+        let name = |file: &str, n| kept_copy_name(file, n, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert_eq!(name("notes.md", 1), "notes (kept copy).md");
+        assert_eq!(name("notes.md", 2), "notes (kept copy 2).md");
+        assert_eq!(name("a.tar.gz", 1), "a.tar (kept copy).gz");
+        assert_eq!(name(".env", 1), ".env (kept copy)");
+        assert_eq!(name("Makefile", 3), "Makefile (kept copy 3)");
+    }
+
+    #[test]
+    fn recovery_leaves_interrupted_kept_copy_link_for_next_save() {
+        for target_exists in [false, true] {
+            for known_bytes in [false, true] {
+                let scratch = Scratch::new("kept-copy-interrupted-link");
+                let root = std::fs::canonicalize(&scratch.root).unwrap();
+                let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+                enqueue_write_job(&mut store, "kept-link", "notes.md", b"job content", 1);
+                let expected = store.put_binary_blob(b"preimage").unwrap();
+                let staging = staging_dir(&root, true).unwrap();
+                let name = staged_name("kept-link", 0);
+                let kept = staging.join(&name);
+                let bytes: &[u8] = if known_bytes {
+                    b"preimage"
+                } else {
+                    b"outside edit"
+                };
+                std::fs::write(&kept, bytes).unwrap();
+                let id = store
+                    .open_displacement(&DisplacementSpec {
+                        job_id: "kept-link".into(),
+                        workspace_id: "ws".into(),
+                        target_path: "notes.md".into(),
+                        displaced_name: name,
+                        expected_sha256: expected,
+                        content_sha256: Some(hex_sha256(b"job content")),
+                        now_ms: 1,
+                    })
+                    .unwrap();
+                // The earlier inspection could not read the staged bytes.
+                store
+                    .resolve_displacement(
+                        id,
+                        DisplacementResolution::Keep {
+                            displaced_sha256: None,
+                        },
+                        None,
+                        1,
+                    )
+                    .unwrap();
+                let target = root.join("notes.md");
+                if target_exists {
+                    std::fs::write(&target, b"job content").unwrap();
+                }
+                let copy = root.join("notes (kept copy).md");
+                // Save claimed the visible name but stopped before unlinking staging.
+                std::fs::hard_link(&kept, &copy).unwrap();
+                let rows = store.list_kept_displacements("ws").unwrap();
+                let options = options_with(&StdReplacer);
+                for _ in 0..2 {
+                    recover_displacements(&store, &root, Some("ws"), &options).unwrap();
+                    assert!(kept.exists(), "recovery must leave Save's staging link");
+                    assert!(is_same_file(&kept, &copy).unwrap());
+                    assert_eq!(store.list_kept_displacements("ws").unwrap(), rows);
+                    assert_eq!(target.exists(), target_exists);
+                    if target_exists {
+                        assert_eq!(std::fs::read(&target).unwrap(), b"job content");
+                    }
+                }
+                assert_eq!(
+                    save_kept_displacement(&store, &root, "ws", id, &options).unwrap(),
+                    KeptCopySave::Saved("notes (kept copy).md".into())
+                );
+                assert!(!kept.exists());
+                assert!(store.list_kept_displacements("ws").unwrap().is_empty());
+                assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+                std::fs::write(&target, b"later original edit").unwrap();
+                assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+                std::fs::write(&copy, b"later copy edit").unwrap();
+                assert_eq!(std::fs::read(&target).unwrap(), b"later original edit");
+            }
+        }
+    }
+
+    /// A name near its budget gives up stem bytes, never its extension or
+    /// suffix, and never splits a character. With no stem byte left, there is
+    /// no name.
+    #[test]
+    fn kept_copy_names_fit_their_budget() {
+        let long = format!("{}.md", "a".repeat(252));
+        let copy = kept_copy_name(&long, 12, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert_eq!(copy.len(), MAX_KEPT_COPY_NAME_BYTES);
+        assert!(copy.ends_with("a (kept copy 12).md"), "{copy}");
+
+        let wide = format!("{}.md", "é".repeat(126));
+        let copy = kept_copy_name(&wide, 1, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert!(copy.len() <= MAX_KEPT_COPY_NAME_BYTES, "{}", copy.len());
+        assert!(copy.ends_with("é (kept copy).md"), "{copy}");
+
+        let dotted = format!("a.{}", "b".repeat(253));
+        let copy = kept_copy_name(&dotted, 1, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert_eq!(copy.len(), MAX_KEPT_COPY_NAME_BYTES);
+        assert!(
+            copy.starts_with("a.b") && copy.ends_with("b (kept copy)"),
+            "{copy}"
+        );
+
+        assert_eq!(
+            kept_copy_name("notes.md", 1, 17).as_deref(),
+            Some("no (kept copy).md")
+        );
+        assert_eq!(
+            kept_copy_name("notes.md", 1, 15).as_deref(),
+            Some("not (kept copy)")
+        );
+        assert_eq!(kept_copy_name("notes.md", 1, 12), None);
+    }
+
     /// The no-replace rename claims an empty name and refuses an occupied
     /// one, leaving both files as they were.
     #[test]
@@ -4762,6 +4810,26 @@ mod tests {
             || std::io::Error::from(ErrorKind::Unsupported),
         ] {
             let replacer = UnsupportedLinks(error);
+            let scratch = Scratch::new("unsupported-links-text");
+            let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+            let sha = hex_sha256(b"authored text");
+            store.write_with(&NoFaults, |tx| {
+                tx.execute("INSERT INTO blobs (sha256, byte_length, text) VALUES (?1, 13, 'authored text')", [&sha]).map_err(StorageError::persist_public)?;
+                enqueue_job(tx, &MaterializationJobSpec { job_id: "authored-text".into(), workspace_id: "workspace".into(), target_path: "authored.txt".into(), content_sha256: sha.clone(), preimage: Preimage::Absent, target_generation: 1, now_ms: 1 })
+            }).unwrap();
+            let job = store
+                .load_materialization_job("authored-text")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                materialize_one(&store, &scratch.root, &job, &options_with(&replacer)).unwrap(),
+                JobOutcome::Completed
+            );
+            assert_eq!(
+                std::fs::read(scratch.root.join("authored.txt")).unwrap(),
+                b"authored text"
+            );
+            assert_eq!(store.binary_blob_count().unwrap(), 0);
             for overwrite in [false, true] {
                 let scratch = Scratch::new("unsupported-links");
                 let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
@@ -5105,6 +5173,156 @@ mod tests {
         fn wait_before_retry(&self, failed_attempt: u32) {
             assert_eq!(failed_attempt, 1);
             std::fs::write(&self.0, b"external edit").expect("external editor saves");
+        }
+    }
+
+    #[test]
+    fn fullwidth_names_remain_writable() {
+        let scratch = Scratch::new("fullwidth");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        let directory = root.join(".ＤＯＨＣ");
+        std::fs::create_dir(&directory).unwrap();
+        let target = resolve_target(&root, ".ＤＯＨＣ/notes.md").unwrap();
+        std::fs::write(&target, b"ordinary content").unwrap();
+        assert_eq!(
+            std::fs::read(directory.join("notes.md")).unwrap(),
+            b"ordinary content"
+        );
+    }
+
+    #[test]
+    fn file_suffix_exclusions_do_not_exclude_ordinary_directories() {
+        let scratch = Scratch::new("ordinary-ancestor");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        for name in ["notes.conflict", "ledger.db-wal"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            assert!(resolve_target(&root, &format!("{name}/readme.md")).is_ok());
+        }
+    }
+
+    #[test]
+    fn resolves_existing_ancestors_and_missing_suffixes() {
+        let scratch = Scratch::new("existing-ancestor");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        std::fs::create_dir_all(root.join("notes/deep")).unwrap();
+        std::fs::write(root.join("notes/deep/existing.md"), b"existing").unwrap();
+        for path in [
+            "notes/deep/existing.md",
+            "notes/deep/missing.md",
+            "notes/deep/new/more/missing.md",
+            "new/more/missing.md",
+        ] {
+            assert_eq!(resolve_target(&root, path).unwrap(), root.join(path));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_existing_hashed_short_names_before_admitting_them() {
+        use std::os::windows::process::CommandExt;
+        fn short_name(root: &Path, name: &str) -> String {
+            let output = std::process::Command::new("cmd")
+                .args(["/d", "/c"])
+                .raw_arg(format!("for %I in ({name}) do @echo %~snxI"))
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+        let scratch = Scratch::new("short-name");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        let mut checked_hashed_alias = false;
+        for index in 0..12 {
+            let name = format!(".dohc-write-{index}");
+            std::fs::create_dir(scratch.root.join(&name)).unwrap();
+            let alias = short_name(&scratch.root, &name);
+            if alias == name || crate::floor::has_ignored_segment(&alias) {
+                continue;
+            }
+            assert!(scratch.root.join(&alias).is_dir(), "{alias}");
+            std::fs::create_dir(scratch.root.join(&name).join("existing")).unwrap();
+            for suffix in [
+                "injected.md",
+                "existing/injected.md",
+                "new/deep/injected.md",
+            ] {
+                assert!(
+                    matches!(
+                        resolve_target(&root, &format!("{alias}/{suffix}")),
+                        Err(MaterializeError::UnsafeTargetPath)
+                    ),
+                    "{alias}/{suffix}"
+                );
+            }
+            checked_hashed_alias = true;
+        }
+        for index in 0..5 {
+            std::fs::create_dir(scratch.root.join(format!("shared-prefix-{index}"))).unwrap();
+        }
+        std::fs::create_dir(scratch.root.join("shared-with-me")).unwrap();
+        let alias = short_name(&scratch.root, "shared-with-me");
+        assert!(
+            matches!(
+                resolve_target(&root, &format!("{alias}/injected.md")),
+                Err(MaterializeError::UnsafeTargetPath)
+            ),
+            "{alias}"
+        );
+        eprintln!(
+            "Checked hashed scratch alias: {checked_hashed_alias}; shared mount alias: {alias}"
+        );
+        if !checked_hashed_alias {
+            eprintln!("NTFS hashed short names were not generated on this test volume");
+        }
+        for name in ["notes.conflict", "ledger.db-wal"] {
+            std::fs::write(scratch.root.join(name), b"private").unwrap();
+            let alias = short_name(&scratch.root, name);
+            assert!(
+                matches!(
+                    resolve_target(&root, &alias),
+                    Err(MaterializeError::UnsafeTargetPath)
+                ),
+                "{alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_writes_refuse_reserved_case_variants() {
+        for name in [
+            ".DOHC",
+            ".Dohc",
+            ".dohc",
+            ".do‍hc",
+            ".GIT",
+            "NODE_MODULES",
+            "GIT~1",
+            "NODE_M~1",
+            "DOHC~1",
+        ] {
+            let scratch = Scratch::new("reserved-case");
+            let mut store = EngineStore::open(&scratch.db(), 1).expect("store");
+            let path = format!("{name}/engine/injected.md");
+            enqueue_write_job(&mut store, "reserved", &path, b"peer content", 1);
+            let job = store.load_materialization_job("reserved").unwrap().unwrap();
+            let result = materialize_one(
+                &store,
+                &scratch.root,
+                &job,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::none(),
+                    replacer: &StdReplacer,
+                    backoff: &NoBackoff,
+                    now_ms: 2,
+                    faults: &NoFaults,
+                },
+            );
+            assert!(
+                matches!(result, Err(MaterializeError::UnsafeTargetPath)),
+                "{name}: {result:?}"
+            );
+            assert!(!scratch.root.join(&path).exists());
         }
     }
 

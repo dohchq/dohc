@@ -1,3 +1,5 @@
+import * as shareLabelsStorage from "./storage/shareLabels";
+import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
@@ -55,6 +57,7 @@ import type {
   SyncRelayLinkHandoffCodeRow,
   LinkHandoffRedeemResult,
   SyncRelayShareWithGrantRow,
+  SyncRelayGrantedShareRow,
   SyncRelayLinkInventoryCursor,
   SyncRelayLinkInventoryPage,
   SyncRelayIndependentGrantInventoryCursor,
@@ -168,6 +171,7 @@ export {
   type ShareGrantTransitionResult,
   type LinkGrantTransitionResult,
   type SyncRelayShareWithGrantRow,
+  type SyncRelayGrantedShareRow,
   type SyncRelayLinkInventoryRow,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
@@ -204,7 +208,7 @@ export {
   currentFileBlobByteLengthQuery,
 } from "./storage/currentFiles";
 export { normalizeDiscussionDisplayName } from "./storage/discussion";
-export { CollectionWriteStaleError, type CollectionWriteReceipt } from "./storage/collectionWrites";
+export { CollectionWriteStaleError, type CollectionWriteReceipt, type CommitCollectionWriteInput } from "./storage/collectionWrites";
 export { referencedBlobShas } from "./storage/blobReferences";
 export { SyncRelayConflictError, SyncRelayQuotaExceededError, SyncRelayBlobMissingError } from "./storage/errors";
 
@@ -571,6 +575,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return automationHostStorage.readAutomationGroupHandover(this, input);
   }
 
+  authorizeLinkCollectionWrite(input: Parameters<typeof collectionWriteStorage.authorizeLinkCollectionWrite>[1]) {
+    return this.readTx(() => collectionWriteStorage.authorizeLinkCollectionWrite(this, input).authorized);
+  }
+
   commitCollectionWrite(input: collectionWriteStorage.CommitCollectionWriteInput) {
     return collectionWriteStorage.commitCollectionWrite(this, input);
   }
@@ -920,6 +928,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return sharesStorage.claimPendingSharesForEmail(this, email, userId);
   }
 
+  shareHasActiveGrants(shareId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM sync_relay_share_grants WHERE share_id = ? AND status = 'active' LIMIT 1").get(shareId);
+  }
+  getShareLabels(shareId: string): ShareLabels { return shareLabelsStorage.getShareLabels(this, shareId); }
+  setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void { shareLabelsStorage.setShareLabels(this, shareId, labels, updatedAtMs); }
   getShare(shareId: string): SyncRelayShareRow | null {
     return sharesStorage.getShare(this, shareId);
   }
@@ -931,7 +944,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return sharesStorage.listActiveShareGrantsForRecipient(this, shareId, recipientUserId);
   }
 
-  listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[] {
+  listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[] {
     return sharesStorage.listSharesGrantedBy(this, granterUserId);
   }
 

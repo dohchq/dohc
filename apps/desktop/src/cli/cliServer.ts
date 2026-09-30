@@ -1,3 +1,4 @@
+import { creationPartialMessage } from "@dohc/cli/creation";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
@@ -17,7 +18,6 @@ import {
 } from "@dohc/cli/protocol";
 import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
-import { collectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
 import type {
   CollectionAutomationRun,
@@ -39,6 +39,7 @@ import type {
   CollectionQueryParams,
   CollectionQueryResult,
   CollectionRecord,
+  CollectionSummary,
 } from "@dohc/workspace-contracts/collection";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type {
@@ -59,6 +60,7 @@ import {
   type ChatUnreadFileThread,
   type GranularChatMessageSearchResponse,
   type GranularChatMessageSearchResult,
+  type KeptCopySaveResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -90,6 +92,7 @@ import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { AutomationRunRetry } from "../automations/automationNotices";
+import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import {
   LiveDocumentEditAppliedError,
   type LiveDocumentEditOrigin,
@@ -184,9 +187,10 @@ export interface CliCollectionWriteSeam {
   createRecord(input: {
     collectionPath: string;
     name: string;
+    recordId?: string;
     fields?: Record<string, unknown>;
     author: ChangeAuthor;
-  }): Promise<{ path: string; recordId: string }>;
+  }): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
 }
 
 // Engine-backed collection access for the CLI verbs. Reads go to the engine
@@ -216,11 +220,22 @@ export interface CliDocumentsPort {
   }): Promise<{ path: string }>;
 }
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile, and the step that moves one to a visible copy beside its
+// file. The desktop's Notices row offers the same step.
+export interface CliKeptCopiesPort {
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  save(id: number): Promise<KeptCopySaveResult>;
+}
+
 // The Automations panel's run history and Try again, for the automation
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
 export interface CliAutomationsPort {
-  runs(automationId: string): Promise<CollectionAutomationRun[]>;
+  /** The engine id of an automation in the Collection at a path, or null when no Collection is there. */
+  automationIdAt(collectionPath: string, id: string): Promise<string | null>;
+  /** One page of runs, newest first, after `before`, and the `before` of the next page or null. */
+  runs(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null }>;
   run(automationId: string, claimId: string): Promise<CollectionAutomationRunDetail | null>;
   retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
 }
@@ -235,7 +250,8 @@ export interface CliButtonsPort {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
-  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
+  // `agent` is the agent this socket's write is, or null for the person.
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
@@ -258,6 +274,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
+  // Absent in a shared view, which keeps no copies of its own.
+  keptCopies?: CliKeptCopiesPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -276,6 +294,9 @@ export interface CliServerOptions {
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
   localUserDisplayName(): string;
+  // The person this computer's agents work for: the account, or this
+  // installation's id when signed out.
+  localPersonId(): string;
   // The chain depth of the agent run in progress in the workspace, or 0. Every
   // write during a run an automation started is the agent's at this depth, so
   // an automation that woke the agent and the agent cannot start each other
@@ -515,6 +536,11 @@ function cliPathRejected(reason: string, path: string) {
 
 // Collection values enter and leave the CLI socket in the engine wire's JSON
 // encoding; the engine adapter speaks decoded CollectionValue on both sides.
+// A Collection as the CLI names it: by its path. Its object id stays in dohc.
+function cliCollection({ objectId: _objectId, ...collection }: CollectionSummary) {
+  return collection;
+}
+
 function encodedCollectionRecord(record: CollectionRecord) {
   return {
     id: record.id,
@@ -567,7 +593,7 @@ function writeActor(
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
 // traffic reaches this socket through the MCP server, whose declared identity
-// is agent `dohc-mcp` acting on behalf of the local owner, at the depth of the
+// is agent `dohc-mcp` acting for this computer's person, at the depth of the
 // agent run in progress; a human write is attributed as this device's local
 // author under the workspace display name.
 function collectionWriteAuthor(
@@ -579,16 +605,28 @@ function collectionWriteAuthor(
     return {
       kind: "agent",
       agentId: "dohc-mcp",
-      onBehalfOf: "local",
+      onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     };
   }
   return createLocalChangeAuthor(options.localUserDisplayName());
 }
 
+// The agent a dataset invocation through this socket is, as writeActor
+// decides: an agent that names itself, at 0 outside a chain, or any caller
+// during a run an automation started, at its depth. Null for the person.
+function datasetAgent(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): LocalDatasetAgent | null {
+  const depth = options.agentRunDepth(context.workspaceId);
+  return depth > 0 || actor === "agent" ? { depth } : null;
+}
+
 // Provenance for a document edit, derived here. A person types in the
-// editor, so every edit through this socket is an agent's on behalf of the
-// local owner, recorded under the name the agent gave itself or under none,
+// editor, so every edit through this socket is an agent's for this
+// computer's person, recorded under the name the agent gave itself or under none,
 // at the depth of the agent run in progress. Any process holding the socket
 // token could otherwise claim the person's typing.
 function documentEditOrigin(
@@ -600,20 +638,22 @@ function documentEditOrigin(
     ...(agent === undefined ? {} : { actorOriginId: agent }),
     attribution: {
       actorKind: "agent",
-      onBehalfOf: "local",
+      onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     },
+  };
+}
+
+function keptCopiesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "kept copies are not available in this workspace",
   };
 }
 
 // A shared view keeps no runs: the owner's computer runs its automations.
 const SHARED_VIEW_AUTOMATIONS =
   "A shared view has no automation runs. The owner's computer runs this workspace's automations.";
-
-const START_OVER = {
-  "definition-changed": "This automation changed since the run failed.",
-  "progress-gone": "dohc no longer has this run's progress.",
-} as const;
 
 // Try again as the panel answers it, in words for an agent: a run that
 // would start over needs startOver, as the panel's confirmation asks.
@@ -622,13 +662,12 @@ function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["aut
     case "queued":
       return { ok: true, status: "queued" };
     case "definition-changed":
-    case "progress-gone":
       return {
         ok: false,
         status: result.status,
         repeatsMessages: result.repeatsMessages,
         reason: [
-          START_OVER[result.status],
+          "This automation changed since the run failed.",
           "Running it again starts from the first step and can repeat changes it already made.",
           ...(result.repeatsMessages ? ["Posts, direct messages, and notices it already sent may be sent again."] : []),
           "To do that, try again with --start-over, or startOver: true.",
@@ -648,6 +687,7 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
     updatedAtMs: run.updatedAtMs,
     trigger: run.trigger,
     definitionChanged: run.definitionChanged,
+    neverStarted: run.neverStarted,
     chainStopped: run.chainStopped,
     undone: run.undone,
   };
@@ -1960,7 +2000,7 @@ async function dispatch(
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("Collection export requires an explicit savePath.");
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.dataset) throw new CliCommandError("Collections require the owning workspace.");
-      return context.dataset(request.args.request);
+      return context.dataset(request.args.request, datasetAgent(request.args.actor, context, options));
     }
     case "ownerAppResponses": {
       if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.ownerAppResponses)throw new CliCommandError("App responses require the owning workspace.");
@@ -2172,7 +2212,7 @@ async function dispatch(
         if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
-          collection: result.collection,
+          collection: cliCollection(result.collection),
           records: result.records.map(encodedCollectionRecord),
           groups:
             result.groups === null
@@ -2214,7 +2254,7 @@ async function dispatch(
         if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
-          collection: result.collection,
+          collection: cliCollection(result.collection),
           record: encodedCollectionRecord(result.record),
           history: result.history.map((entry) => ({
             historyId: entry.historyId,
@@ -2304,13 +2344,16 @@ async function dispatch(
         const outcome = await collections.writes.createRecord({
           collectionPath: collectionValidated.normalized,
           name: request.args.name,
+          recordId: request.args.recordId,
           fields: request.args.fields,
           author: collectionWriteAuthor(request.args.actor, context, options),
         });
+        if ("kind" in outcome) return { ok: false as const, reason: creationPartialMessage(outcome), partial: outcome };
         return {
           ok: true as const,
           recordId: outcome.recordId,
           recordPath: outcome.path,
+          ...(outcome.kept ? { kept: outcome.kept } : {}),
         };
       } catch (error) {
         return mcpFailure(
@@ -2331,13 +2374,15 @@ async function dispatch(
       if (isSharedWithMePath(validated.normalized)) {
         return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
       }
-      const automationId = collectionAutomationId(validated.normalized, request.args.automation);
       try {
+        const automationId = await automations.automationIdAt(validated.normalized, request.args.automation);
+        if (automationId === null) return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
         if (request.verb === "automationRuns") {
-          const runs = await automations.runs(automationId);
+          const page = await automations.runs(automationId, request.args.page);
           const listed: CliResultByVerb["automationRuns"] = {
             ok: true,
-            runs: runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
+            runs: page.runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
+            next: page.next,
           };
           return listed;
         }
@@ -2366,7 +2411,7 @@ async function dispatch(
           startOver: request.args.startOver,
         }));
       } catch (error) {
-        return mcpFailure(error, `failed to reach the runs of ${automationId}`);
+        return mcpFailure(error, `failed to reach the runs of ${request.args.automation} in ${validated.normalized}`);
       }
     }
 
@@ -2409,6 +2454,28 @@ async function dispatch(
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
       } catch (error) {
         return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "keptCopies": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await keptCopies.list()) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list kept copies");
+      }
+    }
+
+    case "saveKeptCopy": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        const saved = await keptCopies.save(request.args.id);
+        if (saved.status === "saved") await notifyWrite(options, context);
+        return { ok: true as const, ...saved };
+      } catch (error) {
+        return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
       }
     }
 

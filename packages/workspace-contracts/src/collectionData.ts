@@ -1,7 +1,9 @@
+import { parseDatasetPath } from "./datasetPath";
 import type { CollectionValue } from "./collection";
+import { isIgnoredPathSegment } from "./pathFloor";
 
 type DocumentCollectionRef = { kind: "document"; path: string };
-type TransactionalCollectionRef = { kind: "transactional"; datasetId: string; tableId: string };
+type TransactionalCollectionRef = { kind: "transactional"; datasetPath: string; tableId: string };
 export type CollectionRef = DocumentCollectionRef | TransactionalCollectionRef;
 export type CollectionRecordRef =
   | { collection: DocumentCollectionRef; recordId: string }
@@ -108,12 +110,13 @@ function ref(input: unknown): CollectionRef {
   if (kind === "document") {
     const row = exact(input, ["kind", "path"]);
     const path = text(row.path, 4096);
-    if (/[\\:%]/u.test(path) || path.split("/").some(part => !part || part === "." || part === ".." || part.toLowerCase() === ".dohc")) fail();
+    if (/[\\:%]/u.test(path) || path.split("/").some(part => !part || part === "." || part === ".." || isIgnoredPathSegment(part))) fail();
     return { kind, path };
   }
   if (kind === "transactional") {
-    const row = exact(input, ["kind", "datasetId", "tableId"]);
-    return { kind, datasetId: uuid(row.datasetId), tableId: uuid(row.tableId) };
+    const row = exact(input, ["kind", "datasetPath", "tableId"]);
+    const datasetPath = parseDatasetPath(row.datasetPath);
+    return { kind, datasetPath, tableId: uuid(row.tableId) };
   }
   fail();
 }

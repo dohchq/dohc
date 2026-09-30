@@ -1,8 +1,9 @@
 use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
-    AutomationClaim, AutomationClaimAttempt, AutomationFailure, AutomationFieldFacts,
-    AutomationGroupRelease, AutomationGroupWatch, AutomationGroupWatched, AutomationPress,
+    AutomationClaim, AutomationClaimAttempt, AutomationClaimCursor, AutomationClaimLookup,
+    AutomationClaimPage, AutomationFailure, AutomationFieldFacts, AutomationGroupRelease,
+    AutomationGroupWatch, AutomationGroupWatched, AutomationHistoryPruned, AutomationPress,
     AutomationPressed, AutomationRetry, AutomationRunNow, AutomationScheduleClaim,
     AutomationScheduleClaimed, AutomationScheduleMark, AutomationSettle, AutomationSubscription,
 };
@@ -366,10 +367,55 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         automation_id: String,
-    ) -> Result<Vec<AutomationClaim>, RuntimeError> {
+        before: Option<AutomationClaimCursor>,
+        limit: i64,
+    ) -> Result<AutomationClaimPage, RuntimeError> {
         self.run(move |store, _cache| {
-            dohc_engine_domain::list_automation_claims(store, &workspace_id, &automation_id)
+            dohc_engine_domain::list_automation_claims(
+                store,
+                &workspace_id,
+                &automation_id,
+                before.as_ref(),
+                limit,
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn automation_claim(
+        &self,
+        workspace_id: String,
+        lookup: AutomationClaimLookup,
+    ) -> Result<Option<AutomationClaim>, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_domain::get_automation_claim(store, &workspace_id, &lookup)
                 .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn automation_prune_history(
+        &self,
+        workspace_id: String,
+        keep: Vec<String>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<AutomationHistoryPruned, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::prune_automation_history(
+                    store,
+                    &workspace_id,
+                    &keep,
+                    now_ms,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
         })
         .await
     }

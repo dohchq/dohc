@@ -1,3 +1,4 @@
+import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { escapeHtml } from "@dohc/workspace-core/html";
 import { isRecord } from "@dohc/workspace-core/records";
@@ -1194,6 +1195,7 @@ interface RemoteIdentity {
 }
 
 interface RegistryWorkspace {
+  shareView?: {grantedSelector?: unknown; subjectName?: unknown; sharerName?: unknown; granterEmail?: unknown; shareId?: unknown};
   workspaceId: string;
   rootPath: string;
   kind: string;
@@ -1363,7 +1365,7 @@ function removedShareStatus(workspace: RegistryWorkspace | null) {
 }
 
 export async function workspaceStatus(ctx: ToolContext) {
-  const [manifest, remote, credentials, workspace] = await Promise.all([
+  const [manifest, remote, credentials, entry] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
@@ -1373,8 +1375,13 @@ export async function workspaceStatus(ctx: ToolContext) {
   const synced = remote !== null || nonEmptyString(manifest?.serverUrl);
   const credential = credentialStatusFor(remote, credentials);
   return {
+    ...(entry?.shareView ? {receivedShare: {
+      subjectName: normalizeShareLabel(entry.shareView.subjectName) ?? shareSubjectFallback(entry.shareView.grantedSelector),
+      sharerName: shareSenderLabel(entry.shareView.sharerName, entry.shareView.granterEmail),
+      access: ctx.shareAccess ?? null,
+    }} : {}),
     synced,
-    ...removedShareStatus(workspace),
+    ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
     ...(remote?.workspaceId ?? manifest?.workspaceId
@@ -2590,7 +2597,7 @@ export async function setRecordFields(
 
 export async function createRecord(
   ctx: ToolContext,
-  args: { collectionPath: string; name: string; fields?: unknown },
+  args: { collectionPath: string; name: string; fields?: unknown; recordId?: string },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
@@ -2604,7 +2611,19 @@ export async function createRecord(
     collectionPath: resolved.normalized,
     name: args.name,
     fields: fields.value,
+    ...(args.recordId ? { recordId: args.recordId } : {}),
   });
+}
+
+// Files dohc moved aside while it saved, because another program changed them
+// meanwhile. The desktop shows each as a Notices row; an agent reads the same
+// list and takes the same step.
+export async function listKeptCopies(ctx: ToolContext) {
+  return requestCli(ctx, "keptCopies", {});
+}
+
+export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
+  return requestCli(ctx, "saveKeptCopy", { id: args.id });
 }
 
 // An automation's runs, and Try again, through the desktop's Automations
@@ -2612,11 +2631,13 @@ export async function createRecord(
 // in that Collection's automations.yaml.
 export async function listAutomationRuns(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string },
+  args: { collectionPath: string; automation: string; page?: string },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "automationRuns", { collectionPath: resolved.normalized, automation: args.automation });
+  return requestCli(ctx, "automationRuns", {
+    collectionPath: resolved.normalized, automation: args.automation, ...(args.page === undefined ? {} : { page: args.page }),
+  });
 }
 
 export async function readAutomationRun(

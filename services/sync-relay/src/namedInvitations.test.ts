@@ -52,7 +52,7 @@ it("omits browser invitations from revoked, dependent, damaged, chat, and public
     grant: {shareId: "share", grantId: "grant", principalKind: "user", principalUserId: "friend", principalEmail: null, access: "edit",
       generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null},
   };
-  const {grantedShareSummary} = createShareSummaries(undefined, SHARE_WEB_ORIGIN);
+  const {grantedShareSummary} = createShareSummaries(() => ({subjectName: null}), undefined, SHARE_WEB_ORIGIN);
   const excluded: SyncRelayShareWithGrantRow[] = [
     {...row, grant: {...row.grant, status: "revoked", revokedAtMs: 2}},
     {...row, grant: {...row.grant, parentGrantId: "parent"}},
@@ -60,5 +60,5 @@ it("omits browser invitations from revoked, dependent, damaged, chat, and public
     {...row, share: {...row.share, selectorJson: "{}"}},
     {...row, share: {...row.share, selectorJson: JSON.stringify({kind: "chat", channelWireId: "channel"})}, grant: {...row.grant, access: "read-write"}},
   ];
-  for (const item of excluded) expect(await grantedShareSummary(item)).not.toHaveProperty("browserInvitationUrl");
+  for (const item of excluded) expect(await grantedShareSummary({ ...item, automationsGeneration: null })).not.toHaveProperty("browserInvitationUrl");
 });

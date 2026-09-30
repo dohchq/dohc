@@ -50,9 +50,9 @@ export interface ProposalMomentContext {
   // proposal names its sender here, and the proposal record is the real
   // record.
   summary: string | null;
-  // The named recipient of a direct write, which only the relay's
-  // collection-file origin may carry. Null for an accepted proposal.
-  author: NamedMomentAuthor | null;
+  // The named recipient or Edit link of a direct write, which only the
+  // relay's collection-file origin may carry. Null for an accepted proposal.
+  author: DirectWriteMomentAuthor | null;
 }
 
 // A share recipient named by the relay: an opaque user id and the grant and
@@ -63,6 +63,18 @@ export interface NamedMomentAuthor {
   grantId: string;
   grantGeneration: number;
 }
+
+// An Edit share link named by the relay: the link's grant and generation,
+// and the server-minted principal that tells its browser sessions apart.
+// Never a person, and never a name the holder claimed.
+export interface LinkMomentAuthor {
+  kind: "link";
+  grantId: string;
+  grantGeneration: number;
+  principalId: string;
+}
+
+export type DirectWriteMomentAuthor = NamedMomentAuthor | LinkMomentAuthor;
 
 export type ProposalMomentResult =
   | { ok: true; payload: Record<string, unknown>; blobSha256: string }

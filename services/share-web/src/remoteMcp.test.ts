@@ -63,7 +63,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
       if (revoked) return new Response(null, {status: 404});
       if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
-      if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
+      if (path === "/sync/link/share") return Response.json({ok: true, subjectName: "Trip", access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
       if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
       if (path === "/sync/link/log") return Response.json(servedLog);
       if (path === `/sync/link/blobs/${withdrawn}`) return new Response(null, {status: 404});
@@ -151,6 +151,7 @@ it.each([
   const names = (await client.listTools()).tools.map(tool => tool.name);
   expect(names.includes("dohc_post_discussion")).toBe(comment);
   expect(names.includes("dohc_edit_document")).toBe(edit);
+  expect(names.includes("dohc_write_collection_files")).toBe(access === "edit" && version === null);
   if (edit) expect(await client.callTool({name: "dohc_edit_document", arguments: {path: "doc.md", find: "old", replacement: "new"}})).toMatchObject({isError: true, structuredContent: {ok: false, outcome: "not-applied"}});
 });
 
@@ -275,6 +276,8 @@ it.each([
     effectiveSelector: {versionId, paths: ["docs", "plan.md"], access}, lastSettledKnown: true, lastSettledAtMs: 123});
   const summary = asRecord(result.structuredContent)?.summary;
   expect(summary).toEqual(expect.any(String));
+  expect(summary).toContain("Trip");
+  expect(asRecord(result.structuredContent)).not.toHaveProperty("sharerName");
   expect(summary).toContain(access === "view" ? "You can read files and comments." :
     access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
   expect(summary).toContain("Included paths: docs, plan.md.");
@@ -285,7 +288,10 @@ it.each([
   if (versionId !== null) {
     expect(summary).toContain("pinned version");
     expect(summary).toContain("Editing is unavailable on this link.");
-  } else if (access === "edit") expect(summary).toContain("Editing pauses while the workspace is offline");
+  } else if (access === "edit") {
+    expect(summary).toContain("Editing pauses while the workspace is offline");
+    expect(summary).toContain("You can change a Collection's collection.yaml and automations.yaml here.");
+  }
   expect(result.content).toContainEqual({type: "text", text: JSON.stringify(result.structuredContent)});
   expect(f.calls.every(call => ["/sync/link-exchange", "/sync/link/share"].includes(new URL(call.url).pathname))).toBe(true);
 });

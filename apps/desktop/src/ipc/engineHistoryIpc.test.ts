@@ -163,6 +163,19 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     expect(record.publicAuthor).toBeUndefined();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
+  it("carries an Edit link's grant and principal, and names no person for it", () => {
+    const detail = detailWith({before: textSide("old"), after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    const author = {kind: "link", grantId: "grant-1", grantGeneration: 2, principalId: "holder-1"} as const;
+    detail.moment.author = author;
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record.linkAuthor).toEqual(author);
+    expect(record.namedAuthor).toBeUndefined();
+    expect(record.publicAuthor).toBeUndefined();
+    expect(record.agentAuthorName).toBeUndefined();
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+    expect(() => EngineMomentDetailRecord.parse({...record, linkAuthor: {...author, userId: "ana"}})).toThrow();
+  });
   it("keeps the plain text moment shape (no binary side fields)", () => {
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("v1\n"), after: textSide("v2\n") }),

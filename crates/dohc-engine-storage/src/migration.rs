@@ -2569,6 +2569,93 @@ CREATE INDEX materialization_displacements_state
     ON materialization_displacements(state, job_id);
 ";
 
+/// Run history keeps an automation's settled claims 30 days from when they
+/// last settled, and its newest failure. An expired claim that still keeps a
+/// trigger from running twice stays, marked `expired` and out of run
+/// history. A deleted claim's failures move to
+/// `automation_retired_failures`, so an automation's failure generation
+/// never goes down.
+const V2_AUTOMATION_RUN_RETENTION_DDL: &str = "\
+ALTER TABLE automation_claims ADD COLUMN expired INTEGER NOT NULL DEFAULT 0
+    CHECK (expired IN (0, 1));
+CREATE TABLE automation_retired_failures (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    failures      INTEGER NOT NULL CHECK (failures > 0),
+    PRIMARY KEY (workspace_id, automation_id)
+) STRICT;
+DROP INDEX idx_automation_claims_prunable;
+DROP INDEX idx_automation_claims_settled_facts;
+CREATE INDEX idx_automation_claims_expiring
+    ON automation_claims(workspace_id, updated_at_ms)
+    WHERE state IN ('done', 'failed') AND expired = 0;
+CREATE INDEX idx_automation_claims_failed
+    ON automation_claims(workspace_id, automation_id, updated_at_ms, claim_id)
+    WHERE state = 'failed' AND expired = 0;
+CREATE INDEX idx_automation_claims_expired_schedule_keys
+    ON automation_claims(workspace_id, automation_id)
+    WHERE expired = 1 AND change_kind = 'schedule' AND substr(trigger_key, 1, 9) = 'schedule:';
+CREATE INDEX idx_automation_claims_history
+    ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id)
+    WHERE expired = 0;
+";
+
+// A job references either content table. Keep the reference checks while
+// allowing text jobs to use the text blob already owned by their moment.
+const V2_MATERIALIZATION_TEXT_BLOBS_DDL: &str = "\
+ALTER TABLE engine_requests ADD COLUMN publication_outcome TEXT
+    CHECK (publication_outcome IN ('applied', 'skipped', 'conflict', 'superseded'));
+CREATE TABLE materialization_jobs_next (
+    job_id TEXT NOT NULL PRIMARY KEY,
+    target_path TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    preimage_present INTEGER NOT NULL,
+    preimage_sha256 TEXT,
+    target_generation INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at_ms INTEGER NOT NULL,
+    completed_at_ms INTEGER,
+    operation TEXT NOT NULL DEFAULT 'write',
+    workspace_id TEXT NOT NULL DEFAULT ''
+) STRICT;
+INSERT INTO materialization_jobs_next SELECT * FROM materialization_jobs;
+DROP TABLE materialization_jobs;
+ALTER TABLE materialization_jobs_next RENAME TO materialization_jobs;
+CREATE INDEX idx_materialization_jobs_status ON materialization_jobs(status);
+CREATE INDEX idx_materialization_jobs_workspace_path_status_generation
+    ON materialization_jobs(workspace_id, target_path, status, target_generation);
+CREATE INDEX idx_materialization_jobs_mutation_generation
+    ON materialization_jobs(target_generation DESC)
+    WHERE job_id NOT GLOB 'version-switch-mat_*'
+      AND job_id NOT GLOB 'version-switch-secret-mat_*';
+CREATE TRIGGER materialization_content_insert BEFORE INSERT ON materialization_jobs
+WHEN NOT EXISTS (SELECT 1 FROM blobs WHERE sha256 = NEW.content_sha256)
+ AND NOT EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = NEW.content_sha256)
+BEGIN SELECT RAISE(ABORT, 'missing materialization content'); END;
+CREATE TRIGGER materialization_content_update BEFORE UPDATE OF content_sha256 ON materialization_jobs
+WHEN NOT EXISTS (SELECT 1 FROM blobs WHERE sha256 = NEW.content_sha256)
+ AND NOT EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = NEW.content_sha256)
+BEGIN SELECT RAISE(ABORT, 'missing materialization content'); END;
+CREATE TRIGGER materialization_text_delete BEFORE DELETE ON blobs
+WHEN EXISTS (SELECT 1 FROM materialization_jobs WHERE content_sha256 = OLD.sha256)
+ AND NOT EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = OLD.sha256)
+BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
+CREATE TRIGGER materialization_text_update BEFORE UPDATE OF sha256 ON blobs
+WHEN OLD.sha256 <> NEW.sha256
+ AND EXISTS (SELECT 1 FROM materialization_jobs WHERE content_sha256 = OLD.sha256)
+ AND NOT EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = OLD.sha256)
+BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
+CREATE TRIGGER materialization_binary_delete BEFORE DELETE ON binary_blobs
+WHEN EXISTS (SELECT 1 FROM materialization_jobs WHERE content_sha256 = OLD.sha256)
+ AND NOT EXISTS (SELECT 1 FROM blobs WHERE sha256 = OLD.sha256)
+BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
+CREATE TRIGGER materialization_binary_update BEFORE UPDATE OF sha256 ON binary_blobs
+WHEN OLD.sha256 <> NEW.sha256
+ AND EXISTS (SELECT 1 FROM materialization_jobs WHERE content_sha256 = OLD.sha256)
+ AND NOT EXISTS (SELECT 1 FROM blobs WHERE sha256 = OLD.sha256)
+BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
+";
+
 /// Live edits keep their authors. A moment's `author_json` becomes a list
 /// with one entry per author, so each stored single author becomes a list of
 /// one; NULL stays NULL. A lineage's creator author is a moment author list
@@ -2708,9 +2795,39 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
         sets_user_version: None,
     },
-    // Ordinals 21 to 24 are reserved by other changes.
+    // Who the relay accepted a claimed live change from, when that was a
+    // person the owner shared with or an Edit share link. Null for every
+    // other claim.
     Migration {
-        ordinal: 25,
+        ordinal: 21,
+        id: "v2-automation-claim-shared-author",
+        sql: "ALTER TABLE automation_claims ADD COLUMN change_author_json TEXT CHECK (change_author_json IS NULL OR json_valid(change_author_json));",
+        sets_user_version: None,
+    },
+    // The relay's live journal cursor of the frame a claimed live change came
+    // in, so the relay can tell when a settlement has carried it. Null for
+    // every other claim.
+    Migration {
+        ordinal: 22,
+        id: "v2-automation-claim-live-cursor",
+        sql: "ALTER TABLE automation_claims ADD COLUMN change_live_cursor INTEGER CHECK (change_live_cursor IS NULL OR change_live_cursor BETWEEN 1 AND 9007199254740991);",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 23,
+        id: "v2-automation-run-retention",
+        sql: V2_AUTOMATION_RUN_RETENTION_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 24,
+        id: "v2-materialization-text-blobs",
+        sql: V2_MATERIALIZATION_TEXT_BLOBS_DDL,
+    sets_user_version: None,
+    },
+    // Ordinal 25 belongs to PR #1484.
+    Migration {
+        ordinal: 26,
         id: "v2-ydoc-live-edit-authors",
         sql: V2_YDOC_LIVE_EDIT_AUTHORS_DDL,
         sets_user_version: None,
@@ -3053,6 +3170,22 @@ mod tests {
                 "2887eaf2ca3af9e0361b7dce143eddaf80e94c60dfaf46bcb2b29443c735a36b",
             ),
             (
+                "v2-automation-claim-shared-author",
+                "8533e507bf0a0d99971e20ce73e57068b076986b2088166c144a0345aa03e7ae",
+            ),
+            (
+                "v2-automation-claim-live-cursor",
+                "e0e03940b8d14b9e61ba21a9ea5d2d99410074802e43a5d0f593761d3a27c942",
+            ),
+            (
+                "v2-automation-run-retention",
+                "6adf05d0ee7187060acef8edd6ef82b1aaf482eeedd8c0e0c994c676b11a895a",
+            ),
+            (
+                "v2-materialization-text-blobs",
+                "2f5662203a97d14c1ecd6e1902a1dfd2d1b0dfe11734fe7c12b4a2982fc317ca",
+            ),
+            (
                 "v2-ydoc-live-edit-authors",
                 "f4fdc3aed10824852d0ecbf3ad16b8510dcc78fff91b5b508c3d036570b6788f",
             ),
@@ -3066,6 +3199,66 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn materialization_text_blobs_upgrade_preserves_jobs_and_content_references() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = BASELINE_MIGRATIONS.len() - 1;
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 24);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at, kind) VALUES ('before-upgrade', 'fingerprint', 7, 3, 'versioned')", []).unwrap();
+        let binary = crate::blob::put_binary_blob(&conn, b"binary").unwrap();
+        conn.execute("INSERT INTO materialization_jobs (job_id, target_path, content_sha256, preimage_present, target_generation, created_at_ms) VALUES ('pending', 'asset.bin', ?1, 0, 1, 1), ('complete', 'other.bin', ?1, 0, 2, 2)", [&binary]).unwrap();
+        conn.execute("UPDATE materialization_jobs SET status='complete', completed_at_ms=3 WHERE job_id='complete'", []).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let request: (String, i64, Option<String>) = conn.query_row(
+            "SELECT payload_hash, result_seq, publication_outcome FROM engine_requests WHERE request_id='before-upgrade'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(request, ("fingerprint".into(), 7, None));
+        let jobs: i64 = conn.query_row("SELECT count(*) FROM materialization_jobs WHERE (job_id='pending' AND status='pending') OR (job_id='complete' AND status='complete' AND completed_at_ms=3)", [], |row| row.get(0)).unwrap();
+        assert_eq!(jobs, 2);
+        assert!(
+            conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&binary])
+                .is_err()
+        );
+        conn.execute("INSERT INTO blobs VALUES ('text-sha', 4, 'text')", [])
+            .unwrap();
+        conn.execute("INSERT INTO materialization_jobs (job_id, target_path, content_sha256, preimage_present, target_generation, created_at_ms) VALUES ('text', 'note.txt', 'text-sha', 0, 3, 3)", []).unwrap();
+        assert!(
+            conn.execute("DELETE FROM blobs WHERE sha256='text-sha'", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE blobs SET sha256='changed' WHERE sha256='text-sha'",
+                []
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE binary_blobs SET sha256='changed' WHERE sha256=?1",
+                [&binary]
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE materialization_jobs SET content_sha256='missing' WHERE job_id='text'",
+                []
+            )
+            .is_err()
+        );
+        assert!(conn.execute("INSERT INTO materialization_jobs (job_id, target_path, content_sha256, preimage_present, target_generation, created_at_ms) VALUES ('missing', 'missing.txt', 'missing', 0, 4, 4)", []).is_err());
+        conn.execute("DELETE FROM materialization_jobs WHERE job_id='text'", [])
+            .unwrap();
+        conn.execute("DELETE FROM blobs WHERE sha256='text-sha'", [])
+            .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
     }
 
     /// The ledger is raw TEXT. A tampered checksum that is not ASCII must
@@ -3091,16 +3284,96 @@ mod tests {
         );
     }
 
+    /// Where a migration sits in the shipped list, so an upgrade test runs
+    /// everything before it however many migrations come after.
+    fn migration_index(id: &str) -> usize {
+        BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == id)
+            .expect("a shipped migration")
+    }
+
+    #[test]
+    fn a_claim_from_before_shared_authors_reads_none_and_a_new_one_must_be_json() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-automation-claim-shared-author");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let insert = |conn: &Connection, claim_id: &str| {
+            conn.execute(
+                "INSERT INTO automation_claims (workspace_id, claim_id, automation_id, trigger_history_id, \
+                 record_id, collection_path, depth, state, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', ?1, 'collection:tasks#stamp', ?2, 'rec', 'tasks', 0, 'pending', 1, 1)",
+                rusqlite::params![claim_id, claim_id.len() as i64],
+            )
+        };
+        insert(&conn, "atc_old").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let author: Option<String> = conn
+            .query_row(
+                "SELECT change_author_json FROM automation_claims WHERE claim_id = 'atc_old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(author, None, "a claim from before names no shared author");
+        insert(&conn, "atc_newer").unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE automation_claims SET change_author_json = 'not json' WHERE claim_id = 'atc_newer'",
+                [],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_claim_from_before_live_cursors_reads_none_and_a_new_one_must_be_positive() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-automation-claim-live-cursor");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute(
+            "INSERT INTO automation_claims (workspace_id, claim_id, automation_id, trigger_history_id, \
+             record_id, collection_path, depth, state, created_at_ms, updated_at_ms) \
+             VALUES ('ws', 'atc_old', 'collection:tasks#stamp', 1, 'rec', 'tasks', 0, 'pending', 1, 1)",
+            [],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let cursor: Option<i64> = conn
+            .query_row(
+                "SELECT change_live_cursor FROM automation_claims WHERE claim_id = 'atc_old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, None, "a claim from before has no live cursor");
+        assert!(
+            conn.execute(
+                "UPDATE automation_claims SET change_live_cursor = 0 WHERE claim_id = 'atc_old'",
+                [],
+            )
+            .is_err()
+        );
+        conn.execute(
+            "UPDATE automation_claims SET change_live_cursor = 7 WHERE claim_id = 'atc_old'",
+            [],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn relay_identity_claim_migration_preserves_existing_identity() {
         let dir = tempdir();
         let path = dir.join("engine.db");
         let mut conn = open_bare(&path);
         let ctx = MigrationContext::current(1_000);
-        let before = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == "v2-sync-identity-claim-state")
-            .expect("the identity claim migration ships");
+        let before = migration_index("v2-sync-identity-claim-state");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('ws','origin','epoch','stream',1)", []).unwrap();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();

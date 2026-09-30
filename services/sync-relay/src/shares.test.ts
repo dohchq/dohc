@@ -319,6 +319,7 @@ describe("share grants", () => {
     const granterList = await json(await h(request(GRANTER, "/sync/shares")));
     expect(granterList.granted).toEqual([
       {
+        subjectName: null, sharerName: null,
         shareId: "share-0",
         workspaceId: WORKSPACE,
         recipientUserId: RECIPIENT,
@@ -328,6 +329,7 @@ describe("share grants", () => {
         grantId: expect.any(String),
         principalKind: "user",
         generation: 1,
+        automationsGeneration: null,
         createdAtMs: 5555,
         revokedAtMs: null,
       },

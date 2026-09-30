@@ -43,6 +43,14 @@ pub fn write_binary_in_tx(
     tx: &Transaction<'_>,
     input: &WriteBinary,
 ) -> Result<BinaryWriteResult, DomainError> {
+    write_published_binary_in_tx(tx, input, None)
+}
+
+pub fn write_published_binary_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteBinary,
+    conditions: Option<&str>,
+) -> Result<BinaryWriteResult, DomainError> {
     // RESERVED ORIGIN at the door, like the text write: capture's binary
     // primitive never routes through this fn, so the reservation cannot be
     // forged while capture keeps stamping its own origin.
@@ -76,6 +84,11 @@ pub fn write_binary_in_tx(
         author_kind,
         author_json,
     ]);
+    let payload_hash = if let Some(conditions) = conditions {
+        hash_fields(&[payload_hash.as_bytes(), conditions.as_bytes()])
+    } else {
+        payload_hash
+    };
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
     {

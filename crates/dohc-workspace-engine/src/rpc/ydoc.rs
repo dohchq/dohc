@@ -101,6 +101,9 @@ pub(super) struct YdocSessionView {
 
 fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
     match error {
+        RuntimeError::YdocOpenConflict { .. } => {
+            WireError::new(ErrorCode::InvalidParams, "ydoc-conflict-open")
+        }
         RuntimeError::YdocArtifactAssetsPending => {
             WireError::new(ErrorCode::Overloaded, "ydoc-artifact-assets-pending")
         }
@@ -841,7 +844,14 @@ impl EngineService {
                 cancellation.token(),
             )
             .await
-            .map_err(map_ydoc_open_runtime)?;
+            .map_err(|error| {
+                if let RuntimeError::YdocOpenConflict { record_facts } = &error {
+                    for facts in record_facts {
+                        emit_record_events(&self.events, &open.workspace_id, facts);
+                    }
+                }
+                map_ydoc_open_runtime(error)
+            })?;
         if state.key != probe.key {
             // The path's owner changed between the probe and the lease: the
             // held lease guards the wrong key. Refuse; the client retries.

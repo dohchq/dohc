@@ -5,12 +5,12 @@ import {
   type CollectionRef, type CollectionRecordRef,
 } from "./collectionData";
 
-const datasetId = "00000000-0000-4000-8000-000000000001";
+const datasetPath = "data/dataset.json";
 const tableId = "00000000-0000-4000-8000-000000000002";
 const fieldId = "00000000-0000-4000-8000-000000000003";
 const operationId = "00000000-0000-4000-8000-000000000004";
 const document: CollectionRef = { kind: "document", path: "tasks" };
-const transactional: CollectionRef = { kind: "transactional", datasetId, tableId };
+const transactional: CollectionRef = { kind: "transactional", datasetPath, tableId };
 const documentRecord: CollectionRecordRef = { collection: document, recordId: `rec_${"a".repeat(26)}` };
 const action = () => ({ kind: "transactional", action: "operation", collection: transactional, operationId,
   input: { id: 1, expectedVersion: 2, values: { [fieldId]: "Alice" } }, revision: 1, revisionSha256: "a".repeat(64), idempotencyKey: "edit:1" });
@@ -22,12 +22,12 @@ describe("Collection references", () => {
     expect(parseCollectionRef(transactional)).not.toHaveProperty("path");
     expect(parseCollectionRecordRef(documentRecord)).toEqual(documentRecord);
     expect(parseCollectionRecordRef({ collection: transactional, recordId: "order/2026 A" }).recordId).toBe("order/2026 A");
-    expect(collectionRefKey({ tableId, datasetId, kind: "transactional" })).toBe(collectionRefKey(transactional));
+    expect(collectionRefKey({ tableId, datasetPath, kind: "transactional" })).toBe(collectionRefKey(transactional));
     expect(collectionRecordRefKey({ collection: transactional, recordId: 1 })).not.toBe(collectionRecordRefKey({ collection: transactional, recordId: "1" }));
   });
 
   it("rejects mixed identities and unsafe record values", () => {
-    for (const input of [{ ...transactional, path: "fake.md" }, { ...document, datasetId }, { kind: "transactional", datasetId: "data/file.sqlite", tableId },
+    for (const input of [{ ...transactional, path: "fake.md" }, { ...document, datasetPath }, { kind: "transactional", datasetPath: "data/file.sqlite", tableId },
       { ...transactional, tableId: `${tableId}\n` }, { ...document, path: "../private" }, { ...document, path: "C:/secret" },
       { ...document, path: "a//b" }, { ...document, path: ".dohc/data" }, { ...document, path: "a/%2e%2e" }]) {
       expect(() => parseCollectionRef(input)).toThrow();
@@ -41,6 +41,10 @@ describe("Collection references", () => {
 });
 
 describe("Collection data requests", () => {
+  it.each([".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"])("refuses reserved Collection path %s", (name) => {
+    expect(() => parseCollectionRef({ kind: "document", path: `notes/${name}/data` })).toThrow();
+    expect(parseCollectionRef({ kind: "document", path: "my-dohc/data" })).toEqual({ kind: "document", path: "my-dohc/data" });
+  });
   it("matches bounded table query inputs and preserves document field names", () => {
     const query = { collection: transactional, limit: 50, after: { id: 3, value: "Alice" }, sort: { fieldId, direction: "asc" }, search: "", filters: [{ fieldId, value: "Alice" }] };
     expect(parseCollectionDataQuery(query)).toEqual(query);
@@ -91,4 +95,8 @@ describe("Collection data requests", () => {
     const input = action(); const parsed = parseCollectionDataAction(input); input.input.values[fieldId] = "Changed";
     expect(parsed).toEqual(action());
   });
+});
+
+it.each([".git/dataset.json", "node_modules/dataset.json", ".dohc./dataset.json", "DOHC~1/dataset.json", "shared-with-me/dataset.json", ".env/dataset.json", "data/.. /dataset.json"])("rejects unsafe transactional paths with the shared validator: %s", datasetPath => {
+  expect(() => parseCollectionRef({ kind: "transactional", datasetPath, tableId: "00000000-0000-4000-8000-000000000001" })).toThrow();
 });

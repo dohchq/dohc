@@ -70,6 +70,20 @@ async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
         .expect("feature fork");
     let bytes = b"\x89PNG\x0d\x0a".to_vec();
     actor
+        .set_active_version(
+            dohc_engine_runtime::ActiveVersionSwitch {
+                workspace_id: WORKSPACE.into(),
+                version_id: "feature".into(),
+                root_dir: scratch.path().into(),
+                self_writes: Arc::new(()),
+                now_ms: 21,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("activate source before publishing");
+    actor
         .versioned_binary_write(
             WriteBinary {
                 workspace_id: WORKSPACE.to_owned(),
@@ -92,6 +106,21 @@ async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
         )
         .await
         .expect("the source gains the asset");
+    actor
+        .set_active_version(
+            dohc_engine_runtime::ActiveVersionSwitch {
+                workspace_id: WORKSPACE.into(),
+                version_id: "main".into(),
+                root_dir: scratch.path().into(),
+                self_writes: Arc::new(()),
+                now_ms: 26,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("return to the merge target");
+    assert!(!scratch.path().join("logo.png").exists());
 
     let execution = actor
         .versioned_text_merge(

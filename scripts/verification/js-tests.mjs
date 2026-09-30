@@ -53,25 +53,23 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {} } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {}, beforeDesktopScripts } = {}) {
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
   const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(report, null, 2) + "\n");
   const cancellation = cancellationScope("Workspace tests");
+  // The first command to fail stops every lane from starting another.
+  let failure;
   async function command(name, args) {
     await cancellation.checkpoint();
+    if (failure) throw failure;
     const row = { name, args, log: join(output, name.replaceAll(/[^\w.-]/gu, "_") + ".log") };
     report.steps.push(row);
-    return timed(row, () => run(...pnpm(args), { env, log: row.log }), save);
+    return timed(row, () => run(...pnpm(args), { env, log: row.log }), save)
+      .catch(error => { failure ??= error; throw error; });
   }
-  try {
-    if (!prepared) {
-      await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
-    }
-    // These tests change tracked files temporarily. Keep provenance probes and
-    // package readers outside that interval.
-    await command("repository", ["run", "test:repo"]);
+  async function runPackages() {
     const inventory = await command("inventory", ["-r", "list", "--depth", "-1", "--json"]);
     const packages = JSON.parse(inventory.stdout).filter(pkg => relative(repoRoot, pkg.path) !== "")
       .map(pkg => ({ ...pkg, manifest: JSON.parse(readFileSync(join(pkg.path, "package.json"), "utf8")) }));
@@ -88,9 +86,26 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     report.packages = tasks.map(({name, script, resource, files}) => ({name, script, resource, ...(files ? {files} : {})}));
     save();
     await runBounded(tasks, task => command(task.name, task.args), report.concurrency);
-    // Packaging tests rebuild runtime output. No package may read dist during
-    // that rebuild, even when its own tests finished much earlier.
-    if (tasks.some(task => task.name === "@dohc/desktop")) await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts"]);
+    return tasks;
+  }
+  try {
+    if (!prepared) {
+      await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
+    }
+    // Repository tests write only temporary fixtures and read only tracked
+    // source and this checkout's HEAD, which package tests never change, so
+    // they run beside the package lanes. Both lanes settle before any failure
+    // is reported, so no command outlives cleanup.
+    const [, packages] = await Promise.allSettled([command("repository", ["run", "test:repo"]), runPackages()]);
+    if (failure) throw failure;
+    if (packages.status === "rejected") throw packages.reason;
+    const tasks = packages.value;
+    // Packaging rebuilds dist, which package tests and Rust's public-collection
+    // recovery fixture read. Both must finish before the rebuild.
+    if (tasks.some(task => task.name === "@dohc/desktop")) {
+      await beforeDesktopScripts?.();
+      await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts"]);
+    }
     await cancellation.checkpoint();
     report.verdict = "PASS";
   } catch (error) {

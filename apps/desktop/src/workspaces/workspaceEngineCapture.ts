@@ -59,6 +59,8 @@ import {
   type EngineTransport,
   type ArtifactAssetDescriptor,
   type ChangeAttributionWire,
+  type KeptCopy,
+  type KeptCopySaveResult,
   type YdocContentKind,
 } from "@dohc/workspace-engine-client";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
@@ -455,7 +457,7 @@ export interface WorkspaceEngineCapture {
     absolutePath: string,
     text: string,
     author: MomentWriteAuthor | null,
-    options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string },
+    options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string; requestId?: string },
   ): Promise<{ resolvedAbsolutePath: string }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
@@ -570,6 +572,11 @@ export interface WorkspaceEngineCapture {
     afterConflictId?: string,
   ): Promise<WorkspaceVersionConflictPage>;
   countOpenConflicts(): Promise<number>;
+  // Files dohc moved aside while saving because another program changed them
+  // meanwhile. Each waits at a hidden name until saveKeptCopy moves it to a
+  // visible copy beside its file.
+  listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
+  saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
   resolveConflict(
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,
@@ -661,7 +668,7 @@ export interface WorkspaceEngineCapture {
   runRelaySync<T>(
     task: (materializePage: MaterializeRelayPullPage) => Promise<T>,
   ): Promise<T>;
-  // Resolves when everything enqueued so far has been captured (tests).
+  // Resolves when everything enqueued so far has been captured.
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
   // written — the workspace shutdown chain awaits this so the last capture
@@ -1021,6 +1028,15 @@ export class RestoreFolderInUseError extends Error {
   constructor(readonly path: string) {
     super(`${path} shares its folder with other files.`);
     this.name = "RestoreFolderInUseError";
+  }
+}
+
+function requirePublishedWrite(path: string, result: { materializeOutcome?: string }): void {
+  if (result.materializeOutcome === "conflict" || result.materializeOutcome === "superseded") {
+    throw new AuthoredTextChangedError(path);
+  }
+  if (result.materializeOutcome !== "applied") {
+    throw new VersionedTextStoreError("persist-failed", `dohc could not publish ${path}. Retry the write.`);
   }
 }
 
@@ -3439,12 +3455,6 @@ export function createWorkspaceEngineCapture(
         if (writeOptions.signal?.aborted) {
           throw new Error("The write was cancelled.");
         }
-        const observedBytes = Buffer.byteLength(text, "utf8");
-        if (observedBytes > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
-          throw new Error(
-            `Authored text exceeds the in-band write limit: limit ${MAX_DESKTOP_CAPTURE_TEXT_BYTES} bytes, observed ${observedBytes} bytes.`,
-          );
-        }
         const { relative: resolvedRelative, resolvedAbsolute } =
           await assertResolvedWorkspacePath({
             rootPath,
@@ -3468,37 +3478,35 @@ export function createWorkspaceEngineCapture(
           throw new Error("The write was cancelled.");
         }
         const engine = await engineStore();
-        if (writeOptions.expectedContentHash !== undefined) {
-          await engine.flushCapture?.();
-          const current = await readFile(resolvedAbsolute).catch(() => null);
-          if (current === null || createHash("sha256").update(current).digest("hex") !== writeOptions.expectedContentHash) {
-            throw new AuthoredTextChangedError(path);
-          }
-        }
+        await engine.flushCapture?.();
         const versionId = await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {
           origin: "api",
           summary: `Updated ${pathBasename(path)}`,
-          correlationId: `authored-write-${createId()}`,
+          correlationId: `authored-write-${writeOptions.requestId ?? createId()}`,
         };
         try {
-          await engine.writeTextFile({
+          const result = await engine.writeTextFile({
             workspaceId,
             versionId,
             path,
             text,
+            publish: true,
+            ...(writeOptions.requestId !== undefined ? { requestId: writeOptions.requestId } : {}),
+            ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
             ...(author ? { author } : {}),
           });
+          requirePublishedWrite(path, result);
         } catch (error) {
+          if (error instanceof VersionedTextStoreError && error.code === "write-precondition-failed") {
+            throw new AuthoredTextChangedError(path);
+          }
           if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
             throw new VersionedTextStoreError("target-path-exists", `File already exists: ${path}`);
           }
           throw error;
-        }
-        if (!writeOptions.createOnly) {
-          await materialize([{ kind: "write", path, text }], policy);
         }
         return { resolvedAbsolutePath: resolvedAbsolute };
       });
@@ -5357,6 +5365,14 @@ export function createWorkspaceEngineCapture(
       return count;
     },
 
+    async listKeptCopies() {
+      return await (await engineStore()).listKeptCopies();
+    },
+
+    async saveKeptCopy(id) {
+      return await (await engineStore()).saveKeptCopy(id);
+    },
+
     resolveConflict(conflictId, resolution) {
       return enqueueResult("resolve conflict", async () => {
         const policy = await readPolicyForTask();
@@ -5743,10 +5759,11 @@ export function createWorkspaceEngineCapture(
                     versionId: activeVersionId,
                     path,
                     text: target.text,
+                    publish: true,
                     restoreBeforeMomentId: momentId,
                     metadata,
                   });
-            await materialize([await materializeWriteForSnapshot(engine, result.snapshot)], policy);
+            requirePublishedWrite(path, result);
             return {
               restored: "text" as const,
               restoredMomentId: result.moment.id,
@@ -5959,12 +5976,14 @@ export function createWorkspaceEngineCapture(
             versionId,
             path,
             text: input.text,
+            publish: true,
             metadata,
           });
+          requirePublishedWrite(path, written);
           current = written.snapshot;
           changed = true;
         }
-        if (disk.kind !== "text" || disk.text !== input.text) {
+        if (!changed && (disk.kind !== "text" || disk.text !== input.text)) {
           await materialize([{ kind: "write", path, text: input.text }], policy);
           changed = true;
         }
@@ -6083,6 +6102,7 @@ export function createWorkspaceEngineCapture(
           ) {
             throw new Error(`Generated Markdown archive cannot repair its disk copy: ${toPath}`);
           }
+          let published = false;
           if (destinationDisk.kind === "text" && destinationDisk.text !== destination.text) {
             const canonical = destination.text;
             await writeIfChanged(engine, versionId, toPath, destinationDisk, {
@@ -6094,16 +6114,19 @@ export function createWorkspaceEngineCapture(
               versionId,
               path: toPath,
               text: canonical,
+              publish: true,
               metadata: input.metadata ?? {
                 origin: "api",
                 summary: `Repaired archived ${pathBasename(toPath)}`,
               },
             });
+            requirePublishedWrite(toPath, repaired);
+            published = true;
             destination = repaired.snapshot;
           }
           await materialize(
             [
-              { kind: "write", path: toPath, text: destination.text },
+              ...(published ? [] : [{ kind: "write" as const, path: toPath, text: destination.text }]),
               { kind: "delete", path: fromPath },
             ],
             policy,
@@ -6162,16 +6185,18 @@ export function createWorkspaceEngineCapture(
             summary: `Saved edits before archiving ${pathBasename(fromPath)}`,
             correlationId: metadata.correlationId,
           });
-          await engine.writeTextFile({
+          const repaired = await engine.writeTextFile({
             workspaceId,
             versionId,
             path: fromPath,
             text: canonical,
+            publish: true,
             metadata: {
               ...metadata,
               summary: `Restored generated ${pathBasename(fromPath)} before archive`,
             },
           });
+          requirePublishedWrite(fromPath, repaired);
           source = await engine.readTextFile({ workspaceId, versionId, path: fromPath });
           if (!source) throw new Error(`Generated Markdown disappeared: ${fromPath}`);
         }

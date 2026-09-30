@@ -380,6 +380,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "unicode-normalization",
  "winapi-util",
 ]
 
@@ -446,7 +447,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
- "unicode-normalization",
 ]
 
 [[package]]

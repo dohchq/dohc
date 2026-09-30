@@ -1514,10 +1514,8 @@ pub(super) fn ydoc_open_state_on_store(
     // preserves the head against — the user types into unreviewed content
     // and resolution rewrites the lineage under the live client. Refuse
     // with the same reason the settle freeze uses; resolution lifts both.
-    // The check runs before the lineage clear and the deferred drain below:
-    // both mutate durable state, and a drain whose open then refuses would
-    // consume the parked rows — and the record facts persisted on them —
-    // with no caller left to emit their events.
+    // Refuse an existing conflict before changing the lineage or draining.
+    // If the drain opens a conflict, return its record facts with the refusal.
     if expected_key_matches
         && store
             .read_with(|conn| {
@@ -1605,7 +1603,28 @@ pub(super) fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
-        let drained = drain_deferred_ydoc_for_local_rpc(store, doc_cache, &key, &NoFaults)?;
+        let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+            store, doc_cache, &key, &NoFaults,
+        )?;
+        dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, &NoFaults)?;
+        if store
+            .read_with(|conn| {
+                dohc_engine_sync::open_sync_conflict_for_object(
+                    conn,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                )
+            })?
+            .is_some()
+        {
+            return Err(RuntimeError::YdocOpenConflict {
+                record_facts: drained.record_facts,
+            });
+        }
+        for declined in &drained.sharing_declined {
+            eprintln!("engine: {declined}");
+        }
         record_facts = drained.record_facts;
     }
     // A post-lease open starts a live session on this doc: prefer keeping its
@@ -3259,22 +3278,6 @@ fn materialize_ydoc_drain(
 
 /// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
 /// decline visible at this boundary, matching the existing #632 diagnostic.
-/// The caller owns the drained record facts: the open, settle, and close
-/// RPC results carry them to the service, which emits them post-commit like
-/// the pull pass.
-fn drain_deferred_ydoc_for_local_rpc(
-    store: &mut EngineStore,
-    doc_cache: &mut WriterDocCache,
-    key: &DocKey,
-    faults: &dyn FaultInjector,
-) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
-    let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, doc_cache, key, faults)?;
-    for declined in &drained.sharing_declined {
-        eprintln!("engine: {declined}");
-    }
-    Ok(drained)
-}
-
 /// Live sessions can consume only coordinates for the lineage they opened.
 /// A foreign base and every row behind it stay queued until close releases the
 /// lease, so resync cannot replace the lineage behind the active editor.

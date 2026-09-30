@@ -76,7 +76,7 @@ describe("NewCollectionDialog", () => {
     expect(definition.schemaPath).toBe("events/registrations/schema.sql");
     expect(definition.tables[0]!.fields[1]).toMatchObject({ name: "Name", required: true, unique: true });
     expect(definition.tables[0]!.fields[2]).toMatchObject({ name: "Status", default: "New" });
-    expect(onCreated).toHaveBeenCalledWith({ kind: "transactional", datasetId: definition.datasetId, tableId: definition.tables[0]!.tableId });
+    expect(onCreated).toHaveBeenCalledWith({ kind: "transactional", datasetPath: "events/registrations/dataset.json", tableId: definition.tables[0]!.tableId });
     expect(bridgeMock.createWorkspaceFile).not.toHaveBeenCalled();
   });
 

@@ -1,5 +1,7 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
+import { activityPathsAffectWorkspaceListing } from "./bridgeContract";
+
 import {
   ENGINE_YDOC_UPDATE_MAX_BYTES,
   EXPLORER_MENU_COMMANDS,
@@ -178,6 +180,13 @@ import {
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
+
+it.each(["linux", "darwin", "win32"] as const)("ignores reserved activity paths on %s", (platform) => {
+  for (const name of [".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES"]) {
+    expect(activityPathsAffectWorkspaceListing([`${name}/engine/private.md`], platform)).toBe(false);
+  }
+  expect(activityPathsAffectWorkspaceListing(["my-dohc/notes.md"], platform)).toBe(true);
+});
 
 const shareUndoReceipt = { undoId: "undo-1", expiresAtMs: 600_020 };
 const malformedShareUndoReceipts = [
@@ -1791,7 +1800,7 @@ describe("workspace graph IPC contract", () => {
 describe("collection IPC contracts", () => {
   it("round-trips a queried record with a bigint value and a flagged validation", () => {
     const result = QueryCollectionRecordsResult.parse({
-      collection: { path: "tasks", status: "valid", reasons: [] },
+      collection: { path: "tasks", objectId: "object-tasks", status: "valid", reasons: [] },
       records: [
         {
           id: "rec-1",
@@ -1819,6 +1828,7 @@ describe("collection IPC contracts", () => {
   it("keeps every field kind and view definition through the details result", () => {
     const details = GetCollectionResult.parse({
       path: "tasks",
+      objectId: "object-tasks",
       status: "degraded",
       reasons: [{ code: "unknown-field-type", path: "fields.mystery" }],
       schema: {
@@ -1855,6 +1865,7 @@ describe("collection IPC contracts", () => {
 
     const details = GetCollectionResult.parse({
       path: "tasks",
+      objectId: "object-tasks",
       status: "valid",
       reasons: [],
       schema: {
@@ -1872,6 +1883,7 @@ describe("collection IPC contracts", () => {
   it("accepts more than 1,000 canonical schema reasons", () => {
     const details = GetCollectionResult.parse({
       path: "tasks",
+      objectId: "object-tasks",
       status: "degraded",
       reasons: Array.from({ length: 1_001 }, (_, index) => ({
         code: "unknown-property",
@@ -1904,6 +1916,7 @@ describe("collection IPC contracts", () => {
     expect(() =>
       GetCollectionResult.parse({
         path: "tasks",
+        objectId: "object-tasks",
         status: "valid",
         reasons: [],
         schema: {

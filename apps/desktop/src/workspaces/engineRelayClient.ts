@@ -660,6 +660,7 @@ export interface EngineRelayWorkspaceClient {
 }
 
 export interface EngineRelayClientOptions {
+  onRefusalsChanged?(): void;
   sessions: EngineWorkspaceSessions;
   routes: RelayTransportRouteGuard;
   /** Closes the captured binding without re-entering this client's request lane. */
@@ -671,6 +672,7 @@ export interface EngineRelayClientOptions {
 const DEFAULT_RELAY_REQUEST_DEADLINE_MS = 30_000;
 
 export class EngineRelayClient {
+  private readonly onRefusalsChanged: EngineRelayClientOptions["onRefusalsChanged"];
   private readonly sessions: EngineWorkspaceSessions;
   private readonly routes: RelayTransportRouteGuard;
   private readonly closeWorkspaceBinding: (workspace: EngineWorkspace) => Promise<void>;
@@ -681,6 +683,7 @@ export class EngineRelayClient {
   private readonly lanes = new Map<string | symbol, Promise<void>>();
 
   constructor(options: EngineRelayClientOptions) {
+    this.onRefusalsChanged = options.onRefusalsChanged;
     this.sessions = options.sessions;
     this.routes = options.routes;
     this.closeWorkspaceBinding = options.closeWorkspaceBinding ??
@@ -903,8 +906,19 @@ export class EngineRelayClient {
           for (const path of pageChangedPaths) {
             changed.set(`${path.versionId}\0${path.path}`, path);
           }
-          await materializePage(pageChangedPaths);
-          appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);
+          if (!Array.isArray(result.refusals)) throw new Error("Rust engine sync.pull.refusals must be an array.");
+          result.refusals.forEach((entry, index) => {
+            const at = `sync.pull.refusals[${index}]`;
+            const row = resultRecord(entry, at);
+            return { originId: stringField(row, "originId", at), originSeq: numberField(row, "originSeq", at),
+              opKind: stringField(row, "opKind", at), code: stringField(row, "code", at), reason: stringField(row, "reason", at) };
+          });
+          try {
+            await materializePage(pageChangedPaths);
+            appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);
+          } finally {
+            this.onRefusalsChanged?.();
+          }
           if (!hasMore) break;
         }
         return {

@@ -44,6 +44,7 @@ export function createWorkspaceEngineIpc<
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
   }>;
   localAgentDisplayName(): string;
+  localPersonId(): string;
   /** An automation author as History shows it, in one workspace. */
   automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
   /** A person the owner shared with, as History names their direct write. */
@@ -72,7 +73,7 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, automationAuthor, namedAuthorLabel,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, automationAuthor, namedAuthorLabel,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
@@ -145,13 +146,13 @@ export function createWorkspaceEngineIpc<
     // timeline from engine moments; every handler resolves the workspace via
     // requireWorkspace and rejects when the engine capture is not attached.
     // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,
-    // unit-tested); main only injects how authors read below. An agent takes
-    // the display-name rule the chat rail uses: AgentIntegration stamps
-    // onBehalfOf "local" for local runs, which use the configured agent name,
-    // and other labels display as stored. An automation reads as main names it.
+    // unit-tested); main only injects how authors read below. An agent that
+    // works for this computer's person reads as the configured agent name,
+    // and any other agent as "Agent": its onBehalfOf is a person id, never a
+    // name. An automation reads as main names it.
     function authorNames(workspaceId: string): EngineMomentAuthorNames {
       return {
-        agent: (author) => author.onBehalfOf === "local" ? localAgentDisplayName() : author.onBehalfOf,
+        agent: (author) => author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
         automation: (automationId) => automationAuthor(workspaceId, automationId),
         named: (author) => namedAuthorLabel(workspaceId, author),
       };

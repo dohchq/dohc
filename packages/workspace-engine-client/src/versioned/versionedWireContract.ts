@@ -6,6 +6,7 @@ import type { JsonValue } from "../protocol";
 
 export const VERSIONED_METHOD = {
   textWrite: "versionedText.write",
+  textWriteBlob: "versionedText.writeBlob",
   textRead: "versionedText.read",
   textReadBlob: "versionedText.readBlob",
   textRename: "versionedText.rename",
@@ -72,7 +73,7 @@ export type AgentAuthor = JsonObject & {
  */
 export type WriteAuthor =
   | AgentAuthor
-  | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf: string; depth: number });
+  | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf?: string; depth: number });
 
 type MutationMetadata = JsonObject & {
   workspaceId?: string;
@@ -85,14 +86,19 @@ type MutationMetadata = JsonObject & {
 };
 
 type VersionedTextWriteParams = MutationMetadata & {
+  /** Publish after committing. Omit when recording bytes already on disk. */
+  publish?: boolean;
   versionId: string;
   objectId?: string;
   path: string;
   text: string;
   createOnly?: boolean;
+  expectedSha256?: string;
   restoreBeforeMomentId?: string;
   momentId?: string;
 };
+
+type VersionedTextWriteBlobParams = Omit<VersionedTextWriteParams, "text"> & { sha256: string; bytesBase64: string };
 
 type VersionedTextReadParams = JsonObject & {
   versionId: string;
@@ -105,6 +111,8 @@ type VersionedTextReadBlobParams = JsonObject & {
 };
 
 type VersionedBinaryWriteParams = MutationMetadata & {
+  createOnly?: boolean;
+  expectedSha256?: string;
   versionId: string;
   objectId?: string;
   path: string;
@@ -114,6 +122,8 @@ type VersionedBinaryWriteParams = MutationMetadata & {
 };
 
 type VersionedBinaryWriteBlobParams = MutationMetadata & {
+  createOnly?: boolean;
+  expectedSha256?: string;
   versionId: string;
   objectId?: string;
   path: string;
@@ -451,6 +461,7 @@ export type VersionedMethodParamsMap = {
     bounds: { maxInputFiles: number; maxInputBytes: number };
   };
   [VERSIONED_METHOD.textWrite]: VersionedTextWriteParams;
+  [VERSIONED_METHOD.textWriteBlob]: VersionedTextWriteBlobParams;
   [VERSIONED_METHOD.textRead]: VersionedTextReadParams;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobParams;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameParams;
@@ -490,6 +501,7 @@ export type VersionedMethodParamsMap = {
 export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.textCaptureSources]: SourceCapture;
   [VERSIONED_METHOD.textWrite]: VersionedTextWriteResult;
+  [VERSIONED_METHOD.textWriteBlob]: typeof TextBlobWriteResultSchema.Type;
   [VERSIONED_METHOD.textRead]: VersionedTextReadResult;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobResult;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameResult;
@@ -626,6 +638,12 @@ const NamedAuthorSchema = mutableStruct({
   grantId: Schema.String,
   grantGeneration: Schema.Int,
 });
+const LinkAuthorSchema = mutableStruct({
+  kind: Schema.Literal("link"),
+  grantId: Schema.String,
+  grantGeneration: Schema.Int,
+  principalId: Schema.String,
+});
 const AutomationAuthorSchema = mutableStruct({
   kind: Schema.Literal("automation"),
   automationId: Schema.String,
@@ -645,6 +663,7 @@ const MomentAuthorsSchema = Schema.NullOr(
       HumanAuthorSchema,
       PublicAuthorSchema,
       NamedAuthorSchema,
+      LinkAuthorSchema,
       AutomationAuthorSchema,
       CorruptAuthorSchema,
     ]),
@@ -709,6 +728,19 @@ const TextWriteResultSchema = mutableStruct({
   snapshot: TextWriteSnapshotSchema,
   moment: MomentRecordSchema,
   deduped: Schema.Boolean,
+  materialized: Schema.Boolean,
+  materializeOutcome: MaterializeOutcomeSchema,
+});
+const TextBlobWriteResultSchema = mutableStruct({
+  object: FileObjectSchema,
+  snapshot: Schema.Union([TextWriteSnapshotSchema, mutableStruct({
+    ...TextReadMetadataFields,
+    contentKind: Schema.Literal("text"), text: Schema.Null, inbandLimitBytes: Schema.Int,
+  })]),
+  moment: MomentRecordSchema,
+  deduped: Schema.Boolean,
+  materialized: Schema.Boolean,
+  materializeOutcome: MaterializeOutcomeSchema,
 });
 const BinaryWriteResultWireSchema = mutableStruct({
   object: FileObjectSchema,
@@ -980,6 +1012,7 @@ export type SourceCapture = typeof SourceCaptureSchema.Type;
 const VersionedResultSchemas = {
   [VERSIONED_METHOD.textCaptureSources]: SourceCaptureSchema,
   [VERSIONED_METHOD.textWrite]: TextWriteResultSchema,
+  [VERSIONED_METHOD.textWriteBlob]: TextBlobWriteResultSchema,
   [VERSIONED_METHOD.textRead]: Schema.NullOr(VersionedTextReadValueSchema),
   [VERSIONED_METHOD.textReadBlob]: BlobReadResultSchema,
   [VERSIONED_METHOD.textRename]: TextRenameResultSchema,

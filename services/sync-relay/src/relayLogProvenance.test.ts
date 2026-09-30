@@ -8,6 +8,11 @@ const RELAY_ORIGIN_PREFIXES = [SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORI
 const RELAY_AUTHORS = [
   {kind: "public", principalId: "forged", grantId: "grant"},
   {kind: "named", userId: "forged", grantId: "grant", grantGeneration: 1},
+  {kind: "link", grantId: "grant", grantGeneration: 1, principalId: "forged"},
+  // A kind this relay does not know yet is refused, not passed through.
+  {kind: "future", grantId: "grant"},
+  "link",
+  [],
 ];
 
 describe("client log provenance", () => {
@@ -25,7 +30,7 @@ describe("client log provenance", () => {
       expect(() => assertClientLogProvenance(`${prefix}grant`, [])).toThrow();
     }
   });
-  it("refuses client-stamped public and named moments", () => {
+  it("refuses client-stamped relay moments", () => {
     const agent = {kind: "agent", agentId: "agent", onBehalfOf: "owner"};
     for (const author of RELAY_AUTHORS) {
       expect(() => assertClientLogProvenance("device", [{opKind: "moment.append", payload: {authors: [author]}}])).toThrow();

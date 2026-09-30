@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   lutimes,
   mkdir,
@@ -43,7 +44,7 @@ describe("test scratch", () => {
     const harness = await createTestScratch("sweep-test-");
     const parent = join(harness, "runs");
     const old = join(parent, "old-run-4821-0000000000000001");
-    const live = join(parent, "live-run-4821-0000000000000002");
+    const live = join(parent, `live-run-${process.pid}-0000000000000002`);
     const current = join(parent, THIS_RUN);
     await Promise.all([
       mkdir(old, { recursive: true }),
@@ -58,6 +59,22 @@ describe("test scratch", () => {
     expect(await pathExists(old), "the sweep must remove an aged run").toBe(false);
     expect(await pathExists(live), "the sweep removed a recent run").toBe(true);
     expect(await pathExists(current), "the sweep removed the current run").toBe(true);
+  });
+
+  it("removes an empty run root its dead process left, and keeps one that holds work", async () => {
+    const harness = await createTestScratch("abandoned-");
+    const parent = join(harness, "runs");
+    const pid = spawnSync(process.execPath, ["-e", ""]).pid!;
+    const empty = join(parent, `process-${pid}-0000000000000004`);
+    const working = join(parent, `process-${pid}-0000000000000005`);
+    await mkdir(empty, { recursive: true });
+    await mkdir(working, { recursive: true });
+    await writeFile(join(working, "engine.db"), "work");
+
+    await sweepScratchParent(parent, join(parent, THIS_RUN), Date.now());
+
+    expect(await pathExists(empty), "an empty root of an exited process must be swept").toBe(false);
+    expect(await pathExists(working), "a recent root that holds work waits for the age limit").toBe(true);
   });
 
   // `join` folds `.` and `..` away before mkdtemp adds its suffix, so a scratch

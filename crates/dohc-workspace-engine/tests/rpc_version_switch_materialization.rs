@@ -440,7 +440,7 @@ async fn switching_does_not_clobber_untracked_content() {
     write_text(&transport, &handle, 2, "main", "foreign.md", "tracked").await;
     let feature = create_feature(&transport, &handle, 3, &workspace_id).await;
     write_text(&transport, &handle, 4, &feature, "foreign.md", "target").await;
-    let foreign = vec![b'x'; (dohc_engine_files::MAX_CAPTURE_BINARY_BYTES + 1) as usize];
+    let foreign = vec![b'x'; (dohc_engine_files::MAX_CAPTURE_TEXT_BYTES + 1) as usize];
     std::fs::write(scratch.path().join("foreign.md"), &foreign).expect("foreign disk");
 
     switch_to(&transport, &handle, 5, &workspace_id, &feature).await;

@@ -17,7 +17,7 @@ const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).d
 test("stock orders use custom apps, relations, transactions, and attachments through the same Collection and agent APIs", async ({ browser }, info) => {
   test.setTimeout(90000);
   const directory = await mkdtemp(join(tmpdir(), "dohc-stock-browser-"));
-  const host = await createLocalDatasetHost({workspaceId:"stock-workspace",workspaceRoot:directory});
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId:"stock-workspace",workspaceRoot:directory});
   const lifetime = new AbortController(), launcher = await createLocalAppLaunchHost({backend:host.apps,lifetime:lifetime.signal});
   const context = await browser.newContext();
   const root = fileURLToPath(new URL("../../../examples/stock-orders",import.meta.url));
@@ -72,12 +72,13 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
     expect(lines.rows.every((line:any)=>line.values[field("order_items","order_id")]===orderId)).toBe(true);
     expect(datasetColumnFields(revision.definition.tables.find(table=>table.sqlName==="order_items")!).find(value=>value.sqlColumn==="order_id")!.relation?.tableId).toBe(revision.definition.tables.find(table=>table.sqlName==="orders")!.tableId);
     expect(Buffer.from((await host.file({...selection,fileId:receiptId})).bytesBase64,"base64")).toEqual(receipt);
-    const request = {action:"invoke",workspaceId:"stock-workspace",...selection,operationId:operation("tableOrders"),input:{},idempotencyKey:"agent-stock-read"};
+    const request = {action:"invoke",workspaceId:"stock-workspace",datasetPath:"stock-orders/dataset.json",revision:revision.revision,revisionSha256:revision.revisionSha256,operationId:operation("tableOrders"),input:{},idempotencyKey:"agent-stock-read"};
     const agentContext: ToolContext = {root:directory,home:directory,request:async envelope=>{
       expect(envelope.verb).toBe("dataset");
       const parsed = DatasetRequest.parse((envelope.args as {request:unknown}).request);
-      if(parsed.action!=="invoke"||parsed.workspaceId!=="stock-workspace")throw Error("Wrong agent request scope");
-      return {kind:"invoked",...await (parsed.operationId===operation("editOrderStatus") ? host.action(parsed) : host.query(parsed))};
+      if(parsed.action!=="invoke"||parsed.workspaceId!=="stock-workspace"||parsed.datasetPath!=="stock-orders/dataset.json")throw Error("Wrong agent request scope");
+      const invocation = {datasetId:revision.datasetId,revision:parsed.revision,revisionSha256:parsed.revisionSha256,operationId:parsed.operationId,input:parsed.input,idempotencyKey:parsed.idempotencyKey};
+      return {kind:"invoked",...await (parsed.operationId===operation("editOrderStatus") ? host.action(invocation) : host.query(invocation))};
     }};
     const agent = await agentDataset(agentContext,request);
     expect(agent).toMatchObject({kind:"invoked",result:rows});

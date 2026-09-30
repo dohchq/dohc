@@ -22,8 +22,8 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { ListNoticesResult } from "../ipc/bridgeContract";
+import { FAILED_ELSEWHERE_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import {
-  FAILED_ELSEWHERE_BODY,
   RETRY_ELSEWHERE,
   retryAutomationRun,
   retryFromFailureNotice,
@@ -126,7 +126,7 @@ function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
 
 async function computer(
   signedIn: NoticeAccount | null,
-  options: { directory?: string; outboxPostLimit?: number; installId?: string } = {},
+  options: { directory?: string; outboxPostLimit?: number; installId?: string; refusalNotices?: Parameters<typeof createNoticeStore>[0]["refusalNotices"]; dismissRefusal?: Parameters<typeof createNoticeStore>[0]["dismissRefusal"] } = {},
 ): Promise<Computer> {
   const state: Computer = {
     directory: options.directory ?? await createTestScratch("notices-"),
@@ -157,6 +157,8 @@ async function computer(
     installId: () => options.installId ?? "install-a",
     onChanged: () => { state.changes += 1; },
     nowMs: () => clock,
+    refusalNotices: options.refusalNotices,
+    dismissRefusal: options.dismissRefusal,
     ...(options.outboxPostLimit === undefined ? {} : { outboxPostLimit: options.outboxPostLimit }),
   });
   return state;
@@ -485,6 +487,8 @@ describe("notices on one person's computers", () => {
     for (const signedIn of [null, account(server, "ana")]) {
       const laptop = await computer(signedIn);
       await laptop.store.postNotice(notice({ noticeId: "first", title: "First" }));
+      // Sync saves the account outbox before sending, even when the relay is offline.
+      await laptop.store.sync();
       const name = (await readdir(laptop.directory)).find((entry) => entry.endsWith(".json"))!;
       const where = signedIn ? "account" : "local";
       // A folder where the save writes its temporary file makes the save fail.
@@ -667,6 +671,19 @@ describe("notices that stay on this computer", () => {
     await laptop.store.postNotice(notice());
     switchTo(laptop, account(server, "ana"));
     await laptop.store.postNotice(notice({ title: "Again" }));
+    await laptop.store.sync();
+    expect(await titles(laptop)).toEqual(["local:Your agent finished"]);
+    const other = await computer(account(server, "ana"));
+    await other.store.sync();
+    expect((await other.store.list()).notices).toEqual([]);
+  });
+
+  it("keeps a notice only here when asked, even signed in to an account that syncs the workspace", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    // A retry posts the same id, and it is kept once.
+    await laptop.store.postNotice(notice({ kind: "automation-notify", onlyHere: true }));
+    await laptop.store.postNotice(notice({ kind: "automation-notify", onlyHere: true }));
     await laptop.store.sync();
     expect(await titles(laptop)).toEqual(["local:Your agent finished"]);
     const other = await computer(account(server, "ana"));
@@ -907,7 +924,7 @@ describe("notices for another person", () => {
     await ana.store.sync();
     expect(await titles(ana)).toEqual([
       "account:Stamp the finish date failed (read)",
-      "account:Name owner shared trip with you",
+      "account:Name owner (owner@dohc.test) shared a folder or file with you",
     ]);
 
     await expect(owner.store.postNotice({ ...failed, noticeId: "x", target: { path: "budget" } }))
@@ -947,18 +964,182 @@ describe("notices for another person", () => {
   }, 60_000);
 });
 
+it("rebuilds refusal Notices from the engine and keeps read marks across restart", async () => {
+  let pending = [{ noticeId: "sync-refusal-a", originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    reason: "plaintext projection exceeds limit", document: { versionId: "main", path: "doc.md",
+      objectId: "object-a", lineageClaimId: "inactive", conflictId: "review" } }];
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: pending}];
+  let failDismiss = false;
+  const dismissRefusal = async (workspaceId: string, noticeId: string) => {
+    expect(workspaceId).toBe(WORKSPACE);
+    if (failDismiss) throw new Error("engine unavailable");
+    pending = pending.filter(row => row.noticeId !== noticeId);
+  };
+  const first = await computer(null, {refusalNotices, dismissRefusal});
+  const [notice] = (await first.store.list()).notices;
+  expect(notice).toMatchObject({kind: "sync-refusal", workspaceId: WORKSPACE, target: {path: "doc.md"}});
+  expect(notice!.body).toContain("Open its conflict and choose a copy.");
+  expect(notice!.detail).toContain("Object: object-a\nLineage: inactive");
+  await first.store.mark([notice!], "read", null);
+  clock += 365 * 24 * 60 * 60_000;
+  const restarted = await computer(null, {directory: first.directory, refusalNotices, dismissRefusal});
+  expect((await restarted.store.list()).notices[0]!.readAtMs).not.toBeNull();
+  failDismiss = true;
+  await expect(restarted.store.mark([notice!], "dismissed", null)).rejects.toThrow("engine unavailable");
+  expect((await restarted.store.list()).notices).toHaveLength(1);
+  failDismiss = false;
+  await restarted.store.mark([notice!], "dismissed", null);
+  const again = await computer(null, {directory: first.directory, refusalNotices, dismissRefusal});
+  expect((await again.store.list()).notices).toEqual([]);
+});
+
+it("lists engine refusals without the local row limit and removes resolved rows", async () => {
+  let pending = Array.from({length: 1_001}, (_, index) => ({noticeId: `sync-refusal-${index}`,
+    originId: "peer", originSeq: index, refusalCoordinates: [{ originId: "peer", originSeq: index }], reason: "Review this file", document: null}));
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: pending}];
+  const first = await computer(null, {refusalNotices});
+  expect((await first.store.list()).notices).toHaveLength(1_001);
+  await first.store.postNotice(notice());
+  expect((await first.store.list()).notices).toHaveLength(1_002);
+  pending = [];
+  expect((await first.store.list()).notices).toHaveLength(1);
+});
+
+it("recovers engine Notices even if the desktop file was lost", async () => {
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: [{noticeId: "sync-refusal-a",
+    originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }], reason: "Review this file", document: null}]}];
+  const first = await computer(null, {refusalNotices});
+  expect((await first.store.list()).notices).toHaveLength(1);
+  const fresh = await computer(null, {refusalNotices});
+  expect((await fresh.store.list()).notices).toHaveLength(1);
+});
+
+it("keeps a queued refusal dismissal hidden when applying it fails, then retries", async () => {
+  const pending = [{ noticeId: "queued-refusal", originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    reason: "Review this file", document: null }];
+  let open = true;
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: open ? pending : null }];
+  const dismissRefusal = vi.fn(async () => {});
+  const first = await computer(null, { refusalNotices, dismissRefusal });
+  const [row] = (await first.store.list()).notices;
+  open = false;
+  await first.store.mark([row!], "dismissed", null);
+  open = true;
+  dismissRefusal.mockRejectedValueOnce(new Error("engine unavailable"));
+  await first.store.refreshRefusals(WORKSPACE);
+  expect((await first.store.list()).notices).toEqual([]);
+  expect(dismissRefusal).toHaveBeenCalledTimes(3);
+});
+
+it.each([undefined, []])("rejects a refusal dismissal without shown coordinates: %s", async (refusalCoordinates) => {
+  const dismissRefusal = vi.fn(async () => {});
+  const first = await computer(null, { dismissRefusal, refusalNotices: async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "refusal", originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    reason: "Review this file", document: null,
+  }] }] });
+  const [shown] = (await first.store.list()).notices;
+  await expect(first.store.mark([{ ...shown!, refusalCoordinates }], "dismissed", null))
+    .rejects.toThrow("The engine could not dismiss this Notice. Try again.");
+  expect(dismissRefusal).not.toHaveBeenCalled();
+  expect((await first.store.list()).notices).toHaveLength(1);
+});
+
+it("hides a failed queued dismissal when the newer refusal resolves", async () => {
+  const firstCoordinate = { originId: "peer", originSeq: 1 };
+  const secondCoordinate = { originId: "peer", originSeq: 2 };
+  let coordinates = [firstCoordinate];
+  let open = true;
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: open ? [{
+    noticeId: "refusal", ...coordinates[coordinates.length - 1]!, refusalCoordinates: coordinates,
+    reason: "Review this file", document: null,
+  }] : null }];
+  const dismissRefusal = vi.fn(async () => { if (open) throw new Error("engine unavailable"); });
+  const first = await computer(null, { refusalNotices, dismissRefusal });
+  const [shown] = (await first.store.list()).notices;
+  open = false;
+  await first.store.mark([shown!], "dismissed", null);
+  coordinates = [firstCoordinate, secondCoordinate];
+  open = true;
+  expect((await first.store.list()).notices[0]?.refusalCoordinates).toEqual([secondCoordinate]);
+  coordinates = [firstCoordinate];
+  expect((await first.store.list()).notices).toEqual([]);
+  const restarted = await computer(null, { directory: first.directory, refusalNotices, dismissRefusal });
+  expect((await restarted.store.list()).notices).toEqual([]);
+  expect(dismissRefusal.mock.calls).toEqual(Array.from({ length: 4 }, () => [WORKSPACE, "refusal", [firstCoordinate]]));
+});
+
+it("keeps a refusal read when its snapshot only loses coordinates", async () => {
+  let coordinates = [{ originId: "peer", originSeq: 1 }, { originId: "peer", originSeq: 2 }];
+  const first = await computer(null, { refusalNotices: async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "refusal", originId: "peer", originSeq: 2, refusalCoordinates: coordinates,
+    reason: "Review this file", document: null,
+  }] }] });
+  const [shown] = (await first.store.list()).notices;
+  await first.store.mark([shown!], "read", null);
+  coordinates = [coordinates[1]!];
+  expect((await first.store.list()).notices[0]?.readAtMs).not.toBeNull();
+});
+
+it("keeps unavailable workspace refusals while refreshing other workspaces", async () => {
+  const refusal = (noticeId: string) => ({ noticeId, originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    reason: "Review this file", document: null });
+  let pending: Awaited<ReturnType<NonNullable<Parameters<typeof createNoticeStore>[0]["refusalNotices"]>>> = [
+    { workspaceId: WORKSPACE, notices: [refusal("sync-refusal-a")] },
+    { workspaceId: "unavailable", notices: [refusal("sync-refusal-b")] },
+  ];
+  const refusalNotices = async () => pending;
+  const first = await computer(null, { refusalNotices });
+  await first.store.postNotice(notice());
+  const cached = (await first.store.list()).notices.find(row => row.noticeId === "sync-refusal-b")!;
+  await first.store.mark([cached], "read", null);
+  pending = [
+    { workspaceId: WORKSPACE, notices: [refusal("sync-refusal-c")] },
+    { workspaceId: "unavailable", notices: null },
+  ];
+  const restarted = await computer(null, { directory: first.directory, refusalNotices });
+  const rows = (await restarted.store.list()).notices;
+  expect(rows.map(row => row.noticeId).sort()).toEqual(["agent-run:1", "sync-refusal-b", "sync-refusal-c"]);
+  expect(rows.find(row => row.noticeId === "sync-refusal-b")!.readAtMs).not.toBeNull();
+  pending = pending.map(row => ({ ...row, notices: [] }));
+  expect((await restarted.store.list()).notices.map(row => row.noticeId)).toEqual(["agent-run:1"]);
+});
+
+it("lists cached, local, and account Notices when the refusal reader fails", async () => {
+  const server = await relay();
+  let failRead = false;
+  const first = await computer(account(server, "owner"), {
+    refusalNotices: async () => {
+      if (failRead) throw new Error("engine unavailable");
+      return [{ workspaceId: WORKSPACE, notices: [{ noticeId: "sync-refusal-cached", originId: "peer",
+        originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }], reason: "Review this file", document: null }] }];
+    },
+  });
+  await first.store.postNotice(notice());
+  await first.store.sync();
+  await first.store.list();
+  failRead = true;
+  first.reach.clear();
+  await first.store.postNotice(notice({ noticeId: "local-notice" }));
+  const rows = (await first.store.list()).notices;
+  expect(rows).toHaveLength(3);
+  expect(rows).toEqual(expect.arrayContaining([
+    expect.objectContaining({ noticeId: "agent-run:1", store: "account" }),
+    expect.objectContaining({ noticeId: "local-notice", store: "local" }),
+    expect.objectContaining({ noticeId: "sync-refusal-cached", store: "local" }),
+  ]));
+});
 
 describe("automation notices reach the people involved", () => {
-  const AUTOMATION = "collection:trip/tasks#stamp";
+  const AUTOMATION = "collection:object-tasks#stamp";
   const failure = (generation: number, claimId = "atc_1") => ({
-    automationId: AUTOMATION, claimId, chainStopped: false,
+    automationId: AUTOMATION, claimId, neverStarted: false, chainStopped: false,
     error: "The record is open elsewhere", updatedAtMs: 1_000, generation, datasetInstance: null,
   });
   const report = (
     generation: number,
     options: { replaces?: ReturnType<typeof failure>; startedBy?: string; claimId?: string } = {},
   ) => ({
-    failure: failure(generation, options.claimId), name: "Stamp the finish date",
+    failure: failure(generation, options.claimId), name: "Stamp the finish date", collectionPath: "trip/tasks",
     startedBy: options.startedBy ?? null, replaces: options.replaces ?? null,
   });
   const sender = (store: NoticeStore, installId: string, extra: { throughShare?: boolean; lastChangedBy?: string } = {}) => ({
@@ -1135,6 +1316,24 @@ describe("automation notices reach the people involved", () => {
     expect((await failedIn(owner)).map((row) => row.postedHere)).toEqual([true, true]);
   });
 
+  it("tells everyone involved why a chain stopped, with no run to try again and no promise that someone can", async () => {
+    const server = await relay();
+    await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const owner = await computer(account(server, "owner"), { installId: "install-a" });
+    const ana = await computer(account(server, "ana"));
+    const stopped = { ...report(1, { startedBy: "ana" }), failure: { ...failure(1), neverStarted: true, chainStopped: true, error: "chain-stopped" } };
+    await sendFailureNotices(sender(owner.store, "install-a"), WORKSPACE, stopped);
+    const why = '"Stamp the finish date" did not run. dohc stops a chain after automations and agents start each other 4 times in a row. Check which automations start each other.';
+    await owner.store.sync();
+    await ana.store.sync();
+    const [own] = await failedIn(owner);
+    expect(own).toMatchObject({ title: "An automation chain stopped", body: `${why} This happened on Computer install-a.`, postedHere: true });
+    expect(own?.target?.run).toBeUndefined();
+    const [copy] = await failedIn(ana);
+    expect(copy).toMatchObject({ title: "An automation chain stopped", body: why, postedHere: false, target: { automation: AUTOMATION, path: "trip/tasks/automations.yaml" } });
+    expect(copy?.target?.run).toBeUndefined();
+  });
+
   it("sends a copy again when the connection drops, and never runs a notice someone else sent", async () => {
     const server = await relay();
     await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
@@ -1211,7 +1410,7 @@ describe("automation notices reach the people involved", () => {
         moment("m2", file(null), file(true), ana),
         moment("m1", null, file(null)),
       ]), at);
-      expect(found).toEqual({ switchedOffBy: "owner", lastChangedBy: "ana", contentHash: expect.any(String) });
+      expect(found).toEqual({ switchedOffBy: { kind: "person", userId: "owner" }, lastChangedBy: "ana", contentHash: expect.any(String) });
 
       const server = await relay();
       await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
@@ -1237,7 +1436,7 @@ describe("automation notices reach the people involved", () => {
         moment(`o${index}`, `${file(true)}# ${index}\n`, `${file(true)}# ${index + 1}\n`, ana));
       const moments = [moment("m2", file(true), file(false), ana), ...others, moment("m1", file(null), file(true))];
       const found = await whoSwitchedOff(history(moments), at);
-      expect(found).toMatchObject({ switchedOffBy: "ana", lastChangedBy: "owner" });
+      expect(found).toMatchObject({ switchedOffBy: { kind: "person", userId: "ana" }, lastChangedBy: "owner" });
       await expect(whoChangedLast(history(moments), at)).resolves.toBe("ana");
     });
 
@@ -1263,11 +1462,29 @@ describe("automation notices reach the people involved", () => {
       await expect(whoSwitchedOff(history([moment("m2", file(true), file(false))]), at)).resolves.toBeNull();
     });
 
+    it("tells who changed it last when an Edit link switches it off, and tells nobody for the link's own change", async () => {
+      const link: MomentAuthor = { kind: "link", grantId: "grant-link", grantGeneration: 1, principalId: "holder" };
+      const found = await whoSwitchedOff(history([
+        moment("m2", file(true), file(false), link),
+        moment("m1", file(null), file(true), ana),
+      ]), at);
+      expect(found).toMatchObject({ switchedOffBy: { kind: "link" }, lastChangedBy: "ana" });
+      const switcherName = switcherNameFor({
+        switchedOffBy: found!.switchedOffBy, recipient: "ana", ownerUserId: "owner", ownerName: "Ice", emailOf: () => null,
+      });
+      expect(switchedOffNotice({ workspaceId: WORKSPACE, switched, path: PATH, ...found!, switcherName }))
+        .toMatchObject({ title: 'Someone with an Edit link switched off "Stamp the finish date"', recipientUserId: "ana" });
+      // The link changed it last: it is no person to tell, and an earlier editor did not make that change.
+      await expect(whoChangedLast(history([moment("m2", file(null), file(true), link), moment("m1", null, file(null), ana)]), at))
+        .resolves.toBeNull();
+    });
+
     it("names a person by email only to the owner, who shared with it", () => {
       const names = { ownerUserId: "owner", ownerName: "Ice", emailOf: (userId: string) => `${userId}@dohc.test` };
-      expect(switcherNameFor({ ...names, switchedOffBy: "ana", recipient: "owner" })).toBe("ana@dohc.test");
-      expect(switcherNameFor({ ...names, switchedOffBy: "ana", recipient: "ben" })).toBe("Someone");
-      expect(switcherNameFor({ ...names, switchedOffBy: "owner", recipient: "ben" })).toBe("Ice");
+      expect(switcherNameFor({ ...names, switchedOffBy: { kind: "person", userId: "ana" }, recipient: "owner" })).toBe("ana@dohc.test");
+      expect(switcherNameFor({ ...names, switchedOffBy: { kind: "person", userId: "ana" }, recipient: "ben" })).toBe("Someone");
+      expect(switcherNameFor({ ...names, switchedOffBy: { kind: "person", userId: "owner" }, recipient: "ben" })).toBe("Ice");
+      expect(switcherNameFor({ ...names, switchedOffBy: { kind: "link" }, recipient: "owner" })).toBe("Someone with an Edit link");
     });
   });
 });

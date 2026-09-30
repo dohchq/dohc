@@ -1,3 +1,4 @@
+import { parseDatasetPath } from "@dohc/security-contract/dataset";
 // Pure workbench model: activity-bar view, side-panel visibility
 // and width, open editor tabs, and the right-hand Chats panel. Pure like
 // window/windowState.ts so every transition and the persistence round-trip
@@ -134,15 +135,16 @@ const MOMENT_DIFF_TAB_PREFIX = "tab://moment-diff/";
 const COLLECTION_TAB_PREFIX = "tab://collection/";
 const DATA_COLLECTION_TAB_PREFIX = "tab://data-collection/";
 
-export function transactionalCollectionTabPath(datasetId: string, tableId: string): string {
-  return `${DATA_COLLECTION_TAB_PREFIX}${encodeURIComponent(datasetId)}/${encodeURIComponent(tableId)}`;
+export function transactionalCollectionTabPath(datasetPath: string, tableId: string): string {
+  return `${DATA_COLLECTION_TAB_PREFIX}${encodeURIComponent(datasetPath)}/${encodeURIComponent(tableId)}`;
 }
-export function parseTransactionalCollectionTabPath(path: string | null): { datasetId: string; tableId: string } | null {
+export function parseTransactionalCollectionTabPath(path: string | null): { datasetPath: string; tableId: string } | null {
   if (!path?.startsWith(DATA_COLLECTION_TAB_PREFIX)) return null;
   const parts = path.slice(DATA_COLLECTION_TAB_PREFIX.length).split("/");
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-  if (parts.length !== 2 || !parts.every(part => uuid.test(part))) return null;
-  return { datasetId: parts[0], tableId: parts[1] };
+  if (parts.length !== 2 || !uuid.test(parts[1]!)) return null;
+  try { return { datasetPath: parseDatasetPath(decodeURIComponent(parts[0]!)), tableId: parts[1]! }; }
+  catch { return null; }
 }
 
 export function collectionTabPath(collectionPath: string): string {

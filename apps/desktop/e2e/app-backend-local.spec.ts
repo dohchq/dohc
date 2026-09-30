@@ -33,7 +33,7 @@ test("@app-backend-local fundraiser compiles and persists through the real deskt
     const dataApproved = await dataset(desktop.page, { action: "approve", workspaceId, preparationId: dataPrepared.preparationId, revisionSha256: dataPrepared.revision.revisionSha256 });
     if (dataApproved.kind !== "approved") throw new Error("Expected an approved dataset.");
     const revision = dataApproved.revision;
-    const dataSelection = { workspaceId, datasetId: revision.datasetId, revision: revision.revision, revisionSha256: revision.revisionSha256 };
+    const dataSelection = { workspaceId, datasetPath: "fundraiser/dataset.json", revision: revision.revision, revisionSha256: revision.revisionSha256 };
     const operationId = (name: string) => revision.definition.operations.find(operation => operation.name === name)!.operationId;
     const fields = revision.definition.tables.find(table => table.sqlName === "registrations")!.fields;
     const nameField = fields.find(field => field.type !== "button" && field.sqlColumn === "full_name")!.fieldId;
@@ -49,7 +49,7 @@ test("@app-backend-local fundraiser compiles and persists through the real deskt
     if (approved.kind !== "published") throw new Error("Expected a local publication.");
     expect(approved.local).toBe(true);
     const selection = { workspaceId, publicationId: approved.publicationId };
-    const description = await dataset(desktop.page, { workspaceId, datasetId: revision.datasetId, action: "describe" });
+    const description = await dataset(desktop.page, { workspaceId, datasetPath: "fundraiser/dataset.json", action: "describe" });
     expect(description).toMatchObject({ kind: "description", dataset: { datasetId: revision.datasetId, name: "Pickleball fundraiser" } });
 
     const entry = { ...dataSelection, action: "invoke" as const, operationId: operationId("manualEntry"), idempotencyKey: "electron-fundraiser-entry",

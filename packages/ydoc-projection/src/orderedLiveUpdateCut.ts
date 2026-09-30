@@ -1806,6 +1806,35 @@ function normalizeRanges(
   return result
 }
 
+/** Merge two sorted, disjoint range lists without re-sorting their history. */
+function mergeRanges(
+  left: readonly NumericRange[],
+  right: readonly NumericRange[],
+  budget: ValidationBudget,
+  stage: OrderedLiveUpdateCutFailureStage,
+): NumericRange[] {
+  const result: NumericRange[] = []
+  let leftIndex = 0
+  let rightIndex = 0
+  while (leftIndex < left.length || rightIndex < right.length) {
+    let takeLeft: boolean
+    if (rightIndex === right.length) takeLeft = true
+    else if (leftIndex === left.length) takeLeft = false
+    else {
+      budget.visitIndexOperation(stage)
+      takeLeft = rangeCompare(left[leftIndex] as NumericRange, right[rightIndex] as NumericRange) <= 0
+    }
+    const range = (takeLeft ? left[leftIndex++] : right[rightIndex++]) as NumericRange
+    const last = result[result.length - 1]
+    budget.visitIndexOperation(stage)
+    if (last !== undefined && last.clientId === range.clientId && range.startClock <= last.endClock) {
+      budget.visitIndexOperation(stage)
+      result[result.length - 1] = { ...last, endClock: Math.max(last.endClock, range.endClock) }
+    } else result.push({ ...range })
+  }
+  return result
+}
+
 function groupPoints(
   points: readonly { clientId: number; clock: number }[],
   budget: ValidationBudget,
@@ -2425,6 +2454,25 @@ function slicedSpan(span: LiveSpan, startClock: number, endClock: number): LiveS
   }
 }
 
+/** The first index at or after `from` whose range ends after `clock`. `ranges` is sorted and disjoint. */
+function firstEndingAfter(
+  ranges: readonly NumericRange[],
+  from: number,
+  clock: number,
+  budget: ValidationBudget,
+  stage: OrderedLiveUpdateCutFailureStage,
+): number {
+  let low = from
+  let high = ranges.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    budget.visitIndexOperation(stage)
+    if ((ranges[middle] as NumericRange).endClock <= clock) low = middle + 1
+    else high = middle
+  }
+  return low
+}
+
 function subtractFromSpan(
   span: LiveSpan,
   blocked: readonly NumericRange[],
@@ -2433,15 +2481,7 @@ function subtractFromSpan(
 ): LiveSpan[] {
   const result: LiveSpan[] = []
   let cursor = span.startClock
-  let low = 0
-  let high = blocked.length
-  while (low < high) {
-    const middle = (low + high) >>> 1
-    budget.visitIndexOperation(stage)
-    if ((blocked[middle] as NumericRange).endClock <= cursor) low = middle + 1
-    else high = middle
-  }
-  for (let index = low; index < blocked.length && cursor < span.endClock; index += 1) {
+  for (let index = firstEndingAfter(blocked, 0, cursor, budget, stage); index < blocked.length && cursor < span.endClock; index += 1) {
     const range = blocked[index] as NumericRange
     budget.visitIndexOperation(stage)
     if (range.startClock >= span.endClock) break
@@ -2459,32 +2499,58 @@ function subtractFromSpan(
   return result
 }
 
+/**
+ * One client's sorted, disjoint live spans without its deletes. Spans already
+ * exclude earlier deletes, so only those overlapping `added`, the deletes new
+ * in this update, can change, and fragments keep their span's place in order.
+ */
 function retireSpans(
   spans: readonly LiveSpan[],
-  deletes: ReadonlyMap<number, readonly NumericRange[]>,
+  added: readonly NumericRange[],
+  deletes: readonly NumericRange[],
   budget: ValidationBudget,
   stage: OrderedLiveUpdateCutFailureStage,
 ): LiveSpan[] {
   const result: LiveSpan[] = []
-  for (const span of spans) {
-    for (const fragment of subtractFromSpan(
-      span,
-      deletes.get(span.clientId) ?? [],
-      budget,
-      stage,
-    )) {
-      result.push(fragment)
+  let next = 0
+  const keep = (end: number) => {
+    for (; next < end; next += 1) {
+      budget.visitIndexOperation(stage)
+      result.push(spans[next] as LiveSpan)
     }
   }
-  return stableSort(result, rangeCompare, budget, stage)
+  for (const range of added) {
+    keep(firstEndingAfter(spans, next, range.startClock, budget, stage))
+    for (; next < spans.length && (spans[next] as LiveSpan).startClock < range.endClock; next += 1) {
+      budget.visitIndexOperation(stage)
+      for (const fragment of subtractFromSpan(spans[next] as LiveSpan, deletes, budget, stage)) {
+        result.push(fragment)
+      }
+    }
+  }
+  keep(spans.length)
+  return result
 }
 
 function mergePointLists(
-  left: readonly number[],
+  left: number[],
   right: readonly number[],
   budget: ValidationBudget,
   stage: OrderedLiveUpdateCutFailureStage,
 ): number[] {
+  budget.visitIndexOperation(stage)
+  if (right.length === 0) return left
+  const last = left[left.length - 1]
+  if (last === undefined || (right[0] as number) >= last) {
+    for (const point of right) {
+      budget.visitIndexOperation(stage)
+      if (point !== left[left.length - 1]) {
+        budget.visitIndexOperation(stage)
+        left.push(point)
+      }
+    }
+    return left
+  }
   const result: number[] = []
   let leftIndex = 0
   let rightIndex = 0
@@ -2623,13 +2689,7 @@ class ReplayFrontier {
       const established = this.live.get(clientId) ?? []
       let establishedIndex = 0
       for (const candidate of candidates) {
-        while (
-          establishedIndex < established.length
-          && (established[establishedIndex] as LiveSpan).endClock <= candidate.startClock
-        ) {
-          budget.visitIndexOperation(stage)
-          establishedIndex += 1
-        }
+        establishedIndex = firstEndingAfter(established, establishedIndex, candidate.startClock, budget, stage)
         for (
           let index = establishedIndex;
           index < established.length;
@@ -2654,13 +2714,7 @@ class ReplayFrontier {
         establishedStart = 0
       }
       const established = this.live.get(tombstone.clientId) ?? []
-      while (
-        establishedStart < established.length
-        && (established[establishedStart] as LiveSpan).endClock <= tombstone.startClock
-      ) {
-        budget.visitIndexOperation(stage)
-        establishedStart += 1
-      }
+      establishedStart = firstEndingAfter(established, establishedStart, tombstone.startClock, budget, stage)
       for (let index = establishedStart; index < established.length; index += 1) {
         const span = established[index] as LiveSpan
         budget.visitIndexOperation(stage)
@@ -2681,22 +2735,31 @@ class ReplayFrontier {
     }
 
     this.structural = available
+    // Each client's live spans and deletes stay sorted and disjoint, so a
+    // candidate is checked only against the ranges near it.
     for (const [clientId, candidates] of candidateLive) {
       const existing = this.live.get(clientId) ?? []
-      const blocked = normalizeRanges([
-        ...existing,
-        ...(this.deletes.get(clientId) ?? []),
-      ], budget, stage)
+      const deletes = this.deletes.get(clientId) ?? []
       const additions: LiveSpan[] = []
       for (const span of candidates) {
-        for (const fragment of subtractFromSpan(span, blocked, budget, stage)) {
-          additions.push(fragment)
+        for (const piece of subtractFromSpan(span, existing, budget, stage)) {
+          for (const fragment of subtractFromSpan(piece, deletes, budget, stage)) {
+            additions.push(fragment)
+          }
         }
       }
-      this.live.set(
-        clientId,
-        stableSort([...existing, ...additions], rangeCompare, budget, stage),
-      )
+      const last = existing[existing.length - 1]
+      budget.visitIndexOperation(stage)
+      // Closure requires contiguous client clocks; prior clocks are live or
+      // deleted, so subtracting both leaves only additions after the frontier.
+      if (last !== undefined && additions.length > 0 && (additions[0] as LiveSpan).startClock < last.endClock) {
+        fail('invalid-update', stage)
+      }
+      for (const addition of additions) {
+        budget.visitIndexOperation(stage)
+        existing.push(addition)
+      }
+      this.live.set(clientId, existing)
     }
 
     for (const [clientId, points] of input.unsafePoints) {
@@ -2719,16 +2782,15 @@ class ReplayFrontier {
       ...input.tombstones,
     ], budget, stage))
     for (const [clientId, ranges] of candidateDeletes) {
-      this.deletes.set(clientId, normalizeRanges([
-        ...(this.deletes.get(clientId) ?? []),
-        ...ranges,
-      ], budget, stage))
+      this.deletes.set(clientId, mergeRanges(
+        this.deletes.get(clientId) ?? [], ranges, budget, stage,
+      ))
     }
     // Existing spans and newly added spans already exclude prior deletions.
     // Only clients with deletions in this input can lose more live content.
-    for (const clientId of candidateDeletes.keys()) {
+    for (const [clientId, added] of candidateDeletes) {
       const retainedSpans = retireSpans(
-        this.live.get(clientId) ?? [], this.deletes, budget, stage,
+        this.live.get(clientId) ?? [], added, this.deletes.get(clientId) ?? [], budget, stage,
       )
       if (retainedSpans.length === 0) this.live.delete(clientId)
       else this.live.set(clientId, retainedSpans)

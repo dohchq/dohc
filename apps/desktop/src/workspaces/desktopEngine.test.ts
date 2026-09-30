@@ -133,6 +133,25 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
+  it("notifies after a workspace binding opens, including reopening", async () => {
+    const f = fixture();
+    const opened = vi.fn();
+    f.dependencies.onWorkspaceOpened = opened;
+    const workspace = { workspaceId: "notices", rootPath: await createTestScratch("notice-open-") };
+    try {
+      await f.engine.start();
+      expect(opened).not.toHaveBeenCalled();
+      const sessions = f.engine.sessions!;
+      await sessions.run(workspace, async () => undefined);
+      expect(opened).toHaveBeenCalledExactlyOnceWith("notices");
+      await sessions.run(workspace, async () => undefined);
+      expect(opened).toHaveBeenCalledTimes(1);
+      await sessions.closeWorkspace(workspace);
+      await sessions.run(workspace, async () => undefined);
+      expect(opened).toHaveBeenCalledTimes(2);
+    } finally { await f.close(); }
+  });
+
   it("passes account changes to relay-session cleanup", async () => {
     const f = fixture();
     try {
@@ -574,6 +593,8 @@ describe("desktop engine composed sessions and events", () => {
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "failed" });
       expect(collection.notifyClaimed).toHaveBeenCalledOnce();
+      f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
+      expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");
       expect(collection.failuresChanged).toHaveBeenCalledOnce();
       f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
       expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");

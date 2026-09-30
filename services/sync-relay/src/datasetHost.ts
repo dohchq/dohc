@@ -99,7 +99,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   function owner(auth: AppBackendAuth, workspaceId: string): DatasetAuthority {
     current();
     if (auth.kind !== "named" || auth.workspaceId !== workspaceId || !storage.workspaceIsOwnedBy(workspaceId, auth.userId)) throw notFound();
-    return {caller: {kind: "owner", userId: auth.userId}, principalKey: ownerPrincipalKey(workspaceId)};
+    return {caller: {kind: "owner", userId: auth.userId}, principalKey: ownerPrincipalKey(workspaceId), person: auth.userId};
   }
   function enroll(workspaceId: string, datasetId: string, authority: DatasetAuthority) {
     if (authority.caller.kind !== "link") return;
@@ -422,7 +422,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       bindPublication(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; publicationId: string}): void {
         owner(auth, input.workspaceId);
         const approved = app(auth, input.workspaceId, input.datasetId, input.publicationId).capability;
-        const {operations: _operations, ...binding} = approved;
+        const {operations: _operations, name: _name, ...binding} = approved;
         host.setBinding(auth, {...input, appId: input.publicationId, binding});
       },
       unbindPublication(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; publicationId: string}): void {

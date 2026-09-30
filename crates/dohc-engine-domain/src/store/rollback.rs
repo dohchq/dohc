@@ -156,7 +156,7 @@ impl<'a> VersionedTextStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(
-                "DELETE FROM engine_requests WHERE result_seq = ?1 AND kind IN ('versioned', 'merge', 'authored-create')",
+                "DELETE FROM engine_requests WHERE result_seq = ?1 AND kind IN ('versioned', 'merge')",
                 params![prep.moment.moment_order],
             )
             .map_err(DomainError::sql_persist)?;
@@ -264,7 +264,7 @@ impl<'a> VersionedTextStore<'a> {
                 )?;
             }
 
-            // Reconcile disk with an active-version rolled-back binary write:
+            // Reconcile disk with an active-version rolled-back published write:
             //   * a pending job does not prove disk is clean — the materializer
             //     can crash after the atomic rename lands but before marking the
             //     job complete (`MaterializeAfterRenameBeforeComplete`), leaving
@@ -275,15 +275,17 @@ impl<'a> VersionedTextStore<'a> {
             //   * additionally cancel a still-pending original job so it can never
             //     race the compensator and re-materialize the rolled-back bytes.
             if prep.moment.operation == MomentOp::Write
-                && prep.moment.after_content_kind == "binary"
-                && let Some(written_moment_sha) = prep.moment.after_binary_sha256.as_deref()
+                && let Some(written_moment_sha) = prep.moment.after_binary_sha256.as_deref().or(prep.moment.after_blob_sha256.as_deref())
             {
+                let publication_job_id = if prep.moment.after_content_kind == "binary" {
+                    input.mutation_moment_id.clone()
+                } else { format!("authored-mat_{}", input.mutation_moment_id) };
                 let active = version_is_active(tx, ws, &input.version_id)?;
                 let job: Option<(String, i64, String, String, String)> = tx
                     .query_row(
                         "SELECT status, target_generation, content_sha256, target_path, operation \
                          FROM materialization_jobs WHERE job_id = ?1",
-                        params![input.mutation_moment_id],
+                        params![publication_job_id],
                         |row| {
                             Ok((
                                 row.get(0)?,
@@ -319,7 +321,7 @@ impl<'a> VersionedTextStore<'a> {
                         if status == "pending" {
                             tx.execute(
                                 "DELETE FROM materialization_jobs WHERE job_id = ?1",
-                                params![input.mutation_moment_id],
+                                params![publication_job_id],
                             )
                             .map_err(DomainError::sql_persist)?;
                         }
@@ -333,7 +335,7 @@ impl<'a> VersionedTextStore<'a> {
                     // the DB head would silently diverge forever. Restore
                     // against the write's own generation (the same peer rule
                     // BINHEAD uses for its compensators).
-                    None if active => {
+                    None if active && prep.moment.after_content_kind == "binary" => {
                         enqueue_binary_rollback_restore(
                             tx,
                             input,

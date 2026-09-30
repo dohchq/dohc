@@ -152,6 +152,7 @@ pub(crate) struct SuccessorV1 {
 pub(crate) struct LineageTransitionV1 {
     pub predecessor_claim_id: String,
     pub predecessor_state_vector_sha256: String,
+    pub predecessor_delete_set_sha256: String,
     pub artifact_preimage_sha256: String,
     pub successor: Option<SuccessorV1>,
 }
@@ -213,6 +214,7 @@ enum LocalLineagePlan {
         key: DocKey,
         predecessor_claim_id: String,
         predecessor_state_vector_sha256: String,
+        predecessor_delete_set_sha256: String,
         path: String,
         successor: SuccessorBase,
     },
@@ -220,6 +222,7 @@ enum LocalLineagePlan {
         key: DocKey,
         predecessor_claim_id: String,
         predecessor_state_vector_sha256: String,
+        predecessor_delete_set_sha256: String,
         artifact_preimage_sha256: String,
         last_surfaced_projection_sha256: Option<String>,
     },
@@ -790,6 +793,7 @@ fn parse_lineage_transition(value: &Value) -> Result<Option<LineageTransitionV1>
         &[
             "predecessorClaimId",
             "predecessorStateVectorSha256",
+            "predecessorDeleteSetSha256",
             "artifactPreimageSha256",
             "successor",
         ],
@@ -798,6 +802,7 @@ fn parse_lineage_transition(value: &Value) -> Result<Option<LineageTransitionV1>
     Ok(Some(LineageTransitionV1 {
         predecessor_claim_id: sha256(field(record, "predecessorClaimId")?)?,
         predecessor_state_vector_sha256: sha256(field(record, "predecessorStateVectorSha256")?)?,
+        predecessor_delete_set_sha256: sha256(field(record, "predecessorDeleteSetSha256")?)?,
         artifact_preimage_sha256: sha256(field(record, "artifactPreimageSha256")?)?,
         successor: parse_successor(field(record, "successor")?)?,
     }))
@@ -879,7 +884,9 @@ fn validate_bindings(payload: &ConflictResolveV1) -> Result<(), SyncError> {
         ));
     }
     match payload.resolution {
-        ResolutionV1::KeptCurrent if payload.current != payload.result => {
+        ResolutionV1::KeptCurrent
+            if !same_object_and_projected_content(&payload.current, &payload.result) =>
+        {
             return Err(invalid(
                 "conflict.resolve kept-current result does not equal current",
             ));
@@ -1210,6 +1217,7 @@ fn lineage_transition_value(transition: Option<&LineageTransitionV1>) -> Value {
     json!({
         "predecessorClaimId": transition.predecessor_claim_id,
         "predecessorStateVectorSha256": transition.predecessor_state_vector_sha256,
+        "predecessorDeleteSetSha256": transition.predecessor_delete_set_sha256,
         "artifactPreimageSha256": transition.artifact_preimage_sha256,
         "successor": successor,
     })
@@ -1270,6 +1278,7 @@ fn payload_value(payload: &ConflictResolveV1) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImportedHeadDisposition {
     ExactCurrent,
+    ReviewedSide,
     AlreadyResult,
     Diverged,
 }
@@ -1306,14 +1315,105 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
         })
         .transpose()?;
     ensure_no_live_ydoc_session(payload, leases)?;
+    let rival = key
+        .as_ref()
+        .map(|key| reviewed_rival_successor(tx, payload, key))
+        .transpose()?
+        .flatten();
+    if let Some(rival) = rival.as_ref().filter(|rival| !rival.import_wins) {
+        for shadow in &validated.shadows {
+            crate::moment_apply::record_conflict_parent_shadow_in_tx(
+                tx,
+                &payload.workspace_id,
+                shadow,
+            )?;
+        }
+        archive_conflicting_successor(tx, payload, &rival.review_id, envelope.recorded_at_ms)?;
+        return Ok(ConflictApplyResult {
+            conflict_id: payload.conflict_id.clone(),
+            inserted: None,
+            matched: true,
+        });
+    }
+    if rival.is_some() {
+        preserve_unreviewed_local_text(tx, payload, key.as_ref(), envelope, search_policy)?;
+        let key = key.as_ref().unwrap();
+        let renamed: Option<String> = tx.query_row(
+            "SELECT s.path FROM snapshots s JOIN ydoc_docs d \
+             ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=d.path AND s.path<>?4",
+            params![key.workspace_id,key.version_id,key.object_id,payload.paths[payload.current.path_ref()]],
+            |row| row.get(0),
+        ).optional().map_err(SyncError::corrupt)?;
+        if let Some(path) = renamed {
+            for shadow in &validated.shadows {
+                crate::moment_apply::record_conflict_parent_shadow_in_tx(
+                    tx,
+                    &payload.workspace_id,
+                    shadow,
+                )?;
+            }
+            let mut review_payload = payload.clone();
+            let path_ref = intern_path(&mut review_payload.paths, &path);
+            let renamed_head = imported_live_head(tx, &review_payload, path_ref)?;
+            commit_imported_lineage(tx, payload, Some(key), envelope.recorded_at_ms)?;
+            tx.execute("UPDATE ydoc_docs SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![key.workspace_id,key.version_id,key.object_id,path]).map_err(SyncError::persist)?;
+            let (review_id, inserted) =
+                open_divergent_result_review(tx, &review_payload, &renamed_head)?;
+            return Ok(ConflictApplyResult {
+                conflict_id: review_id,
+                inserted: Some(inserted),
+                matched: false,
+            });
+        }
+        disposition = ImportedHeadDisposition::ReviewedSide;
+    }
+    if rival.is_none()
+        && let (Some(key), Some(transition)) = (key.as_ref(), payload.lineage_transition.as_ref())
+        && let Some(marker) =
+            dohc_engine_collab::read_marker_in(tx, key).map_err(map_local_collab_error)?
+        && marker.lineage_parent_claim_id.as_deref()
+            == Some(transition.predecessor_claim_id.as_str())
+        && marker.lineage_claim_id.as_deref()
+            != transition
+                .successor
+                .as_ref()
+                .map(|successor| successor.lineage_claim_id.as_str())
+    {
+        // A different local resolution is a new decision, even if it kept a reviewed side.
+        disposition = ImportedHeadDisposition::Diverged;
+    }
     if disposition != ImportedHeadDisposition::Diverged
         && payload.lineage_transition.is_none()
         && !unbound_receiver_lineages_match_reviewed_sides(tx, payload)?
     {
         disposition = ImportedHeadDisposition::Diverged;
     }
+    let successor_already_installed = if let (Some(key), Some(successor)) = (
+        key.as_ref(),
+        payload
+            .lineage_transition
+            .as_ref()
+            .and_then(|transition| transition.successor.as_ref()),
+    ) {
+        dohc_engine_collab::read_marker_in(tx, key)
+            .map_err(map_local_collab_error)?
+            .is_some_and(|marker| {
+                marker.lineage_claim_id.as_deref() == Some(successor.lineage_claim_id.as_str())
+            })
+    } else {
+        false
+    };
     if disposition != ImportedHeadDisposition::Diverged {
-        preflight_imported_lineage(tx, payload, key.as_ref(), disposition)?;
+        if let Err(error) = preflight_imported_lineage(tx, payload, key.as_ref(), disposition) {
+            match error {
+                SyncError::RetryableState { .. } => {
+                    disposition = ImportedHeadDisposition::Diverged;
+                }
+                error => return Err(error),
+            }
+        }
     }
 
     let mut materialization_changes = Vec::new();
@@ -1331,6 +1431,29 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
             close_imported_conflict(tx, payload)?;
         }
+        ImportedHeadDisposition::ReviewedSide => {
+            for shadow in &validated.shadows {
+                crate::moment_apply::record_conflict_parent_shadow_in_tx(
+                    tx,
+                    &payload.workspace_id,
+                    shadow,
+                )?;
+            }
+            let shadow = validated
+                .shadows
+                .last()
+                .ok_or_else(|| invalid("reviewed text resolution has no write effect"))?;
+            materialization_changes.extend(
+                crate::moment_apply::adopt_conflict_parent_text_result_in_tx(
+                    tx,
+                    envelope,
+                    shadow,
+                    search_policy,
+                )?,
+            );
+            commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
+            close_imported_conflict(tx, payload)?;
+        }
         ImportedHeadDisposition::AlreadyResult => {
             for shadow in &validated.shadows {
                 crate::moment_apply::record_conflict_parent_shadow_in_tx(
@@ -1339,8 +1462,35 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                     shadow,
                 )?;
             }
-            if payload.lineage_transition.is_none() {
-                reconcile_unbound_receiver_lineages(tx, payload, envelope.recorded_at_ms)?;
+            if payload
+                .lineage_transition
+                .as_ref()
+                .is_some_and(|transition| transition.successor.is_some())
+                && let Some(result) = payload.result.present()
+                && let Some(current) = live.present()
+                && current.latest_moment_id != result.latest_moment_id
+                && (!successor_already_installed
+                    || result.latest_moment_id < current.latest_moment_id)
+            {
+                let shadow = validated
+                    .shadows
+                    .last()
+                    .ok_or_else(|| invalid("resolved text has no write effect"))?;
+                materialization_changes.extend(
+                    crate::moment_apply::adopt_conflict_parent_text_result_in_tx(
+                        tx,
+                        envelope,
+                        shadow,
+                        search_policy,
+                    )?,
+                );
+            }
+            if payload
+                .lineage_transition
+                .as_ref()
+                .is_none_or(|transition| transition.successor.is_some())
+            {
+                commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
             }
             close_imported_conflict(tx, payload)?;
         }
@@ -1353,6 +1503,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 )?;
             }
             let (review_conflict_id, inserted) = open_divergent_result_review(tx, payload, &live)?;
+            preserve_unreviewed_local_text(tx, payload, key.as_ref(), envelope, search_policy)?;
             archive_conflicting_successor(
                 tx,
                 payload,
@@ -1378,6 +1529,55 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
         inserted: None,
         matched: true,
     })
+}
+
+fn preserve_unreviewed_local_text(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+    key: Option<&DocKey>,
+    envelope: &ReplicationEnvelope,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<(), SyncError> {
+    let Some(key) = key else {
+        return Ok(());
+    };
+    let Some(marker) =
+        dohc_engine_collab::read_marker_in(tx, key).map_err(map_local_collab_error)?
+    else {
+        return Ok(());
+    };
+    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
+    let local = crate::project_ydoc_with_store(tx, key, &doc, marker.content_kind)?.content;
+    let sha = dohc_engine_storage::hex_sha256(local.as_bytes());
+    if payload
+        .result
+        .present()
+        .is_some_and(|head| head.content_kind == HeadContentKindV1::Text && head.blob_sha256 == sha)
+    {
+        return Ok(());
+    }
+    let reviewed: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 AND target_version_id=?2 \
+         AND status='open' AND ((current_object_id=?3 AND current_blob_sha256=?4) \
+         OR (incoming_object_id=?3 AND incoming_blob_sha256=?4)))",
+            params![key.workspace_id, key.version_id, key.object_id, sha],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !reviewed && let Some(claim) = marker.lineage_claim_id.as_deref() {
+        crate::ydoc_recovery::create_recovery_in_tx(
+            tx,
+            key,
+            &payload.paths[payload.current.path_ref()],
+            claim,
+            &local,
+            0,
+            envelope.recorded_at_ms,
+            search_policy,
+        )?;
+    }
+    Ok(())
 }
 
 fn present_head_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>, SyncError> {
@@ -1625,6 +1825,15 @@ fn classify_imported_head(
                 || same_object_and_projected_content(&current_live, &payload.result)
             {
                 ImportedHeadDisposition::AlreadyResult
+            } else if payload
+                .lineage_transition
+                .as_ref()
+                .is_some_and(|transition| transition.successor.is_some())
+                && [&payload.current, &payload.incoming]
+                    .iter()
+                    .any(|side| same_object_and_projected_content(&current_live, side))
+            {
+                ImportedHeadDisposition::ReviewedSide
             } else {
                 ImportedHeadDisposition::Diverged
             },
@@ -1690,31 +1899,24 @@ fn preflight_imported_lineage(
     let key = key.ok_or(SyncError::InvalidInput {
         reason: "conflict.resolve lineage transition has no current object",
     })?;
-    if disposition == ImportedHeadDisposition::AlreadyResult {
-        if let Some(successor) = transition.successor.as_ref() {
-            let marker = dohc_engine_collab::read_marker_in(tx, key)
-                .map_err(map_local_collab_error)?
-                .ok_or(SyncError::RetryableState {
-                    reason: "ydoc-lineage-result-missing",
-                })?;
-            if marker.lineage_claim_status != LineageClaimStatus::Exact
-                || marker.lineage_claim_id.as_deref() != Some(successor.lineage_claim_id.as_str())
-            {
-                return Err(SyncError::RetryableState {
-                    reason: "ydoc-lineage-result-mismatch",
-                });
-            }
-            let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
-            if doc.has_pending_dependencies()
-                || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
-                    != successor.state_vector_blob_sha256
-            {
-                return Err(SyncError::RetryableState {
-                    reason: "ydoc-lineage-result-mismatch",
-                });
-            }
-            return Ok(());
+    let marker = dohc_engine_collab::read_marker_in(tx, key).map_err(map_local_collab_error)?;
+    if let (Some(marker), Some(successor)) = (marker.as_ref(), transition.successor.as_ref())
+        && marker.lineage_claim_status == LineageClaimStatus::Exact
+        && marker.lineage_claim_id.as_deref() == Some(successor.lineage_claim_id.as_str())
+    {
+        let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
+        if doc.has_pending_dependencies()
+            || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
+                != successor.state_vector_blob_sha256
+            || !matches_stored_lineage_state(tx, &doc, &successor.update_blob_sha256)?
+        {
+            return Err(SyncError::RetryableState {
+                reason: "ydoc-lineage-result-mismatch",
+            });
         }
+        return Ok(());
+    }
+    if disposition == ImportedHeadDisposition::AlreadyResult && transition.successor.is_none() {
         let archived: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages \
@@ -1747,6 +1949,11 @@ fn preflight_imported_lineage(
     if marker.lineage_claim_status != LineageClaimStatus::Exact
         || marker.lineage_claim_id.as_deref() != Some(transition.predecessor_claim_id.as_str())
     {
+        if reviewed_rival_successor(tx, payload, key)?.is_some()
+            || reviewed_local_predecessor(tx, payload, key)?.is_some()
+        {
+            return Ok(());
+        }
         return Err(SyncError::RetryableState {
             reason: "ydoc-lineage-predecessor-mismatch",
         });
@@ -1774,7 +1981,180 @@ fn preflight_imported_lineage(
             reason: "ydoc-lineage-state-vector-changed",
         });
     }
+    if dohc_engine_storage::hex_sha256(&doc.encode_delete_set())
+        != transition.predecessor_delete_set_sha256
+    {
+        return Err(SyncError::RetryableState {
+            reason: "ydoc-lineage-delete-set-changed",
+        });
+    }
     Ok(())
+}
+
+struct RivalSuccessor {
+    import_wins: bool,
+    review_id: String,
+    local_claim: String,
+}
+
+fn reviewed_rival_successor(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+    key: &DocKey,
+) -> Result<Option<RivalSuccessor>, SyncError> {
+    let Some(transition) = payload.lineage_transition.as_ref() else {
+        return Ok(None);
+    };
+    let Some(successor) = transition.successor.as_ref() else {
+        return Ok(None);
+    };
+    let Some(marker) =
+        dohc_engine_collab::read_marker_in(tx, key).map_err(map_local_collab_error)?
+    else {
+        return Ok(None);
+    };
+    let Some(local_claim) = marker.lineage_claim_id else {
+        return Ok(None);
+    };
+    if local_claim == successor.lineage_claim_id || local_claim == transition.predecessor_claim_id {
+        return Ok(None);
+    }
+    let review_id: Option<String> = tx.query_row(
+        "SELECT c.conflict_id FROM ydoc_inactive_lineages l JOIN conflicts c \
+         ON c.workspace_id=l.workspace_id AND c.conflict_id=l.open_conflict_id \
+         WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3 \
+         AND (l.lineage_claim_id=?4 OR l.open_conflict_id=?5) AND l.disposition='conflicting-successor' AND c.status='resolved'",
+        params![key.workspace_id,key.version_id,key.object_id,transition.predecessor_claim_id,payload.conflict_id],
+        |row| row.get(0),
+    ).optional().map_err(SyncError::corrupt)?;
+    let Some(review_id) = review_id else {
+        return Ok(None);
+    };
+    // Match both original review heads, not merely a previously resolved conflict.
+    // A later decision can review a successor of this decision and must supersede it.
+    let local_payload: Option<String> = tx.query_row(
+        "SELECT payload_json FROM (SELECT payload_json FROM replication_pending_conflict_ops \
+          WHERE op_kind='conflict.resolve' UNION ALL SELECT payload_json FROM replication_log \
+          WHERE workspace_id=?1 AND op_kind='conflict.resolve') \
+         WHERE json_extract(payload_json,'$.workspaceId')=?1 \
+           AND json_extract(payload_json,'$.lineageTransition.successor.lineageClaimId')=?2 LIMIT 1",
+        params![key.workspace_id,local_claim], |row| row.get(0),
+    ).optional().map_err(SyncError::corrupt)?;
+    let Some(local_payload) = local_payload else {
+        return Ok(None);
+    };
+    let local: Value = serde_json::from_str(&local_payload).map_err(SyncError::corrupt)?;
+    let local_heads = [
+        local["transition"]["current"]["latestMomentId"].as_str(),
+        local["transition"]["incoming"]["latestMomentId"].as_str(),
+    ];
+    let incoming_heads = [
+        payload
+            .current
+            .present()
+            .map(|head| head.latest_moment_id.as_str()),
+        payload
+            .incoming
+            .present()
+            .map(|head| head.latest_moment_id.as_str()),
+    ];
+    if local_heads.iter().any(Option::is_none)
+        || !(local_heads == incoming_heads || local_heads == [incoming_heads[1], incoming_heads[0]])
+    {
+        return Ok(None);
+    }
+    Ok(Some(RivalSuccessor {
+        import_wins: successor.lineage_claim_id < local_claim,
+        review_id,
+        local_claim,
+    }))
+}
+
+fn reviewed_local_predecessor(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+    key: &DocKey,
+) -> Result<Option<(String, String)>, SyncError> {
+    let Some(transition) = payload.lineage_transition.as_ref() else {
+        return Ok(None);
+    };
+    let Some(marker) =
+        dohc_engine_collab::read_marker_in(tx, key).map_err(map_local_collab_error)?
+    else {
+        return Ok(None);
+    };
+    let Some(claim) = marker.lineage_claim_id.as_ref() else {
+        return Ok(None);
+    };
+    if marker.lineage_claim_status != LineageClaimStatus::Exact
+        || claim == &transition.predecessor_claim_id
+        || transition.successor.is_none()
+    {
+        return Ok(None);
+    }
+    let related: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages l JOIN conflicts c \
+         ON c.workspace_id=l.workspace_id AND c.conflict_id=l.open_conflict_id \
+         WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3 \
+           AND l.lineage_claim_id=?4 AND l.disposition='conflicting-successor' \
+           AND c.target_version_id=?2 AND c.current_object_id=?3 \
+           AND c.incoming_object_id=?3 AND c.status IN ('open','resolved'))",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                transition.predecessor_claim_id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !related {
+        return Ok(None);
+    }
+    let deferred: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+        params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
+    let base: Option<(String, String)> = tx
+        .query_row(
+            "SELECT snapshot_blob_sha256,state_vector_blob_sha256 FROM ydoc_snapshots \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND up_to_seq=0",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some((base_sha, vector_sha)) = base else {
+        return Ok(None);
+    };
+    if deferred
+        || doc.has_pending_dependencies()
+        || !matches_stored_lineage_state(tx, &doc, &base_sha)?
+        || dohc_engine_storage::hex_sha256(&doc.encode_state_vector()) != vector_sha
+    {
+        return Ok(None);
+    }
+    Ok(Some((claim.clone(), vector_sha)))
+}
+
+fn matches_stored_lineage_state(
+    tx: &Transaction<'_>,
+    doc: &dohc_engine_collab::Ydoc,
+    base_sha: &str,
+) -> Result<bool, SyncError> {
+    let bytes: Vec<u8> = tx
+        .query_row(
+            "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+            [base_sha],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let base = dohc_engine_collab::Ydoc::wire();
+    base.apply(&bytes).map_err(map_local_collab_error)?;
+    Ok(doc.encode_state_vector() == base.encode_state_vector()
+        && doc.encode_delete_set() == base.encode_delete_set())
 }
 
 fn imported_successor(
@@ -1990,7 +2370,16 @@ fn commit_imported_lineage(
         let scene_result = scene_successor_result(tx, &successor_base)?;
         install_scene_successor_assets(tx, key, &successor_base, scene_result.as_deref(), now_ms)?;
         validate_scene_successor_with_store(tx, key, &successor_base, scene_result.as_deref())?;
-        dohc_engine_collab::replace_lineage_with_successor_in_tx(
+        let reviewed = if let Some(rival) = reviewed_rival_successor(tx, payload, key)? {
+            let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
+            Some((
+                rival.local_claim,
+                dohc_engine_storage::hex_sha256(&doc.encode_state_vector()),
+            ))
+        } else {
+            reviewed_local_predecessor(tx, payload, key)?
+        };
+        dohc_engine_collab::replace_reviewed_lineage_with_successor_in_tx(
             tx,
             SuccessorReplacement {
                 key,
@@ -2002,8 +2391,51 @@ fn commit_imported_lineage(
                 scene_result: scene_result.as_deref(),
                 now_ms,
             },
+            reviewed
+                .as_ref()
+                .map(|(claim, vector)| (claim.as_str(), vector.as_str())),
         )
         .map_err(map_local_collab_error)?;
+        if reviewed.is_some() {
+            let review: Option<String> = tx
+                .query_row(
+                    "SELECT l.open_conflict_id FROM ydoc_inactive_lineages l JOIN conflicts c \
+                 ON c.workspace_id=l.workspace_id AND c.conflict_id=l.open_conflict_id \
+                 WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3 \
+                 AND l.lineage_claim_id=?4 AND c.status='open'",
+                    params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        transition.predecessor_claim_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)?;
+            if let Some(review) = review {
+                crate::refusal_notices::clear_conflict_in_tx(tx, &key.workspace_id, &review)?;
+            }
+            tx.execute(
+                "UPDATE conflicts SET status='resolved',updated_at_ms=?5, \
+                 chosen_from=CASE WHEN current_blob_sha256=?6 THEN 'current' \
+                   WHEN incoming_blob_sha256=?6 THEN 'incoming' ELSE 'merged' END, \
+                 resolution=CASE WHEN current_blob_sha256=?6 THEN 'kept-current' \
+                   WHEN incoming_blob_sha256=?6 THEN 'applied-incoming' ELSE 'applied-merged' END \
+                 WHERE workspace_id=?1 AND conflict_id IN (SELECT open_conflict_id \
+                 FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 \
+                 AND object_id=?3 AND lineage_claim_id=?4) AND status='open'",
+                params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    transition.predecessor_claim_id,
+                    now_ms,
+                    successor.result_sha256
+                ],
+            )
+            .map_err(SyncError::persist)?;
+        }
     } else {
         dohc_engine_collab::archive_active_lineage_in_tx(
             tx,
@@ -2131,18 +2563,26 @@ fn close_imported_conflict(
         ResolutionV1::AppliedIncoming => "applied-incoming",
         ResolutionV1::AppliedMerged => "applied-merged",
     };
-    tx.execute(
-        "UPDATE conflicts SET status='resolved',chosen_from=?3,resolution=?4,updated_at_ms=?5 \
+    let changed = tx
+        .execute(
+            "UPDATE conflicts SET status='resolved',chosen_from=?3,resolution=?4,updated_at_ms=?5 \
          WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
-        params![
-            payload.workspace_id,
-            payload.conflict_id,
-            choice,
-            resolution,
-            payload.effect_context.recorded_at_ms
-        ],
-    )
-    .map_err(SyncError::persist)?;
+            params![
+                payload.workspace_id,
+                payload.conflict_id,
+                choice,
+                resolution,
+                payload.effect_context.recorded_at_ms
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    if changed > 0 {
+        crate::refusal_notices::clear_conflict_in_tx(
+            tx,
+            &payload.workspace_id,
+            &payload.conflict_id,
+        )?;
+    }
     Ok(())
 }
 
@@ -2234,6 +2674,31 @@ fn open_divergent_result_review(
     Ok((review_id, inserted))
 }
 
+pub(crate) fn archive_refused_successor_in_tx(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<String, SyncError> {
+    let validated = validate_conflict_resolve_v1(
+        &envelope.payload,
+        ConflictResolveEnvelopeContext {
+            workspace_id: &envelope.workspace_id,
+            recorded_at_ms: envelope.recorded_at_ms,
+        },
+    )?;
+    require_imported_roots(tx, &validated)?;
+    let payload = &validated.payload;
+    if payload
+        .lineage_transition
+        .as_ref()
+        .is_some_and(|transition| transition.successor.is_some())
+    {
+        let (_, live) = classify_imported_head(tx, payload)?;
+        let (review_id, _) = open_divergent_result_review(tx, payload, &live)?;
+        archive_conflicting_successor(tx, payload, &review_id, envelope.recorded_at_ms)?;
+    }
+    Ok(payload.paths[payload.result.path_ref()].clone())
+}
+
 fn archive_conflicting_successor(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
@@ -2249,6 +2714,20 @@ fn archive_conflicting_successor(
     let Some(current) = payload.current.present() else {
         return Ok(());
     };
+    let key = DocKey::new(
+        &payload.workspace_id,
+        &payload.target_version_id,
+        &current.object_id,
+    )
+    .map_err(map_local_collab_error)?;
+    if dohc_engine_collab::read_marker_in(tx, &key)
+        .map_err(map_local_collab_error)?
+        .is_some_and(|marker| {
+            marker.lineage_claim_id.as_deref() == Some(successor.lineage_claim_id.as_str())
+        })
+    {
+        return Ok(());
+    }
     let base = imported_successor(tx, transition, successor)?;
     let doc = dohc_engine_collab::Ydoc::wire();
     doc.apply(&base.update).map_err(map_local_collab_error)?;
@@ -2263,8 +2742,8 @@ fn archive_conflicting_successor(
     tx.execute(
         "INSERT OR IGNORE INTO ydoc_inactive_lineages (workspace_id,version_id,object_id, \
          lineage_claim_id,parent_claim_id,disposition,content_kind,path,epoch_tag, \
-         full_state_blob_sha256,state_vector_blob_sha256,open_conflict_id,recorded_at_ms,updated_at_ms) \
-         VALUES (?1,?2,?3,?4,?5,'conflicting-successor',?6,?7,?8,?9,?10,?11,?12,?12)",
+         full_state_blob_sha256,state_vector_blob_sha256,open_conflict_id,recorded_at_ms,updated_at_ms,last_surfaced_projection_sha256) \
+         VALUES (?1,?2,?3,?4,?5,'conflicting-successor',?6,?7,?8,?9,?10,?11,?12,?12,?13)",
         params![
             payload.workspace_id,
             payload.target_version_id,
@@ -2282,6 +2761,7 @@ fn archive_conflicting_successor(
             successor.state_vector_blob_sha256,
             review_conflict_id,
             now_ms,
+            successor.result_sha256,
         ],
     ).map_err(SyncError::persist)?;
     Ok(())
@@ -2314,7 +2794,7 @@ pub fn prepare_local_conflict_resolve_v1_in_tx(
         incoming_path_ref,
         incoming_binary_updated_at_ms,
     )?;
-    let (result_path, result, result_text) = planned_result(input, conflict, &current)?;
+    let (result_path, result, result_text) = planned_result(tx, input, conflict, &current)?;
     let result_path_ref = intern_path(&mut paths, &result_path);
     let result = with_path_ref(result, result_path_ref);
     let effects = planned_effects(input, &current, &result);
@@ -2395,6 +2875,11 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
     result: &ResolveTextConflictResult,
 ) -> Result<(), SyncError> {
     verify_local_result_in_tx(tx, &prepared.built.validated.payload, result)?;
+    crate::refusal_notices::clear_conflict_in_tx(
+        tx,
+        &prepared.built.validated.payload.workspace_id,
+        &prepared.built.validated.payload.conflict_id,
+    )?;
     match &prepared.lineage {
         LocalLineagePlan::None => {}
         LocalLineagePlan::ExactSuccessor {
@@ -2403,6 +2888,7 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
             predecessor_state_vector_sha256,
             path,
             successor,
+            ..
         } => {
             let scene_result = scene_successor_result(tx, successor)?;
             dohc_engine_collab::replace_lineage_with_successor_in_tx(
@@ -2552,20 +3038,31 @@ fn head_from_conflict_side(
 }
 
 fn planned_result(
+    tx: &Transaction<'_>,
     input: &ResolveTextConflict,
     conflict: &TextConflict,
     current: &HeadV1,
 ) -> Result<(String, HeadV1, Option<String>), SyncError> {
     match &input.resolution {
-        ResolveConflictKind::KeepCurrent => Ok((
-            conflict.current.path.clone(),
-            current.clone(),
-            conflict
-                .current
-                .snapshot
-                .as_ref()
-                .map(|head| head.text.clone()),
-        )),
+        ResolveConflictKind::KeepCurrent => {
+            let mut result = current.clone();
+            if dohc_engine_domain::conflicts::keep_current_needs_lineage_effect(tx, conflict)
+                .map_err(map_local_domain_error)?
+                && let HeadV1::Present(head) = &mut result
+            {
+                head.latest_moment_id = input.write_moment_id.clone();
+                head.updated_at_ms = input.now_ms;
+            }
+            Ok((
+                conflict.current.path.clone(),
+                result,
+                conflict
+                    .current
+                    .snapshot
+                    .as_ref()
+                    .map(|head| head.text.clone()),
+            ))
+        }
         ResolveConflictKind::ApplyIncoming => {
             let side = &conflict.incoming;
             let object_id = if side.path == conflict.current.path {
@@ -2765,6 +3262,8 @@ fn prepare_local_lineage_in_tx(
                 .lineage_claim_id
                 .clone()
                 .ok_or_else(|| corrupt_local("exact Y.Doc lineage is missing its claim ID"))?;
+            let predecessor_delete_set_sha256 =
+                dohc_engine_storage::hex_sha256(&doc.encode_delete_set());
             let predecessor_state_vector = doc.encode_state_vector();
             let predecessor_state_vector_sha256 =
                 dohc_engine_storage::hex_sha256(&predecessor_state_vector);
@@ -2806,6 +3305,7 @@ fn prepare_local_lineage_in_tx(
                     key,
                     predecessor_claim_id,
                     predecessor_state_vector_sha256,
+                    predecessor_delete_set_sha256,
                     path: payload.paths[result.path_ref].clone(),
                     successor,
                 })
@@ -2814,6 +3314,7 @@ fn prepare_local_lineage_in_tx(
                     key,
                     predecessor_claim_id,
                     predecessor_state_vector_sha256,
+                    predecessor_delete_set_sha256,
                     artifact_preimage_sha256: current.blob_sha256.clone(),
                     last_surfaced_projection_sha256: (current.content_kind
                         == HeadContentKindV1::Text)
@@ -2829,11 +3330,13 @@ fn lineage_transition(plan: &LocalLineagePlan) -> Result<Option<LineageTransitio
         LocalLineagePlan::ExactSuccessor {
             predecessor_claim_id,
             predecessor_state_vector_sha256,
+            predecessor_delete_set_sha256,
             successor,
             ..
         } => Some(LineageTransitionV1 {
             predecessor_claim_id: predecessor_claim_id.clone(),
             predecessor_state_vector_sha256: predecessor_state_vector_sha256.clone(),
+            predecessor_delete_set_sha256: predecessor_delete_set_sha256.clone(),
             artifact_preimage_sha256: successor.artifact_preimage_sha256.clone(),
             successor: Some(SuccessorV1 {
                 lineage_claim_id: successor.lineage_claim_id.clone(),
@@ -2851,11 +3354,13 @@ fn lineage_transition(plan: &LocalLineagePlan) -> Result<Option<LineageTransitio
         LocalLineagePlan::ExactArchive {
             predecessor_claim_id,
             predecessor_state_vector_sha256,
+            predecessor_delete_set_sha256,
             artifact_preimage_sha256,
             ..
         } => Some(LineageTransitionV1 {
             predecessor_claim_id: predecessor_claim_id.clone(),
             predecessor_state_vector_sha256: predecessor_state_vector_sha256.clone(),
+            predecessor_delete_set_sha256: predecessor_delete_set_sha256.clone(),
             artifact_preimage_sha256: artifact_preimage_sha256.clone(),
             successor: None,
         }),
@@ -3620,6 +4125,7 @@ mod tests {
             "lineageTransition": {
                 "predecessorClaimId": "a".repeat(64),
                 "predecessorStateVectorSha256": "b".repeat(64),
+                "predecessorDeleteSetSha256": "c".repeat(64),
                 "artifactPreimageSha256": artifact_preimage_sha,
                 "successor": {
                     "lineageClaimId": successor_sha,
@@ -3754,6 +4260,9 @@ mod tests {
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id,
                 predecessor_state_vector_sha256,
+                predecessor_delete_set_sha256: dohc_engine_storage::hex_sha256(
+                    &predecessor.encode_delete_set(),
+                ),
                 artifact_preimage_sha256: current_sha,
                 successor: Some(SuccessorV1 {
                     lineage_claim_id: successor.lineage_claim_id.clone(),
@@ -4516,7 +5025,7 @@ mod tests {
                 .map_err(SyncError::persist)?;
                 Ok::<_, SyncError>(())
             })
-            .expect("simulate the refusal report committed before the next pull page");
+            .expect("simulate dismissal before the next pull page");
 
         let child = imported_envelope(1, "moment.append", built.validated.shadows[0].clone());
         let outcome = crate::apply_replication_envelope(
@@ -4701,7 +5210,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_lineage_retries_the_parent_without_ack_or_effects() {
+    fn incomplete_lineage_acks_the_parent_and_preserves_pending_updates_for_review() {
         let (_scratch, mut store, key, built) = receiver_fixture();
         let dependent_doc = dohc_engine_collab::Ydoc::wire();
         let _predecessor = dependent_doc.plaintext_insert(0, "dependency");
@@ -4753,13 +5262,14 @@ mod tests {
                 &NoFaults,
                 &crate::NoLiveLeases,
             ),
-            Err(SyncError::RetryableState {
-                reason: "ydoc-incomplete-lineage"
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(_),
+                ..
             })
         ));
         assert_eq!(
             crate::read_replication_acked_seq(&store, "ws", "peer").expect("parent ack"),
-            -1
+            0
         );
         let (latest, effect_rows): (String, i64) = store
             .read_with(|conn| {
@@ -4777,8 +5287,34 @@ mod tests {
                     )?,
                 ))
             })
-            .expect("state after retry");
-        assert_eq!((latest.as_str(), effect_rows), ("moment-current", 0));
+            .expect("state after review opened");
+        assert_eq!((latest.as_str(), effect_rows), ("moment-current", 1));
+        assert!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .has_pending_dependencies()
+        );
+        let reviews: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(reviews, 1);
+        let replay = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(matches!(replay.primary, crate::ApplyDisposition::Skipped));
     }
 
     #[test]
@@ -4860,6 +5396,671 @@ mod tests {
             (0, 0),
             "an already-applied move must not be reclassified as divergence",
         );
+    }
+
+    #[test]
+    fn missing_inactive_update_blob_is_reported_without_deleting_the_queue_row() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let sha = store
+            .put_binary_blob(&old.doc.plaintext_insert(0, "late "))
+            .unwrap();
+        let mut op = imported_envelope(
+            1,
+            "ydoc.update",
+            json!({"versionId":"main","objectId":"object-a","path":"doc.md",
+            "contentKind":"plaintext","updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+        );
+        op.relay_seq = Some(2);
+        crate::router::apply_replication_envelope_in_batch(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            true,
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&sha])
+                    .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults),
+            Err(SyncError::BlobInvalid)
+        ));
+        let queued: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(queued, 1);
+    }
+
+    #[test]
+    fn inactive_byte_budget_commits_a_prefix_before_the_next_transaction() {
+        use dohc_engine_storage::{FaultAction, FaultPoint};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct StopSecondCommit(AtomicUsize);
+        impl dohc_engine_storage::FaultInjector for StopSecondCommit {
+            fn poll(&self, point: FaultPoint) -> FaultAction {
+                if point == FaultPoint::StorageBeforePersist
+                    && self.0.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    FaultAction::Crash
+                } else {
+                    FaultAction::Continue
+                }
+            }
+        }
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        for seq in 0..3 {
+            let update = old.doc.plaintext_insert(0, &"x".repeat(9 * 1024 * 1024));
+            let sha = store.put_binary_blob(&update).unwrap();
+            let op = ReplicationEnvelope {
+                workspace_id: "ws".into(),
+                origin_id: "byte-budget".into(),
+                origin_seq: seq,
+                relay_seq: Some(100 + seq),
+                op_kind: "ydoc.update".into(),
+                recorded_at_ms: 30 + seq,
+                payload: json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"plaintext",
+                    "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+            };
+            crate::router::apply_replication_envelope_in_batch(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                true,
+            )
+            .unwrap();
+        }
+        let fault = StopSecondCommit(AtomicUsize::new(0));
+        assert!(matches!(
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &fault),
+            Err(SyncError::FaultCrash)
+        ));
+        let queued: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            queued, 1,
+            "two 9 MiB updates commit; the next transaction rolls back"
+        );
+        let refusals =
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults).unwrap();
+        assert_eq!(refusals.len(), 1);
+        let bytes: Vec<u8> = store.read_with(|conn| conn.query_row("SELECT b.bytes FROM ydoc_inactive_lineages l JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256 WHERE l.lineage_claim_id=?1", [&claim], |row| row.get(0))).unwrap();
+        let archived = dohc_engine_collab::Ydoc::wire();
+        archived.apply(&bytes).unwrap();
+        assert_eq!(archived.plaintext_string(), old.doc.plaintext_string());
+    }
+
+    #[test]
+    fn inactive_updates_follow_relay_order_across_origins() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let first = old.doc.plaintext_insert(0, "first ");
+        let second_machine = dohc_engine_collab::Ydoc::wire();
+        second_machine.apply(&old.doc.encode_full_state()).unwrap();
+        let second = second_machine.plaintext_insert(0, "second ");
+        for (index, (origin, update)) in [("z-first", first), ("a-second", second)]
+            .into_iter()
+            .enumerate()
+        {
+            let sha = store.put_binary_blob(&update).unwrap();
+            let op = ReplicationEnvelope {
+                workspace_id: "ws".into(),
+                origin_id: origin.into(),
+                origin_seq: 0,
+                relay_seq: Some(100 + index as i64),
+                op_kind: "ydoc.update".into(),
+                recorded_at_ms: 30,
+                payload: json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"plaintext",
+                    "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+            };
+            crate::router::apply_replication_envelope_in_batch(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                true,
+            )
+            .unwrap();
+        }
+        assert!(
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
+                .unwrap()
+                .is_empty()
+        );
+        let text: String = store.read_with(|conn| conn.query_row(
+            "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'",
+            [], |row| row.get(0))).unwrap();
+        assert_eq!(text, second_machine.plaintext_string());
+    }
+
+    #[test]
+    fn inactive_updates_queue_as_rows_and_compact_once_per_batch() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let active = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let active_claim = active.marker.lineage_claim_id.unwrap();
+        let state_sha = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+            "SELECT full_state_blob_sha256 FROM ydoc_inactive_lineages WHERE lineage_claim_id=?1",
+            [&claim], |row| row.get::<_, String>(0),
+        )
+                })
+                .unwrap()
+        };
+        for batch in 0..2 {
+            let before = state_sha(&store);
+            for index in 0..257 {
+                let update = old.doc.plaintext_insert(0, "late ");
+                let sha = store.put_binary_blob(&update).unwrap();
+                let seq = batch * 257 + index;
+                let op = ReplicationEnvelope {
+                    workspace_id: "ws".into(),
+                    origin_id: "batch-archive".into(),
+                    origin_seq: seq,
+                    relay_seq: Some(100 + seq),
+                    op_kind: "ydoc.update".into(),
+                    recorded_at_ms: 30 + seq,
+                    payload: json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"plaintext",
+                        "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+                };
+                crate::router::apply_replication_envelope_in_batch(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &op,
+                    &NoFaults,
+                    &crate::NoLiveLeases,
+                    true,
+                )
+                .unwrap();
+                let active_update = active.doc.plaintext_insert(0, "active ");
+                let active_sha = store.put_binary_blob(&active_update).unwrap();
+                let mut interleaved = op.clone();
+                interleaved.origin_id = "interleaved-active".into();
+                interleaved.payload["lineageClaimId"] = json!(active_claim);
+                interleaved.payload["updateBlobSha256"] = json!(active_sha);
+                crate::router::apply_replication_envelope_in_batch(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &interleaved,
+                    &NoFaults,
+                    &crate::NoLiveLeases,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(
+                    state_sha(&store),
+                    before,
+                    "admission must only append queue rows"
+                );
+            }
+            let queued: i64 = store
+                .read_with(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                        row.get(0)
+                    })
+                })
+                .unwrap();
+            assert_eq!(queued, 257);
+            assert!(
+                crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
+                    .unwrap()
+                    .is_empty()
+            );
+            let (queued, recovery_moments, text): (i64,i64,String) = store.read_with(|conn| Ok::<_,rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM moments WHERE object_id LIKE 'ydoc-recovery-object-%'", [], |row| row.get(0))?,
+                conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'", [], |row| row.get(0))?,
+            ))).unwrap();
+            assert_eq!(queued, 0);
+            assert_eq!(recovery_moments, (batch + 1) * 2);
+            assert_eq!(text, old.doc.plaintext_string());
+            if batch > 0 {
+                assert!(
+                    store.get_binary_blob(&before).unwrap().is_none(),
+                    "replaced compacted state must be collected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_last_archive_update_does_not_hide_an_oversized_projection_refusal() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        let mut poison = old.doc.encode_full_state();
+        let offset = poison
+            .windows(12)
+            .position(|bytes| bytes == b"current text")
+            .unwrap();
+        poison[offset..offset + 12].copy_from_slice(b"corrupt text");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let oversized = old
+            .doc
+            .plaintext_insert(0, &"x".repeat(dohc_engine_domain::MAX_TEXT_BYTES));
+        for (seq, bytes) in [oversized, poison].into_iter().enumerate() {
+            let sha = store.put_binary_blob(&bytes).unwrap();
+            let op = ReplicationEnvelope {
+                workspace_id: "ws".into(),
+                origin_id: "archive-rejections".into(),
+                origin_seq: seq as i64,
+                relay_seq: Some(100 + seq as i64),
+                op_kind: "ydoc.update".into(),
+                recorded_at_ms: 30 + seq as i64,
+                payload: json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"plaintext",
+                    "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+            };
+            crate::router::apply_replication_envelope_in_batch(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                true,
+            )
+            .unwrap();
+        }
+        let refusals =
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults).unwrap();
+        assert_eq!(refusals.len(), 2);
+        assert_eq!(refusals[0].origin_seq, 0);
+        assert_eq!(refusals[1].origin_seq, 1);
+        assert!(refusals[1].reason.message().contains("replay validation"));
+        assert!(
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn oversized_inactive_updates_are_retained_and_refused_without_blocking_later_edits() {
+        for deferred in [false, true] {
+            let (_scratch, mut store, key, built) = receiver_fixture();
+            let old = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap();
+            let claim = old.marker.lineage_claim_id.unwrap();
+            let parent = imported_envelope(0, "conflict.resolve", built.value);
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &parent,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .unwrap();
+            let size = dohc_engine_domain::MAX_TEXT_BYTES;
+            let update = old.doc.plaintext_insert(0, &"x".repeat(size));
+            let sha = store.put_binary_blob(&update).unwrap();
+            let op = |seq, sha: String| ReplicationEnvelope {
+                workspace_id: "ws".to_owned(),
+                origin_id: "late-archive".to_owned(),
+                origin_seq: seq,
+                relay_seq: Some(100 + seq),
+                op_kind: "ydoc.update".to_owned(),
+                recorded_at_ms: 30 + seq,
+                payload: json!({
+                    "versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"plaintext",
+                    "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false,
+                }),
+            };
+            let large = op(0, sha);
+            let result = crate::apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &large,
+                &NoFaults,
+                if deferred {
+                    &crate::ydoc_apply::AlwaysLive
+                } else {
+                    &crate::NoLiveLeases
+                },
+            )
+            .unwrap();
+            if deferred {
+                let drained = crate::drain_deferred_ydoc_for_key(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &key,
+                    &NoFaults,
+                )
+                .unwrap();
+                assert_eq!(drained.refusals.len(), 1);
+                crate::drain_deferred_ydoc_for_key(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &key,
+                    &NoFaults,
+                )
+                .unwrap();
+            } else {
+                assert!(
+                    matches!(result.primary, crate::ApplyDisposition::Refused(_)),
+                    "{result:?}"
+                );
+            }
+            assert_eq!(
+                crate::read_replication_acked_seq(&store, "ws", "late-archive").unwrap(),
+                0
+            );
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert_eq!(notices.len(), 1);
+            assert!(
+                notices[0]
+                    .reason
+                    .starts_with("plaintext projection exceeds MAX_TEXT_BYTES:"),
+                "{notices:?}"
+            );
+            let active = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap();
+            let active_update = active.doc.plaintext_insert(0, "active change ");
+            let active_sha = store.put_binary_blob(&active_update).unwrap();
+            let mut active_op = op(0, active_sha);
+            active_op.origin_id = "active-peer".into();
+            active_op.payload["lineageClaimId"] = json!(active.marker.lineage_claim_id.unwrap());
+            crate::apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &active_op,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .unwrap();
+            assert_eq!(
+                crate::list_refusal_notices(&store, "ws").unwrap().len(),
+                1,
+                "active lineage must not withdraw an inactive refusal"
+            );
+            let bytes:Vec<u8> = store.read_with(|conn| conn.query_row(
+                "SELECT b.bytes FROM ydoc_inactive_lineages l JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256 WHERE l.lineage_claim_id=?1",
+                [&claim],|row| row.get(0))).unwrap();
+            let retained = dohc_engine_collab::Ydoc::wire();
+            retained.apply(&bytes).unwrap();
+            assert_eq!(retained.plaintext_string().len(), size + 12);
+            let deletion = old.doc.plaintext_delete(0, size as u32);
+            let later = old.doc.plaintext_insert(0, "after limit ");
+            let merged = dohc_engine_collab::merge_updates(&[deletion, later]).unwrap();
+            let sha = store.put_binary_blob(&merged).unwrap();
+            crate::apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op(1, sha),
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .unwrap();
+            let recovered:String = store.read_with(|conn| conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'",[],|row| row.get(0))).unwrap();
+            assert_eq!(recovered, "after limit current text");
+            assert!(
+                crate::list_refusal_notices(&store, "ws")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_active_content_refuses_resolution_and_preserves_later_successor_edits() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let doc = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc;
+        let update = doc.plaintext_insert(
+            0,
+            &"x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES),
+        );
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &update,
+            dohc_engine_collab::LocalAppend::default(),
+            &NoFaults,
+            20,
+            |_tx, _outcome, _sha| Ok(()),
+        )
+        .unwrap();
+        let successor = built
+            .validated
+            .payload
+            .lineage_transition
+            .as_ref()
+            .unwrap()
+            .successor
+            .as_ref()
+            .unwrap();
+        let successor_claim = successor.lineage_claim_id.clone();
+        let successor_doc = dohc_engine_collab::Ydoc::wire();
+        successor_doc
+            .apply(
+                &store
+                    .get_binary_blob(&successor.update_blob_sha256)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+        let parent = imported_envelope(0, "conflict.resolve", built.value);
+        let outcome = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome.primary, crate::ApplyDisposition::Refused(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            crate::read_replication_acked_seq(&store, "ws", "peer").unwrap(),
+            0
+        );
+        assert_eq!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .plaintext_string(),
+            doc.plaintext_string()
+        );
+        let replay = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(matches!(replay.primary, crate::ApplyDisposition::Skipped));
+        let update = successor_doc.plaintext_insert(0, "later winner edit ");
+        let sha = store.put_binary_blob(&update).unwrap();
+        let mut later = imported_envelope(
+            1,
+            "ydoc.update",
+            json!({
+                "versionId":"main", "objectId":"object-a", "path":"doc.md", "contentKind":"plaintext",
+                "lineageClaimId":successor_claim, "updateBlobSha256":sha, "isBaseState":false
+            }),
+        );
+        later.relay_seq = Some(2);
+        let later = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &later,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(later.primary, crate::ApplyDisposition::Applied(_)),
+            "{later:?}"
+        );
+        let recovered: String = store.read_with(|conn| conn.query_row(
+            "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'",
+            [], |row| row.get(0))).expect("later winner edit must be visible");
+        assert_eq!(recovered, successor_doc.plaintext_string());
+    }
+
+    #[test]
+    fn unsettled_insertions_and_deletions_review_every_result_without_retrying() {
+        for result_kind in 0..3 {
+            for deletion in [false, true] {
+                let (_scratch, mut store, key, built) = match result_kind {
+                    0 => receiver_fixture(),
+                    1 => absent_result_receiver_fixture(),
+                    _ => {
+                        let (scratch, store, key, built, _) = binary_result_receiver_fixture();
+                        (scratch, store, key, built)
+                    }
+                };
+                let doc = dohc_engine_collab::load_persisted(&store, &key)
+                    .unwrap()
+                    .unwrap()
+                    .doc;
+                let vector = doc.encode_state_vector();
+                let update = if deletion {
+                    doc.plaintext_delete(0, 1)
+                } else {
+                    doc.plaintext_insert(0, "extra ")
+                };
+                if deletion {
+                    assert_eq!(vector, doc.encode_state_vector());
+                }
+                dohc_engine_collab::record_local_update(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &key,
+                    &update,
+                    dohc_engine_collab::LocalAppend::default(),
+                    &NoFaults,
+                    20,
+                    |_tx, _outcome, _sha| Ok(()),
+                )
+                .unwrap();
+                let before = doc.encode_full_state();
+                let parent = imported_envelope(0, "conflict.resolve", built.value);
+                let outcome = crate::apply_replication_envelope(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &parent,
+                    &NoFaults,
+                    &crate::NoLiveLeases,
+                )
+                .unwrap();
+                assert!(
+                    matches!(outcome.primary, crate::ApplyDisposition::Applied(_)),
+                    "{outcome:?}"
+                );
+                assert_eq!(
+                    crate::read_replication_acked_seq(&store, "ws", "peer").unwrap(),
+                    0
+                );
+                assert_eq!(
+                    dohc_engine_collab::load_persisted(&store, &key)
+                        .unwrap()
+                        .unwrap()
+                        .doc
+                        .encode_full_state(),
+                    before
+                );
+                let (reviews,recovered): (i64,String) = store.read_with(|conn| Ok::<_,rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM conflicts WHERE status='open'", [], |row| row.get(0))?,
+                    conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'", [], |row| row.get(0))?,
+                ))).unwrap();
+                assert_eq!(reviews, 1);
+                assert_eq!(recovered, doc.plaintext_string());
+                let replay = crate::apply_replication_envelope(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &parent,
+                    &NoFaults,
+                    &crate::NoLiveLeases,
+                )
+                .unwrap();
+                assert!(matches!(replay.primary, crate::ApplyDisposition::Skipped));
+            }
+        }
     }
 
     #[test]
@@ -5398,6 +6599,77 @@ mod tests {
             active_claim_before,
             "the active lineage must remain untouched"
         );
+        let (review, claim): (String, String) = store.read_with(|conn| conn.query_row(
+            "SELECT open_conflict_id,lineage_claim_id FROM ydoc_inactive_lineages WHERE workspace_id='ws' AND object_id='object-a' AND disposition='conflicting-successor'",
+            [], |row| Ok((row.get(0)?,row.get(1)?)),
+        )).unwrap();
+        let refused = imported_envelope(
+            1,
+            "ydoc.update",
+            json!({
+                "versionId":"main", "objectId":"object-a", "lineageClaimId":claim, "path":"doc.md",
+            }),
+        );
+        crate::apply_envelope_with(&mut store, &refused, &NoFaults, |_, _| {
+            Err::<(), _>(SyncError::InvalidInput {
+                reason: "projection exceeds limit",
+            })
+        })
+        .unwrap();
+        for (seq, claim) in [
+            (2, active_claim_before.unwrap()),
+            (3, "unrelated-inactive".into()),
+        ] {
+            let refused = imported_envelope(
+                seq,
+                "ydoc.update",
+                json!({
+                    "versionId":"main", "objectId":"object-a", "lineageClaimId":claim, "path":"doc.md",
+                }),
+            );
+            crate::apply_envelope_with(&mut store, &refused, &NoFaults, |_, _| {
+                Err::<(), _>(SyncError::InvalidInput {
+                    reason: "projection exceeds limit",
+                })
+            })
+            .unwrap();
+        }
+        assert_eq!(crate::list_refusal_notices(&store, "ws").unwrap().len(), 3);
+        let input = ResolveTextConflict {
+            workspace_id: "ws".into(),
+            conflict_id: review,
+            resolution: ResolveConflictKind::KeepCurrent,
+            object_id: "object-a".into(),
+            write_moment_id: "review-write".into(),
+            delete_moment_id: "review-delete".into(),
+            metadata_origin: "sync".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 50,
+            request_id: Some("review-request".into()),
+            conflict_answer_budget_bytes: usize::MAX,
+        };
+        VersionedTextStore::new(&mut store)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |tx, conflict, _| {
+                    prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict)
+                        .map_err(sync_as_domain)
+                },
+                |tx, result, prepared| {
+                    commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                        .map_err(sync_as_domain)
+                },
+            )
+            .unwrap();
+        let remaining = crate::list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].document.as_ref().unwrap().lineage_claim_id,
+            "unrelated-inactive"
+        );
     }
 
     #[test]
@@ -5752,6 +7024,7 @@ mod tests {
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id: "e".repeat(64),
                 predecessor_state_vector_sha256: "f".repeat(64),
+                predecessor_delete_set_sha256: "e".repeat(64),
                 artifact_preimage_sha256: current_sha,
                 successor: Some(SuccessorV1 {
                     lineage_claim_id: successor_sha.clone(),
@@ -5776,11 +7049,11 @@ mod tests {
             built.validated.encoded_payload_bytes,
             MAX_PAYLOAD_JSON_BYTES - built.validated.encoded_payload_bytes
         );
-        assert_eq!(built.validated.encoded_payload_bytes, 218_223);
+        assert_eq!(built.validated.encoded_payload_bytes, 218_319);
         assert_eq!(shadow_sizes, [216_040, 208_719]);
         assert_eq!(
             MAX_PAYLOAD_JSON_BYTES - built.validated.encoded_payload_bytes,
-            43_921
+            43_825
         );
     }
 

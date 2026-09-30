@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import {
   checkAutomationReach,
+  datasetFieldKey,
+  reachStepId,
   PERSONAL_NEEDS_ACCOUNT,
   shareImpactOf,
   type ReachAutomation,
   type ReachCollection,
   type ReachDatasetOperation,
   type ReachRoster,
+  type FormerEditor,
   type ReachStep,
   type RosterGrant,
 } from "./automationReach";
@@ -72,6 +75,19 @@ describe("reach check", () => {
     expect(check(roster, personal(OWNER))).toEqual(stopped("This step acts as you, and ana@dohc.test can also edit Trip."));
     // Edit on another file in the Collection does not make an editor.
     expect(check(owner(grant(ana, { paths: ["Trip/collection.yaml"], access: "edit" })), personal(OWNER))).toEqual(allowed);
+  });
+
+  it("stops every step that would run when someone who can change the automation or its code cannot view the Collection", () => {
+    const yamlOnly = owner(grant(ana, { paths: ["Trip/automations.yaml"], access: "edit" }), grant(ana, { paths: ["Budget"], access: "edit" }));
+    // The step itself reaches Budget, but its formulas read Trip's records.
+    expect(check(yamlOnly, change(budget))).toEqual(stopped("ana@dohc.test cannot view Trip."));
+    expect(check(yamlOnly, notify(OWNER))).toEqual(stopped("ana@dohc.test cannot view Trip."));
+    const codeOnly = owner(grant(ana, { paths: ["Trip/scripts/copy.js"], access: "edit" }), grant(ana, { paths: ["Budget"], access: "edit" }));
+    expect(check(codeOnly, change(budget), trip, ["Trip/scripts/copy.js"])).toEqual(stopped("ana@dohc.test cannot view Trip."));
+    expect(check(codeOnly, change(budget), trip, [])).toEqual(allowed);
+    // View on the Collection is enough to read its records.
+    const withView = owner(grant(ana, { paths: ["Trip/automations.yaml", "Budget"], access: "edit" }), grant(ana, { paths: ["Trip"], access: "view" }));
+    expect(check(withView, change(budget))).toEqual(allowed);
   });
 
   it("counts Edit on a code file the automation runs as an editor", () => {
@@ -202,7 +218,7 @@ describe("reach check", () => {
   it("notifies only people who can view the Collection", () => {
     const roster = owner(
       grant(ana, { paths: ["Trip"], access: "view" }),
-      grant(ben, { paths: ["Trip"], access: "edit", versionId: "v-1" }),
+      grant(ben, { paths: ["Trip"], access: "view", versionId: "v-1" }),
     );
     expect(check(roster, notify(OWNER))).toEqual(allowed);
     expect(check(roster, notify("u-ana"))).toEqual(allowed);
@@ -222,7 +238,27 @@ describe("reach check", () => {
   it("stops a personal step when no account says who this computer's person is", () => {
     const local: ReachRoster = { kind: "owner", ownerUserId: null, grants: [] };
     expect(check(local, personal("u-anyone"))).toEqual(stopped(PERSONAL_NEEDS_ACCOUNT));
+    expect(check(local, notify("u-anyone", "Someone"))).toEqual(stopped("Someone cannot view Trip."));
     expect(check(local, change(budget))).toEqual(allowed);
+  });
+
+  it("names this computer's person by its own id for them only where the roster proves nobody else had a part", () => {
+    const signedOut: ReachRoster = { kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] };
+    expect(check(signedOut, personal("install-here"))).toEqual(allowed);
+    expect(check(signedOut, notify("install-here"))).toEqual(allowed);
+    expect(check(signedOut, personal("install-elsewhere"))).toEqual(stopped(PERSONAL_NEEDS_ACCOUNT));
+    expect(check(signedOut, personal(OWNER))).toEqual(stopped(PERSONAL_NEEDS_ACCOUNT));
+    expect(check(signedOut, notify("install-elsewhere", "Someone"))).toEqual(stopped("Someone cannot view Trip."));
+    const signedIn: ReachRoster = { ...signedOut, ownerUserId: OWNER };
+    expect(check(signedIn, personal("install-here"))).toEqual(allowed);
+    expect(check(signedIn, personal(OWNER))).toEqual(allowed);
+    expect(check(signedIn, personal("install-elsewhere", "Cai"))).toEqual(stopped("This step acts as Cai, and you can also edit Trip."));
+    // Another editor still stops it, as for an account.
+    expect(check({ ...signedOut, grants: [grant(ana, { paths: ["Trip"], access: "edit" })] }, personal("install-here")))
+      .toEqual(stopped("This step acts as you, and ana@dohc.test can also edit Trip."));
+    // Without the proof, the same id names nobody.
+    expect(check({ kind: "owner", ownerUserId: null, grants: [] }, personal("install-here"))).toEqual(stopped(PERSONAL_NEEDS_ACCOUNT));
+    expect(check({ kind: "owner", ownerUserId: OWNER, grants: [] }, notify("install-here", "Someone"))).toEqual(stopped("Someone cannot view Trip."));
   });
 
   it("counts a grant pinned to a saved version as an editor only when it names paths, and never as reach", () => {
@@ -246,6 +282,8 @@ describe("reach check", () => {
         "dohc can't read what one of your share links grants. End it from Share… on any file, then try again."],
       [{ kind: "unknown", problem: { kind: "unusable-listing" } },
         "dohc could not read this workspace's shares from your server. Try again later."],
+      [{ kind: "unknown", problem: { kind: "outdated-server" } },
+        "dohc could not check who can edit Trip because your server is older than this version of dohc. Update your server, then try again."],
     ];
     for (const [roster, reason] of cases) {
       expect(checkAutomationReach(roster, { id: "a", collection: trip, codeFiles: [], steps: everyStep }))
@@ -264,6 +302,103 @@ describe("reach check", () => {
   });
 });
 
+describe("share links as editors", () => {
+  // A share link's own grant: it names nobody.
+  function linkGrant(grantId: string, paths: string[], access: "view" | "comment" | "edit" = "edit"): RosterGrant {
+    return { grantId, recipientUserId: null, recipientEmail: null, files: { paths, versionId: null, access }, channel: null };
+  }
+
+  it("counts an Edit link as an editor before anyone opens it, with only its own reach", () => {
+    const roster = owner(linkGrant("g-link", ["Trip"]));
+    expect(check(roster, change(trip))).toEqual(allowed);
+    expect(check(roster, change(budget))).toEqual(stopped("Anyone with your share link to Trip cannot edit Budget."));
+    expect(check(roster, post("wire-family"))).toEqual(stopped("Anyone with your share link to Trip cannot post in Family."));
+    expect(check(roster, personal(OWNER))).toEqual(stopped("This step acts as you, and Anyone with your share link to Trip can also edit Trip."));
+    expect(check(owner(linkGrant("g-link", ["Trip"], "view")), change(budget))).toEqual(allowed);
+  });
+
+  it("never lets a link lend its reach to another link, its creator, or a person who opened it", () => {
+    // Each link reaches one of the Collections; together they reach both.
+    const two = owner(linkGrant("g-trip", ["Trip", "Notes"]), linkGrant("g-trip-budget", ["Trip", "Budget"]));
+    expect(check(two, change(budget))).toEqual(stopped("Anyone with your share link to Trip cannot edit Budget."));
+    expect(check(two, find({ path: "Notes", name: "Notes" }))).toEqual(stopped("Anyone with your share link to Trip cannot view Notes."));
+    // Ana opened the link in dohc and holds her own grant beside it.
+    const opened = owner(linkGrant("g-link", ["Trip"]), grant(ana, { paths: ["Trip", "Budget"], access: "edit" }));
+    expect(check(opened, change(budget))).toEqual(stopped("Anyone with your share link to Trip cannot edit Budget."));
+    // A link the owner made gives the owner's reach to nobody.
+    expect(check(owner(linkGrant("g-link", ["Trip"]), grant({ userId: OWNER }, { paths: ["Budget"], access: "edit" })), change(budget)))
+      .toEqual(stopped("Anyone with your share link to Trip cannot edit Budget."));
+  });
+
+  it("gives a link no data grant on a dataset", () => {
+    const grants = { workspaceId: "w", grants: [{ principalKey: datasetPrincipalKey("w", "g-link", "u-ana"), operationIds: ["op-add"] }] };
+    const operation: ReachDatasetOperation = { operationId: "op-add", name: "Add order", access: "link" };
+    expect(check(owner(linkGrant("g-link", ["Trip"])), { kind: "dataset-operation", collection: trip, datasetId: "trip", operation, grants }))
+      .toEqual(stopped("Anyone with your share link to Trip has no grant to use Add order in Trip."));
+  });
+});
+
+describe("a link that wrote automations directly and stopped editing", () => {
+  const formerTrip = { grantId: "g-gone", generation: 1, files: { paths: ["Trip"], versionId: null } };
+
+  function withFormer(formerLinks: ReadonlyArray<Omit<FormerEditor, "recipientEmail" | "holder">>, ...grants: RosterGrant[]): ReachRoster {
+    return { kind: "owner", ownerUserId: OWNER, grants, formerEditors: formerLinks.map((link) => ({ ...link, holder: "link", recipientEmail: null })) };
+  }
+
+  const stopsFor = (...links: Array<[string, string]>) =>
+    ({ allowed: true, formerStops: links.map(([grantId, path]) => ({ evidence: `${grantId}#1`, name: `Anyone who had your share link to ${path}` })) });
+
+  it("allows a step it could not have run, and names it as the editor who could not", () => {
+    const roster = withFormer([formerTrip]);
+    expect(check(roster, change(budget))).toEqual(stopsFor(["g-gone", "Trip"]));
+    expect(check(roster, personal(OWNER))).toEqual(stopsFor(["g-gone", "Trip"]));
+    expect(check(roster, change(trip))).toEqual(allowed);
+  });
+
+  it("matters only for automations it could have written", () => {
+    expect(check(withFormer([formerTrip]), change(trip), budget)).toEqual(allowed);
+    expect(check(withFormer([{ grantId: "g-gone", generation: 1, files: { paths: ["Trip/automations.yaml"], versionId: null } }]), change(budget)))
+      .toEqual(stopsFor(["g-gone", "Trip/automations.yaml"]));
+    // A link pinned to a saved version edited Trip's files there, and reached nothing.
+    expect(check(withFormer([{ grantId: "g-pinned", generation: 1, files: { paths: ["Trip"], versionId: "v-1" } }]), change(trip)))
+      .toEqual(stopsFor(["g-pinned", "Trip"]));
+  });
+
+  it("leaves a step a current editor stops stopped, for that editor", () => {
+    expect(check(withFormer([formerTrip], grant(ana, { paths: ["Trip"], access: "edit" })), change(budget)))
+      .toEqual(stopped("ana@dohc.test cannot edit Budget."));
+  });
+
+  it("names a former named editor by email, on its own, apart from the same person's current grants", () => {
+    const roster: ReachRoster = {
+      kind: "owner", ownerUserId: OWNER,
+      // Ana still edits Budget through another grant.
+      grants: [grant(ana, { paths: ["Budget"], access: "edit" })],
+      formerEditors: [{ grantId: "g-ana-trip", generation: 2, holder: "person", recipientEmail: "ana@dohc.test", files: { paths: ["Trip"], versionId: null } }],
+    };
+    expect(check(roster, change(budget), trip))
+      .toEqual({ allowed: true, formerStops: [{ evidence: "g-ana-trip#2", name: "ana@dohc.test" }] });
+  });
+
+  it("names a former person with no known email as a person, never as a link", () => {
+    const roster: ReachRoster = {
+      kind: "owner", ownerUserId: OWNER, grants: [],
+      formerEditors: [{ grantId: "g-cy", generation: 1, holder: "person", recipientEmail: null, files: { paths: ["Trip"], versionId: null } }],
+    };
+    expect(check(roster, change(budget), trip))
+      .toEqual({ allowed: true, formerStops: [{ evidence: "g-cy#1", name: "Someone you shared Trip with" }] });
+  });
+
+  it("checks each former link on its own, not a combination of them", () => {
+    const roster = withFormer([
+      { grantId: "g-wide", generation: 1, files: { paths: ["Trip", "Budget"], versionId: null } },
+      { grantId: "g-narrow", generation: 1, files: { paths: ["Trip"], versionId: null } },
+      { grantId: "g-also-narrow", generation: 1, files: { paths: ["Trip"], versionId: null } },
+    ]);
+    expect(check(roster, change(budget))).toEqual(stopsFor(["g-narrow", "Trip"], ["g-also-narrow", "Trip"]));
+  });
+});
+
 describe("reach on a dataset Collection", () => {
   // Budget keeps its records in a dataset. Its automations use its operations.
   const edit = { operationId: "op-edit", name: "invoices.edit", access: "helper" as const };
@@ -274,10 +409,27 @@ describe("reach on a dataset Collection", () => {
   const anaKey = datasetPrincipalKey("workspace", anaGrant.grantId, ana.userId);
   const grants = (operationIds: string[]) => ({ workspaceId: "workspace", grants: [{ principalKey: anaKey, operationIds }] });
   const asOperation = (read: { operationId: string }): ReachDatasetOperation => ({ operationId: read.operationId, name: read.operationId, access: "helper" });
-  const field = (fieldId: string, reads: Array<{ operationId: string }>, held = grants([])): ReachStep =>
-    ({ kind: "dataset-field", collection: budget, field: { fieldId, name: fieldId === "f-amount" ? "Amount" : "Status" }, reads: reads.map(asOperation), grants: held });
-  const step = (operation: ReachDatasetOperation, operationIds: string[] = []): ReachStep =>
-    ({ kind: "dataset-operation", collection: budget, operation, grants: grants(operationIds) });
+  const field = (fieldId: string, reads: Array<{ operationId: string }>, held = grants([])): Extract<ReachStep, { kind: "dataset-field" }> =>
+    ({ kind: "dataset-field", collection: budget, datasetId: "budget", tableId: "invoices", field: { fieldId, name: fieldId === "f-amount" ? "Amount" : "Status" }, reads: reads.map(asOperation), grants: held });
+  const step = (operation: ReachDatasetOperation, operationIds: string[] = []): Extract<ReachStep, { kind: "dataset-operation" }> =>
+    ({ kind: "dataset-operation", collection: budget, datasetId: "budget", operation, grants: grants(operationIds) });
+
+  it("keeps duplicate operation names and fields separate by destination and table", () => {
+    const a = step(edit, [edit.operationId]);
+    const b = { ...a, collection: trip, datasetId: "trip" };
+    expect(reachStepId(a, 0)).not.toBe(reachStepId(b, 0));
+    expect(reachStepId(a, 0)).toBe(reachStepId({ ...a, operation: { ...edit, name: "renamed" } }, 0));
+    const visible = field("f-status", [read], grants([read.operationId]));
+    const hidden = { ...visible, datasetId: "trip", collection: trip, grants: grants([]) };
+    const verdicts = checkAutomationReach(owner(anaGrant), { id: "a", collection: budget, codeFiles: [], steps: [visible, hidden] });
+    expect(verdicts.map((verdict) => verdict.allowed)).toEqual([true, false]);
+    expect(reachStepId(visible, 0)).not.toBe(reachStepId(hidden, 0));
+    expect(new Set([
+      datasetFieldKey("budget", "invoices", "f-status"),
+      datasetFieldKey("trip", "invoices", "f-status"),
+      datasetFieldKey("budget", "refunds", "f-status"),
+    ]).size).toBe(3);
+  });
 
   it("allows any operation when the owner is the only editor", () => {
     expect(check(owner(), step(ownerOnly), budget)).toEqual(allowed);
@@ -338,8 +490,8 @@ describe("share impact", () => {
     const roster = owner(grant(ana, { paths: ["Trip", "Budget", "Notes"], access: "edit" }));
     expect(shareImpactOf(roster, { paths: ["Trip"], versionId: null, access: "edit", recipientEmail: null }, automations))
       .toEqual([
-        { automationId: "stamp", step: 1, reason: "Someone you shared with cannot edit Budget." },
-        { automationId: "stamp", step: 3, reason: "Someone you shared with cannot view Notes." },
+        { automationId: "stamp", step: 1, reason: "Anyone with your share link to Trip cannot edit Budget." },
+        { automationId: "stamp", step: 3, reason: "Anyone with your share link to Trip cannot view Notes." },
       ]);
   });
 

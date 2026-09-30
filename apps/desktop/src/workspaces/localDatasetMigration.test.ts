@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { DatasetMigrationPreparation, DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
@@ -27,25 +27,12 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-migration-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, ...extra });
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, ...extra });
   hosts.push(host); return { host, workspaceRoot };
 }
 function fixture() {
   const files = new Map([["items/dataset.json", JSON.stringify(definition)], [definition.schemaPath, schema], [definition.operationsPath, source]]);
-  const blobs = new Map<string, Uint8Array>();
-  const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
-    const params = request.params as Record<string, unknown>;
-    if (request.method === "versionedText.captureSources") {
-      const selected = [...params.paths as string[]].sort().map(path => {
-        const bytes = Buffer.from(files.get(path)!), sha256 = digest(bytes); blobs.set(sha256, bytes);
-        return { path, objectId: path, contentKind: "text", sha256, byteLength: bytes.byteLength, latestMomentId: "m" };
-      });
-      return { id: request.id, result: { workspaceId: "w", versionId: "main", files: selected, totalBytes: selected.reduce((n, f) => n + f.byteLength, 0),
-        sourceDigest: digest(JSON.stringify(["dohc-source-capture-v1", "w", "main", selected])) } };
-    }
-    const bytes = blobs.get(String(params.sha256))!;
-    return { id: request.id, result: { bytesBase64: Buffer.from(bytes).toString("base64"), byteLength: bytes.byteLength } };
-  } }, "owner", { workspaceId: "w" });
+  const adapter = sourceCaptureAdapter(files);
   const next = () => {
     const updated = structuredClone(definition);
     updated.tables[0]!.fields.push({ fieldId: id(7), name: "Note", sqlColumn: "note", type: "text", required: false, unique: false });
@@ -192,7 +179,7 @@ describe("owner Collection migration", () => {
       finally { active = false; }
     },
       hostForWorkspace: async () => host, withAdapter: async (_workspace, work) => work(f.adapter), createSources: async () => {} });
-    const prepared = await handler("owner", DatasetRequest.parse({ workspaceId: "w", action: "prepareMigration", datasetId: id(1), descriptorPath: "items/dataset.json", migrationPath: "items/migration.sql" }));
+    const prepared = await handler("owner", DatasetRequest.parse({ workspaceId: "w", action: "prepareMigration", expectedDatasetId: id(1), datasetPath: "items/dataset.json", migrationPath: "items/migration.sql" }));
     expect(DatasetResult.parse(prepared).kind).toBe("migration-prepared");
     if (prepared.kind !== "migration-prepared") throw new Error("Missing migration review");
     const migrated = await handler("owner", { workspaceId: "w", action: "approveMigration", ...approval(prepared) });

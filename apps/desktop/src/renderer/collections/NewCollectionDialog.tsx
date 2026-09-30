@@ -102,7 +102,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
         const result = await bridge().dataset({ action: "create", workspaceId: props.workspaceId, definition: plan.definition });
         if (!alive.current) return;
         if (result.kind !== "approved" || result.revision.datasetId !== plan.definition.datasetId) throw new Error("dohc created a different Collection than the one you asked for. Try again.");
-        props.onCreated({ kind: "transactional", datasetId: result.revision.datasetId, tableId: plan.definition.tables[0]!.tableId });
+        props.onCreated({ kind: "transactional", datasetPath: plan.definition.schemaPath.slice(0, plan.definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json", tableId: plan.definition.tables[0]!.tableId });
       } else {
         const result = await bridge().createWorkspaceFile({ workspaceId: props.workspaceId, relativePath: `${plan.folder}/${COLLECTION_SCHEMA_FILENAME}`, initialText: serializeCollectionSchema(plan.schema) });
         if (!alive.current) return;

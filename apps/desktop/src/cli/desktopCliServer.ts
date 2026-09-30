@@ -25,10 +25,11 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
+import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import {
-  createCollectionRecord,
+  runCollectionRecordCreation,
   setCollectionRecordFields,
   type CollectionRecordEditContext,
 } from "../workspaces/collectionRecordEdits";
@@ -42,15 +43,15 @@ import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projectio
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 // The History author of a document an agent creates: the agent under the
-// name it gave, on behalf of the local owner, at its run's depth. Without a
+// name it gave, for the person its edit names, at its run's depth. Without a
 // name it has no author, unless an automation started the run: then the MCP
 // server's agent authors it, so a record it adds carries the run's depth.
 function momentAuthorFor(origin: LiveDocumentEditOrigin): MomentWriteAuthor | null {
-  const depth = origin.attribution.depth ?? 0;
+  const { depth = 0, onBehalfOf } = origin.attribution;
   const agentId = origin.actorOriginId ?? (depth > 0 ? "dohc-mcp" : undefined);
-  return agentId === undefined
+  return agentId === undefined || onBehalfOf === undefined
     ? null
-    : { kind: "agent", agentId, onBehalfOf: "local", ...(depth > 0 ? { depth } : {}) };
+    : { kind: "agent", agentId, onBehalfOf, ...(depth > 0 ? { depth } : {}) };
 }
 
 // With no editor open, the file holds the document's settled text.
@@ -61,7 +62,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
-  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   /** The executor calls the Automations panel makes, for one workspace. */
@@ -74,7 +75,9 @@ interface DesktopCliServerDependencies<State> {
   activity: {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
-      "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment" | "listVersions" | "writeAuthoredTextFile"
+      | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
+      | "listKeptCopies" | "saveKeptCopy"
+      | "listVersions" | "writeAuthoredTextFile"
     > | null;
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
@@ -101,6 +104,7 @@ interface DesktopCliServerDependencies<State> {
   startCliServer: typeof startCliServerImplementation;
   stateDir(): string;
   localUserDisplayName(): string;
+  localPersonId(): string;
   notifyRenderer(input: { workspaceId: string }): void;
   syncSharedChannelsForChatTarget(
     workspaceId: string,
@@ -131,6 +135,7 @@ export function createDesktopCliServer<State>(
     startCliServer,
     stateDir,
     localUserDisplayName,
+    localPersonId,
     notifyRenderer,
     syncSharedChannelsForChatTarget,
     chatDispatchService,
@@ -181,11 +186,11 @@ export function createDesktopCliServer<State>(
       });
     return {
       workspaceId: workspace.workspaceId,
-      ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest) =>
+      ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
           if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The Collection workspace attachment changed.");
           if (request.action === "prepareRecovery" && !request.sourcePath) throw new Error("Collection recovery requires an explicit sourcePath.");
-          return dependencies.dataset!(request);
+          return dependencies.dataset!(request, agent);
         }) } : {}),
       ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
@@ -242,7 +247,7 @@ export function createDesktopCliServer<State>(
           setFields: (input) =>
             cliCollectionEdit((context) => setCollectionRecordFields(context, input)),
           createRecord: (input) =>
-            cliCollectionEdit((context) => createCollectionRecord(context, input)),
+            runCollectionRecordCreation(cliCollectionEdit, input),
         },
         query: async (params) => {
           const result = await withEngineAdapter(
@@ -333,6 +338,14 @@ export function createDesktopCliServer<State>(
           return { path };
         },
       },
+      ...(sharedViewOf(workspace.workspaceId)
+        ? {}
+        : {
+            keptCopies: {
+              list: () => capture.listKeptCopies(),
+              save: (id: number) => capture.saveKeptCopy(id),
+            },
+          }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit, objectId }) => {
         const page = await capture.listMoments({ limit, ...(objectId ? { objectId } : {}) });
@@ -385,6 +398,7 @@ export function createDesktopCliServer<State>(
       openWorkspace: openCliWorkspace,
       chatWrites,
       localUserDisplayName,
+      localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,

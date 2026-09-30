@@ -177,6 +177,40 @@ describe("DesktopRoot", () => {
     expect(screen.queryByTestId("handoff-active")).toBeNull();
   });
 
+  it("renders the states page at its address only with the dev-tools grant", async () => {
+    const stub = (devTools: boolean) => ({
+      windowRole: "workspace",
+      devTools,
+      ...noticeBridge(),
+      getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn(() => () => undefined),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+    });
+    window.location.hash = "#/dev/states";
+    try {
+      vi.stubGlobal("dohcDesktop", stub(false));
+      const withoutGrant = render(<DesktopRoot />);
+      expect(await screen.findByTestId("first-run")).toBeTruthy();
+      expect(screen.queryByTestId("states-page")).toBeNull();
+      withoutGrant.unmount();
+
+      vi.stubGlobal("dohcDesktop", stub(true));
+      render(<DesktopRoot />);
+      expect(await screen.findByTestId("states-page")).toBeTruthy();
+      expect(screen.queryByTestId("first-run")).toBeNull();
+    } finally {
+      window.location.hash = "";
+    }
+  });
+
   it("dismisses a handoff by its visible identity and returns to the ordinary surface", async () => {
     const dismissShareHandoff = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {

@@ -25,7 +25,7 @@ use serde_json::Value;
 use serde_json::json;
 
 const COLLECTION_RESPONSE_HARD_CAP_BYTES: usize =
-    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+    crate::rpc::reads::RESPONSE_FRAME_BYTES - 64 * 1024;
 
 const COLLECTION_INTEGER_MARKER: &str = "$dohcInt64";
 
@@ -669,6 +669,7 @@ mod tests {
             let mut query = CollectionQueryResult {
                 collection: CollectionSummary {
                     path: "tasks".into(),
+                    object_id: "object-tasks".into(),
                     status: CollectionSchemaStatus::Valid,
                     reasons: Vec::new(),
                 },
@@ -890,6 +891,7 @@ mod tests {
         };
         let collection = json!({
             "path": "tasks",
+            "objectId": "object-tasks",
             "status": "degraded",
             "reasons": [{ "code": "invalid-yaml", "path": "" }]
         });
@@ -898,6 +900,7 @@ mod tests {
                 "collections.get",
                 json!({
                     "path": "tasks",
+                    "objectId": "object-tasks",
                     "status": "valid",
                     "reasons": [],
                     "schema": {

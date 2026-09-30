@@ -62,7 +62,7 @@ type CliCommandBody =
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "moment"; id: string; side: "before" | "after" }
-  | { verb: "automationRuns"; collectionPath: string; automation: string }
+  | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
   | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
   | {
@@ -477,10 +477,15 @@ const AUTOMATION_VERBS = {
   runs: {
     summary: "List an automation's runs on this computer, newest first.",
     operands: "<collection> <automation>",
-    notes: ["Lists the 20 newest runs, as the Automations panel does. Each line starts with the run's ID."],
+    flags: [{ name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." }],
+    notes: [
+      "Lists 20 runs at a time, newest first, as the Automations panel does. Each line starts with the run's ID.",
+      "When older runs remain, the last line gives the --page value that lists them.",
+    ],
     parse: (input) => {
       const { collectionPath, automation } = automationOperands(input, "runs", false);
-      return { verb: "automationRuns", collectionPath, automation };
+      const page = lastValue(input, "--page");
+      return { verb: "automationRuns", collectionPath, automation, ...(page === undefined ? {} : { page }) };
     },
   },
   run: {
@@ -668,7 +673,6 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Restore a Collection from a prepared archive.",
     take: [
       { field: "workspaceId", from: "prepareRecovery", path: "recovery.sourceCursor.workspaceId" },
-      { field: "datasetId", from: "prepareRecovery", path: "recovery.sourceCursor.datasetId" },
       { field: "transferId", from: "prepareRecovery", path: "recovery.transferId" },
       { field: "manifestSha256", from: "prepareRecovery", path: "recovery.manifestSha256" },
       { field: "sourceCursor", from: "prepareRecovery", path: "recovery.sourceCursor" },
@@ -828,7 +832,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
   },
   dataset: {
     summary: "Create, change, and use transactional Collections.",
-    notes: [workspaceNote, "These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity."],
+    notes: [workspaceNote, "datasetPath is the workspace-relative dataset.json path. List and describe return it alongside the internal datasetId.", "After moving the file, update commands and app manifests. An old path reports a broken reference.", "These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity."],
     verbs: DATASET_VERBS,
   },
   app: {

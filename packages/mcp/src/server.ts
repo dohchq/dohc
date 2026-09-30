@@ -42,12 +42,14 @@ import {
   importData,
   listWorkspaceFiles,
   listChanges,
+  listKeptCopies,
   listWorkspaces,
   moveWorkspacePath,
   queryDatabase,
   readChange,
   readDocument,
   readWorkspaceFile,
+  saveKeptCopy,
   searchWorkspaceFiles,
   testApp,
   writeWorkspaceFile,
@@ -91,7 +93,7 @@ function text(structuredContent: Record<string, unknown>) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
     structuredContent,
-    ...(structuredContent.ok === false ? { isError: true } : {}),
+    ...(structuredContent.ok === false || structuredContent.kind === "partial" ? { isError: true } : {}),
   };
 }
 
@@ -125,7 +127,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const registerAutomation = registerWrite;
 
   registerWrite("dohc_dataset", {
-    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
+    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its workspace-relative dataset.json path. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
     inputSchema: {request: DatasetRequest},
   }, async ({request}) => text(await dataset(ctx, request)));
 
@@ -158,6 +160,26 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await listChanges(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_list_kept_copies",
+    {
+      description:
+        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them.",
+      inputSchema: {},
+    },
+    async () => text(await listKeptCopies(ctx)),
+  );
+
+  registerWrite(
+    "dohc_save_kept_copy",
+    {
+      description:
+        "Move one kept copy from dohc_list_kept_copies to a visible file beside its file, such as `notes (kept copy).md`. The original file does not change. `status` is `saved` with the copy's `path`: read both, keep what you need, and delete the copy when you are done. `gone` means nothing is kept under that id any more. `no-valid-name` means no name beside the file fits dohc's path limits, so the copy stays kept: rename the file or its folder to something shorter and try again.",
+      inputSchema: { id: z.number().int() },
+    },
+    async (args) => text(await saveKeptCopy(ctx, args)),
   );
 
   server.registerTool(
@@ -536,10 +558,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_record",
     {
       description:
-        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. A name already taken in the folder is refused.",
+        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. The kept map reports current values of seed fields preserved after someone edited them. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.",
       inputSchema: {
         collectionPath: z.string().min(1).max(4096),
         name: z.string().min(1).max(200),
+        recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
         fields: z.record(z.string().min(1).max(200), z.unknown()).optional(),
       },
     },
@@ -555,8 +578,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_automation_runs",
     {
       description:
-        "List an automation's 20 newest runs on this computer, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. Each computer keeps the runs of the automations it ran.",
-      inputSchema: automationInput,
+        "List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.",
+      inputSchema: { ...automationInput, page: z.string().min(1).max(512).optional() },
     },
     async (args) => text(await listAutomationRuns(ctx, args)),
   );

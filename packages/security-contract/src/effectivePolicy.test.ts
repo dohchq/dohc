@@ -295,6 +295,9 @@ describe("workspace engine effective policy precedence", () => {
     ".env",
     "config/.env",
     ".dohc/x",
+    ".DOHC/x",
+    ".Dohc/x",
+    ".do‍hc/x",
     "node_modules/x",
     ".git/x",
   ])("keeps no-policy tracked default identical to classifyEngineFilePath for %s", (path) => {

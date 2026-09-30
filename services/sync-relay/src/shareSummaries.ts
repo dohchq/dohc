@@ -4,6 +4,7 @@ import {
 } from "@dohc/security-contract";
 import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
 import type {
+  SyncRelayGrantedShareRow,
   SyncRelayShareWithGrantRow,
   SyncRelayShareGrantRow,
   SyncRelayLinkInventoryRow,
@@ -28,6 +29,7 @@ function storedSelectorKind(
 }
 
 export function createShareSummaries(
+  labels: (shareId: string) => import("@dohc/security-contract/share-labels").ShareLabels,
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
 ) {
@@ -54,6 +56,8 @@ export function createShareSummaries(
         : null;
     return {
       shareId: share.shareId,
+      ...labels(share.shareId),
+      sharerName: null,
       // An unreadable row says so. It does not get a stand-in scope: empty
       // paths with no version would claim the entire live workspace, on a row
       // whose own reads answer 404. The row stays listed because it is the
@@ -77,7 +81,7 @@ export function createShareSummaries(
   };
 
   const grantedShareSummary = async (
-    row: SyncRelayShareWithGrantRow,
+    row: SyncRelayGrantedShareRow,
   ): Promise<Record<string, unknown>> => {
     const { share, grant } = row;
     // A pending invite has no recipient user id yet; surface the addressed
@@ -95,6 +99,7 @@ export function createShareSummaries(
       recipientUserId: grant.principalUserId,
       recipientEmail,
       revokedAtMs: grant.revokedAtMs,
+      automationsGeneration: row.automationsGeneration,
       ...(selector && grant.status === "active" && grant.revokedAtMs === null && grant.parentGrantId === null &&
         (grant.principalKind === "user" || grant.principalKind === "email")
         ? namedBrowserInvitation(grant.grantId, selector, grant.access) : {}),
@@ -105,6 +110,7 @@ export function createShareSummaries(
     row: SyncRelayShareWithGrantRow,
     granterEmail: string | null,
     genericChatWritable: boolean,
+    sharerName: string | null = granterEmail,
   ): Record<string, unknown> => {
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
@@ -113,6 +119,7 @@ export function createShareSummaries(
       ...shareSummaryBase(row),
       granterUserId: row.share.granterUserId,
       granterEmail,
+      sharerName,
       genericChatWritable,
     };
   };
@@ -210,6 +217,8 @@ export function createShareSummaries(
     return {
       shareId: share.shareId,
       grantId: grant.grantId,
+      ...labels(share.shareId),
+      sharerName: null,
       selector,
       ...(selector
         ? {}
@@ -221,6 +230,7 @@ export function createShareSummaries(
       revokedAtMs: grant.revokedAtMs,
       lastUsedAtMs: row.lastUsedAtMs,
       urlIssuedAtMs: row.urlIssuedAtMs,
+      automationsGeneration: row.automationsGeneration,
       dependents: await Promise.all(row.dependents.map(dependentGrantSummary)),
     };
   };

@@ -3,6 +3,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { CreationPartial } from "./creation";
 import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
@@ -140,6 +141,11 @@ const documentReadArgsSchema = z
 // after a timeout for example, the request returns its first result while
 // dohc runs instead of doing its work twice.
 export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
+
+const keptCopiesArgsSchema = z.object(argsBase).strict();
+const saveKeptCopyArgsSchema = z
+  .object({ ...argsBase, id: z.number().int() })
+  .strict();
 
 const documentEditArgsSchema = z
   .object({
@@ -293,6 +299,7 @@ const collectionCreateRecordArgsSchema = z
         { message: "a record name is one file name, not a path" },
       ),
     fields: collectionCreateFieldsSchema,
+    recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
   })
   .strict();
 
@@ -304,7 +311,8 @@ const automationArgs = {
   automation: z.string().min(1).max(200),
 };
 const automationRunIdArg = z.string().min(1).max(256);
-const automationRunsArgsSchema = z.object(automationArgs).strict();
+// `page` is the `next` of an earlier listing: the runs older than it.
+const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional() }).strict();
 const automationRunArgsSchema = z
   .object({ ...automationArgs, run: automationRunIdArg })
   .strict();
@@ -372,6 +380,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     args: collectionCreateRecordArgsSchema,
   }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -584,6 +594,18 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     kind: z.literal("public"),
     principalId: z.string().min(1),
     grantId: z.string().min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal("named"),
+    userId: z.string().min(1),
+    grantId: z.string().min(1),
+    grantGeneration: z.number().int().positive(),
+  }).strict(),
+  z.object({
+    kind: z.literal("link"),
+    grantId: z.string().min(1),
+    grantGeneration: z.number().int().positive(),
+    principalId: z.string().min(1),
   }).strict(),
   z.object({
     kind: z.literal("automation"),
@@ -842,9 +864,10 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
       ok: z.literal(true),
       recordId: z.string().min(1),
       recordPath: z.string().min(1),
+      kept: z.record(z.string(), z.json()).optional(),
     })
     .strict(),
-  rawFailureSchema,
+  rawFailureSchema.extend({ partial: CreationPartial.optional() }),
 ]);
 
 const documentReadResultSchema = z.discriminatedUnion("ok", [
@@ -872,6 +895,31 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
+// visible copy beside its file.
+const keptCopiesResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    keptCopies: z.array(z.object({
+      id: z.number().int(),
+      path: z.string().min(1),
+      keptAtMs: z.number().int().nonnegative(),
+    }).strict()),
+    more: z.boolean(),
+  }).strict(),
+  rawFailureSchema,
+]);
+// `saved` with the copy's path; `gone` when nothing is kept under that id any
+// more; `no-valid-name` when no name beside the file fits dohc's path limits,
+// so the copy stays kept.
+const saveKeptCopyResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("saved"), path: z.string().min(1) }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("gone") }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("no-valid-name") }).strict(),
+  rawFailureSchema,
+]);
+
 // What an automation run did, as this computer's run history keeps it:
 // a field it wrote, a record it added, a field someone else had changed
 // since the run planned it (kept as they left it), a record it could no
@@ -886,15 +934,18 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("created"), recordId: z.string(), path: z.string() }).strict(),
   z.object({ kind: z.literal("kept"), recordId: z.string(), path: z.string(), field: z.string(), planned: z.json(), current: z.json() }).strict(),
   z.object({ kind: z.literal("skipped"), recordId: z.string(), path: z.string(), reason: z.string() }).strict(),
+  // An edit that landed, with the record version it was sent at and the one it left.
   z.object({
     kind: z.literal("dataset-edit"),
     rules: automationDatasetRulesSchema,
     operationId: z.string(),
     tableId: z.string(),
     recordId: automationDatasetRecordIdSchema,
+    expectedVersion: z.number().int().positive(),
     version: z.number().int().positive(),
     fields: z.array(z.object({ fieldId: z.string(), field: z.string(), before: z.json(), after: z.json() }).strict()),
   }).strict(),
+  // A record the run added. `deletes` are the approved deletes Undo may use on it, as the run recorded them.
   z.object({
     kind: z.literal("dataset-created"),
     rules: automationDatasetRulesSchema,
@@ -902,6 +953,7 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
     tableId: z.string(),
     recordId: automationDatasetRecordIdSchema,
     version: z.number().int().positive(),
+    deletes: z.array(z.string()),
   }).strict(),
   // An action that ran, by its label then, and the dataset revision its commit made. When the
   // rules named a reverse action, `reverseOperationId` is it and `undo` is its input; Undo runs that or nothing.
@@ -929,11 +981,18 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
 ]);
 // The change a run is for. `kind` is null for a dataset run that failed
 // before it could carry its change; `by` is null when the change did not say.
+// A person the owner shared with, or an Edit share link, the relay accepted
+// the change from. A link is its grant, never a person's account.
+const automationSharedAuthorSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("named"), userId: z.string().min(1), grantId: z.string().min(1), grantGeneration: z.number().int().positive() }).strict(),
+  z.object({ kind: z.literal("link"), grantId: z.string().min(1), grantGeneration: z.number().int().positive(), principalId: z.string().min(1) }).strict(),
+]);
 const automationTriggerSchema = z
   .object({
     kind: z.enum(["added", "changed", "removed", "message", "button", "schedule"]).nullable(),
     recordId: z.string().nullable(),
     by: z.enum(["human", "agent", "automation"]).nullable(),
+    sharedAuthor: automationSharedAuthorSchema.nullable(),
     depth: z.number().int().nonnegative(),
   })
   .strict();
@@ -946,6 +1005,9 @@ const automationRunFields = {
   trigger: automationTriggerSchema,
   // The run began under another version of the automation.
   definitionChanged: z.boolean(),
+  // It failed before it started, as a chain stop or a change too large to
+  // start automations for, so it cannot run again.
+  neverStarted: z.boolean(),
   // The chain depth cap stopped it before it ran.
   chainStopped: z.boolean(),
   undone: z.boolean(),
@@ -955,6 +1017,8 @@ const automationRunsResultSchema = z.discriminatedUnion("ok", [
     .object({
       ok: z.literal(true),
       runs: z.array(z.object({ ...automationRunFields, changes: z.number().int().nonnegative() }).strict()),
+      // The `page` that lists the older runs, or null after the oldest.
+      next: z.string().min(1).nullable(),
     })
     .strict(),
   rawFailureSchema,
@@ -994,7 +1058,7 @@ const automationRetryResultSchema = z.union([
   z
     .object({
       ok: z.literal(false),
-      status: z.enum(["definition-changed", "progress-gone"]),
+      status: z.literal("definition-changed"),
       repeatsMessages: z.boolean(),
       reason: z.string().min(1),
     })
@@ -1058,6 +1122,8 @@ export const cliResultSchemas = {
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
+  keptCopies: keptCopiesResultSchema,
+  saveKeptCopy: saveKeptCopyResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

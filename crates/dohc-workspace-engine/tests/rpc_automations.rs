@@ -68,6 +68,8 @@ async fn call_error(
 
 fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {
     CollectionRecordApplyFacts {
+        shared_author: None,
+        live_cursor: None,
         collection_path: "tasks".to_owned(),
         record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         created: false,
@@ -197,6 +199,8 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             "automations.listClaims",
             json!({ "automationId": "collection:x#y" }),
         ),
+        ("automations.getClaim", json!({ "claimId": "atc_x" })),
+        ("automations.pruneHistory", json!({ "keep": [] })),
         (
             "automations.settle",
             json!({ "claimId": "atc_x", "state": "done" }),
@@ -354,6 +358,8 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             "authorOriginId": null,
             "actorKind": null,
             "onBehalfOf": null,
+            "sharedAuthor": null,
+            "liveCursor": null,
             "fields": [],
             "fieldsOmitted": 0,
         })
@@ -428,6 +434,8 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             "authorOriginId": "alice",
             "actorKind": "human",
             "onBehalfOf": null,
+            "sharedAuthor": null,
+            "liveCursor": null,
             "fields": [{
                 "field": "status",
                 "historyId": 1,
@@ -652,6 +660,71 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             "the history carries no field facts"
         );
         assert_eq!(claims[0]["error"], json!(AUTOMATION_CHAIN_STOPPED));
+        assert_eq!(history["next"], Value::Null, "one page holds them all");
+
+        // Pages of two: each cursor starts after the last claim listed.
+        let mut paged = Vec::new();
+        let mut before = Value::Null;
+        loop {
+            let mut params = json!({ "automationId": AUTOMATION, "limit": 2 });
+            if !before.is_null() {
+                params["before"] = before.clone();
+            }
+            let page = call(
+                &transport,
+                &handle,
+                &mut id,
+                "automations.listClaims",
+                params,
+            )
+            .await;
+            paged.extend(page["claims"].as_array().expect("claims").iter().cloned());
+            before = page["next"].clone();
+            if before.is_null() {
+                break;
+            }
+        }
+        assert_eq!(paged, claims, "the pages hold the same history");
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "automations.listClaims",
+            json!({ "automationId": AUTOMATION, "before": "not-a-cursor" }),
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+
+        let found = call(
+            &transport,
+            &handle,
+            &mut id,
+            "automations.getClaim",
+            json!({ "claimId": claims[4]["claimId"] }),
+        )
+        .await;
+        assert_eq!(
+            found["claim"], claims[4],
+            "an exact lookup finds the oldest"
+        );
+        let missing = call(
+            &transport,
+            &handle,
+            &mut id,
+            "automations.getClaim",
+            json!({ "claimId": "atc_missing" }),
+        )
+        .await;
+        assert_eq!(missing["claim"], Value::Null);
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "automations.getClaim",
+            json!({ "claimId": "atc_x", "automationId": AUTOMATION }),
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
         claims[0]["claimId"].clone()
     };
     for (claim_id, wrong) in [
@@ -725,6 +798,49 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         let error = call_error(&transport, &handle, &mut id, "automations.settle", params).await;
         assert_eq!(error.code, ErrorCode::InvalidParams, "{wrong}");
     }
+
+    // Long past 30 days, the two done claims and the older failure leave run
+    // history. The newest failure, which the notice offers, stays, and every
+    // failure stays counted.
+    let pruned = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.pruneHistory",
+        json!({ "keep": [], "nowMs": 10_000_000_000_000_i64 }),
+    )
+    .await;
+    assert_eq!(pruned, json!({ "pruned": 3, "more": false }));
+    let history = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.listClaims",
+        json!({ "automationId": AUTOMATION }),
+    )
+    .await;
+    assert_eq!(
+        history["claims"]
+            .as_array()
+            .expect("claims")
+            .iter()
+            .map(|claim| claim["state"].as_str().expect("state"))
+            .collect::<Vec<_>>(),
+        vec!["failed", "running"]
+    );
+    let failures = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.failures",
+        json!({}),
+    )
+    .await;
+    assert_eq!(failures["failures"][0]["generation"], json!(3));
+    assert_eq!(
+        failures["failures"][0]["error"],
+        json!(AUTOMATION_RECLAIM_EXHAUSTED)
+    );
 }
 
 /// A record added on this computer and then written through
@@ -866,6 +982,8 @@ async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
             "authorOriginId": null,
             "actorKind": null,
             "onBehalfOf": null,
+            "sharedAuthor": null,
+            "liveCursor": null,
             "fields": [{
                 "field": "status",
                 "historyId": null,
@@ -1091,6 +1209,7 @@ async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
         "versionedText.write",
         json!({
             "versionId": "main",
+            "publish": true,
             "createOnly": true,
             "objectId": "object-beta",
             "path": "tasks/beta.md",
@@ -1118,7 +1237,7 @@ async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
         &mut id,
         "versionedText.write",
         json!({
-            "versionId": "main", "createOnly": true, "path": "tasks/beta.md",
+            "versionId": "main", "publish": true, "createOnly": true, "path": "tasks/beta.md",
             "text": "must not replace beta", "momentId": "collision-loser", "origin": "api",
         }),
     )
@@ -1183,7 +1302,7 @@ fn claimed_events(
 /// it. `chats.messages.get` reads the whole message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn group_messages_written_here_claim_through_rpc() {
-    const TASK: &str = "collection:Trip/Tasks#task";
+    const TASK: &str = "collection:object-tasks#task";
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let service = Arc::new(EngineService::new());
@@ -1272,7 +1391,7 @@ async fn group_messages_written_here_claim_through_rpc() {
     assert_eq!(claimed.len(), 1, "{claimed:?}");
     assert_eq!(claimed[0]["trigger"], json!({ "key": "message:m1" }));
     assert_eq!(claimed[0]["recordId"], Value::Null);
-    assert_eq!(claimed[0]["collectionPath"], json!("Trip/Tasks"));
+    assert_eq!(claimed[0]["collectionPath"], Value::Null);
     assert_eq!(claimed[0]["workspaceId"], json!(WORKSPACE_ID));
 
     let send = async |id: &mut u64, message_id: &str, body: &str| {
@@ -1313,6 +1432,8 @@ async fn group_messages_written_here_claim_through_rpc() {
             "authorOriginId": null,
             "actorKind": "human",
             "onBehalfOf": "ada",
+            "sharedAuthor": null,
+            "liveCursor": null,
             "fields": [],
             "fieldsOmitted": 0,
             "message": {
@@ -1512,7 +1633,7 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
     let pressed = &answer["claim"];
     assert_eq!(pressed["trigger"], json!({ "key": "press:press-1" }));
     assert_eq!(pressed["recordId"], json!("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"));
-    assert_eq!(pressed["collectionPath"], json!("Invoices"));
+    assert_eq!(pressed["collectionPath"], Value::Null);
     assert_eq!(pressed["depth"], json!(0));
     assert_eq!(
         pressed["change"],
@@ -1521,6 +1642,8 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
             "authorOriginId": null,
             "actorKind": "human",
             "onBehalfOf": "user:ada",
+            "sharedAuthor": null,
+            "liveCursor": null,
         })
     );
     assert_eq!(pressed["state"], json!("pending"));
@@ -1588,6 +1711,8 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
             "authorOriginId": "dohc-mcp",
             "actorKind": "agent",
             "onBehalfOf": "user:ada",
+            "sharedAuthor": null,
+            "liveCursor": null,
         })
     );
     // A press names who made it; an automation never presses.

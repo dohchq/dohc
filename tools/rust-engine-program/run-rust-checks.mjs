@@ -57,6 +57,7 @@ import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
+const preparedRuntime = process.argv.includes("--prepared-runtime");
 
 // The machine's build budget. On the shared dev box the gate refuses to
 // start under the free-space floor, takes one of the four build slots before
@@ -167,7 +168,8 @@ function toolAvailable(probe) {
 const required = [
   {
     name: "fixture drift",
-    cmd: "node packages/app-backend-runtime/scripts/build.mjs && node tools/rust-engine-program/check-fixture-drift.mjs",
+    // The public-collection recovery test loads the relay's built runtime.
+    cmd: `${preparedRuntime ? "" : "node packages/app-backend-runtime/scripts/build.mjs && "}node tools/rust-engine-program/check-fixture-drift.mjs`,
     skipCode: 2,
     skipReason: "yjs/tsx unavailable; fixture drift not checked",
   },

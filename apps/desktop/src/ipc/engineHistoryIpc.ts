@@ -19,14 +19,14 @@ import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 
 type MomentAuthor = NonNullable<VersionedTextMomentSummary["authors"]>[number];
 
-// Main supplies how an author reads. An agent follows the display-name rule
-// the chat rail uses (onBehalfOf "local" -> the cloud email or "You";
-// anything else is already a user-facing label). A Collection automation
+// Main supplies how an author reads. An agent working for this computer's
+// person reads as the configured agent name, and any other agent as
+// "Agent". A Collection automation
 // reads as its name and the Collection it belongs to; null leaves any other
 // automation on the moment's origin label.
 export interface EngineMomentAuthorNames {
   agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
-  automation(automationId: string): { name: string; collection: string } | null;
+  automation(automationId: string): { name: string; collection?: string } | null;
   named(author: Extract<MomentAuthor, {kind: "named"}>): string;
 }
 
@@ -77,6 +77,7 @@ function engineMomentBaseForIpc(
       ? { agentAuthorName }
       : {}),
     ...(author?.kind === "public" ? { publicAuthor: author } : {}),
+    ...(author?.kind === "link" ? { linkAuthor: author } : {}),
     ...automationAuthorOf(author, names),
     ...(author?.kind === "named"
       ? { namedAuthor: { userId: author.userId, label: names.named(author) } }

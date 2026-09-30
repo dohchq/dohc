@@ -31,6 +31,7 @@ let exposeHeldLogQuery = false;
 
 const DEFAULT_META: ViewMeta = {
   access: "view",
+  subjectName: "Trip plans",
   effectiveSelector: {
     paths: [],
     versionId: null,
@@ -250,6 +251,8 @@ describe("App", () => {
     ["edit", null, "doc.md"],
     ["edit", "saved-version", "doc.md"],
     ["edit", null, "notes.txt"],
+    ["edit", null, "trip/packing/collection.yaml"],
+    ["comment", null, "trip/packing/automations.yaml"],
     ["view", null, null],
   ] as const)("explains link access and available next steps for %s, version=%s, file=%s", async (access, versionId, path) => {
     const meta: ViewMeta = {...DEFAULT_META, access, effectiveSelector: {access, versionId, paths: ["docs"]}};
@@ -273,7 +276,7 @@ describe("App", () => {
     expect(copy).toContain("Deleted files and files moved out lose their readable history.");
     expect(copy).toContain("Open in dohc");
     expect(copy.includes("Choose a file in Files")).toBe(path !== null);
-    expect(copy.includes("Choose Edit file")).toBe(access === "edit" && versionId === null && path === "doc.md");
+    expect(copy.includes("Choose Edit file")).toBe(access === "edit" && versionId === null && (path === "doc.md" || path === "trip/packing/collection.yaml"));
     if (access !== "edit") expect(copy).toContain(access === "view" ? "does not let you comment or edit" : "does not let you edit files");
     if (versionId !== null) {
       expect(copy).toContain("pinned version");
@@ -281,6 +284,24 @@ describe("App", () => {
     }
     expect(copy).toContain(access === "view" ? "Read the discussion in Comments." : "Use Comments to read or post comments.");
     expect(buttonNamed("Open in dohc")).toBeDefined();
+  });
+
+  it("opens a Collection's schema in the plain-text editor, not the live document editor", async () => {
+    const meta: ViewMeta = {...DEFAULT_META, access: "edit", effectiveSelector: {access: "edit", versionId: null, paths: ["trip"]}};
+    const files: SharedFile[] = [{path: "trip/packing/collection.yaml", blobSha256: "a".repeat(64), contentKind: "text"}];
+    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const route = requestPath(input);
+      if (route === "/api/view/meta") return jsonResponse(meta);
+      if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
+      if (route.startsWith("/api/view/blob/")) return new Response("name: Packing\n");
+      return fallback(input, init);
+    }));
+    await renderApp();
+    await act(async () => buttonNamed("Edit file")!.click());
+    await settle(() => container.querySelector("textarea") !== null);
+    expect(container.querySelector("textarea")!.value).toBe("name: Packing\n");
+    expect(container.querySelector('[role="textbox"]')).toBeNull();
   });
 
   it("aborts parked Comments activity when the viewer unmounts", async () => {
@@ -709,7 +730,7 @@ describe("App", () => {
     await settle(() => firstHandoffSignal?.aborted === true);
 
     expect(navigate).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Shared by a dohc user");
+    expect(container.textContent).toContain("Trip plans");
     expect(container.textContent).not.toContain("If dohc didn't open");
   });
 
@@ -782,7 +803,7 @@ describe("App", () => {
     await renderApp();
 
     expect(container.querySelector("header")?.textContent).toContain(
-      "Shared by a dohc user",
+      "Trip plans",
     );
     expect(container.querySelector(".badge")?.textContent).toBe("View");
     expect(container.querySelector(".freshness")?.textContent).toBe(
@@ -827,7 +848,7 @@ describe("App", () => {
 
     expect(currentRequests).toBe(2);
     expect(container.querySelector("header")?.textContent).toContain(
-      "Shared by a dohc user",
+      "Trip plans",
     );
     expect(container.querySelector("main.content")?.textContent).toBe(
       "No files in this share yet.",
@@ -1213,7 +1234,7 @@ describe("App", () => {
       "This file changed. Refreshing.",
     );
     expect(container.querySelector("header")?.textContent).toContain(
-      "Shared by a dohc user",
+      "Trip plans",
     );
     expect(container.querySelector("h1")?.textContent).toBe(staleFile.path);
     expect(container.querySelector(".badge")?.textContent).toBe("View");
@@ -1273,7 +1294,7 @@ describe("App", () => {
       "This file isn't available right now.",
     );
     expect(container.querySelector("header")?.textContent).toContain(
-      "Shared by a dohc user",
+      "Trip plans",
     );
     expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
       .toContain(file.path);

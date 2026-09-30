@@ -12,7 +12,7 @@ use crate::store::{
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
-    enqueue_job, has_binary_blob, put_binary_blob, put_binary_blob_verified,
+    enqueue_job, has_binary_blob, put_binary_blob_verified,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -876,6 +876,27 @@ impl VersionedTextStore<'_> {
             let mut binary_write = None;
             let (choice, resolution) = match &input.resolution {
                 ResolveConflictKind::KeepCurrent => {
+                    if keep_current_needs_lineage_effect(tx, &conflict)?
+                        && let Some(current) = &conflict.current.snapshot
+                    {
+                        let mut kept = write_input(
+                            input,
+                            &conflict.target_version_id,
+                            &conflict.path,
+                            &current.text,
+                            &input.write_moment_id,
+                        );
+                        kept.object_id = current.object_id.clone();
+                        validate_write_input(&kept)?;
+                        let result = write_text_in_tx(tx, &kept)?;
+                        enqueue_write(
+                            tx,
+                            &result,
+                            conflict_state_preimage(&conflict.current),
+                            "resolve",
+                        )?;
+                        write = Some(result);
+                    }
                     (ConflictChoice::Current, ConflictResolution::KeptCurrent)
                 }
                 ResolveConflictKind::ApplyIncoming => {
@@ -1029,6 +1050,19 @@ impl VersionedTextStore<'_> {
     }
 }
 
+/// A shared lineage resolution needs a durable head that every peer can adopt.
+#[doc(hidden)]
+pub fn keep_current_needs_lineage_effect(
+    tx: &Transaction<'_>,
+    conflict: &TextConflict,
+) -> Result<bool, DomainError> {
+    let Some(current) = &conflict.current.snapshot else {
+        return Ok(false);
+    };
+    tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_status='exact')",
+        params![conflict.workspace_id,conflict.target_version_id,current.object_id],|row| row.get(0)).map_err(DomainError::sql_corrupt)
+}
+
 #[doc(hidden)]
 pub fn enqueue_write(
     tx: &Transaction<'_>,
@@ -1043,14 +1077,13 @@ pub fn enqueue_write(
     )? {
         return Ok(());
     }
-    let sha = put_binary_blob(tx, result.snapshot.text.as_bytes())?;
     enqueue_job(
         tx,
         &MaterializationJobSpec {
             job_id: format!("{prefix}-mat_{}", result.moment.moment_id),
             workspace_id: result.snapshot.workspace_id.clone(),
             target_path: result.snapshot.path.clone(),
-            content_sha256: sha,
+            content_sha256: result.snapshot.blob_sha256.clone(),
             preimage,
             target_generation: result.moment.moment_order,
             now_ms: result.moment.recorded_at_ms,
@@ -1068,14 +1101,13 @@ pub fn enqueue_delete(
     if !version_is_active(tx, &result.before.workspace_id, &result.before.version_id)? {
         return Ok(());
     }
-    let sha = put_binary_blob(tx, result.before.text.as_bytes())?;
     enqueue_delete_job(
         tx,
         &MaterializationJobSpec {
             job_id: format!("{prefix}-mat_{}", result.moment.moment_id),
             workspace_id: result.before.workspace_id.clone(),
             target_path: result.before.path.clone(),
-            content_sha256: sha,
+            content_sha256: result.before.blob_sha256.clone(),
             preimage: Preimage::Present(result.before.blob_sha256.clone()),
             target_generation: result.moment.moment_order,
             now_ms: result.moment.recorded_at_ms,
@@ -2273,7 +2305,7 @@ mod tests {
                     )
                     .map_err(DomainError::sql_persist)?;
                 }
-                put_binary_blob(tx, bytes).map_err(DomainError::from)?;
+                dohc_engine_storage::put_binary_blob(tx, bytes).map_err(DomainError::from)?;
                 write_binary_file_in_tx(
                     tx,
                     &WriteBinaryFile {
@@ -2336,7 +2368,7 @@ mod tests {
                     [WORKSPACE_ID],
                 )
                 .map_err(DomainError::sql_persist)?;
-                put_binary_blob(tx, bytes).map_err(DomainError::from)?;
+                dohc_engine_storage::put_binary_blob(tx, bytes).map_err(DomainError::from)?;
                 write_binary_file_in_tx(
                     tx,
                     &WriteBinaryFile {

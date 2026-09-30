@@ -1440,7 +1440,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             .expect("mismatched-kind disposition");
         assert_eq!(
             (deferred, updates, refusal_rows),
-            (0, 2, 1),
+            (0, 2, 0),
             "the refused clock and its dependent descendant must both enter the causal lineage"
         );
     }
@@ -1914,7 +1914,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
         text.contains(" valid-after"),
         "the valid update after the refusal must still apply: {text:?}"
     );
-    let (queued, applied_updates, refusal_rows, reason): (i64, i64, i64, String) = engine
+    let (queued, applied_updates, refusal_rows): (i64, i64, i64) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
                 conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
@@ -1923,13 +1923,8 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))?,
                 conn.query_row(
                     "SELECT COUNT(*) FROM replication_pending_refusals \
-                     WHERE workspace_id='ws' AND origin_id='b-invalid-collision' AND origin_seq=0",
-                    [],
-                    |row| row.get(0),
-                )?,
-                conn.query_row(
-                    "SELECT reason_message FROM replication_pending_refusals \
-                     WHERE workspace_id='ws' AND origin_id='b-invalid-collision' AND origin_seq=0",
+                     WHERE workspace_id='ws' AND origin_id='b-invalid-collision' AND origin_seq=0 \
+                       AND reason_message='parked ydoc.update could not be applied'",
                     [],
                     |row| row.get(0),
                 )?,
@@ -1943,9 +1938,8 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
     );
     assert_eq!(
         refusal_rows, 1,
-        "omitting refusal persistence loses the invalid coordinate"
+        "the rejected update never entered the lineage, so its refusal must survive"
     );
-    assert_eq!(reason, "parked ydoc.update could not be applied");
     assert_eq!(
         drain_deferred_ydoc_for_key(
             &mut engine,
@@ -2283,7 +2277,7 @@ fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
 }
 
 #[test]
-fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
+fn a_deferred_base_preserves_local_only_rows_in_a_conflict() {
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -2389,7 +2383,7 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
         .lineage_replacements
         .first()
         .expect("local-only lineage replacement");
-    assert_eq!(replacement.recovered_paths.len(), 1);
+    assert!(replacement.recovered_paths.is_empty());
     let (head, recovered, update_rows, seed_source): (String, String, i64, Option<String>) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -2401,9 +2395,8 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
                     |row| row.get(0),
                 )?,
                 conn.query_row(
-                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
-                         WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
-                    [&replacement.recovered_paths[0]],
+                    "SELECT b.text FROM conflicts c JOIN blobs b ON b.sha256=c.incoming_blob_sha256 WHERE c.status='open'",
+                    [],
                     |row| row.get(0),
                 )?,
                 conn.query_row(
@@ -2423,8 +2416,8 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
             ))
         })
         .expect("deferred replacement state");
-    assert_eq!(head, "base-part");
-    assert_eq!(recovered, "local-part ");
+    assert_eq!(head, "local-part ");
+    assert_eq!(recovered, "base-part");
     assert_eq!(
         update_rows, 0,
         "the local lineage must not remain in the winner"

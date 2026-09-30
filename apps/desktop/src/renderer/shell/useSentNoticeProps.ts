@@ -14,6 +14,9 @@ export const NOT_HERE_NOTE =
   "This workspace isn't on this computer. Join it from Manage workspaces, then choose Open again.";
 // Open beside it is the way to try again.
 export const SHARE_LOOKUP_FAILED_NOTE = "dohc could not open this share.";
+export const AUTOMATION_NOT_HERE_NOTE = "dohc cannot find this automation's Collection on this computer.";
+// Open beside it is the way to try again.
+const AUTOMATION_LOOKUP_FAILED_NOTE = "dohc could not open this automation.";
 
 // Main dismisses a failed run's notice once its run is queued again.
 const nothingToReread = () => undefined;
@@ -37,7 +40,11 @@ export function useSentNoticeProps(input: {
   workspaceId: string;
   workspaces: readonly WorkspaceSummary[];
   openFile: (path: string) => void;
-  openAutomation: (automationId: string) => void;
+  /**
+   * Opens an automation's runs, at the run a notice names when this
+   * computer ran it; resolves to a sentence for the row when it cannot.
+   */
+  openAutomation: (automationId: string, run: string | null) => Promise<string | null>;
   onSwitchWorkspace: (workspace: WorkspaceSummary, openPath?: string) => void;
   onOpenShare: (share: NoticeShare) => void;
   reportShellError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
@@ -64,12 +71,12 @@ export function useSentNoticeProps(input: {
     [workspaceId, workspaces],
   );
   const rows = useMemo(
-    () => (sentNotices?.notices ?? []).map(describe),
-    [describe, sentNotices?.notices],
+    () => (sentNotices?.notices ?? []).filter(notice => notice.kind !== "sync-refusal" || notice.workspaceId !== workspaceId).map(describe),
+    [describe, sentNotices?.notices, workspaceId],
   );
   const toast = useMemo(
-    () => (sentNotices?.toast ? describe(sentNotices.toast) : null),
-    [describe, sentNotices?.toast],
+    () => (sentNotices?.toast && (sentNotices.toast.kind !== "sync-refusal" || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
+    [describe, sentNotices?.toast, workspaceId],
   );
 
   // A list main could not read is a failure with a way to ask again.
@@ -130,7 +137,14 @@ export function useSentNoticeProps(input: {
           if (place.workspace.workspaceId !== workspaceId) {
             onSwitchWorkspace(place.workspace, place.path ?? undefined);
           } else if (place.mount === null && notice.target?.automation && AUTOMATION_NOTICE_KINDS.has(notice.kind)) {
-            openAutomation(notice.target.automation);
+            let note: string | null;
+            try {
+              // Only the computer that ran a run holds it.
+              note = await openAutomation(notice.target.automation, notice.postedHere ? notice.target.run ?? null : null);
+            } catch {
+              note = AUTOMATION_LOOKUP_FAILED_NOTE;
+            }
+            return signal.aborted ? null : note;
           } else if (place.path !== null) {
             openFile(place.path);
           }

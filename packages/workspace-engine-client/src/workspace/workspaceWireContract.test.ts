@@ -161,7 +161,7 @@ describe("workspace wire schemas", () => {
   it("rejects excess fields nested in collection results", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         records: [
           {
             id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -184,6 +184,7 @@ describe("workspace wire schemas", () => {
   it("decodes a button field definition", () => {
     const result = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
       path: "invoices",
+      objectId: "object-invoices",
       status: "valid",
       reasons: [],
       schema: {
@@ -204,6 +205,7 @@ describe("workspace wire schemas", () => {
           collections: [
             {
               path: "projects",
+              objectId: "object-projects",
               status: "degraded",
               reasons: [{ code, path: "/fields" }],
             },
@@ -215,7 +217,7 @@ describe("workspace wire schemas", () => {
 
     for (const code of reasonCodes.fieldValueReasonCodes) {
       const result = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         records: [
           {
             id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -258,7 +260,7 @@ describe("workspace wire schemas", () => {
       };
     });
     const decoded = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-      collection: { path: "pipeline", status: "valid", reasons: [] },
+      collection: { path: "pipeline", objectId: "object-pipeline", status: "valid", reasons: [] },
       records: [
         {
           id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -313,7 +315,7 @@ describe("workspace wire schemas", () => {
     };
 
     const queried = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-      collection: { path: "projects", status: "valid", reasons: [] },
+      collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
       records: [record],
       groups: [{ value: marker, records: [record] }],
       nextCursor: {
@@ -330,7 +332,7 @@ describe("workspace wire schemas", () => {
     const fetched = decodeWorkspaceResult(
       WORKSPACE_METHOD.collectionsGetRecord,
       {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         record,
         history: [
           {
@@ -378,7 +380,7 @@ describe("workspace wire schemas", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.collectionsList, {
         collections: [
-          { path: "projects", status: "valid", reasons: [] },
+          { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         ],
         nextCursor: null,
       }).collections,
@@ -386,6 +388,7 @@ describe("workspace wire schemas", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
         path: "projects",
+        objectId: "object-projects",
         status: "valid",
         reasons: [],
         schema: {
@@ -495,7 +498,7 @@ describe("workspace wire schemas", () => {
   it("rejects malformed collection integer markers", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-        collection: { path: "projects", status: "valid", reasons: [] },
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         records: [
           {
             id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -573,6 +576,8 @@ describe("automations wire schemas", () => {
       authorOriginId: "agent-editor",
       actorKind: "agent",
       onBehalfOf: "user:ice",
+      sharedAuthor: null,
+      liveCursor: null,
     },
     state: "pending",
     attempts: 1,
@@ -673,6 +678,32 @@ describe("automations wire schemas", () => {
     ).toBeNull();
   });
 
+  it("decodes the person or Edit link a live change came through, and nothing else in its place", () => {
+    const link = { kind: "link", grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" };
+    const named = { kind: "named", userId: "user-ana", grantId: "grant-ana", grantGeneration: 1 };
+    for (const sharedAuthor of [link, named]) {
+      const claim = { ...summary, change: { ...summary.change, sharedAuthor } };
+      expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim)).toEqual(claim);
+    }
+    for (const sharedAuthor of [
+      { ...link, userId: "user-ana" },
+      { kind: "link", grantId: "grant-link", grantGeneration: 2 },
+      { kind: "owner", principalId: "owner" },
+    ]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, { ...summary, change: { ...summary.change, sharedAuthor } }))
+        .toThrow(ProtocolShapeError);
+    }
+  });
+
+  it("decodes the live journal cursor a live change came in, and nothing but a whole number", () => {
+    const claim = { ...summary, change: { ...summary.change, liveCursor: 41 } };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim)).toEqual(claim);
+    for (const liveCursor of [1.5, "41", undefined]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, { ...summary, change: { ...summary.change, liveCursor } }))
+        .toThrow(ProtocolShapeError);
+    }
+  });
+
   it("decodes a history-keyed failed claim from settle and retry without facts", () => {
     const failed = {
       ...summary,
@@ -682,6 +713,8 @@ describe("automations wire schemas", () => {
         authorOriginId: null,
         actorKind: null,
         onBehalfOf: null,
+        sharedAuthor: null,
+        liveCursor: null,
       },
       state: "failed",
       error: "handler threw",
@@ -723,16 +756,26 @@ describe("automations wire schemas", () => {
     ).toEqual(removed);
   });
 
-  it("decodes the claim history", () => {
-    const history = { claims: [summary, { ...summary, state: "done" }] };
+  it("decodes a page of claim history, one claim, and a prune", () => {
+    const history = { claims: [summary, { ...summary, state: "done" }], next: "1000:atc_x" };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, history),
     ).toEqual(history);
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, {
         claims: [],
+        next: null,
       }),
-    ).toEqual({ claims: [] });
+    ).toEqual({ claims: [], next: null });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, { claims: [] }),
+    ).toThrow();
+    for (const claim of [summary, null]) {
+      expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsGetClaim, { claim })).toEqual({ claim });
+    }
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsPruneHistory, { pruned: 3, more: false }),
+    ).toEqual({ pruned: 3, more: false });
   });
 
   it("decodes the failure listing and refuses a row without a generation", () => {
@@ -820,7 +863,7 @@ describe("automations wire schemas", () => {
       ...summary,
       automationId: "collection:Invoices#mark-paid",
       trigger: { key: "press:press-1" },
-      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada" },
+      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada", sharedAuthor: null, liveCursor: null },
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: false, claim: pressed }),
@@ -840,7 +883,7 @@ describe("automations wire schemas", () => {
       automationId: mark.automationId,
       trigger: { key: "schedule:2000" },
       recordId: null,
-      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null },
+      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null },
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [due], mark }),

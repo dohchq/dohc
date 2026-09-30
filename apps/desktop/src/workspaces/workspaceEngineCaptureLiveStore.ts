@@ -31,6 +31,8 @@ import {
   type VersionedComparisonRecord,
   type VersionedTextListEntry,
   type VersionedTextReadValue,
+  type KeptCopy,
+  type KeptCopySaveResult,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
@@ -75,6 +77,7 @@ const VERSIONED_TEXT_STORE_ERROR_CODES = [
   "persist-failed",
   "state-corrupt",
   "target-path-exists",
+  "write-precondition-failed",
   "version-name-conflict",
   "version-not-found",
   "workspace-mismatch",
@@ -161,6 +164,10 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
   watcherStatus?(): Promise<WatcherStatusResult>;
+  // Files dohc moved aside while saving because another program changed
+  // them meanwhile, and the step that moves one to a visible copy.
+  listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
+  saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
 };
 
@@ -259,6 +266,9 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
   if (author.kind === "public") return { kind: "public", principalId: author.principalId, grantId: author.grantId };
   if (author.kind === "named") {
     return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
+  }
+  if (author.kind === "link") {
+    return { kind: "link", grantId: author.grantId, grantGeneration: author.grantGeneration, principalId: author.principalId };
   }
   if (author.kind === "automation") {
     return {
@@ -558,8 +568,12 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
 // relay replication, never from this computer.
 function adapterAuthor(author: MomentWriteAuthor): WriteAuthor {
   if (author.kind === "automation") {
-    if (author.onBehalfOf === undefined) throw new VersionedTextStoreError("invalid-input", "The write does not name the person it acts for.");
-    return { kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth };
+    return {
+      kind: "automation",
+      automationId: author.automationId,
+      ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
+      depth: author.depth,
+    };
   }
   return captureAuthor(author);
 }
@@ -884,7 +898,10 @@ export function createCaptureLiveStores(
       workspaceId: string;
       versionId: string;
       path: string;
+      requestId?: string;
+      expectedSha256?: string;
       text: string;
+      publish?: boolean;
       createOnly?: boolean;
       restoreBeforeMomentId?: string;
       metadata: ActorNeutralWriteMetadata;
@@ -892,17 +909,19 @@ export function createCaptureLiveStores(
       momentId?: string;
     }) {
       const { metadata, author, ...writeInput } = input;
-      const requestId = input.createOnly ? randomUUID() : undefined;
+      const requestId = input.requestId ?? randomUUID();
       const raw = await runMutation(
         async (adapter) =>
           await adapter.writeTextFile({
             ...writeInput,
-            ...(requestId ? { requestId } : {}),
+            requestId,
             ...(author ? { author: adapterAuthor(author) } : {}),
             metadata: adapterMetadata(metadata),
           }),
       );
       return {
+        materialized: raw.materialized,
+        materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(raw.snapshot, input.metadata),
         moment: momentFromWire(
@@ -917,16 +936,21 @@ export function createCaptureLiveStores(
       workspaceId: string;
       versionId: string;
       path: string;
+      requestId?: string;
+      expectedSha256?: string;
       bytes: Uint8Array;
+      createOnly?: boolean;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       momentId?: string;
     }) {
       const { metadata, author, ...writeInput } = input;
+      const requestId = input.requestId ?? randomUUID();
       const raw = await runMutation(
         async (adapter) =>
           await adapter.writeBinaryFile({
             ...writeInput,
+            requestId,
             ...(author ? { author: adapterAuthor(author) } : {}),
             metadata: adapterMetadata(metadata),
           }),
@@ -946,6 +970,8 @@ export function createCaptureLiveStores(
         metadataOrigin: input.metadata.origin,
       };
       return {
+        materialized: raw.materialized,
+        materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(value, input.metadata),
         moment: momentFromWire(
@@ -1371,6 +1397,14 @@ export function createCaptureLiveStores(
 
     async watcherStatus() {
       return await runRead(async (adapter) => await adapter.watcherStatus());
+    },
+
+    async listKeptCopies() {
+      return await runRead(async (adapter) => await adapter.listKeptCopies());
+    },
+
+    async saveKeptCopy(id: number) {
+      return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
     },
 
     async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {

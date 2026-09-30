@@ -5,6 +5,7 @@ import { skippedRunsNotice } from "./skippedRunsNotice";
 
 const schedule: ScheduledAutomation = {
   automationId: "collection:Reports#weekday",
+  collectionPath: "Reports",
   name: "Weekday report",
   trigger: { kind: "schedule", every: "weekday", at: "09:00", timezone: "UTC" },
   scheduleHash: "hash",

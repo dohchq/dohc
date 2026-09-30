@@ -74,6 +74,8 @@ impl EngineService {
                 | "sync.resetClaimRefusal"
                 | "sync.adoptJoinIdentity"
                 | "sync.pull"
+                | "sync.refusalNotices"
+                | "sync.dismissRefusal"
                 | "liveApplication.captureOwnerActivation"
                 | "liveApplication.releaseOwnerActivation"
                 | "liveApplication.ownerState"
@@ -285,6 +287,14 @@ impl EngineService {
                 Box::pin(self.sync_probe(&ctx, request.workspace, request.params)).await?
             }
             "sync.remoteChanges" => self.sync_remote_changes(&ctx, request.workspace).await?,
+            "sync.dismissRefusal" => {
+                self.sync_dismiss_refusal(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "sync.refusalNotices" => {
+                self.sync_refusal_notices(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "sync.claim" => {
                 Box::pin(self.sync_claim(&ctx, request.workspace, request.params)).await?
             }
@@ -324,6 +334,10 @@ impl EngineService {
             }
             "share.direct.push" => {
                 Box::pin(self.share_direct_push(&ctx, request.workspace, request.params)).await?
+            }
+            "versionedText.writeBlob" => {
+                self.versioned_text_write_blob(&ctx, &request, request.params.clone())
+                    .await?
             }
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
@@ -450,6 +464,11 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace).await?,
+            "keptCopies.list" => self.kept_copies_list(&ctx, request.workspace).await?,
+            "keptCopies.save" => {
+                self.kept_copies_save(request.workspace, request.params)
+                    .await?
+            }
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "capture.reconcile" => self.capture_reconcile(&ctx, request.workspace).await?,
             "capture.setAuthor" => {
@@ -859,6 +878,14 @@ impl EngineService {
                 self.automations_list_claims(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.getClaim" => {
+                self.automations_get_claim(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.pruneHistory" => {
+                self.automations_prune_history(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "automations.settle" => {
                 self.automations_settle(&ctx, request.workspace, request.params)
                     .await?
@@ -1045,6 +1072,7 @@ mod tests {
             "sync.recoverOrigin",
             "sync.probe",
             "versionedText.write",
+            "versionedText.writeBlob",
         ] {
             request.method = method.into();
             assert_eq!(
@@ -1172,9 +1200,11 @@ mod tests {
             "automations.claimNext",
             "automations.claimSchedule",
             "automations.failures",
+            "automations.getClaim",
             "automations.groupSkips",
             "automations.listClaims",
             "automations.press",
+            "automations.pruneHistory",
             "automations.release",
             "automations.releaseGroups",
             "automations.retry",
@@ -1261,6 +1291,8 @@ mod tests {
             "conflicts.resolve",
             "engine.ping",
             "history.page",
+            "keptCopies.list",
+            "keptCopies.save",
             "keys.download",
             "keys.upload",
             "moments.get",
@@ -1310,6 +1342,7 @@ mod tests {
             "versionedText.rename",
             "versionedText.rollback",
             "versionedText.write",
+            "versionedText.writeBlob",
             "versions.active",
             "versions.compareFiles",
             "versions.createNamed",

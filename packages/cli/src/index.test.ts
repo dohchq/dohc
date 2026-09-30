@@ -323,20 +323,37 @@ describe("executeCli", () => {
     const run = {
       run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.",
       createdAtMs: Date.UTC(2026, 8, 27, 9), updatedAtMs: Date.UTC(2026, 8, 27, 9),
-      trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, depth: 1 },
-      definitionChanged: false, chainStopped: false, undone: false,
+      trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 },
+      definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
     };
-    const list = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }] }));
+    const list = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }], next: null }));
+    // A live change through an Edit link names the link, never a person.
+    const linked = {
+      ...run,
+      trigger: { ...run.trigger, by: null, depth: 0, sharedAuthor: { kind: "link" as const, grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" } },
+    };
+    expect((await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: async () => ({ ok: true, runs: [{ ...linked, changes: 0 }], next: null }) })).stdout)
+      .toBe("atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · through Edit link grant-link · 0 changes · The record is open elsewhere.\n");
     expect(await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: list })).toEqual({
       exitCode: 0,
       stderr: "",
       stdout: "atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · by agent · depth 1 · 1 change · The record is open elsewhere.\n",
     });
+    // A run that could not start says so, as the panel offers it no Try again.
+    const unclaimed = { ...run, error: "This change was too large for dohc to start automations for every record. Change fewer records at a time.", neverStarted: true };
+    const unstarted = vi.fn(async () => ({ ok: true, runs: [{ ...unclaimed, changes: 0 }], next: null }));
+    expect((await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: unstarted })).stdout)
+      .toContain(" · never started · ");
     expect(list).toHaveBeenCalledWith({
       protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "automationRuns",
       args: { cwd: WORKSPACE, actor: "human", collectionPath: "tasks", automation: "stamp" },
     });
+    // Older runs remain: the last line names the page that lists them.
+    const paged = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }], next: "1:atc_1" }));
+    const older = await executeCli({ argv: ["automation", "runs", "tasks", "stamp", "--page", "2:atc_2"], cwd: "/workspace", env: {}, request: paged });
+    expect(older.stdout.trimEnd().split("\n").at(-1)).toBe("Older runs: --page 1:atc_1");
+    expect(paged).toHaveBeenCalledWith(expect.objectContaining({ args: expect.objectContaining({ page: "2:atc_2" }) }));
 
     const steps = [
       { step: 1, changes: [{ kind: "field", recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" }] },
