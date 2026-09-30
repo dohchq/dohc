@@ -318,7 +318,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Regular files over 5 MiB binary or 10 MiB text move without a History row. `withoutHistory` lists their paths. With overwrite, History records the destination's delete, and it goes to the system trash, or stays in the workspace's .dohc/trash when the system refuses. A failed move puts everything back it can. `deleted` lists the files History then records as deleted: replaced destination files it could not restore, and moved files that something new kept from both paths. Each stays in the workspace's .dohc/trash, and Restore in History brings it back.",
+        "Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -333,7 +333,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_delete_path",
     {
       description:
-        "Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. dohc deletes regular files over 5 MiB binary or 10 MiB text without a History row. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder also goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
+        "Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),

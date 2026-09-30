@@ -5178,7 +5178,7 @@ export function createWorkspaceEngineCapture(
                   if (disk.kind === "text" || disk.kind === "binary") return disk;
                   if (disk.kind === "absent") throw new Error(`${file} changed while dohc prepared the change. Try again.`);
                   if (disk.kind === "unreadable") throw new Error(`dohc could not read ${file}. Close any program using it, then try again.`);
-                  if (!disk.reason.startsWith("oversized")) throw new Error(`History cannot record ${file}. Move or delete it yourself.`);
+                  if (!disk.reason.startsWith("oversized") && disk.reason !== "non-utf8") throw new Error(`History cannot record ${file}. Move or delete it yourself.`);
                   return disk;
                 };
                 // Every file is checked before any is recorded, and only one
@@ -5192,7 +5192,7 @@ export function createWorkspaceEngineCapture(
                   held.push(file);
                 }
                 // A head for a file gone from disk, or for one now over the
-                // size History keeps, is deleted as capture would delete it.
+                // size History keeps or no longer UTF-8, is deleted as capture would delete it.
                 const onDisk = new Set(files);
                 const kept = new Set(held);
                 for (const head of await listTextFileMetadata(engine, versionId)) {

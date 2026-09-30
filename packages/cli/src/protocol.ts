@@ -1118,24 +1118,30 @@ const fileWriteResultSchema = z.discriminatedUnion("ok", [
 ]);
 
 // A move is whole or put back. `withoutHistory` names the files the move
-// left with no History row: regular files over the size History keeps. After
+// left with no History row: oversized files or text with invalid UTF-8. After
 // a failed move, `deleted` names the files History records as deleted:
 // replaced destination files that could not be restored, and moved files
 // that could not go to either path. Each stays in the workspace trash.
+const replacedPathSchema = z.object({
+  path: z.string(), trashed: z.boolean(), trashPath: z.string().optional(),
+  withoutHistory: z.array(z.string()),
+}).strict();
+
 const fileMoveResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true), fromPath: z.string(), toPath: z.string(), withoutHistory: z.array(z.string()).optional(),
+    replaced: replacedPathSchema.optional(),
   }).strict(),
   z.object({
     ok: z.literal(false), reason: z.string(), path: z.string().optional(), deleted: z.array(z.string()).optional(),
-    withoutHistory: z.array(z.string()).optional(),
+    withoutHistory: z.array(z.string()).optional(), replaced: replacedPathSchema.optional(),
   }).strict(),
 ]);
 
 // `trashed` is true when the system trash took the entry; when false,
 // `trashPath` names its entry in the workspace trash. `withoutHistory` names
-// the files deleted with no History row: regular files over the size History
-// keeps. A folder delete that stops at `path` names the files it already
+// the files deleted with no History row: oversized files or text with invalid
+// UTF-8. A folder delete that stops at `path` names the files it already
 // deleted.
 const fileDeleteResultSchema = z.discriminatedUnion("ok", [
   z.object({

@@ -10,7 +10,7 @@ import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { createWorkspaceEngineCapture, type AuthoredPathChanges, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
-import { deleteWorkspacePathAs, moveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
+import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 
 // Filesystem refusals a test switches on for chosen paths.
 const faults = vi.hoisted(() => ({} as {
@@ -103,8 +103,8 @@ async function fixture(options: {
   };
   return { rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
     move: (fromPath: string, toPath: string, by = named as typeof named | typeof unnamed, overwrite?: boolean) =>
-      moveWorkspacePathAs(operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, by, pathOptions()),
-    remove: (path: string, by = named as typeof named | typeof unnamed) => deleteWorkspacePathAs(operation, path, by, pathOptions()) };
+      prepareMoveWorkspacePathAs(operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, by, pathOptions()).then(finish => finish()),
+    remove: (path: string, by = named as typeof named | typeof unnamed) => prepareDeleteWorkspacePathAs(operation, path, by, pathOptions()).then(finish => finish()) };
 }
 
 describe("agent moves and deletes", () => {
@@ -371,7 +371,8 @@ describe("agent moves and deletes", () => {
     await write(f.rootPath, "b.txt", "old");
     const seen = await f.start();
     expect(await f.move("a.txt", "b.txt")).toMatchObject({ ok: false, reason: expect.stringContaining("already exists") });
-    expect(await f.move("a.txt", "b.txt", named, true)).toEqual({ ok: true, fromPath: "a.txt", toPath: "b.txt" });
+    expect(await f.move("a.txt", "b.txt", named, true)).toEqual({ ok: true, fromPath: "a.txt", toPath: "b.txt",
+      replaced: { path: "b.txt", trashed: true, withoutHistory: [] } });
     expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("new");
     expect(await readFile(await f.systemTrashed("b.txt"), "utf8")).toBe("old");
     expect(await f.workspaceTrash()).toEqual([]);
@@ -483,6 +484,80 @@ describe("agent moves and deletes", () => {
       expect(change === "move" ? await f.move("a.txt", "b.txt") : await f.remove("a.txt")).toMatchObject({ ok: true });
       expect(reads).toBe(1);
     } finally { delete faults.readPolicy; await f.engine().stop(); }
+  });
+
+  it.each(["move", "delete"] as const)("%s allows Latin-1 CSV text inside a folder without a History row", async change => {
+    const f = await fixture();
+    // Above the binary cap but below the text cap: capture leaves this text rowless.
+    const csv = Buffer.from("name\n" + "René\n".repeat(1_260_000), "latin1");
+    await write(f.rootPath, "dir/people.csv", csv);
+    await write(f.rootPath, "dir/a.txt", "a");
+    const seen = await f.start();
+    const result = change === "move" ? await f.move("dir", "moved") : await f.remove("dir");
+    const base = change === "move" ? "moved" : "dir";
+    expect(result).toMatchObject({ ok: true, withoutHistory: [base + "/people.csv"] });
+    const kept = change === "move" ? join(f.rootPath, "moved") : await f.systemTrashed("dir");
+    expect(await readFile(join(kept, "people.csv"))).toEqual(csv);
+    await f.settle();
+    expect(await f.added(seen)).toEqual([
+      { operation: change === "move" ? "rename" : "delete", path: base + "/a.txt", agentId: "Client name" },
+    ]);
+    await f.engine().stop();
+  });
+
+  it.each([false, true])("reports a replaced oversized destination separately, system trash accepts: %s", async accepts => {
+    const f = await fixture();
+    const oversized = new Uint8Array(6 * 1024 * 1024);
+    await write(f.rootPath, "source.png", oversized);
+    await write(f.rootPath, "dest.png", oversized);
+    await f.start();
+    if (!accepts) f.trashItem.mockRejectedValueOnce(new Error("Trash refused"));
+    const result = await f.move("source.png", "dest.png", named, true);
+    expect(result).toMatchObject({ ok: true, withoutHistory: ["dest.png"],
+      replaced: { path: "dest.png", trashed: accepts, withoutHistory: ["dest.png"] } });
+    if (!result.ok || !result.replaced) throw new Error("Expected replacement");
+    const kept = accepts ? await f.systemTrashed("dest.png") : join(f.rootPath, result.replaced.trashPath!);
+    expect(await readFile(kept)).toEqual(Buffer.from(oversized));
+    expect(result.replaced.trashPath).toEqual(accepts ? undefined : expect.stringMatching(/^\.dohc\/trash\//));
+    await f.engine().stop();
+  });
+
+  it("separates a rowless replaced destination retained after rollback", async () => {
+    const f = await fixture({ afterRequest: async request => {
+      if (request.method !== "capture.moveFile") return;
+      await write(f.rootPath, "source.png", "theirs");
+      throw new Error("Move reply lost");
+    } });
+    await write(f.rootPath, "source.png", new Uint8Array(6 * 1024 * 1024));
+    await write(f.rootPath, "dest.png", new Uint8Array(7 * 1024 * 1024));
+    await f.start();
+    const result = await f.move("source.png", "dest.png", named, true);
+    expect(result).toMatchObject({ ok: false, withoutHistory: ["dest.png"],
+      replaced: { path: "dest.png", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//), withoutHistory: ["dest.png"] } });
+    if (result.ok || !result.replaced?.trashPath) throw new Error("Expected retained replacement");
+    expect((await readFile(join(f.rootPath, result.replaced.trashPath))).byteLength).toBe(7 * 1024 * 1024);
+    expect((await readFile(join(f.rootPath, "dest.png"))).byteLength).toBe(6 * 1024 * 1024);
+    expect(await readFile(join(f.rootPath, "source.png"), "utf8")).toBe("theirs");
+    await f.engine().stop();
+  });
+
+  it.each([false, true])("checks the disk after a lost move reply, source occupied: %s", async occupied => {
+    const f = await fixture({ afterRequest: async request => {
+      if (request.method !== "capture.moveFile") return;
+      if (occupied) await write(f.rootPath, "a.txt", "theirs");
+      throw new Error("Move reply lost");
+    } });
+    await write(f.rootPath, "a.txt", "mine");
+    const seen = await f.start();
+    const result = await f.move("a.txt", "b.txt");
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining(occupied ? "stays at b.txt" : "put everything back") });
+    expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe(occupied ? "theirs" : "mine");
+    expect(existsSync(join(f.rootPath, "b.txt"))).toBe(occupied);
+    if (occupied) expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("mine");
+    await f.settle();
+    expect((await f.added(seen)).filter(row => row.agentId !== undefined)).toEqual(
+      occupied ? [{ operation: "rename", path: "b.txt", agentId: "Client name" }] : []);
+    await f.engine().stop();
   });
 
   it.each(["move", "delete"] as const)("%s allows an oversized binary and text file with no History row", async change => {
@@ -645,8 +720,8 @@ describe("agent move and delete admission", () => {
     const options: PathChangeOptions = { capture: { changePathsAs }, requestId: "request", trashItem: vi.fn(), markDeleted: vi.fn() };
     return { ...f, changePathsAs, recorded: engine,
       move: (fromPath: string, toPath: string, overwrite?: boolean) =>
-        moveWorkspacePathAs(f.operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, named, options),
-      remove: (path: string) => deleteWorkspacePathAs(f.operation, path, named, options) };
+        prepareMoveWorkspacePathAs(f.operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, named, options).then(finish => finish()),
+      remove: (path: string) => prepareDeleteWorkspacePathAs(f.operation, path, named, options).then(finish => finish()) };
   }
 
   it.each(["readOnly", "shareView"] as const)("refuses a %s workspace", async kind => {

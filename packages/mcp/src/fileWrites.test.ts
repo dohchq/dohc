@@ -83,6 +83,14 @@ describe("MCP authored moves and deletes", () => {
     expect(await readdir(ctx.root)).toEqual(["note.txt"]);
   });
 
+  it("preserves the replaced destination's trash and History report", async () => {
+    const ctx = await context();
+    const result = { ok: true, fromPath: "source.csv", toPath: "dest.csv", withoutHistory: ["dest.csv"],
+      replaced: { path: "dest.csv", trashed: false, trashPath: ".dohc/trash/old-dest.csv", withoutHistory: ["dest.csv"] } };
+    ctx.request = vi.fn<NonNullable<ToolContext["request"]>>(async () => result);
+    expect(await moveWorkspacePath(ctx, { fromPath: "source.csv", toPath: "dest.csv", overwrite: true }, "Client")).toEqual(result);
+  });
+
   it("sends each change once under the agent's name and passes the desktop's refusal and partial delete through", async () => {
     const ctx = await context();
     await mkdir(join(ctx.root, "notes"));

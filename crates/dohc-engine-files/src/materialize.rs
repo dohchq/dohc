@@ -376,55 +376,45 @@ fn rename_no_replace_atomic(incoming: &Path, target: &Path) -> std::io::Result<(
     }
 }
 
-/// Rename a visible file to an empty name in one kernel operation that
-/// refuses to replace, so bytes another program writes at either name are
-/// never lost: a writer that opens the source name after the rename makes a
-/// new file, and a file that appears at the target first stays.
-///
-/// Answers [`ErrorKind::Unsupported`] wherever no such rename exists, and the
-/// caller stages the file and places a private copy instead. Some SMB and
-/// FUSE mounts refuse the exclusive rename flag. Windows uses the safe
-/// MoveFileExW wrapper without replacement or cross-volume copying. This never claims the target
-/// through a hard link from the visible source, as [`AtomicReplacer::place`]
-/// may for a private staged name: a program writing into the source in the
-/// moment between link and unlink would write into the destination.
+/// Move a file without replacing an existing destination.
+/// Windows uses MoveFileExW without replacement or cross-volume copying.
+/// Other platforms reuse the exclusive rename or link-then-unlink placement.
 pub fn move_file_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-    {
-        use rustix::fs::{CWD, RenameFlags, renameat_with};
-        use rustix::io::Errno;
-        return match renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE) {
-            Ok(()) => Ok(()),
-            Err(err)
-                if err == Errno::INVAL
-                    || err == Errno::NOSYS
-                    || err == Errno::NOTSUP
-                    || err == Errno::OPNOTSUPP =>
-            {
-                Err(std::io::Error::new(
-                    ErrorKind::Unsupported,
-                    "this filesystem has no rename that refuses to replace",
-                ))
-            }
-            Err(err) => Err(err.into()),
-        };
-    }
     #[cfg(windows)]
     {
-        atomicwrites::move_atomic(from, to)
+        move_file_windows(from, to)
     }
-    #[cfg(not(any(
-        windows,
-        target_os = "linux",
-        target_os = "android",
-        target_vendor = "apple"
-    )))]
+    #[cfg(not(windows))]
     {
-        let _ = (from, to);
-        Err(std::io::Error::new(
-            ErrorKind::Unsupported,
-            "this platform has no rename that refuses to replace",
-        ))
+        rename_no_replace_atomic(from, to)
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn move_file_windows(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let wide = |path: &Path| -> std::io::Result<Vec<u16>> {
+        let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if value.contains(&0) {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "a file path contains a null character",
+            ));
+        }
+        value.push(0);
+        Ok(value)
+    };
+    let from = wide(from)?;
+    let to = wide(to)?;
+    // SAFETY: Both buffers remain alive and end with one null. The API
+    // reads these paths synchronously and retains neither pointer.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -4840,6 +4830,28 @@ mod tests {
             std::fs::metadata(&target).expect("target").len(),
             4 * 1024 * 1024
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn visible_file_move_rejects_null_paths_without_touching_files() {
+        let scratch = Scratch::new("visible-file-move-null");
+        let source = scratch.root.join("source.bin");
+        let target = scratch.root.join("target.bin");
+        std::fs::write(&source, b"mine").expect("source");
+        for (from, to) in [
+            (source.clone(), scratch.root.join("target.bin\0other")),
+            (scratch.root.join("source.bin\0other"), target.clone()),
+        ] {
+            assert_eq!(
+                move_file_no_replace(&from, &to)
+                    .expect_err("null path")
+                    .kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(std::fs::read(&source).expect("source"), b"mine");
+        assert!(!target.exists());
     }
 
     #[cfg(windows)]

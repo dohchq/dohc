@@ -183,7 +183,7 @@ Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the 
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Regular files over 5 MiB binary or 10 MiB text move without a History row. `withoutHistory` lists their paths. With overwrite, History records the destination's delete, and it goes to the system trash, or stays in the workspace's .dohc/trash when the system refuses. A failed move puts everything back it can. `deleted` lists the files History then records as deleted: replaced destination files it could not restore, and moved files that something new kept from both paths. Each stays in the workspace's .dohc/trash, and Restore in History brings it back.
+Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -192,18 +192,18 @@ Changes the workspace, so a shared view does not offer it.
 - `overwrite`: `boolean`
 - `summary`: `string`
 
-Returns `{ ok: true, fromPath, toPath, withoutHistory? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists the files the move left with no History row, because they are over the size History keeps. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory? }`. `withoutHistory` also names oversized files after rollback; the reason says where retained files stay. `deleted` lists files History records as deleted after the failed move: replaced destination files it could not restore, and moved files it could not put at either path. They stay in the workspace's .dohc/trash.
+Returns `{ ok: true, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/trash.
 
 ### `dohc_delete_path`
 
-Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. dohc deletes regular files over 5 MiB binary or 10 MiB text without a History row. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder also goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
+Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `path`: `string`. Required.
 - `summary`: `string`
 
-Returns `{ ok: true, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; when it is false, `trashPath` names the entry in the workspace's .dohc/trash. `withoutHistory` lists the files deleted with no History row, because they are over the size History keeps. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists the files History recorded as deleted before it refused `path`. `withoutHistory` also names any oversized files already removed. The reason names their workspace trash location.
+Returns `{ ok: true, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.
 
 ### `dohc_detect_apps`
 

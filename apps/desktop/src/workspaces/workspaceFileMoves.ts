@@ -32,7 +32,7 @@ type DeleteFailure = Extract<CliResultByVerb["fileDelete"], { ok: false }>;
 
 // What a change leaves once capture is released: its answer, and the entry
 // in the workspace trash that then leaves for the system trash. The system
-// trash runs after the hold, because a slow shell must not keep capture out.
+// trash runs through the returned completion, after capture and workspace authority are released.
 type Changed<Done, Failed> = { done: Done; trash?: string } | { failed: Failed };
 
 const under = (base: string, sub: string) => (sub ? `${base}/${sub}` : base);
@@ -184,15 +184,21 @@ const stayed = (left: readonly string[], file: string) =>
 // From the workspace trash to the system trash. The entry never returns to
 // its place first, where another program may have written since. When the
 // system refuses, it stays in the workspace trash.
-const toSystemTrash = (options: PathChangeOptions, staged: string) =>
-  options.trashItem(staged).then(() => true, () => false);
+async function toSystemTrash(options: PathChangeOptions, staged: string): Promise<boolean> {
+  try {
+    await options.trashItem(staged);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-export async function moveWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
+export async function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
   operation: WorkspaceAuthorityOperation<Workspace, State>,
   input: { fromPath: string; toPath: string; overwrite?: boolean },
   author: MomentWriteAuthor,
   options: PathChangeOptions,
-): Promise<CliResultByVerb["fileMove"]> {
+): Promise<() => Promise<CliResultByVerb["fileMove"]>> {
   const rootPath = operation.workspace.rootPath;
   const failed = `dohc could not move ${input.fromPath}.`;
   try {
@@ -201,7 +207,7 @@ export async function moveWorkspacePathAs<Workspace extends PathChangeWorkspace,
       let gone: string[] = [];
       // The capture settles, closes and checks these endpoints before the hold.
       const endpoints = [(await admitPath(rootPath, input.fromPath)).physical, (await admitPath(rootPath, input.toPath)).physical];
-      return await options.capture.changePathsAs<Changed<{ fromPath: string; toPath: string; withoutHistory: string[] }, MoveFailure>>(endpoints,
+      return await options.capture.changePathsAs<Changed<{ fromPath: string; toPath: string; withoutHistory: string[]; replacedWithoutHistory: string[] }, MoveFailure>>(endpoints,
         { operation: "move", author, correlationId: `fileMove:${options.requestId}` },
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
@@ -240,16 +246,13 @@ export async function moveWorkspacePathAs<Workspace extends PathChangeWorkspace,
           const destBase = dest?.relative ?? to.relative;
           const fromFiles = from.files.map(sub => under(from.relative, sub));
           const destFiles = (dest?.files ?? []).map(sub => under(destBase, sub));
-          // History holds these; a regular file over the size it keeps moves
-          // or goes with no row, and the answer names it.
+          // Oversized files and text with invalid UTF-8 move without a History row.
           const recorded = new Set(await engine.recordDisk(from.relative, fromFiles));
           const destRecorded = new Set(caseOnly ? [] : await engine.recordDisk(destBase, destFiles));
           const rebase = (path: string) => to.relative + path.slice(from.relative.length);
           const shownTo = (path: string) => to.path + path.slice(to.relative.length);
-          const withoutHistory = [...new Set([
-            ...fromFiles.filter(file => !recorded.has(file)).map(file => shownTo(rebase(file))),
-            ...destFiles.filter(file => !destRecorded.has(file)).map(file => to.path + file.slice(destBase.length)),
-          ])];
+          const withoutHistory = fromFiles.filter(file => !recorded.has(file)).map(file => shownTo(rebase(file)));
+          const replacedWithoutHistory = destFiles.filter(file => !destRecorded.has(file)).map(file => to.path + file.slice(destBase.length));
 
           const change: MoveProgress = { staged: undefined, sourceStaged: undefined, destDeleted: [], moved: false, renamed: [] };
           try {
@@ -270,7 +273,23 @@ export async function moveWorkspacePathAs<Workspace extends PathChangeWorkspace,
               // one. Elsewhere the file leaves its visible name in one rename,
               // so the placement below only ever links and removes a private
               // copy, and copies only where links are refused.
-              if (!(await engine.moveFile(from.relative, to.relative))) {
+              let moved: boolean;
+              const before = await lstat(source, { bigint: true });
+              try {
+                moved = await engine.moveFile(from.relative, to.relative);
+              } catch (error) {
+                // A lost reply can follow a completed rename. Only the same
+                // disk entry at the target establishes that it moved.
+                const after = await lstat(target, { bigint: true }).catch(() => undefined);
+                change.moved = after !== undefined && before.ino !== 0n && before.dev === after.dev && before.ino === after.ino;
+                if (!change.moved) {
+                  const original = await lstat(source, { bigint: true }).catch(() => undefined);
+                  change.uncertain = original === undefined || before.ino === 0n || before.dev !== original.dev || before.ino !== original.ino;
+                }
+                if (change.moved) markChanged();
+                throw error;
+              }
+              if (!moved) {
                 change.sourceStaged = await moveIntoWorkspaceTrash(rootPath, source);
                 markChanged();
                 if ((await placeBack(rootPath, change.sourceStaged, target)).length) {
@@ -296,28 +315,40 @@ export async function moveWorkspacePathAs<Workspace extends PathChangeWorkspace,
             const undone = await undoMove(rootPath, engine, change, from.relative, fromFiles, recorded, rebase, source, target,
               join(rootPath, destBase), caseOnly, input);
             gone = [...undone.destDeleted, ...undone.sourceDeleted];
-            const rowless = [...new Set([
-              ...undone.rowlessSource.map(({ path, atTarget }) => atTarget ? shownTo(rebase(path)) : from.path + path.slice(from.relative.length)),
-              ...(change.staged === undefined ? [] : destFiles.filter(file => !destRecorded.has(file)).map(file => to.path + file.slice(destBase.length))),
-            ])];
+            const rowless = undone.rowlessSource.map(({ path, atTarget }) =>
+              atTarget ? shownTo(rebase(path)) : from.path + path.slice(from.relative.length));
+            const replaced = change.staged === undefined || !undone.destLeft.length ? undefined : {
+              path: to.path, trashed: false, trashPath: workspaceTrashPath(change.staged),
+              withoutHistory: destFiles.filter(file => !destRecorded.has(file) && stayed(undone.destLeft, file.slice(destBase.length).replace(/^\//u, "")))
+                .map(file => to.path + file.slice(destBase.length)),
+            };
             const deleted = [...undone.destDeleted.map(path => to.path + path.slice(destBase.length)),
               ...undone.sourceDeleted.map(path => from.path + path.slice(from.relative.length))];
             return { failed: { ok: false as const, path: input.fromPath, reason: `${reason(error, failed)}${undone.notes}`,
-              ...(deleted.length ? { deleted } : {}), ...(rowless.length ? { withoutHistory: rowless } : {}) } };
+              ...(deleted.length ? { deleted } : {}), ...(rowless.length ? { withoutHistory: rowless } : {}), ...(replaced ? { replaced } : {}) } };
           }
           gone = [from.relative, ...(dest ? [destBase] : [])];
-          return { done: { fromPath: from.path, toPath: to.path, withoutHistory }, ...(change.staged !== undefined ? { trash: change.staged } : {}) };
+          return { done: { fromPath: from.path, toPath: to.path, withoutHistory, replacedWithoutHistory }, ...(change.staged !== undefined ? { trash: change.staged } : {}) };
         },
         () => gone);
     });
-    if ("failed" in changed) return changed.failed;
+    if ("failed" in changed) return async () => changed.failed;
     // The replaced destination leaves the workspace trash for the system
     // trash, as a deleted file does, or stays when the system refuses.
-    if (changed.trash !== undefined) await toSystemTrash(options, changed.trash);
-    const { withoutHistory, ...done } = changed.done;
-    return { ok: true, ...done, ...(withoutHistory.length ? { withoutHistory } : {}) };
+    return async () => {
+      const { withoutHistory, replacedWithoutHistory, ...done } = changed.done;
+      const staged = changed.trash;
+      const replaced = staged === undefined ? undefined : {
+        path: done.toPath,
+        trashed: await toSystemTrash(options, staged),
+        withoutHistory: replacedWithoutHistory,
+      };
+      return { ok: true, ...done, ...(withoutHistory.length ? { withoutHistory } : {}),
+        ...(replaced === undefined ? {} : { replaced: { ...replaced,
+          ...(replaced.trashed || staged === undefined ? {} : { trashPath: workspaceTrashPath(staged) }) } }) };
+    };
   } catch (error) {
-    return { ok: false, path: input.fromPath, reason: reason(error, failed) };
+    return async () => ({ ok: false, path: input.fromPath, reason: reason(error, failed) });
   }
 }
 
@@ -327,6 +358,7 @@ interface MoveProgress {
   sourceStaged: string | undefined;
   destDeleted: Array<{ path: string; sub: string; momentId: string }>;
   moved: boolean;
+  uncertain?: boolean;
   renamed: string[];
 }
 
@@ -341,8 +373,9 @@ interface MoveProgress {
 async function undoMove(rootPath: string, engine: AuthoredPathChanges, change: MoveProgress, fromBase: string,
   fromFiles: readonly string[], recorded: ReadonlySet<string>, rebase: (path: string) => string, source: string,
   target: string, destPlace: string, caseOnly: boolean, input: { fromPath: string; toPath: string },
-): Promise<{ notes: string; destDeleted: string[]; sourceDeleted: string[]; rowlessSource: { path: string; atTarget: boolean }[] }> {
-  const notes: string[] = [];
+): Promise<{ notes: string; destLeft: string[]; destDeleted: string[]; sourceDeleted: string[]; rowlessSource: { path: string; atTarget: boolean }[] }> {
+  const notes: string[] = change.uncertain
+    ? [`dohc could not confirm where ${input.fromPath} is. Check both paths before trying again.`] : [];
   const sourceDeleted: string[] = [];
   const recordOrNote = (work: Promise<unknown>, note: string) => work.then(() => true, () => { notes.push(note); return false; });
   const subOf = (file: string) => file.slice(fromBase.length).replace(/^\//u, "");
@@ -379,8 +412,10 @@ async function undoMove(rootPath: string, engine: AuthoredPathChanges, change: M
     notes.push(`Part of it stays in the workspace trash as ${workspaceTrashPath(trashed)}, because something new is at both paths.`);
   }
   const destDeleted: string[] = [];
+  let destLeft: string[] = [];
   if (change.staged !== undefined) {
     const left = await placeBack(rootPath, change.staged, destPlace);
+    destLeft = left;
     if (left.length) notes.push(`Part of the replaced ${input.toPath} stays in the workspace trash as ${workspaceTrashPath(change.staged)}.`);
     for (const { path, sub, momentId } of [...change.destDeleted].reverse()) {
       if (stayed(left, sub)) {
@@ -391,21 +426,21 @@ async function undoMove(rootPath: string, engine: AuthoredPathChanges, change: M
       // Back on disk. A delete row History would not take back is not a
       // deleted file: capture records the file again, without an author.
       await recordOrNote(engine.undoDelete(path, momentId),
-        `History still shows ${path} as deleted. The file is back at ${path}, and capture records it again without an author.`);
+        `History still shows ${path} as deleted. The file is back at ${path}. History records it again as a local file edit.`);
     }
   }
   const rowlessSource = change.moved || change.sourceStaged !== undefined
     ? fromFiles.filter(file => !recorded.has(file)).map(path => ({ path, atTarget: where(path) === "target" }))
     : [];
-  return { notes: notes.length ? ` ${notes.join(" ")}` : " dohc put everything back.", destDeleted, sourceDeleted, rowlessSource };
+  return { notes: notes.length ? ` ${notes.join(" ")}` : " dohc put everything back.", destLeft, destDeleted, sourceDeleted, rowlessSource };
 }
 
-export async function deleteWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
+export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
   operation: WorkspaceAuthorityOperation<Workspace, State>,
   path: string,
   author: MomentWriteAuthor,
   options: PathChangeOptions,
-): Promise<CliResultByVerb["fileDelete"]> {
+): Promise<() => Promise<CliResultByVerb["fileDelete"]>> {
   const rootPath = operation.workspace.rootPath;
   const failed = `dohc could not delete ${path}.`;
   try {
@@ -423,8 +458,7 @@ export async function deleteWorkspacePathAs<Workspace extends PathChangeWorkspac
           if (target.relative !== endpoint) throw new Error(`${path} now leads somewhere else. Check the path, then try again.`);
           const files = target.files.map(sub => under(target.relative, sub));
           const shown = (file: string) => target.path + file.slice(target.relative.length);
-          // History holds these; a regular file over the size it keeps goes
-          // with no row, and the answer names it.
+          // Oversized files and text with invalid UTF-8 go without a History row.
           const recorded = new Set(await engine.recordDisk(target.relative, files));
           const withoutHistory = files.filter(file => !recorded.has(file)).map(shown);
           const original = join(rootPath, target.relative);
@@ -468,14 +502,16 @@ export async function deleteWorkspacePathAs<Workspace extends PathChangeWorkspac
         },
         () => gone);
     });
-    if ("failed" in changed) return changed.failed;
-    const trashed = changed.trash !== undefined && await toSystemTrash(options, changed.trash);
-    const { withoutHistory, ...done } = changed.done;
-    return { ok: true, ...done, trashed,
-      ...(trashed || changed.trash === undefined ? {} : { trashPath: workspaceTrashPath(changed.trash) }),
-      ...(withoutHistory.length ? { withoutHistory } : {}) };
+    if ("failed" in changed) return async () => changed.failed;
+    return async () => {
+      const trashed = changed.trash !== undefined && await toSystemTrash(options, changed.trash);
+      const { withoutHistory, ...done } = changed.done;
+      return { ok: true, ...done, trashed,
+        ...(trashed || changed.trash === undefined ? {} : { trashPath: workspaceTrashPath(changed.trash) }),
+        ...(withoutHistory.length ? { withoutHistory } : {}) };
+    };
   } catch (error) {
-    return { ok: false, deleted: [], path, reason: reason(error, failed) };
+    return async () => ({ ok: false, deleted: [], path, reason: reason(error, failed) });
   }
 }
 

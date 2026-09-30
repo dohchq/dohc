@@ -610,6 +610,7 @@ describe("raw fileWrite socket requests", () => {
     };
     return { ...f, invoke };
   }
+
   it("refuses a human actor and a shared view before capture", async () => {
     const f = await setup();
     const files = [{ path: "plain.txt", contentBase64: "bmV3" }];
@@ -686,6 +687,28 @@ describe("raw fileMove and fileDelete socket requests", () => {
     };
     return { ...f, root, invoke };
   }
+
+  it.each(["delete", "overwrite"] as const)("a hung trash during %s holds neither file verbs nor workspace close", async change => {
+    const f = await setup();
+    await writeFile(join(f.root, "first.txt"), "first");
+    await writeFile(join(f.root, "source.txt"), "source");
+    await writeFile(join(f.root, "next.txt"), "next");
+    const entered = deferred(), released = deferred();
+    vi.mocked(f.dependencies.trashItem).mockImplementationOnce(async () => {
+      entered.release();
+      await released.promise;
+    });
+    const pending = change === "delete" ? f.invoke("fileDelete", { path: "first.txt" })
+      : f.invoke("fileMove", { fromPath: "source.txt", toPath: "first.txt", overwrite: true });
+    await entered.promise;
+    try {
+      expect(await f.invoke("fileMove", { fromPath: "next.txt", toPath: "after.txt" })).toMatchObject({ ok: true });
+      await f.authorities.close();
+    } finally {
+      released.release();
+      expect(await pending).toMatchObject({ ok: true });
+    }
+  });
 
   it("refuses a human actor and a shared view before capture", async () => {
     const f = await setup();
