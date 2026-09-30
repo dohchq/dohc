@@ -1,46 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { repoRoot } from "./process.mjs";
+import { repoRoot, run } from "./process.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 
-// Resolve only after the owned child closes, including timeout or cancellation.
-function runFixture(command, args, { timeout, signal, encoding, ...options }) {
-  if (signal?.aborted) throw new Error("Fixture cancelled before launch.");
-  return new Promise(resolve => {
-    const child = spawn(command, args, { ...options, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    const stdout = [], stderr = [];
-    let error;
-    child.on("error", cause => { error ??= cause; });
-    const stop = message => {
-      error ??= new Error(message);
-      child.kill("SIGKILL");
-    };
-    const collect = chunks => {
-      let bytes = 0;
-      return chunk => {
-        bytes += chunk.length;
-        if (bytes > 1024 * 1024) stop("Fixture output exceeded its buffer.");
-        else chunks.push(chunk);
-      };
-    };
-    child.stdout.on("data", collect(stdout));
-    child.stderr.on("data", collect(stderr));
-    const abort = () => stop("Fixture cancelled.");
-    signal?.addEventListener("abort", abort, { once: true });
-    const deadline = setTimeout(() => stop("Fixture timed out."), timeout);
-    child.once("close", (status, exitSignal) => {
-      clearTimeout(deadline);
-      signal?.removeEventListener("abort", abort);
-      resolve({ status, signal: exitSignal, error, stdout: Buffer.concat(stdout).toString(encoding),
-        stderr: Buffer.concat(stderr).toString(encoding) });
-    });
-    if (signal?.aborted) abort();
-  });
+async function runFixture(command, args, { timeout, signal, ...options }) {
+  try {
+    const result = await run(command, args, { ...options, timeoutMs: timeout, signal, quietStdout: true });
+    return { status: result.code, error: undefined, stdout: result.stdout, stderr: result.stderr };
+  } catch (failure) {
+    return { status: failure.exitCode, signal: failure.signal, stdout: failure.stdout, stderr: failure.stderr,
+      error: typeof failure.exitCode === "number" && !failure.interrupted && !failure.timedOut ? undefined : failure };
+  }
 }
 
 test("verification selects packages and proofs and prepares before parallel jobs", { concurrency: 2 }, async (t) => {
@@ -328,7 +303,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           writeFileSync('.dohc-dev/report.json',readFileSync(output+'/'+readdirSync(output)[0]+'/result.json'));
           writeFileSync('.dohc-dev/incremental.json',JSON.stringify({value:process.env.CARGO_INCREMENTAL??null,present:Object.hasOwn(process.env,'CARGO_INCREMENTAL')}));
         }
-      `, ...args], { cwd: root, encoding: "utf8", timeout: 120_000, signal: context.signal, env: { ...process.env,
+      `, ...args], { cwd: root, timeout: 120_000, signal: context.signal, env: { ...process.env,
         NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "",
         CARGO_INCREMENTAL: previousIncremental,
         POSTGRES_URL:"postgres://must-not-use-inherited-database/foreign" } });

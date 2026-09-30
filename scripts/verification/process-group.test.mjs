@@ -8,6 +8,128 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { run } from "./process.mjs";
 
+test("an already aborted command starts no process and creates no log", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-preaborted-command-"));
+  const controller = new AbortController();
+  const listeners = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+  let spawned = false;
+  controller.abort();
+  try {
+    await assert.rejects(run(process.execPath, ["-e", "require('node:fs').writeFileSync('command-ran','yes')"], {
+      cwd: root, signal: controller.signal, log: join(root, "output/command.log"),
+      onSpawn: () => { spawned = true; }, timeoutMs: 20_000,
+    }), error => {
+      assert.equal(error.interrupted, true);
+      assert.equal(error.timedOut, false);
+      assert.equal(error.exitCode, null);
+      assert.equal(error.signal, null);
+      assert.equal(error.stdout, "");
+      assert.equal(error.stderr, "");
+      return true;
+    });
+    assert.equal(spawned, false);
+    assert.equal(existsSync(join(root, "command-ran")), false);
+    assert.equal(existsSync(join(root, "output")), false);
+    assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], listeners);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test(`${process.platform === "win32" ? "Windows job" : "POSIX group"} abort closes active descendants before caller cleanup`, {
+  timeout: 30_000,
+}, async context => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-command-abort-"));
+  const controller = new AbortController();
+  const listeners = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+  let owner, ready = false, descendantSocket, releaseDescendant, cancelWaitHandler, cleaning = false;
+  const descendantClosed = new Promise(resolve => { releaseDescendant = resolve; });
+  const server = createServer(socket => {
+    descendantSocket = socket;
+    socket.on("error", () => {});
+    socket.once("close", releaseDescendant);
+    socket.resume();
+    if (cleaning) socket.end();
+  });
+  const cancelWait = new Promise((_, reject) => {
+    cancelWaitHandler = () => {
+      cleaning = true;
+      controller.abort();
+      descendantSocket?.end();
+      if (owner?.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL");
+      reject(new Error("Descendant did not close."));
+    };
+    context.signal.addEventListener("abort", cancelWaitHandler, { once: true });
+  });
+  cancelWait.catch(() => {});
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const port = server.address().port;
+    writeFileSync(join(root, "descendant.mjs"), `
+      import {connect} from 'node:net';
+      import {writeFileSync} from 'node:fs';
+      import {join} from 'node:path';
+      const socket=connect(${port},'127.0.0.1');
+      socket.on('end',()=>process.exit(0));
+      socket.on('error',()=>process.exit(1));
+      socket.resume();
+      process.on('SIGTERM',()=>process.stderr.write('descendant ignored SIGTERM\\n'));
+      setInterval(()=>{},1000);
+      socket.once('connect',()=>{
+        writeFileSync(join(process.argv[2],'descendant.json'),JSON.stringify({pid:process.pid}));
+        console.log('descendant ready');
+      });
+    `);
+    writeFileSync(join(root, "leader.mjs"), `
+      import {spawn} from 'node:child_process';
+      import {join} from 'node:path';
+      process.on('SIGTERM',()=>process.stderr.write('leader ignored SIGTERM\\n'));
+      spawn(process.execPath,[join(process.argv[2],'descendant.mjs'),process.argv[2]],{
+        windowsHide:true,stdio:['ignore','inherit','inherit'],
+      });
+      setInterval(()=>{},1000);
+    `);
+    let observed = "";
+    await assert.rejects(run(process.execPath, [join(root, "leader.mjs"), root], {
+      cwd: root, signal: controller.signal, timeoutMs: 20_000, quietStdout: true, log: join(root, "command.log"),
+      onSpawn: child => {
+        owner = child;
+        child.stdout.on("data", chunk => {
+          observed += chunk;
+          if (!ready && observed.includes("descendant ready")) { ready = true; controller.abort(); }
+        });
+      },
+    }), error => {
+      assert.equal(error.interrupted, true);
+      assert.equal(error.timedOut, false);
+      assert.match(error.stdout, /descendant ready/);
+      assert.ok(Object.hasOwn(error, "exitCode") && Object.hasOwn(error, "signal"));
+      return true;
+    });
+    assert.equal(ready, true);
+    assert.ok(owner.exitCode !== null || owner.signalCode !== null);
+    assert.ok(descendantSocket);
+    await Promise.race([descendantClosed, cancelWait]);
+    assert.equal(descendantSocket.destroyed, true);
+    if (process.platform === "win32") {
+      const {pid} = JSON.parse(readFileSync(join(root, "descendant.json"), "utf8"));
+      assert.throws(() => process.kill(pid, 0), {code: "ESRCH"});
+    } else {
+      assert.equal(owner.signalCode, "SIGKILL");
+      assert.match(readFileSync(join(root, "command.log"), "utf8"), /descendant ignored SIGTERM/);
+    }
+    assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], listeners);
+  } finally {
+    cleaning = true;
+    context.signal.removeEventListener("abort", cancelWaitHandler);
+    controller.abort();
+    descendantSocket?.end();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function stopWindowsDescendant(root) {
   if (!existsSync(join(root, "descendant.json"))) return;
   const { pid } = JSON.parse(readFileSync(join(root, "descendant.json"), "utf8"));
