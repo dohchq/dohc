@@ -2056,7 +2056,7 @@ export class CollectionAutomations {
       const operations = approved.definition.operations;
       const verdicts = checkAutomationReach(roster, {
         id: "", collection, codeFiles: [], steps: operations.map((operation): ReachStep => ({
-          kind: "dataset-operation", collection: resolved.collection, datasetId: approved.datasetId, grants,
+          kind: "dataset-operation", collection: resolved.collection, datasetId: approved.datasetId, operations, grants,
           operation: { operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access },
         })),
       });
