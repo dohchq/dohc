@@ -1008,6 +1008,8 @@ export class VersionedLiveAdapter {
     fromPath: string;
     toPath: string;
     metadata: AdapterWriteMetadata;
+    author?: WriteAuthor | null;
+    captureHoldId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.rename"]> {
     this.assertWorkspace(input.workspaceId);
     const requestId = randomUUID();
@@ -1025,6 +1027,8 @@ export class VersionedLiveAdapter {
         ...(input.metadata.correlationId !== undefined
           ? { correlationId: input.metadata.correlationId }
           : {}),
+        ...(input.author ? { author: input.author } : {}),
+        ...(input.captureHoldId !== undefined ? { captureHoldId: input.captureHoldId } : {}),
         requestId,
       },
       { idempotencyKey: requestId },
@@ -1041,6 +1045,7 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
     author?: WriteAuthor | null;
     momentId?: string;
+    captureHoldId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.delete"]> {
     this.assertWorkspace(input.workspaceId);
     if (input.momentId !== undefined) {
@@ -1065,6 +1070,7 @@ export class VersionedLiveAdapter {
           ? { correlationId: input.metadata.correlationId }
           : {}),
         ...(input.author ? { author: input.author } : {}),
+        ...(input.captureHoldId !== undefined ? { captureHoldId: input.captureHoldId } : {}),
         requestId,
       },
       { idempotencyKey: requestId },
@@ -1076,6 +1082,8 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     mutationMomentId: string;
+    origin: VersionedOrigin;
+    author?: WriteAuthor;
   }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     const requestId = randomUUID();
@@ -1582,6 +1590,15 @@ export class VersionedLiveAdapter {
 
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
+  }
+
+  // Capture records nothing until the hold is released or the workspace closes.
+  async holdCapture(): Promise<string> {
+    return (await this.workspaceRequest(WORKSPACE_METHOD.captureHold, {})).holdId;
+  }
+
+  async releaseCapture(holdId: string): Promise<boolean> {
+    return (await this.workspaceRequest(WORKSPACE_METHOD.captureRelease, { holdId })).released;
   }
 
   async close(): Promise<void> {

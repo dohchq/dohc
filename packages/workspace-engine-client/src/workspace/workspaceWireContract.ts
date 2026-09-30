@@ -36,6 +36,8 @@ export const WORKSPACE_METHOD = {
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
   captureSetAuthor: "capture.setAuthor",
+  captureHold: "capture.hold",
+  captureRelease: "capture.release",
   automationsSubscribe: "automations.subscribe",
   automationsUnsubscribe: "automations.unsubscribe",
   automationsReleaseGroups: "automations.releaseGroups",
@@ -437,6 +439,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
+  [WORKSPACE_METHOD.captureHold]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureRelease]: WorkspaceJsonObject & { holdId: string };
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeParams;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeParams;
   [WORKSPACE_METHOD.automationsReleaseGroups]: WorkspaceEmptyParams;
@@ -1259,6 +1263,9 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),
+  [WORKSPACE_METHOD.captureHold]: mutableStruct({ holdId: Schema.String }),
+  /** False when the hold had already ended, as it does when the workspace closes. */
+  [WORKSPACE_METHOD.captureRelease]: mutableStruct({ released: Schema.Boolean }),
   /** True when the call inserted the pair or replaced its filter. */
   [WORKSPACE_METHOD.automationsSubscribe]: mutableStruct({
     subscribed: Schema.Boolean,

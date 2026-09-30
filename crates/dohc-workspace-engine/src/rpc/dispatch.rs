@@ -486,6 +486,11 @@ impl EngineService {
                 self.capture_set_author(&ctx, request.workspace, request.params)
                     .await?
             }
+            "capture.hold" => self.capture_hold(&ctx, request.workspace).await?,
+            "capture.release" => {
+                self.capture_release(request.workspace, request.params)
+                    .await?
+            }
             "versions.active" => {
                 self.versions_active(&ctx, request.workspace, request.params)
                     .await?
@@ -1226,7 +1231,9 @@ mod tests {
             "automations.unsubscribe",
             "automations.watchGroups",
             "capture.flush",
+            "capture.hold",
             "capture.reconcile",
+            "capture.release",
             "capture.setAuthor",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",

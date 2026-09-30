@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
 
@@ -23,6 +24,30 @@ pub(super) const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CaptureSetAuthorParams {
     author: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaptureReleaseParams {
+    hold_id: String,
+}
+
+static NEXT_CAPTURE_HOLD: AtomicU64 = AtomicU64::new(1);
+
+/// A write that names a hold refuses once the hold ended, for example because
+/// the workspace closed or the engine restarted, so the caller restores disk
+/// instead of recording a change capture may already have seen.
+pub(super) fn require_capture_hold(
+    open: &OpenWorkspace,
+    hold_id: Option<&str>,
+) -> Result<(), WireError> {
+    match hold_id {
+        Some(id) if !lock(&open.capture_holds).contains_key(id) => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "capture-hold-ended",
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub(super) fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireError> {
@@ -228,6 +253,59 @@ impl EngineService {
         })?;
         driver.set_author_json(author_json);
         Ok(json!({ "updated": true }))
+    }
+
+    /// Keep capture from recording anything until `capture.release`, so a
+    /// caller can change the disk and record that change under its own
+    /// author before capture sees it. Capture then finds each change already
+    /// recorded. The hold has no time limit, because a limit could end it
+    /// while the caller's change is still running. It also ends when the
+    /// workspace closes, and with this process, which exits when its one
+    /// client does.
+    pub(super) async fn capture_hold(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "capture.hold needs the workspace's owning handle",
+            ));
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let guard = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("capture.hold (queued)"));
+            }
+            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+        };
+        let hold_id = format!(
+            "hold-{:016x}",
+            NEXT_CAPTURE_HOLD.fetch_add(1, Ordering::Relaxed)
+        );
+        lock(&open.capture_holds).insert(hold_id.clone(), guard);
+        Ok(json!({ "holdId": hold_id }))
+    }
+
+    /// End a hold. `released: false` means it had already ended.
+    pub(super) async fn capture_release(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CaptureReleaseParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "capture.release needs the workspace's owning handle",
+            ));
+        }
+        let released = lock(&open.capture_holds).remove(&params.hold_id).is_some();
+        Ok(json!({ "released": released }))
     }
 }
 

@@ -42,6 +42,8 @@ use std::time::Duration;
 
 pub(super) const MAX_OPEN_HANDLES: usize = 64;
 
+pub(super) type CaptureHolds = Arc<Mutex<HashMap<String, tokio::sync::OwnedMutexGuard<()>>>>;
+
 pub(crate) struct OpenWorkspace {
     pub(super) root: PathBuf,
     pub(super) db_path: PathBuf,
@@ -63,6 +65,9 @@ pub(crate) struct OpenWorkspace {
     /// apply and prevents a new one from resolving the destination version
     /// across the active-version boundary.
     pub(super) capture_apply_gate: capture_driver::ApplyGate,
+    /// The apply gate, held by `capture.hold` until `capture.release` or the
+    /// workspace closes, keyed by hold id.
+    pub(super) capture_holds: CaptureHolds,
     /// Serializes Y.Doc admission and versioned mutations for this workspace.
     /// Version fences retain this gate through their destructive continuation,
     /// without stalling editor traffic in unrelated open workspaces.
@@ -108,6 +113,7 @@ impl OpenWorkspace {
             reconciles_collections: self.reconciles_collections,
             automation_recovery: Arc::clone(&self.automation_recovery),
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
+            capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
         }
     }
@@ -216,6 +222,7 @@ struct EngineServiceCleanup {
 impl EngineServiceCleanup {
     async fn run(self) {
         for (handle, workspace) in self.open {
+            lock(&workspace.capture_holds).clear();
             let _capture = Arc::clone(&workspace.capture_apply_gate).lock_owned().await;
             let _sessions = Arc::clone(&workspace.session_ops).lock_owned().await;
             lock(&self.sessions).retain(|_, session| session.workspace != handle);
@@ -987,6 +994,7 @@ impl EngineService {
                 reconciles_collections: params.reconcile_collections,
                 automation_recovery: Arc::new(Mutex::new(automation_recovery)),
                 capture_apply_gate,
+                capture_holds: CaptureHolds::default(),
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
             }),
         );
@@ -1038,6 +1046,8 @@ impl EngineService {
         };
         let removed = removed.ok_or_else(workspace_unavailable)?;
         let closed = closing.is_some();
+        // A hold whose caller went away must not keep teardown waiting.
+        lock(&removed.capture_holds).clear();
         let capture_gate = Arc::clone(&removed.capture_apply_gate);
         let session_gate = Arc::clone(&removed.session_ops);
         let sessions = Arc::clone(&self.sessions);
