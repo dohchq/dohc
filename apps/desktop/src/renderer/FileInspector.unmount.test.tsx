@@ -3455,6 +3455,7 @@ describe("markdown editor unmount flush", () => {
     const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("One");
+    await advanceAutosaveDebounce();
     await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     await user.keyboard("Two");
@@ -3528,6 +3529,7 @@ describe("markdown editor unmount flush", () => {
     const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} One");
+    await advanceAutosaveDebounce();
     await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toEqual({
       workspaceId: "ws-1",
@@ -3577,6 +3579,7 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     await user.click(content);
     await user.keyboard("{End} Fresh");
+    await advanceAutosaveDebounce();
     await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
       workspaceId: "ws-1",
@@ -5660,6 +5663,7 @@ describe("markdown editor unmount flush", () => {
     const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} v1");
+    await advanceAutosaveDebounce();
     await waitFor(() =>
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
     );
@@ -5889,6 +5893,7 @@ describe("markdown editor unmount flush", () => {
     const peerContent = await textEditorContent(editors[1]);
     await user.click(firstContent);
     await user.keyboard("{End} First");
+    await advanceAutosaveDebounce();
     await waitFor(() =>
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
     );
