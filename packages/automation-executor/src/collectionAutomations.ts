@@ -325,6 +325,8 @@ export interface CollectionAutomationsOptions {
    * Throws when the relay does not answer.
    */
   reachRelayRecord(generation: number): Promise<ReachRelayRecord>;
+  /** A server replica without reach history must hold steps in a workspace that was shared. */
+  holdUnprovenWithoutHistory?(): Promise<boolean>;
   /**
    * An enabled Group trigger asks the host module, as a schedule does, to
    * record this computer as the host when the relay names none. Resolves at
@@ -536,6 +538,8 @@ export interface CollectionAutomationHold {
   definitionHash: string;
   /** The step's identity (reachStepId). */
   step: string;
+  /** The label of the approved operation this step calls, as the app names it. */
+  operationName?: string;
   seq: number;
   /** The name of the Collection the automation belongs to, and the one the step reaches. */
   collection: string;
@@ -1109,7 +1113,7 @@ export class CollectionAutomations {
     const current = () => generation === this.generation;
     this.opened ??= this.enqueue(async () => {
       const subscriptions = await this.options.store.readSubscriptions();
-      const { verdicts, hostRecord, unproven, unprovenAll, unprovenFolders, unprovenPaths, pending, taken, unreadable } =
+      const { verdicts, hostRecord, unproven, unprovenAll, unprovenFolders, unprovenPaths, pending, taken, unreadable, missing } =
         await this.options.store.readReachVerdicts();
       const timeouts = await this.options.store.readTimeouts();
       if (!current()) return;
@@ -1132,6 +1136,9 @@ export class CollectionAutomations {
       await this.loadIndex();
       if (!current()) return;
       await this.noteSwitches();
+      if (missing && await this.options.holdUnprovenWithoutHistory?.()) {
+        await this.updateVerdicts(() => this.holdUnproven(), true);
+      }
       this.noteEnabledSchedules(true);
       this.state = "open";
       this.waitingFor.clear();
@@ -2094,6 +2101,7 @@ export class CollectionAutomations {
         if (held === null) return;
         steps.push({
           automationId, automationName: automation.name, definitionHash: hash, step, seq: stored.seq,
+          ...(reach.kind === "dataset-operation" ? { operationName: reach.operation.label } : {}),
           collection: collection.name, collectionPath, ...held, stoppedFor: stored.stoppedFor, fileUnread: this.fileUnread(stored),
         });
       });

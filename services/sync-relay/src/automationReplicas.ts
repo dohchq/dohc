@@ -18,6 +18,8 @@ export interface AutomationReplica {
   readonly workspaceId: string;
   readonly ownerUserId: string;
   readonly incarnation: number;
+  /** Relay log head covered by the last completed sync. */
+  readonly pulledHead: number;
   /** When this incarnation began: its schedules start after it. */
   readonly startedAtMs: number;
   /** The replica's workspace folder. Only the engine writes it. */

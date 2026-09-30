@@ -1,3 +1,4 @@
+import { createDatasetAutomations, createDatasetAutomationAuthority } from "./datasetAutomations";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
@@ -83,6 +84,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   if (storage.unavailable.aborted) { await close(); standing(); }
 
   function current(): void { standing(); if (closing) throw new Error("Dataset host is closed."); }
+  const automationAuthority = createDatasetAutomationAuthority(current, storage);
+  const automationListeners = new Set<(workspaceId: string, failed: boolean) => void>();
   function account(workspaceId: string, datasetId: string, bytes: number, create = false): void {
     current();
     if (!Number.isSafeInteger(bytes)) throw new Error("Invalid dataset allocation.");
@@ -173,6 +176,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   }
   function resolveAuthority(auth: AppBackendAuth, request: {workspaceId: string; datasetId?: string; access: DatasetAccess}): DatasetAuthority {
     current();
+    const automation = automationAuthority.resolve(auth, request.workspaceId, request.access.kind);
+    if (automation !== null) return automation;
     if (request.access.kind === "app") {
       if (!request.datasetId) throw notFound();
       return app(auth, request.workspaceId, request.datasetId, request.access.appId).authority;
@@ -235,6 +240,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       accountMigration(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
       accountCheckpointStage(_auth, allocation) { account(allocation.scope.workspaceId, allocation.scope.datasetId, allocation.bytes); },
       accountMetadata(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
+      wakeAutomations(scope, failed) { for (const wake of automationListeners) wake(scope.workspaceId, failed); },
       accountAutomations(allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
       deleteResources(_auth, key) {
         storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?").run(key.workspaceId,key.datasetId);
@@ -270,9 +276,16 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_automation_subscriptions WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_automation_claims WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_automation_revisions WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_automation_presses WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_automation_failure_generations WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id;
       END;`));
     return {
+      automations: createDatasetAutomations({ host, storage, current, authority: automationAuthority }),
+      observeAutomationClaims(wake: (workspaceId: string, failed: boolean) => void) {
+        automationListeners.add(wake);
+        return () => { automationListeners.delete(wake); };
+      },
       offlineAccessFingerprint(auth: Extract<AppBackendAuth, {kind: "named"}>) {
         current();
         if (!auth.grantId) throw notFound();

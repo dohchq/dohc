@@ -245,3 +245,13 @@ export function serverHostedWorkspaces(storage: StorageContext): string[] {
     `SELECT workspace_id FROM sync_relay_automation_hosts WHERE install_id = ? OR handover_from = ? ORDER BY workspace_id`,
   ).all(AUTOMATION_SERVER_INSTALL_ID, AUTOMATION_SERVER_INSTALL_ID).map((row) => String(row.workspace_id)));
 }
+
+/** Ownership and sharing history remain available while a replica is closed. */
+export function automationWorkspaceInfo(storage: StorageContext, workspaceId: string): { ownerUserId: string; everShared: boolean } | null {
+  return storage.readTx(() => {
+    const row = storage.db.prepare(
+      "SELECT owner_user_id, EXISTS(SELECT 1 FROM sync_relay_shares WHERE workspace_id=w.workspace_id) AS ever_shared FROM sync_relay_workspaces w WHERE workspace_id=?"
+    ).get(workspaceId);
+    return row ? { ownerUserId: String(row.owner_user_id), everShared: Boolean(row.ever_shared) } : null;
+  });
+}

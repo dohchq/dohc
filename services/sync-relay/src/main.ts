@@ -15,7 +15,7 @@ import {
 import { Pool } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
-import { errorBody, errorResponse } from "./errors";
+import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
@@ -362,6 +362,10 @@ const relayApplication = createSyncRelayHandler({
   publicEditRelease,
   appPublicationLimits,
   datasetHost,
+  pressDataset: (auth, input, signal) => {
+    if (!automations) throw notFound();
+    return automations.pressDataset(auth, input, signal);
+  },
   appCollectionPolicy,
   noticePostRateLimiter,
   ...(automationServer ? {automationServer} : {}),
@@ -621,7 +625,7 @@ server.listen(requestedPort, host, () => {
 const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
 if (!automationsOn && automationRoot) await removeAutomationReplicas(storage, automationRoot);
 automations = automationServer && automationReplicaKey && automationRoot ? await startAutomationServer({
-  storage, server: automationServer,
+  storage, server: automationServer, datasetHost,
   replicas: {root: automationRoot, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
     relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, ...automationReplicaKey},
   readOwnerShares: relayApplication.readOwnerShares,

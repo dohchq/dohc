@@ -332,7 +332,7 @@ describe("share links as editors", () => {
 
   it("gives a link no data grant on a dataset", () => {
     const grants = { workspaceId: "w", grants: [{ principalKey: datasetPrincipalKey("w", "g-link", "u-ana"), operationIds: ["op-add"] }] };
-    const operation: ReachDatasetOperation = { operationId: "op-add", name: "Add order", access: "link" };
+    const operation: ReachDatasetOperation = { operationId: "op-add", name: "Add order", label: "Add order", access: "link" };
     expect(check(owner(linkGrant("g-link", ["Trip"])), { kind: "dataset-operation", collection: trip, datasetId: "trip", operation, grants }))
       .toEqual(stopped("Anyone with your share link to Trip has no grant to use Add order in Trip."));
   });
@@ -401,14 +401,14 @@ describe("a link that wrote automations directly and stopped editing", () => {
 
 describe("reach on a dataset Collection", () => {
   // Budget keeps its records in a dataset. Its automations use its operations.
-  const edit = { operationId: "op-edit", name: "invoices.edit", access: "helper" as const };
-  const ownerOnly = { operationId: "op-delete", name: "invoices.delete", access: "owner" as const };
+  const edit = { operationId: "op-edit", name: "invoices.edit", label: "Edit", access: "helper" as const };
+  const ownerOnly = { operationId: "op-delete", name: "invoices.delete", label: "Delete", access: "owner" as const };
   const read = { operationId: "op-read", fieldIds: ["f-status", "f-amount"] };
   const narrow = { operationId: "op-narrow", fieldIds: ["f-status"] };
   const anaGrant = grant(ana, { paths: ["Budget"], access: "edit" });
   const anaKey = datasetPrincipalKey("workspace", anaGrant.grantId, ana.userId);
   const grants = (operationIds: string[]) => ({ workspaceId: "workspace", grants: [{ principalKey: anaKey, operationIds }] });
-  const asOperation = (read: { operationId: string }): ReachDatasetOperation => ({ operationId: read.operationId, name: read.operationId, access: "helper" });
+  const asOperation = (read: { operationId: string }): ReachDatasetOperation => ({ operationId: read.operationId, name: read.operationId, label: read.operationId, access: "helper" });
   const field = (fieldId: string, reads: Array<{ operationId: string }>, held = grants([])): Extract<ReachStep, { kind: "dataset-field" }> =>
     ({ kind: "dataset-field", collection: budget, datasetId: "budget", tableId: "invoices", field: { fieldId, name: fieldId === "f-amount" ? "Amount" : "Status" }, reads: reads.map(asOperation), grants: held });
   const step = (operation: ReachDatasetOperation, operationIds: string[] = []): Extract<ReachStep, { kind: "dataset-operation" }> =>
