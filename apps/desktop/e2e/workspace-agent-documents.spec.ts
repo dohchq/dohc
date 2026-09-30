@@ -8,7 +8,7 @@ import {
 } from "@dohc/cli/protocol";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { launchDesktopApp } from "./helpers/desktopApp";
+import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { waitForCliEndpoint } from "./helpers/dohcCli";
 import { ydocUpdateAuthors } from "./helpers/engineDb";
 import {
@@ -94,6 +94,110 @@ async function releaseEditorUpdates(desktop: Desktop): Promise<void> {
 async function fileText(temp: TempWorkspace, path: string): Promise<string> {
   return await readFile(join(temp.rootPath, path), "utf8").catch(() => "");
 }
+
+test("a document remains editable by its person and agent after restart", async ({}, testInfo) => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const path = "notes/lifecycle.md";
+  const timings: Array<{ step: string; seconds: number }> = [];
+  const launches: Desktop[] = [];
+  let desktop: Desktop | null = null;
+  const step = async <Result>(name: string, action: () => Promise<Result>): Promise<Result> => {
+    const started = performance.now();
+    try { return await test.step(name, action); }
+    finally { timings.push({ step: name, seconds: (performance.now() - started) / 1000 }); }
+  };
+
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "notes/readme.md", contents: "# Notes\n" }]);
+    const workspace = await step("initial workspace and agent endpoint ready", async () => {
+      desktop = await launchDesktopApp({ workspace: temp });
+      launches.push(desktop);
+      const opened = await openWorkspaceFromFirstRun(desktop.page, temp);
+      await waitForWorkspaceFile(desktop.page, opened.workspaceId, "notes/readme.md");
+      await waitForCliEndpoint(temp.homeDir);
+      return opened;
+    });
+    await step("agent creates document", async () => {
+      expect(await agentCli(temp, "documentCreate", {
+        agent: "e2e-lifecycle-agent",
+        path,
+        markdown: "# Lifecycle\n\nAgent draft before restart.\n\nThe person continues here.\n",
+      })).toEqual({ ok: true, path });
+    });
+    const first = launches[0]!;
+    await step("created document opens for the person", async () => {
+      await waitForWorkspaceFile(first.page, workspace.workspaceId, path);
+      await openDocument(first.page, path);
+      await expect(first.page.getByTestId("markdown-editor")).toContainText("Agent draft before restart.");
+    });
+    await step("agent reads and edits open document", async () => {
+      const read = await agentCli(temp, "documentRead", { path });
+      expect(read).toMatchObject({ ok: true, markdown: expect.stringContaining("Agent draft before restart.") });
+      expect(await agentCli(temp, "documentEdit", {
+        agent: "e2e-lifecycle-agent", path,
+        find: "Agent draft before restart.", replacement: "Agent saved before restart.",
+      })).toMatchObject({ ok: true, path, changed: true });
+    });
+    await step("first agent edit appears and settles", async () => {
+      await expect(first.page.getByTestId("markdown-editor")).toContainText("Agent saved before restart.");
+      await expect(first.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+      await expect.poll(() => fileText(temp, path), { timeout: 30_000 }).toContain("Agent saved before restart.");
+    });
+    await step("restart opens the same workspace and document", async () => {
+      await first.close();
+      desktop = null;
+      desktop = await launchDesktopApp({ workspace: temp });
+      launches.push(desktop);
+      const reopened = await openWorkspaceFromFirstRun(desktop.page, temp);
+      expect(reopened.workspaceId).toBe(workspace.workspaceId);
+      await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+      await waitForCliEndpoint(temp.homeDir);
+      await openDocument(desktop.page, path);
+      await expect(desktop.page.getByTestId("markdown-editor")).toContainText("Agent saved before restart.");
+    });
+    const second = launches[1]!;
+    await step("agent reads and edits after restart", async () => {
+      const read = await agentCli(temp, "documentRead", { path });
+      expect(read).toMatchObject({ ok: true, markdown: expect.stringContaining("Agent saved before restart.") });
+      expect(await agentCli(temp, "documentEdit", {
+        agent: "e2e-lifecycle-agent", path,
+        find: "Agent saved before restart.", replacement: "Agent continued after restart.",
+      })).toMatchObject({ ok: true, path, changed: true });
+      await expect(second.page.getByTestId("markdown-editor")).toContainText("Agent continued after restart.");
+    });
+    await step("person continues typing in the reopened document", async () => {
+      await second.page.getByTestId("markdown-editor").getByText("The person continues here.").click();
+      await second.page.keyboard.press("End");
+      await second.page.keyboard.type(" Human continued after restart.");
+      await expect(second.page.getByTestId("markdown-editor")).toContainText("The person continues here. Human continued after restart.");
+    });
+    await step("editor, agent read, and saved file agree", async () => {
+      await expect(second.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+      await expect.poll(async () => {
+        const read = await agentCli(temp, "documentRead", { path });
+        const disk = await fileText(temp, path);
+        return read.ok && read.markdown === disk &&
+          disk.includes("Agent continued after restart.") &&
+          disk.includes("The person continues here. Human continued after restart.");
+      }, { timeout: 30_000 }).toBe(true);
+      await expect(second.page.getByTestId("markdown-editor")).toContainText("Agent continued after restart.");
+      await second.page.screenshot({ path: testInfo.outputPath("document-after-restart.png") });
+      for (const launch of launches) {
+        expect(launch.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+        assertDesktopEngineHealthy(launch.logs);
+      }
+    });
+  } finally {
+    try { await cleanupDesktopWorkspace(desktop, temp); }
+    finally {
+      await testInfo.attach("document lifecycle timings", {
+        body: JSON.stringify({ platform: process.platform, steps: timings }, null, 2),
+        contentType: "application/json",
+      });
+    }
+  }
+});
 
 test("an agent's edit merges into a document the person is typing in", async ({}, testInfo) => {
   test.setTimeout(240_000);

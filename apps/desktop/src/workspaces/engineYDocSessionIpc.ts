@@ -53,6 +53,7 @@ import {
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
   isYDocSessionUnreleasedError,
+  type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
   type WorkspaceEngineYDocProviderSession,
 } from "./workspaceEngineCapture";
@@ -78,7 +79,7 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
 };
 export interface EngineYDocSessionCapture {
-  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number) => void}): Promise<EngineYDocSessionProvider>;
+  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent) => void}): Promise<EngineYDocSessionProvider>;
 }
 
 interface EngineYDocWorkspace {
@@ -561,11 +562,13 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           provider = await capture.openYDocSession({
             path: canonicalPath,
             contentKind: documentKind,
-            onSaveState: (state, token) => {
+            onSaveState: (state, token, event) => {
               const seq =
-                state === "settling"
+                event === "start"
                   ? noteSettleStart(saveSeq, token)
-                  : noteSettleOutcome(saveSeq, token);
+                  : event === "outcome"
+                    ? noteSettleOutcome(saveSeq, token)
+                    : 0;
               publish(() => signals.emit({ state, seq }));
             },
             onRemoteUpdate: (update) => {

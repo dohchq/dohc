@@ -76,8 +76,8 @@ export function createNamedDesktopLiveCapture(options: {
       const unsubscribe = session.subscribe(state => {
         if (!active) { announce(); return; }
         if (closed) return;
-        if (state.status !== "live") input.onSaveState?.("read-only", token);
-        else if (state.pendingUpdates === 0) for (const accepted of pendingTokens.splice(0)) input.onSaveState?.("saved", accepted);
+        if (state.status !== "live") input.onSaveState?.("read-only", token, "status");
+        else if (state.pendingUpdates === 0) for (const accepted of pendingTokens.splice(0)) input.onSaveState?.("saved", accepted, "outcome");
       });
       try { await session.reconnect(); announce(); await ready; options.assertCurrent(); credentials.signal.throwIfAborted(); }
       catch (error) { unsubscribe(); credentials.signal.removeEventListener("abort", abort); transport.close(); throw error; }
@@ -96,12 +96,12 @@ export function createNamedDesktopLiveCapture(options: {
         applyLocalUpdate(bytes, onArmed) {
           options.assertCurrent(); credentials.signal.throwIfAborted();
           if (closed || session.state().status !== "live") throw new Error("Live editing is paused.");
-          onArmed?.(); token++; pendingTokens.push(token); input.onSaveState?.("settling", token);
+          onArmed?.(); token++; pendingTokens.push(token); input.onSaveState?.("settling", token, "start");
           localTransaction = true;
           try { session.edit(() => Y.applyUpdate(session.doc, bytes)); }
           finally { localTransaction = false; }
           if (session.state().status === "live" && session.state().pendingUpdates === 0) {
-            for (const accepted of pendingTokens.splice(0)) input.onSaveState?.("saved", accepted);
+            for (const accepted of pendingTokens.splice(0)) input.onSaveState?.("saved", accepted, "outcome");
           }
         },
         // A shared session applies each edit at once, so the decision and
