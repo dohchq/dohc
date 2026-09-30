@@ -6,9 +6,15 @@ import { initializeServiceHostEnrollmentSchema } from "./serviceHostEnrollment";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
 import { initializeNoticeSchema, initializeShareNoticeDeliverySchema } from "./noticeSchema";
 import { initializeAutomationHostSchema } from "./automationHostSchema";
-import { initializeAutomationGroupHandoverSchema, initializeAutomationHostPlacementSchema } from "./automationHosts";
+import {
+  initializeAutomationGroupHandoverSchema,
+  initializeAutomationHostPlacementSchema,
+  initializeAutomationReachHandoverSchema,
+  initializeAutomationServerScheduleSchema,
+} from "./automationHosts";
 import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
+import { initializeAutomationWorkspaceSchema, initializeLiveClaimIndex } from "./automationWorkspaces";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
@@ -1219,9 +1225,13 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationHostSchema(db);
     initializeAutomationGroupHandoverSchema(db);
     initializeAutomationHostPlacementSchema(db);
+    initializeAutomationReachHandoverSchema(db);
+    initializeAutomationServerScheduleSchema(db);
     initializeCurrentFileKeySchema(db);
     initializeCollectionWriteSchema(db);
     initializeAutomationPressSchema(db);
+    initializeAutomationWorkspaceSchema(db);
+    initializeLiveClaimIndex(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)

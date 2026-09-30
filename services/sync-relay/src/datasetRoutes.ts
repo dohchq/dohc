@@ -6,6 +6,8 @@ import { isDatasetReopenWaitError, isDatasetWorkerFailure } from "@dohc/app-back
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { APP_BACKEND_UPLOAD_REQUEST_BYTES, parseAppBackendJson, parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
+import type { DatasetServerPress } from "./datasetAutomations";
+import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { AppBackendRoute } from "./appBackendRoutes";
@@ -19,7 +21,7 @@ export interface DatasetRoute {
   datasetId?: string;
   transferId?: string;
   named?: boolean;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "prepare-migration" | "approve-migration" | "discard-migration" | "migration-preview-page" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "history-revision" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt" | "delete-preview" | "delete" | "deletion-status";
+  action: "press" | "list" | "activate" | "describe" | "artifacts" | "invoke" | "prepare-migration" | "approve-migration" | "discard-migration" | "migration-preview-page" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "history-revision" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt" | "delete-preview" | "delete" | "deletion-status";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -54,7 +56,8 @@ async function response(run: () => unknown): Promise<Response> {
 }
 
 export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelayStorage,
-  options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number}) {
+  options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number;
+    pressDataset?: (auth: Extract<AppBackendAuth, {kind: "named"}>, input: DatasetServerPress, signal: AbortSignal) => ReturnType<CollectionAutomations["pressDataset"]>}) {
   const admit = createAppBackendAdmission(options.limits);
   return async (request: Request, route: DatasetRoute, auth: Extract<AppBackendAuth, {kind: "named"}>): Promise<Response> => {
     if (route.action === "import") {
@@ -197,6 +200,14 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
           if (expected.workspaceId !== scope.workspaceId || expected.datasetId !== scope.datasetId || !Number.isSafeInteger(expected.revision) || Number(expected.revision) < 0) throw badRequest("Invalid dataset cursor.");
           return host.prepareMigration(auth, {...input, migrationSql: text(body.migrationSql, 256 * 1024), expected: {...scope,
             hostEpoch: text(expected.hostEpoch), approvedRevisionHash: digest(expected.approvedRevisionHash), revision: Number(expected.revision), digest: digest(expected.digest)}});
+        }
+        if (route.action === "press") {
+          if (!options.pressDataset) throw notFound();
+          const body = record(raw, ["table", "field", "recordId", "pressId", "confirmed"]);
+          if (!Array.isArray(body.confirmed) || body.confirmed.length > 128) throw badRequest("Invalid dataset request.");
+          return options.pressDataset(auth, {datasetId: scope.datasetId, table: text(body.table), field: text(body.field),
+            recordId: text(body.recordId, 1024), pressId: text(body.pressId, 256), by: { kind: "human" },
+            confirmed: body.confirmed.map(value => text(value))}, signal);
         }
         if (route.action === "invoke") {
           const body = record(raw, ["revision", "revisionSha256", "operationId", "input", "idempotencyKey"]);

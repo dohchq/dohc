@@ -5,6 +5,8 @@ import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   claimWorkspace,
   closeTestStorages,
+  inspectDatabase,
+  storagePath,
   createShare,
   testHandler,
   testStorage,
@@ -34,6 +36,7 @@ import {
   whoSwitchedOff,
   type AutomationsFileHistory,
 } from "../automations/automationNotices";
+import { createAutomationWakeConsumer, createAutomationWakeIntents } from "../automations/automationWakeIntents";
 import { createTestScratch } from "../workspaces/testTemp";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
@@ -1486,5 +1489,134 @@ describe("automation notices reach the people involved", () => {
       expect(switcherNameFor({ ...names, switchedOffBy: { kind: "person", userId: "owner" }, recipient: "ben" })).toBe("Ice");
       expect(switcherNameFor({ ...names, switchedOffBy: { kind: "link" }, recipient: "owner" })).toBe("Someone with an Edit link");
     });
+  });
+});
+
+describe("the relay hands an agent wake to one owner computer", () => {
+  const wake = { automationId: "collection:Tasks#ask", name: "Ask", depth: 2, body: "Check the task. ".repeat(100) };
+  const postWake = (server: Relay) => server.storage.postAutomationWake({
+    workspaceId: WORKSPACE, ownerUserId: "owner", claimId: "claim", keySeed: "hash", effectId: "claim/hash/0/wake", startedAtMs: clock, wake, senderLabel: "Ice", nowMs: clock,
+  }).noticeId;
+
+  it("keeps the full payload in main, executes on one computer, and never exposes it through the UI list", async () => {
+    const server = await relay();
+    const id = postWake(server);
+    const laptop = await computer(account(server, "owner"), { installId: "laptop" });
+    const desktop = await computer(account(server, "owner"), { installId: "desktop" });
+    await Promise.all([laptop.store.sync(), desktop.store.sync()]);
+    expect(await laptop.store.pendingAutomationWakes()).toEqual([{
+      account: laptop.signedIn!.key, noticeId: id, workspaceId: WORKSPACE, wake,
+    }]);
+    expect((await laptop.store.list()).notices[0]).not.toHaveProperty("wake");
+    const ran: string[] = [];
+    const errors: unknown[] = [];
+    const consumer = (c: Computer, name: string) => createAutomationWakeConsumer({
+      intents: createAutomationWakeIntents(join(c.directory, "wakes.json")),
+      pending: () => c.store.pendingAutomationWakes(),
+      ready: async (intent) => c.signedIn?.key === intent.account,
+      enabled: async () => true,
+      enabledIfOpen: async () => true,
+      dismiss: (intent) => c.store.dismissFirst({ store: "account", noticeId: intent.noticeId }, intent.account),
+      wake: async (_intent, message) => { expect(message.automation.depth).toBe(2); expect(message.body).toBe(wake.body); ran.push(name); },
+      onError: (error) => errors.push(error),
+    });
+    await Promise.all([consumer(laptop, "laptop").resume(), consumer(desktop, "desktop").resume()]);
+    expect(errors).toEqual([]);
+    expect(ran).toHaveLength(1);
+    await Promise.all([laptop.store.sync(), desktop.store.sync()]);
+    expect(await laptop.store.pendingAutomationWakes()).toEqual([]);
+    expect(await desktop.store.pendingAutomationWakes()).toEqual([]);
+  });
+
+  it.each([
+    { bodies: ["Task A", "Task B", "Task C"], expected: ["Task A", "Task B", "Task C"] },
+    { bodies: ["Check Tasks", "Check Tasks", "Check Tasks"], expected: ["Check Tasks"] },
+  ])("runs the parked bodies $expected", async ({ bodies, expected }) => {
+    const server = await relay();
+    for (const [i, body] of bodies.entries()) server.storage.postAutomationWake({
+      workspaceId: WORKSPACE, ownerUserId: "owner", effectId: "effect-" + i,
+      claimId: "claim-" + i, keySeed: "hash", startedAtMs: clock,
+      wake: { ...wake, body }, senderLabel: "Ice", nowMs: clock,
+    });
+    const laptop = await computer(account(server, "owner"), { installId: "laptop" });
+    await laptop.store.sync();
+    const ran: string[] = [];
+    const errors: unknown[] = [];
+    await createAutomationWakeConsumer({
+      intents: createAutomationWakeIntents(join(laptop.directory, "wakes.json")),
+      pending: () => laptop.store.pendingAutomationWakes(),
+      ready: async (intent) => laptop.signedIn?.key === intent.account,
+      enabled: async () => true,
+      enabledIfOpen: async () => true,
+      dismiss: (intent) => laptop.store.dismissFirst({ store: "account", noticeId: intent.noticeId }, intent.account),
+      wake: async (_intent, message) => { ran.push(message.body); },
+      onError: (error) => errors.push(error),
+    }).resume();
+    expect(errors).toEqual([]);
+    expect(ran).toEqual(expected);
+  });
+
+  it("removes a saved intent after ownership changes without retrying or waking", async () => {
+    const server = await relay();
+    postWake(server);
+    const laptop = await computer(account(server, "owner"));
+    await laptop.store.sync();
+    const [intent] = await laptop.store.pendingAutomationWakes();
+    const intents = createAutomationWakeIntents(join(laptop.directory, "wakes.json"));
+    await intents.save({ ...intent!, claimed: false });
+    const db = inspectDatabase(storagePath(server.storage));
+    try { db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'other' WHERE workspace_id = ?").run(WORKSPACE); }
+    finally { db.close(); }
+    const errors: unknown[] = [];
+    let wakes = 0;
+    const consumer = createAutomationWakeConsumer({
+      intents, pending: () => laptop.store.pendingAutomationWakes(), ready: async () => true, enabled: async () => true,
+      enabledIfOpen: async () => true,
+      dismiss: (row) => laptop.store.dismissFirst({ store: "account", noticeId: row.noticeId }, row.account),
+      wake: async () => { wakes++; }, onError: (error) => errors.push(error),
+    });
+    await consumer.resume();
+    await consumer.resume();
+    expect(await intents.list()).toEqual([]);
+    expect(await laptop.store.pendingAutomationWakes()).toEqual([]);
+    expect(wakes).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  it("keeps a read parked wake in the local cache past retention", async () => {
+    const server = await relay();
+    const id = postWake(server);
+    const laptop = await computer(account(server, "owner"));
+    await laptop.store.sync();
+    await laptop.store.mark([{ store: "account", noticeId: id }], "read", laptop.signedIn!.key);
+    clock += NOTICE_READ_RETENTION_MS * 3;
+    await laptop.store.sync();
+    expect(await laptop.store.pendingAutomationWakes()).toHaveLength(1);
+  });
+
+  it("does not offer a wake through a share view, another account, or a stale session", async () => {
+    const server = await relay();
+    postWake(server);
+    const laptop = await computer(account(server, "owner"));
+    await laptop.store.sync();
+    laptop.reach.set(WORKSPACE, { shareId: "share-view" });
+    expect(await laptop.store.pendingAutomationWakes()).toEqual([]);
+    laptop.reach.set(WORKSPACE, { workspaceId: WORKSPACE });
+    switchTo(laptop, account(server, "ana"));
+    await laptop.store.sync();
+    expect(await laptop.store.pendingAutomationWakes()).toEqual([]);
+    switchTo(laptop, account(server, "owner"));
+    laptop.onReach = () => switchTo(laptop, account(server, "ana"));
+    expect(await laptop.store.pendingAutomationWakes()).toEqual([]);
+  });
+
+  it("does not claim a notice the person dismissed while the computer was offline", async () => {
+    const server = await relay();
+    const id = postWake(server);
+    const laptop = await computer(account(server, "owner"));
+    await laptop.store.sync();
+    server.online = false;
+    await laptop.store.mark([{ store: "account", noticeId: id }], "dismissed", laptop.signedIn!.key);
+    expect(await laptop.store.pendingAutomationWakes()).toEqual([]);
   });
 });

@@ -547,7 +547,7 @@ export function createDatasetAutomationClaims(options: {
      * host checks the table and button against the approved rules, and
      * derives who pressed.
      */
-    press(input: DatasetPressInput & { cursor: Pick<DatasetCursor, "workspaceId" | "datasetId" | "hostEpoch" | "revision"> }): DatasetPressed {
+    press(input: DatasetPressInput & { cursor: Pick<DatasetCursor, "workspaceId" | "datasetId" | "hostEpoch" | "revision"> }, authorize: () => void = () => undefined): DatasetPressed {
       const { cursor } = input, scope = { workspaceId: text(cursor.workspaceId, "workspace"), datasetId: text(cursor.datasetId, "dataset") };
       const pressId = text(input.pressId, "press", 256), automationId = text(input.automationId, "id");
       if (typeof input.request !== "string" || !/^[a-f0-9]{64}$/.test(input.request)) throw new Error("Invalid automation press request.");
@@ -566,6 +566,7 @@ export function createDatasetAutomationClaims(options: {
         (actor.kind === "owner" || actor.kind === "named") && actor.kind === presser.kind && actor.userId === presser.userId;
       const another = () => new Error("This press id already names another press.");
       return tx(() => {
+        sync(authorize);
         const at = now();
         forgetPresses(scope.workspaceId, at);
         // The same press sent again is the same request, whatever the rules or automations say now.

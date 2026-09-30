@@ -338,13 +338,13 @@ describe("workspace engine IPC registrations", () => {
     expect(h.notify).not.toHaveBeenCalled();
   });
 
-  it("names this computer's agent by its display name, and any other agent as Agent, never by its person", async () => {
+  it("names this computer's dohc run by its display name, and another person's run as Agent", async () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue({
       moments: ["person-local", "user-pat"].map((onBehalfOf, index) => ({
         id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
-        authors: [{ kind: "agent", agentId: "agent", onBehalfOf }],
+        authors: [{ kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf }],
       })),
       nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
     });
@@ -358,7 +358,38 @@ describe("workspace engine IPC registrations", () => {
       moment: {
         id: "detail", workspaceId: "workspace", versionId: "main", objectId: "object",
         path: "notes/a.md", recordedAtMs: 1, operation: "write", metadata: { origin: "local-file" },
-        authors: [{ kind: "agent", agentId: "agent", onBehalfOf: "person-local" }],
+        authors: [{ kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf: "person-local" }],
+        payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
+      },
+    });
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "detail" })).resolves.toMatchObject({
+      moment: { agentAuthorName: "ice@example.com", beforeText: null, afterText: "body" },
+    });
+  });
+
+  it("uses Settings only for dohc runs and handshake names for other agents", async () => {
+    const h = await harness();
+    h.capture.listMoments.mockResolvedValue({
+      moments: [{ agentId: "agent", agentRunId: "run-1" }, { agentId: "Pat" }, { agentId: "dohc-mcp" }].map((identity, index) => ({
+        id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
+        operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
+        authors: [{ kind: "agent", onBehalfOf: "person-local", ...identity }],
+      })),
+      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+    });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
+      moments: [{ agentAuthorName: "You" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
+    });
+    h.displayName.mockReturnValue("ice@example.com");
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
+      moments: [{ agentAuthorName: "ice@example.com" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
+    });
+    h.capture.readMoment.mockResolvedValue({
+      protected: false,
+      moment: {
+        id: "detail", workspaceId: "workspace", versionId: "main", objectId: "object",
+        path: "notes/a.md", recordedAtMs: 1, operation: "write", metadata: { origin: "local-file" },
+        authors: [{ kind: "agent", agentId: "agent", onBehalfOf: "person-local", agentRunId: "run-1" }],
         payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
       },
     });

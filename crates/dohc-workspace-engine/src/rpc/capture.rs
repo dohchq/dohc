@@ -236,6 +236,7 @@ mod tests {
     use crate::EngineService;
     use crate::lock;
     use dohc_engine_protocol::transport::RequestContext;
+    use dohc_engine_protocol::wire::Request;
     use dohc_engine_protocol::wire::WorkspaceHandle;
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
@@ -379,5 +380,126 @@ mod tests {
         let status = service.watcher_status(Some(handle.clone())).await.unwrap();
         assert_eq!(status["recoveryUnavailable"], json!(false));
         service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    /// A server's automation replica opens without capture and asks to keep
+    /// its Collections current. Nothing scans its folder, so the record it
+    /// creates through the engine is adopted by the write itself. Any other
+    /// captureless open, such as the desktop's join bootstrap, reconciles
+    /// nothing, as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_mode_none_adopts_a_record_it_writes_only_when_asked() {
+        for reconcile in [true, false] {
+            for (publish, create_only) in [(true, true), (true, false), (false, false)] {
+                capture_mode_none_adoption(reconcile, publish, create_only).await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_collections_needs_capture_mode_none() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let refused = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "reconcile-needs-no-capture",
+                    "reconcileCollections": true,
+                }),
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "a captured workspace already reconciles through its driver"
+        );
+    }
+
+    async fn capture_mode_none_adoption(reconcile: bool, publish: bool, create_only: bool) {
+        const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "capture-mode-none-collections";
+        let ctx = RequestContext::unbounded();
+        let opened = service
+            .workspace_open(
+                &ctx,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                    "captureMode": "none",
+                    "reconcileCollections": reconcile,
+                }),
+            )
+            .await
+            .expect("no-capture workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        let main = service
+            .versions_ensure_main(
+                &ctx,
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            )
+            .await
+            .expect("ensure main");
+        let files = [
+            (
+                "Tasks/collection.yaml",
+                "name: Tasks\nfields:\n  Status:\n    type: text\n".to_owned(),
+            ),
+            (
+                "Tasks/one.md",
+                format!("---\nid: {RECORD}\nStatus: Doing\n---\n"),
+            ),
+        ];
+        for (id, (path, text)) in (1_u64..).zip(files) {
+            let request = Request {
+                id,
+                method: "versionedText.write".to_owned(),
+                workspace: Some(handle.clone()),
+                deadline_ms: None,
+                idempotency_key: None,
+                progress: false,
+                params: json!({
+                    "versionId": main["id"],
+                    "path": path,
+                    "text": text,
+                    "origin": "api",
+                    "publish": publish,
+                    "createOnly": create_only,
+                }),
+            };
+            service
+                .versioned_text_write(&ctx, &request, request.params.clone())
+                .await
+                .expect("create through the engine");
+        }
+        let found = service
+            .collections_get_record(
+                &ctx,
+                Some(handle.clone()),
+                json!({ "collectionPath": "Tasks", "recordId": RECORD, "historyLimit": 1 }),
+                3,
+            )
+            .await;
+        if reconcile {
+            let (found, _) = found.expect("the record is in its Collection without a capture pass");
+            assert_eq!(found["record"]["path"], json!("Tasks/one.md"));
+        } else {
+            assert!(
+                found.is_err(),
+                "a captureless open that did not ask reconciles nothing"
+            );
+        }
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("close no-capture workspace");
     }
 }

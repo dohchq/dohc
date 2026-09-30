@@ -71,7 +71,7 @@ function engine(moments: VersionedTextMoment[], folders: Record<string, string[]
     }),
     folderEntries: vi.fn(async (path: string) => folders[path] ?? []),
     removeEmptyFolder: vi.fn(async () => undefined),
-    undoRuns: vi.fn(async (_definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>) => ({ undone: 2, left: 1, kept: 3, errorMessage: null as string | null })),
+    undoRuns: vi.fn(async (_definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>) => ({ undone: 2, left: 1, kept: 3, missing: 0, otherKept: 0, errorMessage: null as string | null })),
   };
   return { dependencies, restored, refused, changedAtRestore, failing, addedAtRestore, all };
 }
@@ -115,6 +115,7 @@ describe("restoring what a person wrote directly", () => {
       runChangesKept: 3,
       wroteAutomations: true,
       sendsMessages: false,
+      fieldsKept: 3, fieldsMissing: 0,
       errorMessage: null,
     });
     const wipe = { collectionPath: "trip/packing", id: "wipe" };
@@ -142,7 +143,7 @@ describe("restoring what a person wrote directly", () => {
   it("keeps what undoing some runs found when a later run's Undo fails", async () => {
     const auto = moment("m-auto", "o-auto", "trip/packing/automations.yaml", automations(STAMP), automations(STAMP, WIPE));
     const { dependencies } = engine([auto]);
-    dependencies.undoRuns.mockResolvedValueOnce({ undone: 1, left: 0, kept: 4, errorMessage: "The workspace engine is not running." });
+    dependencies.undoRuns.mockResolvedValueOnce({ undone: 1, left: 0, kept: 4, missing: 0, otherKept: 0, errorMessage: "The workspace engine is not running." });
     await expect(restoreDirectWrites(dependencies, [file("m-auto", "o-auto", "trip/packing/automations.yaml")])).resolves.toMatchObject({
       restored: [{ path: "trip/packing/automations.yaml" }],
       runsUndone: 1,

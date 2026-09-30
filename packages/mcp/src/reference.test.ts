@@ -40,7 +40,7 @@ describe("CLI, MCP, and app channel reference", () => {
   it("documents every CLI socket verb, as a command or through an MCP tool", () => {
     const documented = new Set<string>([
       ...Object.keys(CLI_COMMANDS.chat!.verbs),
-      "dataset", "appPublication", "ownerAppResponses",
+      "dataset", "appPublication", "ownerAppResponses", "fileWrite",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);
     expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);

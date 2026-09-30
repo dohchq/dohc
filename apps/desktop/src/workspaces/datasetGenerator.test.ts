@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { evaluateAppOperation, initializeAppDatabase, type JsonValue } from "@dohc/app-backend-runtime";
 import { datasetColumnFields, type DatasetDefinition, type DatasetField, type DatasetOperation } from "@dohc/security-contract/dataset";
-import { generateDatasetSources, hasGeneratedDatasetOperations } from "./datasetGenerator";
+import { generateDatasetSources } from "./datasetGenerator";
+import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const field = (n: number, sqlColumn: string, extra: Partial<DatasetField> = {}): DatasetField => ({ fieldId: id(n), sqlColumn, name: sqlColumn, type: "text", required: false, unique: false, ...extra });

@@ -7,7 +7,8 @@ import {
   type PressHostSeam,
   type RelayedPressFailure,
   type RelayedPressHost,
-} from "./relayedPresses";
+} from "@dohc/automation-executor/relayed-presses";
+import { relayPressTransport } from "./relayedPresses";
 
 // The host's side of shared-view presses against a fake relay and a fake
 // host module: it runs only while the host module says so, accepts and presses
@@ -102,9 +103,8 @@ function hostWith(relay: ReturnType<typeof fakeRelay>, host = fakeHost(), option
   const presses: PressInput[] = [];
   const loop = createRelayedPressHost({
     workspaceId: WORKSPACE,
-    installId: "laptop",
     host: host.seam,
-    relay: async () => relay.connection,
+    transport: async () => relayPressTransport(relay.connection, WORKSPACE, "laptop"),
     heldClaim: options.heldClaim ?? (async () => null),
     press: async (input, watch) => {
       presses.push(input);

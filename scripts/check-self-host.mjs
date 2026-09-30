@@ -63,6 +63,10 @@ else {
         if(value.version!==1||value.relayUrl!==process.env.DOHC_RELAY_PUBLIC_ORIGIN)throw Error('Unexpected descriptor');})().catch(()=>{console.error('Relay cannot verify its public HTTPS origin. Check DNS, TLS, and host routing.');process.exitCode=1;});`;
       const hairpin = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', 'sync-relay', 'node', '-e', hairpinScript), {stdio: 'inherit'});
       record('native executable and relay HTTPS reachability', hairpin.status === 0);
+      // Replica sync uses the gateway, so check it after Compose has started every service.
+      const automations = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', 'sync-relay',
+        'node', '/app/tools/self-host/health.mjs', 'sync-relay', '--automations'), {stdio: 'inherit'});
+      record('server automations', automations.status === 0);
     }
   }
 }

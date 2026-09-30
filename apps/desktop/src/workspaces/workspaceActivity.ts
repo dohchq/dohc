@@ -526,6 +526,18 @@ export function createWorkspaceActivity(
     );
   }
 
+  // One sync pass now, for work that must act on the relay's state, such
+  // as Stop and restore between its passes. Throws unless the pass ended
+  // without a failure on a connected engine.
+  async function syncNow(state: WorkspaceActivityState): Promise<void> {
+    const engine = state.entry?.engine;
+    const unsynced = "dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again.";
+    if (!engine) throw new Error(unsynced);
+    await engine.retryNow({ countsAsAttempt: false });
+    const snapshot = engine.snapshot();
+    if (snapshot.authExpired || snapshot.updateRequired || snapshot.syncFailure) throw new Error(unsynced);
+  }
+
   // Pulls the workspace's own relay log for the Chats polls, where members'
   // replies to the DMs and Groups this workspace owns land. Records no local
   // change. No-op when the workspace has no engine.
@@ -685,6 +697,7 @@ export function createWorkspaceActivity(
     isOpen,
     queueCloudSync,
     retryCloudSync,
+    syncNow,
     queueCloudPull,
     setAgentRun,
     claimAgentRun,

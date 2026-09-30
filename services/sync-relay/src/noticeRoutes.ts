@@ -1,5 +1,8 @@
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import {
+  AUTOMATION_SERVER_INSTALL_ID,
+  SERVER_RUN_FAILED_NOTICE_PREFIX,
+  AUTOMATION_WAKE_PREFIX,
   isNoticeBody,
   isNoticeLine,
   isNoticeTarget,
@@ -72,6 +75,9 @@ export function createNoticeRoutes(
         : posted.recipientUserId;
       if (recipientUserId === undefined) throw relayError("notice_refused");
       const notice = { ...posted, recipientUserId };
+      // Only this server posts as the server, in process.
+      if (notice.originInstallId === AUTOMATION_SERVER_INSTALL_ID) throw badRequest("originInstallId is reserved for the server");
+      if (notice.noticeId.startsWith(SERVER_RUN_FAILED_NOTICE_PREFIX)) throw badRequest("noticeId is reserved for the server");
       if (notice.recipientUserId === userId) {
         if (notice.noticeId.startsWith(NOTICE_FROM_PREFIX)) {
           throw badRequest(`noticeId must not start with ${NOTICE_FROM_PREFIX}`);
@@ -107,7 +113,8 @@ export function createNoticeRoutes(
 type PostedNotice = Omit<PostNoticeInput, "senderUserId" | "senderLabel" | "nowMs" | "recipientUserId"> &
   ({ recipientUserId: string; toWorkspaceOwner: false } | { recipientUserId?: undefined; toWorkspaceOwner: true });
 
-function parsePostNotice(body: Record<string, unknown>): PostedNotice {
+/** A posted notice as the route accepts it; the server's own automations post through this too. */
+export function parsePostNotice(body: Record<string, unknown>): PostedNotice {
   if (
     typeof body.kind !== "string" || !Object.hasOwn(NOTICE_KINDS, body.kind) ||
     NOTICE_KINDS[body.kind as NoticeKind].recipients === "relay"
@@ -115,6 +122,7 @@ function parsePostNotice(body: Record<string, unknown>): PostedNotice {
     throw badRequest("kind is not a notice kind anyone may post");
   }
   if (!isNoticeLine(body.noticeId, NOTICE_POSTED_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
+  if (body.noticeId.startsWith(AUTOMATION_WAKE_PREFIX)) throw badRequest("noticeId is reserved for agent wakes");
   if (!isNoticeLine(body.title, NOTICE_TITLE_MAX_CHARS)) throw badRequest("title is invalid");
   if (!isNoticeBody(body.body)) throw badRequest("body is invalid");
   if (!isNoticeTarget(body.target)) throw badRequest("target is invalid");

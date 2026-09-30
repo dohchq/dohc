@@ -464,7 +464,7 @@ export function datasetReachSteps(
   const resolved = resolve(automation, rules, false);
   if ("problem" in resolved) return null;
   const { trigger, steps } = resolved.steps;
-  const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, access: operation.access });
+  const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access });
   // A code step on a generated dataset reads and changes its table's records, so their fields count too.
   const code = (rules.sourceCollection === undefined || rules.sourceCollection === posix.dirname(definition.schemaPath)) && rules.generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
     ? datasetCodeTable(automation, definition)
@@ -500,7 +500,7 @@ export function datasetUndoDeletes(
     id: "", collection, codeFiles: [],
     steps: deletes.map((operation): ReachStep => ({
       kind: "dataset-operation", collection, datasetId: definition.datasetId, grants,
-      operation: { operationId: operation.operationId, name: operation.name, access: operation.access },
+      operation: { operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access },
     })),
   });
   return deletes.filter((_, index) => verdicts[index]!.allowed);

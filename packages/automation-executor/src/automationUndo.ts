@@ -22,7 +22,7 @@ const empty = (): CollectionAutomationUndone => ({ reverted: 0, removed: 0, kept
 export async function undoAutomationRuns(
   documents: CollectionAutomationUndoDependencies, host: DatasetUndoHost | null, collection: import("./automationReach").ReachCollection, rosterNow: () => Promise<import("./automationReach").ReachRoster>, claimId: string, runs: readonly StoredRun[],
   saveRequest: (request: DatasetUndoRequest) => Promise<void>, signal: AbortSignal,
-): Promise<CollectionAutomationUndone> {
+): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
   if (host !== null && datasetUndoRulesChanged(host, runs)) throw new Error(DATASET_UNDO_RULES_CHANGED);
   const targets = new Map<string, Target>();
   const touch = (key: string, target: Target) => { targets.delete(key); targets.set(key, target); };
@@ -56,6 +56,7 @@ export async function undoAutomationRuns(
   }));
   const datasetChanges = host === null ? [] : datasetUndoChanges(host, runs);
   const result = empty();
+  const keptFields: Array<{ recordId: string; field: string }> = [];
   const accumulate = (next: CollectionAutomationUndone) => { for (const key of Object.keys(result) as Array<keyof CollectionAutomationUndone>) result[key] += next[key]; };
   const ordered = [...targets.values()].reverse();
   const actions = new Map<string, Array<Extract<Target, { kind: "action" }>>>();
@@ -71,14 +72,18 @@ export async function undoAutomationRuns(
     const target = recorded.kind === "action" ? actions.get(recorded.datasetId)!.shift()! : recorded;
     signal.throwIfAborted();
     if (target.kind === "document") {
-      accumulate(await undoCollectionAutomationRuns(documents, runs, signal, target.recordId, documentChanges));
+      const document = await undoCollectionAutomationRuns(documents, runs, signal, undefined, target.recordId, documentChanges);
+      accumulate(document.undone);
+      keptFields.push(...document.keptFields);
       continue;
     }
     if (host === null) throw new Error("The dataset host is unavailable.");
     const only = target.kind === "dataset" ? { ...target, kind: "record" as const } : target;
-    accumulate(await undoDatasetAutomationRuns(host, collection, rosterNow, claimId, runs, saveRequest, signal, only, datasetChanges));
+    const dataset = await undoDatasetAutomationRuns(host, collection, rosterNow, claimId, runs, saveRequest, signal, only, datasetChanges);
+    accumulate(dataset.undone);
+    keptFields.push(...dataset.keptFields);
   }
-  return result;
+  return { undone: result, keptFields };
 }
 
 /** Reach and descriptor checks come from recorded writes, not the source Collection's current storage kind. */

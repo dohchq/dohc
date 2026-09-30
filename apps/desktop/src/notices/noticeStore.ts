@@ -5,6 +5,9 @@ import { z } from "zod";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   isNoticeBody,
+  isAutomationWake,
+  AUTOMATION_WAKE_PREFIX,
+  type AutomationWake,
   isNoticeLine,
   isNoticeTarget,
   NOTICE_DISMISSED_RETENTION_MS,
@@ -74,7 +77,16 @@ export interface PostNoticeInput {
   signal?: AbortSignal;
 }
 
+export interface PendingAutomationWake {
+  account: string;
+  workspaceId: string;
+  noticeId: string;
+  wake: AutomationWake;
+}
+
 export interface NoticeStore {
+  /** Relay-created personal steps in this signed-in owner's workspace. Main process only. */
+  pendingAutomationWakes(): Promise<PendingAutomationWake[]>;
   // Throws when the notice breaks the relay's rules, before keeping it.
   postNotice(input: PostNoticeInput): Promise<void>;
   // The rows and the key of the signed-in account they belong to, read
@@ -172,6 +184,7 @@ function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinat
 }
 
 const RelayRow = z.object({
+  wake: z.custom<AutomationWake>(isAutomationWake).optional(),
   noticeId: NoticeRow.shape.noticeId,
   changeSeq: z.number().int().positive(),
   workspaceId: NoticeRow.shape.workspaceId,
@@ -970,8 +983,12 @@ export function createNoticeStore(deps: {
       });
       dismissed = ((await response.json().catch(() => null)) as { dismissed?: unknown } | null)?.dismissed;
     } catch (error) {
-      console.warn("[notices] a dismissal for Run now could not be sent", error);
-      return "unanswered";
+      if (ref.noticeId.startsWith(AUTOMATION_WAKE_PREFIX) && error instanceof RelayRefusal && error.reason === "refused") {
+        dismissed = [];
+      } else {
+        console.warn("[notices] a dismissal for Run now could not be sent", error);
+        return "unanswered";
+      }
     }
     // An older relay does not say which dismissal was first.
     if (!Array.isArray(dismissed)) return "unanswered";
@@ -1040,7 +1057,27 @@ export function createNoticeStore(deps: {
     });
   }
 
-  return { postNotice, list, mark, sync, dismissFirst, withdraw, refreshRefusals, sentFailure };
+  async function pendingAutomationWakes(): Promise<PendingAutomationWake[]> {
+    const session = await deps.session();
+    if (!session?.isCurrent()) return [];
+    return locked(async () => {
+      const file = await loadAccount(session.account);
+      if (!session.isCurrent()) return [];
+      return file.rows.flatMap((row) => {
+        if (row.kind !== "automation-wake" || !row.noticeId.startsWith(AUTOMATION_WAKE_PREFIX) ||
+          row.originInstallId !== "server" || row.senderKind !== "automation" ||
+          row.senderUserId !== session.account.userId || row.workspaceId === null ||
+          row.recipientShareId !== null || row.dismissedAtMs !== null || row.removed || !row.wake ||
+          file.marks.some((mark) => mark.noticeId === row.noticeId && mark.mark === "dismissed")) return [];
+        const reach = session.reachFor(row.workspaceId);
+        return session.isCurrent() && reach?.workspaceId === row.workspaceId
+          ? [{ account: session.account.key, workspaceId: row.workspaceId, noticeId: row.noticeId, wake: row.wake }]
+          : [];
+      });
+    });
+  }
+
+  return { postNotice, list, mark, sync, dismissFirst, withdraw, refreshRefusals, sentFailure, pendingAutomationWakes };
 }
 
 // Folds one page into the stored rows. A page that starts the list over
@@ -1084,18 +1121,19 @@ function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
 // reading, unread rows 180 days after arriving. Past the limit, read and
 // dismissed rows go first, oldest first, then the oldest unread. Returns
 // `rows` itself when nothing goes.
-function retained<Row extends { createdAtMs: number; readAtMs: number | null; dismissedAtMs: number | null }>(
+function retained<Row extends { kind?: string; createdAtMs: number; readAtMs: number | null; dismissedAtMs: number | null }>(
   rows: Row[],
   limit: number,
   nowMs: number,
 ): Row[] {
-  const live = rows.filter((row) =>
+  const parked = (row: Row) => row.kind === "automation-wake" && row.dismissedAtMs === null;
+  const live = rows.filter((row) => parked(row) || (
     row.dismissedAtMs !== null ? row.dismissedAtMs + NOTICE_DISMISSED_RETENTION_MS > nowMs
     : row.readAtMs !== null ? row.readAtMs + NOTICE_READ_RETENTION_MS > nowMs
-    : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs);
+    : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs));
   if (live.length === rows.length && rows.length <= limit) return rows;
   if (live.length <= limit) return live;
-  const removed = new Set([...live]
+  const removed = new Set(live.filter((row) => !parked(row))
     .sort((left, right) =>
       Number(left.readAtMs === null) - Number(right.readAtMs === null) ||
       left.createdAtMs - right.createdAtMs)

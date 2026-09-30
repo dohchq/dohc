@@ -41,8 +41,6 @@ import { errnoCode,
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import {
-  chmod,
-  link,
   lstat,
   mkdir,
   open,
@@ -50,9 +48,7 @@ import {
   readdir,
   realpath,
   rename,
-  rm,
   stat,
-  writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
@@ -187,19 +183,6 @@ function liveDocumentWriteRefusal(resolved: { normalized: string; realRelative: 
   return null;
 }
 
-async function safeResolveForMutation(
-  ctx: ToolContext,
-  normalizedPath: string,
-): Promise<{ absolute: string; normalized: string }> {
-  const resolved = await safeResolve(ctx, normalizedPath);
-  if (!resolved.ok) {
-    throw Object.assign(new Error(resolved.reason), { code: "EINVAL" });
-  }
-  const refusal = liveDocumentWriteRefusal(resolved);
-  if (refusal) throw new Error(refusal);
-  return resolved;
-}
-
 async function readFileWindowWithDigest(
   absolute: string,
   offsetBytes: number,
@@ -237,13 +220,6 @@ async function readFileWindowWithDigest(
     await file.close();
   }
 }
-
-// MCP writes no history of its own. The desktop watcher captures MCP's
-// physical writes into engine moments (agent-attributed when a dohc-tracked
-// run is active; an external MCP client without one yields actor-neutral
-// capture). That capture happens while the app is open; a write made while
-// the desktop is closed is picked up on the next open.
-const RECORDED_BY_ENGINE = { recordedBy: "workspace-engine" } as const;
 
 function failureReason(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
@@ -302,7 +278,7 @@ function deleteAftermath(path: string, aftermath: Aftermath): string {
   switch (aftermath) {
     case "replaced":
       // The observation, not a consequence drawn from it. An atomic save
-      // replaces the entry too -- writeFileAtomicallyForTool does exactly
+      // replaces the entry too -- the desktop file writer does exactly
       // that, and so does most editors' save -- so "a retry deletes the
       // replacement, not the entry you asked for" was wrong whenever the
       // replacement was the same document, one revision newer. What is at the
@@ -402,105 +378,6 @@ async function safeTrashDir(ctx: ToolContext): Promise<string> {
   const dir = join(await safeMetadataDir(ctx), "trash");
   await ensureGuardedDir(dir, DOHC_TRASH_GUARD, ctx.root);
   return dir;
-}
-
-function mutationRetainedReason(error: unknown, fallback: string): string {
-  return `${failureReason(error, fallback)}; visible mutation retained because rollback cannot be made atomic`;
-}
-
-function expectedSha256Mismatch(currentSha256: string): Error & { currentSha256: string } {
-  return Object.assign(new Error("expectedSha256 does not match current file"), {
-    code: "ESTALE",
-    currentSha256,
-  });
-}
-
-function isExpectedSha256Mismatch(
-  error: unknown,
-): error is Error & { currentSha256: string } {
-  return (
-    error instanceof Error &&
-    typeof (error as { currentSha256?: unknown }).currentSha256 === "string"
-  );
-}
-
-async function writeFileAtomicallyForTool(
-  ctx: ToolContext,
-  normalizedPath: string,
-  data: string | Buffer,
-  options: { expectedSha256?: string; overwrite?: boolean } = {},
-): Promise<void> {
-  const target = await safeResolveForMutation(ctx, normalizedPath);
-  const absolutePath = target.absolute;
-  const parentDir = dirname(target.absolute);
-  const tempPath = join(parentDir, `.dohc-write-${process.pid}-${randomUUID()}.tmp`);
-  let published = false;
-  let existingMode: number | undefined;
-  const publishTarget = async (): Promise<string> => {
-    const current = await safeResolveForMutation(ctx, normalizedPath);
-    if (current.absolute !== absolutePath) {
-      throw Object.assign(new Error(`path changed before publish: ${normalizedPath}`), {
-        code: "EINVAL",
-      });
-    }
-    return current.absolute;
-  };
-  const assertExpectedCurrent = async (): Promise<void> => {
-    if (options.expectedSha256 === undefined) return;
-    const finalPath = await publishTarget();
-    const existing = await lstat(finalPath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    if (existing?.isSymbolicLink()) {
-      throw Object.assign(new Error(`refusing to overwrite symlink: ${absolutePath}`), {
-        code: "ELOOP",
-      });
-    }
-    if (existing && !existing.isFile()) {
-      throw Object.assign(new Error(`refusing to overwrite non-file: ${absolutePath}`), {
-        code: "EISDIR",
-      });
-    }
-    const currentBytes = existing ? await readFile(finalPath) : Buffer.alloc(0);
-    const currentSha256 = sha256Hex(currentBytes);
-    if (currentSha256 !== options.expectedSha256) {
-      throw expectedSha256Mismatch(currentSha256);
-    }
-  };
-  if (options.overwrite !== false) {
-    const existing = await lstat(await publishTarget()).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    if (existing?.isSymbolicLink()) {
-      throw Object.assign(new Error(`refusing to overwrite symlink: ${absolutePath}`), {
-        code: "ELOOP",
-      });
-    }
-    if (existing && !existing.isFile()) {
-      throw Object.assign(new Error(`refusing to overwrite non-file: ${absolutePath}`), {
-        code: "EISDIR",
-      });
-    }
-    existingMode = existing ? existing.mode & 0o777 : undefined;
-  }
-  try {
-    await writeFile(tempPath, data, { flag: "wx" });
-    if (existingMode !== undefined) await chmod(tempPath, existingMode);
-    await assertExpectedCurrent();
-    const finalPath = await publishTarget();
-    if (options.overwrite === false) {
-      await link(tempPath, finalPath);
-      published = true;
-      await rm(tempPath, { force: true }).catch(() => undefined);
-    } else {
-      await rename(tempPath, finalPath);
-      published = true;
-    }
-  } finally {
-    if (!published) await rm(tempPath, { force: true }).catch(() => undefined);
-  }
 }
 
 const requireFromHere = createRequire(import.meta.url);
@@ -924,49 +801,21 @@ export async function writeWorkspaceFile(
     expectedSha256?: string;
     summary?: string;
   },
+  agent?: string,
 ) {
   const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   const refusal = liveDocumentWriteRefusal(resolved);
   if (refusal) return { ok: false as const, reason: refusal };
-  const recordable = await ensureRecordable(ctx);
-  if (recordable) return recordable;
 
-  const bytes =
-    args.encoding === "base64"
-      ? Buffer.from(args.content, "base64")
-      : Buffer.from(args.content, "utf8");
-  const parentDir = dirname(resolved.absolute);
-  let visibleMutationStarted = false;
-  try {
-    const createdParent = await mkdir(parentDir, { recursive: true });
-    if (createdParent) visibleMutationStarted = true;
-    await writeFileAtomicallyForTool(ctx, resolved.normalized, bytes, {
-      expectedSha256: args.expectedSha256,
-    });
-    visibleMutationStarted = true;
-  } catch (error) {
-    if (isExpectedSha256Mismatch(error)) {
-      return {
-        ok: false as const,
-        reason: error.message,
-        currentSha256: error.currentSha256,
-      };
-    }
-    return {
-      ok: false as const,
-      reason: visibleMutationStarted
-        ? mutationRetainedReason(error, `failed to write: ${args.path}`)
-        : failureReason(error, `failed to write: ${args.path}`),
-    };
-  }
-  return {
-    ok: true as const,
-    path: resolved.normalized,
-    bytes: bytes.byteLength,
-    sha256: sha256Hex(bytes),
-    ...RECORDED_BY_ENGINE,
-  };
+  const contentBase64 = args.encoding === "base64" ? args.content : Buffer.from(args.content, "utf8").toString("base64");
+  const result = await requestCli(ctx, "fileWrite", {
+    files: [{ path: resolved.normalized, contentBase64, expectedSha256: args.expectedSha256 }],
+    agent, requestId: randomUUID(),
+  });
+  if (!result.ok) return result;
+  const bytes = Buffer.from(contentBase64, "base64");
+  return { ok: true as const, path: resolved.normalized, bytes: bytes.byteLength, sha256: sha256Hex(bytes) };
 }
 
 export async function createWorkspaceDirectory(
@@ -1004,7 +853,6 @@ export async function createWorkspaceDirectory(
   return {
     ok: true as const,
     path: resolved.normalized,
-    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -1037,7 +885,6 @@ export async function moveWorkspacePath(
       ok: true as const,
       fromPath: from.normalized,
       toPath: to.normalized,
-      ...RECORDED_BY_ENGINE,
     };
   } catch (error) {
     return {
@@ -1183,7 +1030,6 @@ export async function deleteWorkspacePath(
     ok: true as const,
     path: resolved.normalized,
     trashed: true,
-    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -1933,12 +1779,11 @@ export async function detectApps(
 export async function createApp(
   ctx: ToolContext,
   args: { appRoot: string; title?: string; withDohcJson?: boolean },
+  agent?: string,
 ) {
   const root = await safeResolve(ctx, args.appRoot);
   if (!root.ok) return { ok: false as const, reason: root.reason };
   if (!root.normalized) return { ok: false as const, reason: "appRoot must name a folder" };
-  const recordable = await ensureRecordable(ctx);
-  if (recordable) return recordable;
 
   const existing = await lstat(root.absolute).catch(() => null);
   if (existing && !existing.isDirectory()) {
@@ -2099,30 +1944,15 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     resolvedFiles.push({ ...file, ...resolved });
   }
 
-  let visibleMutationStarted = false;
-  try {
-    await mkdir(root.absolute, { recursive: true });
-    if (!existing) visibleMutationStarted = true;
-    for (const file of resolvedFiles) {
-      const parentDir = dirname(file.absolute);
-      const createdParent = await mkdir(parentDir, { recursive: true });
-      if (createdParent) visibleMutationStarted = true;
-      await writeFileAtomicallyForTool(ctx, file.normalized, file.content, { overwrite: false });
-      visibleMutationStarted = true;
-    }
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: visibleMutationStarted
-        ? mutationRetainedReason(error, `failed to create app: ${root.normalized}`)
-        : failureReason(error, `failed to create app: ${root.normalized}`),
-    };
-  }
+  const result = await requestCli(ctx, "fileWrite", {
+    files: resolvedFiles.map(file => ({ path: file.normalized, contentBase64: Buffer.from(file.content).toString("base64"), createOnly: true })),
+    agent, requestId: randomUUID(),
+  });
+  if (!result.ok) return result;
   return {
     ok: true as const,
     appRoot: root.normalized,
     files: resolvedFiles.map((file) => file.normalized),
-    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -2214,6 +2044,7 @@ function isVisibleDatabase(resolved: { normalized: string; realRelative: string 
 export async function importData(
   ctx: ToolContext,
   args: { sourcePath: string; databasePath: string; tableName: string },
+  agent?: string,
 ) {
   const sourceRel = await safeResolve(ctx, args.sourcePath, "read");
   if (!sourceRel.ok) return { ok: false as const, reason: sourceRel.reason };
@@ -2225,8 +2056,6 @@ export async function importData(
   }
   const dbRel = await safeResolve(ctx, args.databasePath);
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
-  const recordable = await ensureRecordable(ctx);
-  if (recordable) return recordable;
   if (!isVisibleDatabase(dbRel)) {
     return { ok: false as const, reason: `not a visible database target: ${args.databasePath}` };
   }
@@ -2242,28 +2071,16 @@ export async function importData(
   });
   if (!result.ok) return { ok: false as const, reason: `${result.code}: ${result.message}` };
 
-  const parentDir = dirname(dbRel.absolute);
-  let visibleMutationStarted = false;
-  try {
-    const createdParent = await mkdir(parentDir, { recursive: true });
-    if (createdParent) visibleMutationStarted = true;
-    const dbBytes = Buffer.from(result.bytesBase64, "base64");
-    await writeFileAtomicallyForTool(ctx, dbRel.normalized, dbBytes, { overwrite: false });
-    visibleMutationStarted = true;
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: visibleMutationStarted
-        ? mutationRetainedReason(error, `failed to write import: ${dbRel.normalized}`)
-        : failureReason(error, `failed to write import: ${dbRel.normalized}`),
-    };
-  }
+  const written = await requestCli(ctx, "fileWrite", {
+    files: [{ path: dbRel.normalized, contentBase64: result.bytesBase64, createOnly: true }],
+    agent, requestId: randomUUID(),
+  });
+  if (!written.ok) return written;
   return {
     ok: true as const,
     path: dbRel.normalized,
     tableName: result.tableName,
     rowCount: result.rowCount,
-    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -2331,9 +2148,11 @@ function isReadOnlySelect(sql: string): boolean {
 export const DOHC_TRANSPORT_UNAVAILABLE_REASON =
   "dohc is not running. Open the dohc app to read workspace history or chats, or post chats.";
 
-function cliFailureReason(error: unknown): string {
+export const FILE_WRITE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to write through it, or write the file yourself. History will record that write without your name.";
+
+function cliFailureReason(error: unknown, verb: CliVerb): string {
   if (error instanceof DohcCliError && error.message === "desktop app not running") {
-    return DOHC_TRANSPORT_UNAVAILABLE_REASON;
+    return verb === "fileWrite" ? FILE_WRITE_UNAVAILABLE_REASON : DOHC_TRANSPORT_UNAVAILABLE_REASON;
   }
   return failureReason(error, DOHC_TRANSPORT_UNAVAILABLE_REASON);
 }
@@ -2358,7 +2177,7 @@ async function requestCli<Verb extends CliVerb>(
       : await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" ? {timeoutMs:90_000} : {}) });
     return parseCliResult(verb, rawResult);
   } catch (error) {
-    return { ok: false as const, reason: cliFailureReason(error) };
+    return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
 }
 
@@ -2580,6 +2399,7 @@ export async function readRecord(
 export async function setRecordFields(
   ctx: ToolContext,
   args: { recordPath: string; fields: unknown },
+  agent?: string,
 ) {
   const resolved = await safeResolve(ctx, args.recordPath, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
@@ -2590,6 +2410,7 @@ export async function setRecordFields(
   );
   if (!fields.ok) return { ok: false as const, reason: fields.reason };
   return requestCli(ctx, "collectionSetFields", {
+    agent,
     recordPath: resolved.normalized,
     fields: fields.value,
   });
@@ -2598,6 +2419,7 @@ export async function setRecordFields(
 export async function createRecord(
   ctx: ToolContext,
   args: { collectionPath: string; name: string; fields?: unknown; recordId?: string },
+  agent?: string,
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
@@ -2608,6 +2430,7 @@ export async function createRecord(
   );
   if (!fields.ok) return { ok: false as const, reason: fields.reason };
   return requestCli(ctx, "collectionCreateRecord", {
+    agent,
     collectionPath: resolved.normalized,
     name: args.name,
     fields: fields.value,

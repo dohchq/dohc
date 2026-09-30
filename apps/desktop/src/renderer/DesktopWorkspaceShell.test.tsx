@@ -1761,6 +1761,38 @@ describe("workbench render cost", () => {
     }
   });
 
+  it("refreshes files for a non-reserved .GIT prefix on Linux", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "linux");
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".GIT-not-reserved/file.md"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        allowCached: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores reserved .GIT activity paths on Linux", async () => {
     const bridge = makeBridge(Promise.resolve(null), "linux");
     renderShell(bridge);

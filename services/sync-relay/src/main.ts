@@ -15,13 +15,14 @@ import {
 import { Pool } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
-import { errorBody, errorResponse } from "./errors";
+import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { automationHostMaxBodyBytes } from "./automationHostRoutes";
+import { AUTOMATION_SERVER_MAX_BODY_BYTES, isAutomationServerPath } from "./automationServerRoutes";
 import { isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
 import { AUTOMATION_PRESS_MAX_BODY_BYTES } from "@dohc/workspace-contracts/relay";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
@@ -53,6 +54,12 @@ import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
+import {authorizeServiceHostReplication} from "./serviceHostCredential";
+import {TokenBucketLimiter} from "@dohc/service-http";
+import {NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_MAX_SENDERS, NOTICE_POST_REFILL_PER_SECOND} from "./noticeRoutes";
+import {automationServerLabel, startAutomationServer} from "./automationServer";
+import {removeAutomationReplicas} from "./automationReplicas";
+import {AUTOMATION_REPLICA_BEARER_PREFIX, authorizeAutomationReplication} from "./automationReplicaCredential";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
@@ -75,6 +82,11 @@ const relayExchangeKeyHash =
 const selfHostedLive = process.env.DOHC_SELF_HOST_LIVE === "1";
 if (process.env.DOHC_SELF_HOST_LIVE !== undefined && !["0", "1"].includes(process.env.DOHC_SELF_HOST_LIVE)) fatal("FATAL: DOHC_SELF_HOST_LIVE must be 0 or 1.");
 const liveProfile = selfHostedLive ? selfHostLiveProfile() : undefined;
+// This server runs its owners' automations: on by default under the supported
+// self-host profile, off for development relays and tests unless they ask.
+const automationsSetting = process.env.DOHC_RELAY_AUTOMATIONS;
+if (automationsSetting !== undefined && !["0", "1"].includes(automationsSetting)) fatal("FATAL: DOHC_RELAY_AUTOMATIONS must be 0 or 1.");
+const automationsOn = automationsSetting === undefined ? selfHostedLive : automationsSetting === "1";
 if (selfHostedLive && (process.env.DOHC_RELAY_SERVICE_HOST_CONFIG || process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG || process.env.DOHC_DEVICE_CONTROL_LIMITS)) {
   fatal("FATAL: The self-host live service cannot replace a manually configured service or device host.");
 }
@@ -275,8 +287,23 @@ const resolveAccountActor: ResolveActor = testAuthSeam
   })();
 
 const resolveActor = resolveAccountActor;
+if (automationsOn && (!deployment || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
+  fatal("FATAL: Automations on this server require a deployment, the link key, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
+}
+const automationServer = automationsOn ? {label: automationServerLabel(process.env.DOHC_SERVER_NAME)} : undefined;
+const automationReplicaKey = automationsOn ? {key: Buffer.from(linkKey!), namespace: deployment!.history.namespace} : undefined;
+const automationReplication = automationReplicaKey
+  ? createServiceHostReplication({storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
+    authorize: input => authorizeAutomationReplication(storage, {...automationReplicaKey, ...input})}) : undefined;
+// One limit per person for notices to others, shared by the route and this server's automations.
+const noticePostRateLimiter = new TokenBucketLimiter(NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_REFILL_PER_SECOND, NOTICE_POST_MAX_SENDERS);
+let automations: Awaited<ReturnType<typeof startAutomationServer>> | undefined;
 const serviceReplication = selfHostedLive && deployment && linkKey
-  ? createServiceHostReplication({storage, key: Buffer.from(linkKey), namespace: deployment.history.namespace}) : undefined;
+  ? (() => {
+      const credential = {key: Buffer.from(linkKey), namespace: deployment.history.namespace};
+      return createServiceHostReplication({storage, prefix: "dohc-service-v1.",
+        authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input})});
+    })() : undefined;
 
 function createTestActorResolver(): ResolveActor {
   return (request, workspaceId) => {
@@ -336,7 +363,14 @@ const relayApplication = createSyncRelayHandler({
   publicEditRelease,
   appPublicationLimits,
   datasetHost,
+  pressDataset: (auth, input, signal) => {
+    if (!automations) throw notFound();
+    return automations.pressDataset(auth, input, signal);
+  },
+  serverRuns: () => automations?.runs,
   appCollectionPolicy,
+  noticePostRateLimiter,
+  ...(automationServer ? {automationServer} : {}),
 });
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
@@ -348,6 +382,7 @@ const linkLivePaths = new Set(["/sync/live/link-tickets", "/sync/live/link-sessi
 const relayHandler = guardRelayResponses(storage, request => {
   const path = new URL(request.url).pathname;
   if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)) return automationReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (/^\/sync\/[^/]+\/live-host$/.test(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/desktop-open") return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
@@ -357,7 +392,8 @@ const relayHandler = guardRelayResponses(storage, request => {
 const fetchHandler = async (request: Request): Promise<Response> => {
   if (new URL(request.url).pathname === "/ready") {
     const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
-    return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready, apiVersions: RELAY_API_VERSIONS},
+    return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready, apiVersions: RELAY_API_VERSIONS,
+      automations: !automationsOn ? "off" : automations && !automations.unavailable ? "on" : "unavailable"},
       {status: ready ? 200 : 503, headers: {"cache-control": "no-store"}});
   }
   if (new URL(request.url).pathname === "/health") {
@@ -444,6 +480,7 @@ const server = serveFetchHandler({
   maxBodyBytes: (url) => automationHostMaxBodyBytes(url.pathname) ?? (
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
     isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
+    isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
@@ -587,9 +624,25 @@ server.listen(requestedPort, host, () => {
   if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
 });
 
+// A server that does not run automations keeps no copies of workspaces.
+const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
+if (!automationsOn && automationRoot) await removeAutomationReplicas(storage, automationRoot);
+automations = automationServer && automationReplicaKey && automationRoot ? await startAutomationServer({
+  storage, server: automationServer, datasetHost,
+  replicas: {root: automationRoot, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
+    relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, ...automationReplicaKey},
+  readOwnerShares: relayApplication.readOwnerShares,
+  lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
+  noticeLimiter: noticePostRateLimiter,
+  ...(selfHost ? {live: {ledger: (workspaceId: string) => selfHost.automationLedger(workspaceId),
+    workspaces: () => selfHost.automationWorkspaces(), onEvent: selfHost.onAutomationEvent}} : {}),
+  onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
+}) : undefined;
+
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    await automations?.close();
     await selfHost?.close();
     await configuredServiceHost?.close();
     await liveValidation.close();

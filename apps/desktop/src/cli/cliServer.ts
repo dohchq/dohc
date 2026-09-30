@@ -3,6 +3,8 @@ import { nameSlug } from "@dohc/workspace-contracts/names";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   CLI_PROTOCOL_VERSION,
+  MAX_CLI_REQUEST_BYTES,
+  type CliFileWrite,
   cliRequestSchema,
   cliTransportResponseSchema,
   parseCliResult,
@@ -106,7 +108,7 @@ export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
 export const CLI_ENDPOINT_FILE = "dohc-cli-endpoint";
 
-const MAX_REQUEST_BYTES = 1024 * 1024;
+const MAX_REQUEST_BYTES = MAX_CLI_REQUEST_BYTES;
 const MAX_FTS_CANDIDATES = 50_000;
 const LIST_MOMENTS_HARD_LIMIT = 500;
 const MAX_SOCKET_CONNECTIONS = 64;
@@ -170,7 +172,7 @@ export interface CliRegistryWorkspace {
 
 // The desktop's one collection write seam. The shapes mirror
 // `setCollectionRecordFields` / `createCollectionRecord` in
-// `apps/desktop/src/workspaces/collectionRecordEdits.ts` exactly, so main's
+// `packages/automation-executor/src/collectionRecordEdits.ts` exactly, so main's
 // wiring is a closure over that module's workspace-scoped edit context. The
 // author is derived here, main-side, from the workspace identity plus the
 // behavior-bearing actor kind; the request never supplies one. Field values
@@ -274,6 +276,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
+  writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
   // Absent in a shared view, which keeps no copies of its own.
   keptCopies?: CliKeptCopiesPort;
   automations?: CliAutomationsPort;
@@ -592,19 +595,20 @@ function writeActor(
 }
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
-// traffic reaches this socket through the MCP server, whose declared identity
-// is agent `dohc-mcp` acting for this computer's person, at the depth of the
+// traffic carries its handshake name, or `dohc-mcp` when unnamed,
+// acting on behalf of the local owner, at the depth of the
 // agent run in progress; a human write is attributed as this device's local
 // author under the workspace display name.
 function collectionWriteAuthor(
   actor: CliActor,
   context: CliWorkspaceContext,
   options: CliServerOptions,
+  agent: string | undefined,
 ): ChangeAuthor {
   if (writeActor(actor, context, options) === "agent") {
     return {
       kind: "agent",
-      agentId: "dohc-mcp",
+      agentId: agent ?? "dohc-mcp",
       onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     };
@@ -625,8 +629,8 @@ function datasetAgent(
 }
 
 // Provenance for a document edit, derived here. A person types in the
-// editor, so every edit through this socket is an agent's for this
-// computer's person, recorded under the name the agent gave itself or under none,
+// editor, so every edit through this socket is an agent's on behalf of the
+// local owner, recorded under its handshake name or the unnamed agent label,
 // at the depth of the agent run in progress. Any process holding the socket
 // token could otherwise claim the person's typing.
 function documentEditOrigin(
@@ -635,7 +639,7 @@ function documentEditOrigin(
   options: CliServerOptions,
 ): LiveDocumentEditOrigin {
   return {
-    ...(agent === undefined ? {} : { actorOriginId: agent }),
+    actorOriginId: agent ?? "dohc-mcp",
     attribution: {
       actorKind: "agent",
       onBehalfOf: options.localPersonId(),
@@ -697,7 +701,7 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
 // socket would be, at its run's depth, or the person. A press counts in the
 // chain as that agent's own record write does, and stops at the cap.
 function pressActor(actor: CliActor, context: CliWorkspaceContext, options: CliServerOptions): AutomationPressActor {
-  const author = collectionWriteAuthor(actor, context, options);
+  const author = collectionWriteAuthor(actor, context, options, undefined);
   return author.kind === "agent" ? { kind: "agent", originId: author.agentId, depth: author.depth } : { kind: "human" };
 }
 
@@ -2304,7 +2308,7 @@ async function dispatch(
         const outcome = await collections.writes.setFields({
           recordPath: validated.normalized,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, context, options),
+          author: collectionWriteAuthor(request.args.actor, context, options, request.args.agent),
         });
         return { ok: true as const, recordPath: outcome.path };
       } catch (error) {
@@ -2346,7 +2350,7 @@ async function dispatch(
           name: request.args.name,
           recordId: request.args.recordId,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, context, options),
+          author: collectionWriteAuthor(request.args.actor, context, options, request.args.agent),
         });
         if ("kind" in outcome) return { ok: false as const, reason: creationPartialMessage(outcome), partial: outcome };
         return {
@@ -2413,6 +2417,32 @@ async function dispatch(
       } catch (error) {
         return mcpFailure(error, `failed to reach the runs of ${request.args.automation} in ${validated.normalized}`);
       }
+    }
+
+    case "fileWrite": {
+      if (request.args.actor !== "agent") return { ok: false, written: [], reason: `A file write through the CLI socket is recorded as an agent's; send actor "agent".` };
+      if (!context.writeFiles) return { ok: false, written: [], reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
+      try {
+        const root = await realpath(context.rootPath);
+        const folder = await realpath(request.args.cwd);
+        const files: CliFileWrite[] = [];
+        for (const file of request.args.files) {
+          const checked = validateUserMaterializePath(file.path, { platform: process.platform });
+          if (!checked.ok) return { ...cliPathRejected(checked.reason, file.path), written: [] };
+          files.push({ ...file, path: relative(root, resolve(folder, checked.normalized)).split(sep).join("/") });
+        }
+        const result = await context.writeFiles(files, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
+        if (result.written?.length) await notifyWrite(options, context);
+        const callerPath = (path: string) => relative(folder, join(root, path)).split(sep).join("/");
+        if (result.ok) return { ...result, written: result.written.map(callerPath) };
+        return {
+          ...result,
+          ...(result.written !== undefined ? { written: result.written.map(callerPath) } : {}),
+          ...(result.path !== undefined
+            ? { path: callerPath(result.path), reason: result.reason.replaceAll(result.path, callerPath(result.path)) }
+            : {}),
+        };
+      } catch (error) { return mcpFailure(error, "dohc could not write the files. Check that the files are writable."); }
     }
 
     // A shared view's press is checked and relayed as the app's is.
@@ -3047,7 +3077,7 @@ async function workspaceContextForRequest(
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
   const documentWriteRequest =
-    request.verb === "documentEdit" || request.verb === "documentCreate";
+    request.verb === "documentEdit" || request.verb === "documentCreate" || request.verb === "fileWrite";
   const writeRequest =
     collectionWriteRequest ||
     documentWriteRequest ||
@@ -3059,7 +3089,9 @@ async function workspaceContextForRequest(
     (request.verb === "show" && !request.args.peek);
   if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
-      collectionWriteRequest
+      request.verb === "fileWrite"
+        ? "This workspace is read-only. Write in the owning workspace."
+        : collectionWriteRequest
         ? "collection writes are not available in a read-only shared view"
         : documentWriteRequest
           ? "document changes are not available in a read-only shared view"
@@ -3147,7 +3179,8 @@ function attachSocketHandler(
 ): void {
   sockets.add(socket);
   socket.setEncoding("utf8");
-  let buffer = "";
+  const chunks: string[] = [];
+  let receivedBytes = 0;
   let handled = false;
   const deadline = setTimeout(() => socket.destroy(), CLI_REQUEST_DEADLINE_MS);
 
@@ -3156,23 +3189,25 @@ function attachSocketHandler(
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: false,
-      error: "dohc: invalid CLI request",
+      error: "dohc: CLI request exceeds 14 MiB. Split the files into smaller batches.",
     });
     socket.end(`${JSON.stringify(response)}\n`);
   };
 
   socket.on("data", (chunk: string) => {
     if (handled) return;
-    buffer += chunk;
-    if (Buffer.byteLength(buffer, "utf8") > MAX_REQUEST_BYTES) {
+    receivedBytes += Buffer.byteLength(chunk, "utf8");
+    if (receivedBytes > MAX_REQUEST_BYTES) {
       failOversized();
       return;
     }
-    const newline = buffer.indexOf("\n");
+    const newline = chunk.indexOf("\n");
+    chunks.push(newline === -1 ? chunk : chunk.slice(0, newline));
     if (newline === -1) return;
     handled = true;
     clearTimeout(deadline);
-    const line = buffer.slice(0, newline);
+    const line = chunks.join("");
+    chunks.length = 0;
     socket.pause();
     const task = handleCliRequestLine(line, token, options)
       .then((response) => {

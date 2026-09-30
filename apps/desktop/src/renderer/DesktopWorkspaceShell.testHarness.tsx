@@ -627,6 +627,8 @@ function makeBaseBridge(
     listCollectionAutomationRuns: vi.fn(
       async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [], next: null }),
     ),
+    listServerAutomationRuns: vi.fn(async () => ({ runs: null })),
+    listServerAutomationHolds: vi.fn(async () => ({ holds: [] })),
     retryCollectionAutomation: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),

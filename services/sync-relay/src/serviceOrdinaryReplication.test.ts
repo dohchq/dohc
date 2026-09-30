@@ -114,13 +114,25 @@ it("bounds each pass without scanning the remaining backlog", async () => {
   expect(f.methods().filter(method => method === "sync.pull")).toHaveLength(2);
 });
 
+it("tells the caller of each committed page before a later page fails", async () => {
+  const f = fixture(); let cursor = 0;
+  const original = f.sendRequest.getMockImplementation()!;
+  f.sendRequest.mockImplementation(async request => {
+    if (request.method === "sync.pull" && ++cursor === 2) throw new Error("the relay stopped answering");
+    return request.method === "sync.pull" ? {result: page(cursor, true)} : original(request);
+  });
+  const heard: string[][] = [];
+  await expect(f.driver.pull(undefined, committed => heard.push([...committed.changedPaths]))).rejects.toThrow("stopped answering");
+  expect(heard, "the first page committed, and its paths were heard").toEqual([["work.md"]]);
+});
+
 it("retains ordinary refusal and sharing-decline evidence", async () => {
   const f = fixture(); const original = f.sendRequest.getMockImplementation()!;
   const refusal = {workspaceId: "workspace", originId: "origin", originSeq: 1, opKind: "ydoc.update", code: "refused", reason: "retained"};
   const decline = {path: "work.md", constraint: "limit", limitBytes: 2, observedBytes: 3};
   f.sendRequest.mockImplementation(async request => request.method === "sync.pull" ? {result: {...page(), refused: 1, refusals: [refusal], sharingDeclined: [decline]}} as never : original(request));
   const result = await f.driver.pull();
-  expect(result.pages[0]).toMatchObject({refused: 1, refusals: [refusal], sharingDeclined: [decline]});
+  expect(result.pages[0]).toMatchObject({refused: 1, refusals: [refusal], sharingDeclined: [decline], changedPaths: ["work.md"]});
 });
 
 it.each([{pendingCursor: {kind: "shareView", token: "foreign"}}, {status: "crashedAfterApply"}, {nextCursor: -1}])(

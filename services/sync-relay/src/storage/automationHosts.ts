@@ -1,7 +1,9 @@
 import {
   AUTOMATION_COMPUTERS_PER_WORKSPACE,
+  AUTOMATION_SERVER_FULL,
   AUTOMATION_SERVER_INSTALL_ID,
   AUTOMATION_SERVER_MAX_WORKSPACES,
+  AUTOMATION_SERVER_OFF,
   type RelayAutomationComputer,
   type RelayAutomationHost,
   type RelayAutomationHostState,
@@ -41,10 +43,128 @@ export function initializeAutomationHostPlacementSchema(db: SqliteDb): void {
   `);
 }
 
+// The reach verdicts the relay's last release carried, beside its Group
+// handover, as the JSON text they arrived as. Null after a take over, or when
+// the computer releasing could not read its own.
+export function initializeAutomationReachHandoverSchema(db: SqliteDb): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_relay_automation_reach_handovers (
+      workspace_id TEXT NOT NULL PRIMARY KEY
+        REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      reach_json TEXT CHECK (reach_json IS NULL OR (json_valid(reach_json) AND length(reach_json) <= 1048576))
+    ) STRICT;
+  `);
+}
+
+// The server's own schedule state for each workspace it has run, kept in
+// the relay database so it survives a restart of the process that runs it.
+// `through_ms` is the latest schedule mark the server reached, in any copy
+// of the workspace: it ran nothing after it. `host_generation` and
+// `host_released_ms` are the host record the server last started from, in
+// the copy `incarnation` names, so a restart does not start it again.
+// `taken_generation` is the latest release the copy was given to take, and
+// `fence_generation` the latest one an earlier copy was given: a rebuilt
+// copy lost that copy's engine, so a release at or before the fence was
+// already taken, and the new copy cannot take it again.
+export function initializeAutomationServerScheduleSchema(db: SqliteDb): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_relay_automation_server_schedules (
+      workspace_id TEXT NOT NULL PRIMARY KEY
+        REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      incarnation INTEGER NOT NULL CHECK (incarnation BETWEEN 0 AND 9007199254740991),
+      host_generation INTEGER CHECK (host_generation IS NULL OR host_generation BETWEEN 1 AND 9007199254740991),
+      host_released_ms INTEGER CHECK (host_released_ms IS NULL OR host_released_ms BETWEEN 0 AND 9007199254740991),
+      through_ms INTEGER CHECK (through_ms IS NULL OR through_ms BETWEEN 0 AND 9007199254740991),
+      taken_generation INTEGER CHECK (taken_generation IS NULL OR taken_generation BETWEEN 1 AND 9007199254740991),
+      fence_generation INTEGER CHECK (fence_generation IS NULL OR fence_generation BETWEEN 1 AND 9007199254740991)
+    ) STRICT;
+  `);
+}
+
+export interface AutomationServerSchedules {
+  incarnation: number;
+  hostGeneration: number | null;
+  hostReleasedMs: number | null;
+  throughMs: number | null;
+  takenGeneration: number | null;
+  fenceGeneration: number | null;
+}
+
+export function readAutomationServerSchedules(storage: StorageContext, workspaceId: string): AutomationServerSchedules | null {
+  const row = storage.db.prepare(
+    "SELECT incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation FROM sync_relay_automation_server_schedules WHERE workspace_id = ?",
+  ).get(workspaceId);
+  if (!row) return null;
+  const optional = (value: unknown) => (value === null ? null : Number(value));
+  return {
+    incarnation: Number(row.incarnation),
+    hostGeneration: optional(row.host_generation),
+    hostReleasedMs: optional(row.host_released_ms),
+    throughMs: optional(row.through_ms),
+    takenGeneration: optional(row.taken_generation),
+    fenceGeneration: optional(row.fence_generation),
+  };
+}
+
+/**
+ * The server opened this copy of the workspace. A copy with another
+ * incarnation than the row's replaces an earlier one: the latest release
+ * that copy was given becomes the fence, and the new copy has started and
+ * taken nothing yet. The progress stays, since the server ran nothing after it.
+ */
+export function beginAutomationServerCopy(storage: StorageContext, input: { workspaceId: string; incarnation: number }): void {
+  storage.tx(() => storage.db.prepare(
+    `INSERT INTO sync_relay_automation_server_schedules (workspace_id, incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation)
+     VALUES (?, ?, NULL, NULL, NULL, NULL, NULL)
+     ON CONFLICT(workspace_id) DO UPDATE SET
+       fence_generation = CASE WHEN incarnation = excluded.incarnation THEN fence_generation
+         WHEN coalesce(fence_generation, taken_generation) IS NULL THEN NULL
+         ELSE max(coalesce(fence_generation, 0), coalesce(taken_generation, 0)) END,
+       taken_generation = CASE WHEN incarnation = excluded.incarnation THEN taken_generation END,
+       host_generation = CASE WHEN incarnation = excluded.incarnation THEN host_generation END,
+       host_released_ms = CASE WHEN incarnation = excluded.incarnation THEN host_released_ms END,
+       incarnation = excluded.incarnation`,
+  ).run(input.workspaceId, input.incarnation));
+}
+
+/** The server started its schedules from this host record, in this copy of the workspace. */
+export function recordAutomationServerStart(
+  storage: StorageContext,
+  input: { workspaceId: string; incarnation: number; generation: number; releasedThroughMs: number | null },
+): void {
+  storage.tx(() => storage.db.prepare(
+    `INSERT INTO sync_relay_automation_server_schedules (workspace_id, incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation)
+     VALUES (?, ?, ?, ?, NULL, NULL, NULL)
+     ON CONFLICT(workspace_id) DO UPDATE SET
+       incarnation = excluded.incarnation, host_generation = excluded.host_generation,
+       host_released_ms = excluded.host_released_ms`,
+  ).run(input.workspaceId, input.incarnation, input.generation, input.releasedThroughMs));
+}
+
+/** The server's schedules reached this mark. The progress never goes back. */
+export function recordAutomationServerProgress(storage: StorageContext, input: { workspaceId: string; throughMs: number }): void {
+  storage.tx(() => storage.db.prepare(
+    `INSERT INTO sync_relay_automation_server_schedules (workspace_id, incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation)
+     VALUES (?, 0, NULL, NULL, ?, NULL, NULL)
+     ON CONFLICT(workspace_id) DO UPDATE SET through_ms = max(coalesce(through_ms, excluded.through_ms), excluded.through_ms)`,
+  ).run(input.workspaceId, input.throughMs));
+}
+
+/** The server gave its current copy the release at this generation to take. It never goes back. */
+export function recordAutomationServerTaken(storage: StorageContext, input: { workspaceId: string; generation: number }): void {
+  storage.tx(() => storage.db.prepare(
+    "UPDATE sync_relay_automation_server_schedules SET taken_generation = max(coalesce(taken_generation, 0), ?) WHERE workspace_id = ?",
+  ).run(input.generation, input.workspaceId));
+}
+
+function serverProgress(storage: StorageContext, workspaceId: string): number | null {
+  return readAutomationServerSchedules(storage, workspaceId)?.throughMs ?? null;
+}
+
 function keepGroupHandover(
   storage: StorageContext,
   workspaceId: string,
-  row: { generation: number; forInstallId: string; tookOver: boolean; groups: string },
+  row: { generation: number; forInstallId: string; tookOver: boolean; groups: string; reach: string | null },
 ): void {
   storage.db.prepare(
     `INSERT INTO sync_relay_automation_group_handovers
@@ -54,6 +174,17 @@ function keepGroupHandover(
        generation = excluded.generation, for_install_id = excluded.for_install_id,
        took_over = excluded.took_over, groups_json = excluded.groups_json`,
   ).run(workspaceId, row.generation, row.forInstallId, row.tookOver ? 1 : 0, row.groups);
+  storage.db.prepare(
+    `INSERT INTO sync_relay_automation_reach_handovers (workspace_id, reach_json) VALUES (?, ?)
+     ON CONFLICT(workspace_id) DO UPDATE SET reach_json = excluded.reach_json`,
+  ).run(workspaceId, row.reach);
+}
+
+function heldReach(storage: StorageContext, workspaceId: string): string | null {
+  const row = storage.db.prepare(
+    "SELECT reach_json FROM sync_relay_automation_reach_handovers WHERE workspace_id = ?",
+  ).get(workspaceId);
+  return row?.reach_json === undefined || row.reach_json === null ? null : String(row.reach_json);
 }
 
 // Every input names the owner the route authenticated. Each call checks
@@ -92,6 +223,8 @@ export interface AutomationHostReleaseInput extends AutomationHostReadInput {
   releasedThroughMs: number;
   /** The Group handover, as JSON text. */
   groups: string;
+  /** The releasing computer's reach verdicts, as JSON text, or null. */
+  reach: string | null;
   /** The host generation the releasing computer last watched its Group subscriptions at. */
   groupsWatched: number;
 }
@@ -171,10 +304,11 @@ function serverHasRoom(storage: StorageContext, workspaceId: string): boolean {
 
 // `installId` starts because the server stopped running automations
 // without a release. The server ran in this process, so it ran nothing after
-// this process's clock reads now: the relay records now as released, and
-// the computer starts after it, as after a release. The progress never goes
-// back, and a computer whose clock runs behind never runs again what the
-// server ran.
+// this process's clock reads now, nor after the latest schedule mark it
+// recorded, which guards against a clock that went back across a restart:
+// the relay records the later of the two as released, and the computer
+// starts after it, as after a release. The progress never goes back, and a
+// computer whose clock runs behind never runs again what the server ran.
 function startWithoutHandover(
   storage: StorageContext,
   workspaceId: string,
@@ -183,10 +317,11 @@ function startWithoutHandover(
   nowMs: number,
 ): void {
   writeHost(storage, workspaceId, {
-    installId, handoverFrom: null, releasedThroughMs: laterProgress(host.releasedThroughMs, nowMs),
+    installId, handoverFrom: null,
+    releasedThroughMs: laterProgress(host.releasedThroughMs, Math.max(nowMs, serverProgress(storage, workspaceId) ?? nowMs)),
   }, host);
   keepGroupHandover(storage, workspaceId, {
-    generation: host.generation + 1, forInstallId: installId, tookOver: true, groups: "{}",
+    generation: host.generation + 1, forInstallId: installId, tookOver: true, groups: "{}", reach: null,
   });
 }
 
@@ -239,6 +374,11 @@ function writeHost(
 // release can only move it forward.
 function laterProgress(previous: number | null, reported: number): number {
   return previous === null ? reported : Math.max(previous, reported);
+}
+
+/** The workspace's host record, for the server that runs its automations in this process. */
+export function automationHostRecord(storage: StorageContext, workspaceId: string): RelayAutomationHost | null {
+  return storage.readTx(() => readHost(storage, workspaceId));
 }
 
 export function readAutomationHost(storage: StorageContext, input: AutomationHostReadInput): RelayAutomationHostState {
@@ -324,9 +464,9 @@ export function chooseAutomationHost(
     const host = readHost(storage, workspaceId);
     requireGeneration(host, input.generation);
     if (installId === AUTOMATION_SERVER_INSTALL_ID) {
-      if (!input.server) throw badRequest("This server does not run automations.");
+      if (!input.server) throw badRequest(AUTOMATION_SERVER_OFF);
       if (!serverHasRoom(storage, workspaceId)) {
-        throw badRequest("This server is running automations for as many workspaces as it can.");
+        throw badRequest(AUTOMATION_SERVER_FULL);
       }
     } else {
       const known = storage.db.prepare(
@@ -381,6 +521,7 @@ export function releaseAutomationHost(
       forInstallId: host.installId,
       tookOver: stale && held.took_over === 1,
       groups: stale ? String(held.groups_json) : input.groups,
+      reach: stale ? heldReach(storage, input.workspaceId) : input.reach,
     });
     return readState(storage, input);
   });
@@ -393,21 +534,34 @@ export function releaseAutomationHost(
 export function readAutomationGroupHandover(
   storage: StorageContext,
   input: AutomationGroupHandoverInput,
-): { generation: number | null; groups: Record<string, unknown> | null } {
+): AutomationGroupHandover {
   return storage.readTx(() => {
     requireOwner(storage, input);
     const host = readHost(storage, input.workspaceId);
     if (!host || host.generation !== input.generation) throw relayError("conflict");
+    const everShared = storage.db.prepare(
+      "SELECT 1 FROM sync_relay_shares WHERE workspace_id = ? LIMIT 1",
+    ).get(input.workspaceId) !== undefined;
     const row = storage.db.prepare(
       "SELECT generation, for_install_id, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
     ).get(input.workspaceId);
-    if (!row) return { generation: null, groups: null };
+    if (!row) return { generation: null, groups: null, reach: null, everShared };
     const mine = row.took_over === 0 && row.for_install_id === host.installId;
+    const reach = mine ? heldReach(storage, input.workspaceId) : null;
     return {
       generation: Number(row.generation),
       groups: mine ? JSON.parse(String(row.groups_json)) as Record<string, unknown> : null,
+      reach: reach === null ? null : JSON.parse(reach) as Record<string, unknown>,
+      everShared,
     };
   });
+}
+
+export interface AutomationGroupHandover {
+  generation: number | null;
+  groups: Record<string, unknown> | null;
+  reach: Record<string, unknown> | null;
+  everShared: boolean;
 }
 
 // The owner ends a handover without the old computer's release. The
@@ -423,7 +577,7 @@ export function takeOverAutomationHost(
     requireGeneration(host, input.generation);
     if (!host?.handoverFrom) throw relayError("conflict");
     if (host.installId === AUTOMATION_SERVER_INSTALL_ID && !input.server) {
-      throw badRequest("This server does not run automations.");
+      throw badRequest(AUTOMATION_SERVER_OFF);
     }
     writeHost(storage, input.workspaceId, {
       installId: host.installId,
@@ -435,6 +589,7 @@ export function takeOverAutomationHost(
       forInstallId: host.installId,
       tookOver: true,
       groups: "{}",
+      reach: null,
     });
     place(storage, input.workspaceId, null);
     return readState(storage, input);

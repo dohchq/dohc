@@ -3,7 +3,8 @@ import { posix } from "node:path";
 import { datasetColumnFields, parseDatasetDefinition, type DatasetColumnField, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { datasetNumberText, losslessDatasetNumber } from "@dohc/security-contract/dataset-conversion";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
-import { generateDatasetSources, hasGeneratedDatasetOperations } from "./datasetGenerator";
+import { generateDatasetSources } from "./datasetGenerator";
+import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { generateFieldMigration } from "./datasetFieldMigration";
 
 const quote = (value: string) => `"${value}"`;

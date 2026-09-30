@@ -62,6 +62,8 @@ export interface ServiceOrdinaryPullPage {
   readonly fetched: number; readonly applied: number; readonly refused: number; readonly skipped: number; readonly conflictsOpened: number;
   readonly refusals: readonly OrdinaryRefusal[];
   readonly sharingDeclined: readonly SharingDeclined[];
+  /** The paths the page wrote or deleted, in any version. */
+  readonly changedPaths: readonly string[];
 }
 function array(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error("Invalid ordinary replication list.");
@@ -110,7 +112,8 @@ export class ServiceOrdinaryReplication {
       return await task(signal);
     } finally { this.#running = false; }
   }
-  async pull(callerSignal?: AbortSignal) {
+  /** Pulls up to maxPagesPerPull pages. `onPage` hears each page once its cursor committed, before the next is asked for. */
+  async pull(callerSignal?: AbortSignal, onPage?: (page: ServiceOrdinaryPullPage) => void) {
     return this.#run(callerSignal, async signal => {
       const pages: ServiceOrdinaryPullPage[] = [];
       let previous: number | undefined;
@@ -130,7 +133,8 @@ export class ServiceOrdinaryReplication {
             const row = record(value);
             return {workspaceId: text(row.workspaceId), originId: text(row.originId), originSeq: integer(row.originSeq),
               opKind: text(row.opKind), code: text(row.code), reason: text(row.reason)};
-          }), sharingDeclined: declines(result.sharingDeclined)};
+          }), sharingDeclined: declines(result.sharingDeclined),
+          changedPaths: array(result.changedPaths).map(value => text(record(value).path))};
         const materialized = await this.#request("sync.materializePendingCursor", {pendingCursor: cursor}, signal);
         if (materialized.materialized !== true) throw new Error("Ordinary workspace materialization did not complete.");
         this.#check(signal);
@@ -138,6 +142,7 @@ export class ServiceOrdinaryReplication {
         if (committed.committed !== true) throw new Error("Ordinary relay cursor did not commit.");
         page.sharingDeclined.push(...declines(committed.sharingDeclined));
         pages.push(page);
+        onPage?.(page);
         previous = nextCursor;
         if (!result.hasMore) return {nextCursor, hasMore: false, pages};
       }

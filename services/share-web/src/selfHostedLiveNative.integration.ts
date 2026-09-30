@@ -18,6 +18,7 @@ import { createSessionActorResolver } from "@dohc/workspace-auth/session";
 import { initializeRelayDeployment, openRelayDeployment } from "../../sync-relay/src/relayDeployment.js";
 import { startServiceLiveHost } from "../../sync-relay/src/serviceLiveHost.js";
 import {startSelfHostedLiveHost} from "../../sync-relay/src/selfHostedLiveHost.js";
+import {authorizeServiceHostReplication} from "../../sync-relay/src/serviceHostCredential.js";
 import {createServiceHostReplication} from "../../sync-relay/src/serviceHostReplication.js";
 import {createServiceHostEnrollmentRoutes} from "../../sync-relay/src/serviceHostEnrollmentRoutes.js";
 import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile.js";
@@ -186,7 +187,8 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const profile = selfHostLiveProfile();
     const {storage, history} = deployment, frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners), validate = createLiveMarkdownJournalValidator(profile.validation);
     const resolveActor = createSessionActorResolver(relayAuth);
-    const serviceReplication = createServiceHostReplication({storage, key: Buffer.from(ticketKey), namespace: history.namespace});
+    const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.",
+      authorize: input => authorizeServiceHostReplication(storage, {key: Buffer.from(ticketKey), namespace: history.namespace, ...input})});
     let routes: ReturnType<typeof createNamedLiveRoutes> | undefined;
     const relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor: createSessionActorResolver(relayAuth),
       namedBrowserSessionLimits: profile.browserSessions, ownerRestoreHost: () => active});

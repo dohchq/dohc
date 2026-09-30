@@ -101,6 +101,7 @@ import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
 import * as automationHostStorage from "./storage/automationHosts";
+import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as collectionWriteStorage from "./storage/collectionWrites";
 import * as ownerCollectionWriteStorage from "./storage/ownerCollectionWrites";
 import * as automationPressStorage from "./storage/automationPresses";
@@ -531,6 +532,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
   }
 
+  postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
+    return noticeStorage.postAutomationWake(this, input);
+  }
+
   postNotice(input: noticeStorage.PostNoticeInput): void {
     noticeStorage.postNotice(this, input);
   }
@@ -577,6 +582,77 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   authorizeLinkCollectionWrite(input: Parameters<typeof collectionWriteStorage.authorizeLinkCollectionWrite>[1]) {
     return this.readTx(() => collectionWriteStorage.authorizeLinkCollectionWrite(this, input).authorized);
+  }
+
+  automationHostRecord(workspaceId: string) {
+    return automationHostStorage.automationHostRecord(this, workspaceId);
+  }
+
+  readAutomationServerSchedules(workspaceId: string) {
+    return this.readTx(() => automationHostStorage.readAutomationServerSchedules(this, workspaceId));
+  }
+
+  beginAutomationServerCopy(input: { workspaceId: string; incarnation: number }) {
+    automationHostStorage.beginAutomationServerCopy(this, input);
+  }
+
+  recordAutomationServerStart(input: Parameters<typeof automationHostStorage.recordAutomationServerStart>[1]) {
+    automationHostStorage.recordAutomationServerStart(this, input);
+  }
+
+  recordAutomationServerTaken(input: { workspaceId: string; generation: number }) {
+    automationHostStorage.recordAutomationServerTaken(this, input);
+  }
+
+  recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }) {
+    automationHostStorage.recordAutomationServerProgress(this, input);
+  }
+
+  joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
+    return automationWorkspaceStorage.joinAutomationWorkspace(this, input);
+  }
+
+  unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
+    return automationWorkspaceStorage.unwantAutomationWorkspace(this, input);
+  }
+
+  listAutomationWorkspaces() {
+    return automationWorkspaceStorage.listAutomationWorkspaces(this);
+  }
+
+  forgetAutomationWorkspace(input: { workspaceId: string; incarnation: number }) {
+    automationWorkspaceStorage.forgetAutomationWorkspace(this, input);
+  }
+
+  forgetAutomationWorkspaces() {
+    automationWorkspaceStorage.forgetAutomationWorkspaces(this);
+  }
+
+  currentAutomationWorkspace(workspaceId: string) {
+    return automationWorkspaceStorage.currentAutomationWorkspace(this, workspaceId);
+  }
+
+  liveClaimLogSeq(input: { workspaceId: string; liveCursor: number }) {
+    return automationWorkspaceStorage.liveClaimLogSeq(this, input);
+  }
+
+  automationWorkspaceLogSeq(input: { workspaceId: string; originId: string; originSeq: number }) {
+    return automationWorkspaceStorage.automationWorkspaceLogSeq(this, input);
+  }
+
+  serverHostedWorkspaces() {
+    return automationWorkspaceStorage.serverHostedWorkspaces(this);
+  }
+
+  restoreAutomationWorkspaceTimes(input: { workspaceId: string; incarnation: number; unwantedSinceMs: number; leftAtMs: number | null }) {
+    automationWorkspaceStorage.restoreAutomationWorkspaceTimes(this, input);
+  }
+
+  automationWorkspaceInfo(workspaceId: string) {
+    return automationWorkspaceStorage.automationWorkspaceInfo(this, workspaceId);
+  }
+  automationWorkspaceLogHead(workspaceId: string) {
+    return automationWorkspaceStorage.automationWorkspaceLogHead(this, workspaceId);
   }
 
   commitCollectionWrite(input: collectionWriteStorage.CommitCollectionWriteInput) {

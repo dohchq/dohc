@@ -4651,6 +4651,7 @@ export const GetCollectionAutomationRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: COLLECTION_AUTOMATION_ID,
   claimId: z.string().min(1).max(256),
+  onServer: z.boolean(),
 });
 export type GetCollectionAutomationRunPayload = z.infer<typeof GetCollectionAutomationRunPayload>;
 export type GetCollectionAutomationRunResult =
@@ -4658,13 +4659,23 @@ export type GetCollectionAutomationRunResult =
   | { status: "missing" }
   | { status: "unavailable" };
 
+// The runs the owner's self-hosted server made, newest first. Read apart
+// from this computer's, so those show without waiting on the server. Null
+// when the server has no copy of the workspace, or this computer cannot ask
+// as its owner.
+export const ListServerAutomationRunsPayload = ListCollectionAutomationRunsPayload;
+export type ListServerAutomationRunsPayload = z.infer<typeof ListServerAutomationRunsPayload>;
+export type ListServerAutomationRunsResult = { runs: CollectionAutomationRun[] | null; next: string | null };
+
 // Try again for a failed run. `startOver` confirms running an automation
-// that changed since the run began from its first step.
+// that changed since the run began from its first step. `onServer` names a
+// run the owner's self-hosted server made, which runs again there.
 export const RetryCollectionAutomationPayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: COLLECTION_AUTOMATION_ID,
   claimId: z.string().min(1).max(256),
   startOver: z.boolean(),
+  onServer: z.boolean(),
 });
 export type RetryCollectionAutomationPayload = z.infer<typeof RetryCollectionAutomationPayload>;
 export type RetryCollectionAutomationResult = CollectionAutomationRetry;
@@ -4730,6 +4741,7 @@ export const UndoCollectionAutomationRunPayload = z.object({
     token: z.string().min(1).max(128),
     chosen: z.array(z.object({ key: z.string().min(1).max(16_384), operationId: z.string().min(1).max(256) })).max(64),
   }).nullable(),
+  onServer: z.boolean(),
 });
 export type UndoCollectionAutomationRunPayload = z.infer<typeof UndoCollectionAutomationRunPayload>;
 export type UndoCollectionAutomationRunResult = CollectionAutomationUndo;
@@ -4768,6 +4780,10 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     wroteAutomations: z.boolean(),
     // One of those automations sends messages, which no Undo takes back.
     sendsMessages: z.boolean(),
+    // Fields those runs wrote that kept a later value, and fields on records
+    // no longer in their Collection.
+    fieldsKept: z.number().int().nonnegative(),
+    fieldsMissing: z.number().int().nonnegative(),
     // What stopped the restore part way; the files above were restored.
     errorMessage: z.string().nullable(),
   }).strict(),
@@ -4792,15 +4808,23 @@ export const ConfirmCollectionAutomationStepPayload = z.object({
   seq: z.number().int().nonnegative(),
   // A person a formula named, or a Collection a code step named, whose hold this is.
   recipient: z.string().min(1).max(1_024).optional(),
+  // The step waits on the owner's self-hosted server.
+  onServer: z.boolean(),
 });
 export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
 export type ConfirmCollectionAutomationStepResult = { status: "confirmed" | "changed" };
 
 // Steps waiting for a current editor to allow them, one notice each, and
 // steps a narrower share stopped, one notice for all of them.
-export const ListAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export const ListAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID, retryPath: z.string().optional() });
 export type ListAutomationHoldsPayload = z.infer<typeof ListAutomationHoldsPayload>;
 export type ListAutomationHoldsResult = CollectionAutomationHolds;
+
+// Steps the owner's self-hosted server holds for Allow. Read apart from this
+// computer's own holds, so showing those never waits on the server.
+export const ListServerAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type ListServerAutomationHoldsPayload = z.infer<typeof ListServerAutomationHoldsPayload>;
+export type ListServerAutomationHoldsResult = { holds: CollectionAutomationHolds["holds"] };
 
 // After the saved verdicts could not be read, hold every step the roster
 // allows now. "roster-unknown" means dohc cannot check who can edit yet.
@@ -6232,6 +6256,7 @@ export interface DohcDesktopBridge
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
   getCollectionAutomationRun(payload: GetCollectionAutomationRunPayload): Promise<GetCollectionAutomationRunResult>;
+  listServerAutomationRuns(payload: ListServerAutomationRunsPayload): Promise<ListServerAutomationRunsResult>;
   retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
@@ -6242,6 +6267,7 @@ export interface DohcDesktopBridge
   undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
+  listServerAutomationHolds(payload: ListServerAutomationHoldsPayload): Promise<ListServerAutomationHoldsResult>;
   resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;
   revealAutomationHolds(payload: RevealAutomationHoldsPayload): Promise<void>;
   dismissAutomationStops(payload: DismissAutomationStopsPayload): Promise<void>;
