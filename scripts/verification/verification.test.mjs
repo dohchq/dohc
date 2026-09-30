@@ -1155,22 +1155,41 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     const head = git(["rev-parse", "HEAD"]);
     const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
     const childScript = `
+      import assert from "node:assert/strict";
       import childProcess from "node:child_process";
+      import { rmSync } from "node:fs";
       import { syncBuiltinESMExports } from "node:module";
       const exec = childProcess.execFileSync;
+      const fault = process.env.FIXTURE_PROVENANCE_FAULT;
+      let changed = false;
       childProcess.execFileSync = (command, ...args) => {
         if (command !== "git") throw new Error("Unavailable code tool: " + command);
-        return exec(command, ...args);
+        if (fault === "path-recovery" && !changed && args[0].includes("--git-path")) {
+          changed = true;
+          throw new Error("Fixture cannot resolve the HEAD log path");
+        }
+        const result = exec(command, ...args);
+        if (!changed && args[0][0] === "reflog") {
+          changed = true;
+          if (fault === "removed-log") rmSync(".git/logs/HEAD");
+          if (fault === "returned-head") {
+            const config = ["-c", "core.hooksPath=no-hooks", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"];
+            exec("git", [...config, "update-ref", "-m", "fixture away", "HEAD", ${JSON.stringify(base)}]);
+            exec("git", [...config, "update-ref", "-m", "fixture back", "HEAD", ${JSON.stringify(head)}]);
+          }
+        }
+        return result;
       };
       childProcess.spawn = command => { throw new Error("Unavailable code tool: " + command); };
       syncBuiltinESMExports();
       const { verify } = await import("./scripts/verification/verify.mjs");
+      if (fault === "path-recovery") await assert.rejects(verify(process.argv.slice(1)), /could not read the HEAD reflog/);
       const report = await verify(process.argv.slice(1));
       console.log(JSON.stringify(report));
     `;
-    const invoke = (extra = []) => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
+    const invoke = (extra = [], fault = "") => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
       cwd: root, encoding: "utf8", timeout: 20_000,
-      env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), DOHC_BUILD_SLOT_ROOT: join(root, "slots") },
+      env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), DOHC_BUILD_SLOT_ROOT: join(root, "slots"), FIXTURE_PROVENANCE_FAULT: fault },
     });
     const clean = invoke();
     assert.equal(clean.error, undefined);
@@ -1187,6 +1206,21 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.equal(report.doctor, undefined);
     assert.equal(report.build, undefined);
     assert.match(report.reason, /No code gate applies/);
+
+    const headLog = join(root, ".git/logs/HEAD");
+    const originalLog = readFileSync(headLog);
+    for (const [fault, reason] of [["removed-log", /keeps no HEAD reflog/], ["returned-head", /HEAD was updated 2 times/]]) {
+      try {
+        const refused = invoke([], fault);
+        assert.equal(refused.error, undefined);
+        assert.notEqual(refused.status, 0);
+        assert.match(refused.stderr, reason);
+      } finally { writeFileSync(headLog, originalLog); }
+    }
+    const recovered = invoke([], "path-recovery");
+    assert.equal(recovered.error, undefined);
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.equal(JSON.parse(recovered.stdout.trim().split(/\r?\n/).at(-1)).verdict, "PASS");
 
     writeFileSync(document, "Dirty documentation.\n");
     const dirty = invoke();
