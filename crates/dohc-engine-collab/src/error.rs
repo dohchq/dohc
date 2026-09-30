@@ -21,7 +21,7 @@ pub enum CollabError {
     ConfiguredByteBudgetExceeded,
 
     #[error(
-        "This file has too many pending authors. Retry saving the file, then try the edit again."
+        "dohc could not save this edit because this file has too many authors waiting to save."
     )]
     AuthorCapacity,
 

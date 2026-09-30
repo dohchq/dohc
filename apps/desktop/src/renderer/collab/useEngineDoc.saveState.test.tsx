@@ -1244,7 +1244,7 @@ it("reports a capacity refusal once with a guarded retry and keeps the edit", as
   act(() => screen.getByTestId("type").click());
   await flushLocalBatch();
   harness.emit("error", 1, undefined, true);
-  expect(screen.getByTestId("save-error").textContent).toContain("too many pending authors");
+  expect(screen.getByTestId("save-error").textContent).toContain("too many authors waiting to save");
   expect(reportError).toHaveBeenCalledTimes(1);
   const [message, error, retry] = reportError.mock.calls[0]!;
   expect(message).toContain("notes/a.md");

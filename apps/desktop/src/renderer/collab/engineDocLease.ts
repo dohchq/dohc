@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { authorCapacityMessage } from "./authorCapacityMessage";
 import type { LiveDocumentKind } from "@dohc/workspace-contracts/live-documents";
 import {
   declareSceneRoots,
@@ -971,7 +972,7 @@ function createEngineDocSession(
       return;
     }
     if (event.state === "error" || event.state === "changed-on-disk") {
-      reportSaveState(event.state, event.authorCapacity ? "This file has too many pending authors. Try saving again." : null, event.authorCapacity);
+      reportSaveState(event.state, event.authorCapacity ? authorCapacityMessage(input.path) : null, event.authorCapacity);
       return;
     }
     if (event.state === "settling") {

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { authorCapacityMessage } from "./authorCapacityMessage";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
 import type { EngineDocSaveState } from "./engineDocLease";
 
@@ -20,7 +21,7 @@ export function useAuthorCapacityNotice(input: {
     }
     if (!input.authorCapacity || !input.reportError || reported.current === key) return;
     reported.current = key;
-    const message = `dohc could not save ${input.path}. This file has too many pending authors. Try again to save this edit.`;
+    const message = authorCapacityMessage(input.path);
     input.reportError(message, new Error(message), () => {
       if (JSON.stringify([current.current.workspaceId, current.current.path]) !== key) return;
       current.current.retry();
