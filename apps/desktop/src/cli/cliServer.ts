@@ -2007,7 +2007,6 @@ function validateRequestPathSpellings(request: CliRequest): void {
 type CliPathMode = "read" | "write" | "materialize";
 
 // Validate the caller spelling before rebasing, then validate workspace authority.
-// fileWrite can use the same helper when its socket verb lands.
 async function callerPaths(context: CliWorkspaceContext, cwd: string) {
   const root = await realpath(context.rootPath);
   const folder = await realpath(cwd);
@@ -2046,7 +2045,7 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
     },
     result(value: unknown): unknown {
       const paths = new Set(["path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath"]);
-      const lists = new Set(["paths", "created", "written"]);
+      const lists = new Set(["paths", "sourcePaths", "created", "written"]);
       const data = new Set(["values", "fields", "kept", "input", "result", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
       const collect = (entry: unknown, key = ""): void => {
         if (typeof entry === "string" && (paths.has(key) || lists.has(key)) && workspacePath(entry)) {
@@ -2091,7 +2090,7 @@ async function dispatch(
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): Promise<unknown> {
-  const pathVerbs = new Set(["moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy"]);
+  const pathVerbs = new Set(["moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options);
@@ -2101,6 +2100,17 @@ async function dispatch(
   try {
     validateRequestPathSpellings(request);
     switch (request.verb) {
+      case "fileWrite":
+        rebased = { ...request, args: { ...request.args, files: request.args.files.map(file => ({
+          ...file, path: paths.rebase(file.path, "materialize"),
+        })) } };
+        break;
+      case "appPublication": {
+        const input = request.args.request;
+        rebased = { ...request, args: { ...request.args, request: "appRoot" in input
+          ? { ...input, appRoot: paths.rebase(input.appRoot, "read") } : input } };
+        break;
+      }
       case "fileChats":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
@@ -2160,7 +2170,8 @@ async function dispatch(
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "path rejected";
-    if (request.verb === "moments") throw new CliCommandError(reason);
+    if (request.verb === "moments" || request.verb === "appPublication") throw new CliCommandError(reason);
+    if (request.verb === "fileWrite") return { ok: false, written: [], reason };
     return request.verb === "dataset" ? { kind: "refused", code: "path_rejected", message: reason } : { ok: false, reason };
   }
   try {
@@ -2610,25 +2621,9 @@ async function dispatchWorkspace(
       if (request.args.actor !== "agent") return { ok: false, written: [], reason: `A file write through the CLI socket is recorded as an agent's; send actor "agent".` };
       if (!context.writeFiles) return { ok: false, written: [], reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
       try {
-        const root = await realpath(context.rootPath);
-        const folder = await realpath(request.args.cwd);
-        const files: CliFileWrite[] = [];
-        for (const file of request.args.files) {
-          const checked = validateUserMaterializePath(file.path, { platform: process.platform });
-          if (!checked.ok) return { ...cliPathRejected(checked.reason, file.path), written: [] };
-          files.push({ ...file, path: relative(root, resolve(folder, checked.normalized)).split(sep).join("/") });
-        }
-        const result = await context.writeFiles(files, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
+        const result = await context.writeFiles(request.args.files, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
         if (result.written?.length) await notifyWrite(options, context);
-        const callerPath = (path: string) => relative(folder, join(root, path)).split(sep).join("/");
-        if (result.ok) return { ...result, written: result.written.map(callerPath) };
-        return {
-          ...result,
-          ...(result.written !== undefined ? { written: result.written.map(callerPath) } : {}),
-          ...(result.path !== undefined
-            ? { path: callerPath(result.path), reason: result.reason.replaceAll(result.path, callerPath(result.path)) }
-            : {}),
-        };
+        return result;
       } catch (error) { return mcpFailure(error, "dohc could not write the files. Check that the files are writable."); }
     }
 

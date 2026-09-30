@@ -554,6 +554,46 @@ describe("CLI socket server", () => {
     });
   });
 
+  it("publishes the app created from a subfolder and returns caller-relative source paths", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    context.writeFiles = async files => {
+      for (const file of files) {
+        const absolute = join(workspaceRoot, file.path);
+        await mkdir(dirname(absolute), { recursive: true });
+        await writeFile(absolute, Buffer.from(file.contentBase64, "base64"));
+      }
+      return { ok: true, written: files.map(file => file.path) };
+    };
+    const ctx: ToolContext = { root: cwd, home: stateDir, request: request => invoke(request.verb, request.args) };
+    expect(await createApp(ctx, { appRoot: "site" })).toMatchObject({ ok: true, appRoot: "site" });
+    const publication = vi.fn<NonNullable<CliWorkspaceContext["appPublication"]>>(async request => {
+      if (request.action !== "prepare") throw new Error("Expected prepare");
+      await expect(readFile(join(workspaceRoot, request.appRoot, "index.html"), "utf8")).resolves.toContain("<!doctype html>");
+      return { kind: "prepared", approvalId: "00000000-0000-4000-8000-000000000001",
+        candidateDigest: "a".repeat(64), appRoot: request.appRoot, versionId: "version-site",
+        sourceRevision: "b".repeat(64), sourcePaths: [request.appRoot + "/index.html", request.appRoot + "/styles.css"],
+        capabilities: [], externalNetwork: true };
+    });
+    context.appPublication = publication;
+    expect(await invoke("appPublication", { cwd, actor: "agent", request: {
+      action: "prepare", workspaceId: WORKSPACE_ID, appRoot: "site", shareId: "share-site", grantId: "grant-site",
+    } })).toMatchObject({ kind: "prepared", appRoot: "site", sourcePaths: ["site/index.html", "site/styles.css"] });
+    expect(publication).toHaveBeenCalledWith(expect.objectContaining({ appRoot: "app/site" }));
+    publication.mockResolvedValueOnce({ kind: "published", publicationId: "c".repeat(64), authorityRevision: 1 });
+    expect(await invoke("appPublication", { cwd, actor: "agent", request: {
+      action: "approve", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001", candidateDigest: "a".repeat(64),
+    } })).toEqual({ kind: "published", publicationId: "c".repeat(64), authorityRevision: 1 });
+    publication.mockRejectedValueOnce(new Error("Cannot publish app/site/index.html"));
+    await expect(invoke("appPublication", { cwd, actor: "agent", request: {
+      action: "prepareLocal", workspaceId: WORKSPACE_ID, appRoot: "site",
+    } })).rejects.toThrow("Cannot publish site/index.html");
+    await expect(invoke("appPublication", { cwd, actor: "agent", request: {
+      action: "listLocal", workspaceId: WORKSPACE_ID, appRoot: "../site",
+    } })).rejects.toThrow("traversal");
+    expect(publication).toHaveBeenCalledTimes(3);
+  });
+
   it("refuses traversal in a fileWrite before cwd translation", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
