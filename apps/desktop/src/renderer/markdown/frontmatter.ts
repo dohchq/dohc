@@ -1,5 +1,6 @@
 import * as yaml from "js-yaml";
 import {
+  leadingFrontmatter,
   loadMarkdownFrontmatter,
   writeMarkdownFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
@@ -26,6 +27,28 @@ export function parseFrontmatter(src: string): {
 } {
   const loaded = loadMarkdownFrontmatter(src);
   return loaded ? { meta: loaded.meta, body: loaded.rest } : { meta: {}, body: src };
+}
+
+function splitRawFrontmatter(markdown: string): {
+  frontmatter: string | null;
+  body: string;
+} {
+  // A block that does not read stays out of the body too, as the engine keeps
+  // it, so the editor never renders it as Markdown.
+  const block = leadingFrontmatter(markdown);
+  if (!block) return { frontmatter: null, body: markdown };
+  return { frontmatter: block.text, body: markdown.slice(block.text.length) };
+}
+
+export function markdownEditorBody(markdown: string): string {
+  return splitRawFrontmatter(markdown).body;
+}
+
+export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): string {
+  const split = splitRawFrontmatter(sourceMarkdown);
+  if (!split.frontmatter) return body;
+  const separator = split.body.startsWith("\n") && !body.startsWith("\n") ? "\n" : "";
+  return `${split.frontmatter}${separator}${body}`;
 }
 
 export function displayFrontmatterValue(value: unknown): string {

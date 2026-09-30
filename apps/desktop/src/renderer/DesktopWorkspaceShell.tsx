@@ -114,10 +114,8 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { QuickOpenPalette } from "./QuickOpenPalette";
-import {
-  classifyForView,
-  FileInspector,
-} from "./FileInspector";
+import { FileInspector } from "./FileInspector";
+import { classifyForView } from "./fileViewKind";
 import {
   preloadMarkdownEditor,
   type HeadingTarget,

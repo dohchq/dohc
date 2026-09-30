@@ -1,8 +1,7 @@
-// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { classifyForView } from "./FileInspector";
-import { lineSpanInText } from "./FileInspector.editor-fixture";
-import { markdownEditorBody, mergeMarkdownEditorBody } from "./MarkdownView";
+import { classifyForView } from "./fileViewKind";
+import { lineSpanInText } from "./FileInspector.text-fixture";
+import { markdownEditorBody, mergeMarkdownEditorBody } from "./markdown/frontmatter";
 import {
   resolveWorkspaceLinkNavigation,
   resolveWikilinkNavigation,

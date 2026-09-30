@@ -45,10 +45,13 @@ import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import {
   frontmatterBlockFor,
-  leadingFrontmatter,
   writtenFrontmatterKeys,
 } from "@dohc/ydoc-projection/frontmatter";
-import { orderFrontmatter } from "./markdown/frontmatter";
+import {
+  markdownEditorBody,
+  mergeMarkdownEditorBody,
+  orderFrontmatter,
+} from "./markdown/frontmatter";
 import type {
   BlockNavigationTarget,
   MarkdownEditorHandle,
@@ -145,21 +148,6 @@ function loadImportExport(): Promise<typeof import("./editor/import-export")> {
   return importExportPromise;
 }
 
-function splitRawFrontmatter(markdown: string): {
-  frontmatter: string | null;
-  body: string;
-} {
-  // A block that does not read stays out of the body too, as the engine keeps
-  // it, so the editor never renders it as Markdown.
-  const block = leadingFrontmatter(markdown);
-  if (!block) return { frontmatter: null, body: markdown };
-  return { frontmatter: block.text, body: markdown.slice(block.text.length) };
-}
-
-export function markdownEditorBody(markdown: string): string {
-  return splitRawFrontmatter(markdown).body;
-}
-
 /** Lines of frontmatter above the editor body. Search numbers its lines
  *  against the FILE; the editor and the block mapping both count from the
  *  body, and this is the offset between them. */
@@ -167,13 +155,6 @@ function frontmatterLineCount(markdown: string): number {
   const body = markdownEditorBody(markdown);
   return (markdown.slice(0, markdown.length - body.length).match(/\n/g) ?? [])
     .length;
-}
-
-export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): string {
-  const split = splitRawFrontmatter(sourceMarkdown);
-  if (!split.frontmatter) return body;
-  const separator = split.body.startsWith("\n") && !body.startsWith("\n") ? "\n" : "";
-  return `${split.frontmatter}${separator}${body}`;
 }
 
 // The restore half of the cancel-and-restore: one row per set-aside

@@ -65,9 +65,10 @@ for (let index = 0; index < 3; index++) {
 const config = join(directory, "vitest.config.mjs");
 writeFileSync(config, `
   import base from ${JSON.stringify(new URL("../../vitest.config.ts", import.meta.url).href)};
-  export default { ...base, root: ${JSON.stringify(desktop)}, test: { ...base.test,
+  const desktopProject = base.test.projects.find(project => project.test.name === 'desktop');
+  export default { ...desktopProject, root: ${JSON.stringify(desktop)}, test: { ...desktopProject.test,
     include: ${JSON.stringify(files.map(file => file.replaceAll("\\", "/")))}, maxWorkers: 1,
-    execArgv: [...base.test.execArgv, '--import', ${JSON.stringify(pathToFileURL(preload).href)}],
+    execArgv: [...desktopProject.test.execArgv, '--import', ${JSON.stringify(pathToFileURL(preload).href)}],
   }};
 `);
 const log = join(directory, "vitest.log");
