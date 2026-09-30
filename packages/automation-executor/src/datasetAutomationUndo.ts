@@ -462,6 +462,8 @@ function undoKey(claimId: string, operationId: string, input: JsonObject): strin
  * refused by the host. `saveRequest` saves a request
  * durably before it is sent again at a record's new version; the runs carry
  * what it saved.
+ * `keptFields` names each field left because it changed since, with its
+ * dataset, table and record id as JSON, so no two datasets' fields meet.
  */
 export async function undoDatasetAutomationRuns(
   host: DatasetUndoHost,
@@ -474,10 +476,15 @@ export async function undoDatasetAutomationRuns(
   signal: AbortSignal,
   only?: { kind: "record"; datasetId: string; tableId: string; recordId: string | number } | { kind: "action"; datasetId: string; revision: number; operationId: string },
   prepared?: ReturnType<typeof datasetUndoChanges>,
-): Promise<CollectionAutomationUndone> {
+): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
   const saved = runs.flatMap((run) => run.undoRequests);
   // Each call once, though two saved lists may hold it: the same content has the same key.
   const calls = [...new Map(runs.flatMap((run) => run.undoCalls).map((call) => [call.idempotencyKey, call])).values()];
+  const keptFields: Array<{ recordId: string; field: string }> = [];
+  const keep = (last: Edit, fields: readonly FieldChange[]) => {
+    const recordId = JSON.stringify([last.rules.datasetId, last.tableId, last.recordId]);
+    for (const field of fields) keptFields.push({ recordId, field: field.fieldId });
+  };
   const undone: CollectionAutomationUndone = {
     reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0,
   };
@@ -586,6 +593,7 @@ export async function undoDatasetAutomationRuns(
         if (!("refused" in result)) {
           undone.reverted += sent;
           undone.changedSince += group.length - sent;
+          keep(record.last, group.filter((field) => !(field.fieldId in resent.values)));
           continue;
         }
         if (result.refused.code !== "stale_record" && result.refused.code !== "not_found") throw new Error(result.refused.message);
@@ -638,6 +646,7 @@ export async function undoDatasetAutomationRuns(
         const still = fields.filter((field) => field.after.some((after) => holds(field, after)));
         // A field already back, from an Undo that stopped part way or an edit that never landed, is neither.
         undone.changedSince += fields.filter((field) => !still.includes(field) && !holds(field, field.before)).length;
+        keep(record.last, fields.filter((field) => !still.includes(field) && !holds(field, field.before)));
         fields = still;
         version = row.version;
         if (fields.length > 0) {
@@ -646,5 +655,5 @@ export async function undoDatasetAutomationRuns(
       }
     }
   }
-  return undone;
+  return { undone, keptFields };
 }

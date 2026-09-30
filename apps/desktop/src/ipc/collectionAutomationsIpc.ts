@@ -13,6 +13,8 @@ import {
   ListAutomationPeoplePayload,
   ListAutomationTargetsPayload,
   ListAutomationHoldsPayload,
+  ListServerAutomationHoldsPayload,
+  ListServerAutomationRunsPayload,
   ResetAutomationHoldsPayload,
   RevealAutomationHoldsPayload,
   GetCollectionAutomationRunPayload,
@@ -32,6 +34,8 @@ import {
   type ListAutomationTargetsResult,
   type DeleteWorkspacePathPayload,
   type ListAutomationHoldsResult,
+  type ListServerAutomationHoldsResult,
+  type ListServerAutomationRunsResult,
   type ResetAutomationHoldsResult,
   type CreateWorkspaceFilePayload,
   type GetCollectionAutomationRunResult,
@@ -46,12 +50,14 @@ import {
 import { CHANNELS } from "./channels";
 import { formulaProblems } from "@dohc/automation-executor/automation-plan";
 import { AUTOMATIONS_FILE_NAME, type CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import type { ServerRuns } from "../automations/serverRuns";
 
 // The ⚡ panel's view of a Collection's automations. Main parses, checks,
 // and writes automations.yaml, so the renderer never loads the file contract
 // and its parser. Writes go through the same file mutations as the editor,
 // so a conflict, a shared view, and file history behave as they do for any
-// other save.
+// other save. The owner's self-hosted server keeps the runs and holds it
+// made; main reads them and acts on them through the relay.
 
 export function registerCollectionAutomationsIpc<
   Sender,
@@ -78,7 +84,18 @@ export function registerCollectionAutomationsIpc<
   deletePath(event: Event, payload: DeleteWorkspacePathPayload): Promise<unknown>;
   /** The window that runs a failed press again hears how the run settles. */
   watchPress(workspaceId: string, claimId: string, sender: Sender): void;
+  /** The owner's self-hosted server's runs and holds. */
+  serverRuns: ServerRuns;
+  /** Whether a request failed because the relay could not be reached, as offline. */
+  relayUnreachable(error: unknown): boolean;
 }): void {
+  const { serverRuns } = dependencies;
+  // Offline, the server's lists have nothing to show; a relay that answered
+  // with a failure is reported.
+  const unlessOffline = <T>(fallback: T) => (error: unknown): T => {
+    if (dependencies.relayUnreachable(error)) return fallback;
+    throw error;
+  };
   const { registerHandler, assertTrustedSender, withRendererWorkspaceOperation } = dependencies;
   const stale = "Automations stopped loading because this window changed workspaces.";
 
@@ -112,19 +129,33 @@ export function registerCollectionAutomationsIpc<
     const input = GetCollectionAutomationRunPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<GetCollectionAutomationRunResult> => {
       if (dependencies.sharedViewOf(input.workspaceId)) return { status: "unavailable" };
-      const run = await operation.state.collectionAutomations.listedRun(input.automationId, input.claimId);
+      const run = input.onServer
+        ? await serverRuns.get(input.workspaceId, input.automationId, input.claimId)
+        : await operation.state.collectionAutomations.listedRun(input.automationId, input.claimId);
       return run === null ? { status: "missing" } : { status: "found", run };
     });
   });
 
+  registerHandler(CHANNELS.listServerAutomationRuns, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListServerAutomationRunsPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<ListServerAutomationRunsResult> =>
+      (dependencies.sharedViewOf(input.workspaceId)
+        ? null
+        : await serverRuns.runs(input.workspaceId, input.automationId, input.before).catch(unlessOffline(null))) ?? { runs: null, next: null });
+  });
+
   // Try again. The executor wakes its drain and the failure notices after
   // the engine queues the claim. Only the person who pressed a button, or
-  // the workspace's owner, runs a press again.
+  // the workspace's owner, runs a press again. A server run runs again on
+  // the server, which the relay lets only the owner ask.
   registerHandler(CHANNELS.retryCollectionAutomation, async (event, payload) => {
     assertTrustedSender(event);
-    const input = RetryCollectionAutomationPayload.parse(payload);
+    const { onServer, ...input } = RetryCollectionAutomationPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<RetryCollectionAutomationResult> =>
-      await operation.state.collectionAutomations.retry(input, (claimId) => dependencies.watchPress(input.workspaceId, claimId, event.sender)));
+      onServer
+        ? await serverRuns.retry(input.workspaceId, { automationId: input.automationId, claimId: input.claimId, startOver: input.startOver })
+        : await operation.state.collectionAutomations.retry(input, (claimId) => dependencies.watchPress(input.workspaceId, claimId, event.sender)));
   });
 
   // Undo for a finished run, as the person who clicked it. Records a run
@@ -133,11 +164,13 @@ export function registerCollectionAutomationsIpc<
   // the person confirms the preview.
   registerHandler(CHANNELS.undoCollectionAutomationRun, async (event, payload) => {
     assertTrustedSender(event);
-    const input = UndoCollectionAutomationRunPayload.parse(payload);
+    const { onServer, ...input } = UndoCollectionAutomationRunPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<UndoCollectionAutomationRunResult> =>
-      await operation.state.collectionAutomations.undo(input, async (relativePath) => {
-        await dependencies.deletePath(event, { workspaceId: input.workspaceId, relativePath });
-      }));
+      onServer
+        ? await serverRuns.undo(input.workspaceId, { automationId: input.automationId, claimId: input.claimId, deletes: input.deletes })
+        : await operation.state.collectionAutomations.undo(input, async (relativePath) => {
+          await dependencies.deletePath(event, { workspaceId: input.workspaceId, relativePath });
+        }));
   });
 
   registerHandler(CHANNELS.listAutomationGroups, async (event, payload) => {
@@ -213,6 +246,13 @@ export function registerCollectionAutomationsIpc<
         }
         return executor.holdState();
       });
+  });
+
+  registerHandler(CHANNELS.listServerAutomationHolds, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListServerAutomationHoldsPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<ListServerAutomationHoldsResult> =>
+      ({ holds: dependencies.sharedViewOf(input.workspaceId) ? [] : await serverRuns.holds(input.workspaceId).catch(unlessOffline([])) }));
   });
 
   // After the saved verdicts could not be read: hold every step the roster
@@ -293,9 +333,9 @@ export function registerCollectionAutomationsIpc<
 
   registerHandler(CHANNELS.confirmCollectionAutomationStep, async (event, payload) => {
     assertTrustedSender(event);
-    const input = ConfirmCollectionAutomationStepPayload.parse(payload);
-    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ConfirmCollectionAutomationStepResult> =>
-      ({ status: await operation.state.collectionAutomations.confirmReach(input) }));
+    const { onServer, workspaceId, ...input } = ConfirmCollectionAutomationStepPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, workspaceId, stale, async (operation): Promise<ConfirmCollectionAutomationStepResult> =>
+      ({ status: onServer ? await serverRuns.allow(workspaceId, input) : await operation.state.collectionAutomations.confirmReach(input) }));
   });
 
   // Saves the panel's automations over the file it read. Each automation

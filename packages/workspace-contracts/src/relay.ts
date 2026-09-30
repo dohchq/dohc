@@ -453,6 +453,12 @@ export const NOTICE_KINDS = {
 }>;
 
 export type NoticeKind = keyof typeof NOTICE_KINDS;
+
+// A self-hosted server posts its owner a notice for each run of theirs that
+// failed there, and for each step it holds until they allow it. The ids
+// start with these, so the owner's computers can act on them there.
+export const SERVER_RUN_FAILED_NOTICE_PREFIX = "server-automation-failed:";
+export const SERVER_HOLD_NOTICE_PREFIX = "automation-held:";
 // The kinds a person or agent may post.
 export type PostableNoticeKind = {
   [Kind in NoticeKind]: (typeof NOTICE_KINDS)[Kind]["recipients"] extends "relay" ? never : Kind;

@@ -46,7 +46,9 @@ export function replicaRecordEngine(replica: Pick<AutomationReplica, "client" | 
  *
  * Each write opens the record's session in the active version, journals each
  * field with its attribution and idempotency key, settles, and closes, as the
- * desktop's capture does for one write. A keyed update the engine did not
+ * desktop's capture does for one write. With `ownerUndo`, the context is
+ * Undo's instead, which writes a person's edits: only the owner's routes
+ * undo a run here. A keyed update the engine did not
  * answer, or a write whose run ended, leaves the session without settling it,
  * so nothing resends an update without its key and nothing lands after the
  * run; the next open settles what the engine recorded. The engine adopts a
@@ -57,6 +59,7 @@ export function replicaRecordEditContext(
   replica: Pick<AutomationReplica, "workspaceId" | "signal">,
   engine: ReplicaRecordEngine,
   callerSignal: AbortSignal,
+  ownerUndo = false,
 ): CollectionRecordEditContext {
   const {workspaceId} = replica;
   const signal = AbortSignal.any([callerSignal, replica.signal]);
@@ -71,12 +74,13 @@ export function replicaRecordEditContext(
       const versionId = await activeVersion();
       const provider = await engine.openSession({versionId, path});
       const expectedObjectId = provider.objectId;
-      return await recordSession(provider, path, signal, () => engine.openSession({
+      return await recordSession(provider, path, signal, ownerUndo, () => engine.openSession({
         versionId, path, ...(expectedObjectId === undefined ? {} : {expectedObjectId}),
       }));
     },
     async createFile(path, text, author) {
-      if (author.kind !== "automation") throw new Error(AUTOMATIONS_ONLY);
+      // Undo adds nothing.
+      if (ownerUndo || author.kind !== "automation") throw new Error(AUTOMATIONS_ONLY);
       const versionId = await activeVersion();
       signal.throwIfAborted();
       await adapter.writeTextFile({
@@ -106,17 +110,18 @@ export function replicaRecordEditContext(
   };
 }
 
-const AUTOMATIONS_ONLY = "This server writes records only for automations.";
+const AUTOMATIONS_ONLY = "This server writes records only for automations, and for the owner's Undo of their runs.";
 
 /**
  * One write's session over a provider. It refuses a path the version does
  * not hold now, whether it never existed or someone deleted it: a settle
  * would write the file back. It settles first what an earlier write left. Each update
- * must name an automation as its author. A completed creation key reopens
+ * must name an automation as its author, or a person in Undo's session.
+ * A completed creation key reopens
  * canonical state for the caller to inspect. Other failures or an aborted
  * signal stop further writes and settlement.
  */
-async function recordSession(provider: EngineYdocProviderSession, path: string, signal: AbortSignal, reopen: () => Promise<EngineYdocProviderSession>): Promise<RecordEditSession> {
+async function recordSession(provider: EngineYdocProviderSession, path: string, signal: AbortSignal, ownerUndo: boolean, reopen: () => Promise<EngineYdocProviderSession>): Promise<RecordEditSession> {
   try {
     if (provider.head === "absent") {
       throw new Error(`${path} is not a record in this server's copy of the workspace.`);
@@ -135,7 +140,10 @@ async function recordSession(provider: EngineYdocProviderSession, path: string, 
       const turn = chain.then(async () => {
         if (failed) throw new Error(`An earlier write to ${path} failed, so this session writes nothing more.`);
         signal.throwIfAborted();
-        if (options.attribution?.actorKind !== "automation" || options.actorOriginId === undefined) throw new Error(AUTOMATIONS_ONLY);
+        const allowed = ownerUndo
+          ? options.attribution?.actorKind === "human"
+          : options.attribution?.actorKind === "automation" && options.actorOriginId !== undefined;
+        if (!allowed) throw new Error(AUTOMATIONS_ONLY);
         const update = decide(provider.doc);
         if (update === null) return false;
         try {

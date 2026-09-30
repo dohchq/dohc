@@ -88,7 +88,7 @@ it("stops the chosen person after one confirm, lists files to check with why, an
     ],
     runsUndone: 2,
     runsLeft: 0,
-    runChangesKept: 0, wroteAutomations: false, sendsMessages: false, 
+    fieldsKept: 0, fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
     errorMessage: null,
   }]);
   const person = await screen.findByRole("combobox", { name: "Who to stop" });
@@ -116,7 +116,7 @@ it("stops the chosen person after one confirm, lists files to check with why, an
 it("says access stopped while changes are still arriving, and tries again", async () => {
   const f = fixture([
     { status: "waiting" },
-    { status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null },
+    { status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, fieldsKept: 0, fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null },
   ]);
   fireEvent.change(await screen.findByRole("combobox", { name: "Who to stop" }), { target: { value: "person:user_bob" } });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
@@ -135,11 +135,11 @@ it("reports failures through the shell, and a Try again after closing opens the 
       review: [],
       runsUndone: 0,
       runsLeft: 0,
-      runChangesKept: 0, wroteAutomations: false, sendsMessages: false, 
+      fieldsKept: 0, fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
       errorMessage: "The workspace engine is not running.",
     },
     new Error("dohc could not reach the relay."),
-    { status: "restored", restored: [{ path: "trip/packing/collection.yaml", restoredMomentId: "back-2" }], review: [], runsUndone: 1, runsLeft: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null },
+    { status: "restored", restored: [{ path: "trip/packing/collection.yaml", restoredMomentId: "back-2" }], review: [], runsUndone: 1, runsLeft: 0, fieldsKept: 0, fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null },
   ]);
   await screen.findByRole("combobox", { name: "Who to stop" });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
@@ -171,7 +171,7 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
     status: "restored",
     restored: [{ path: "trip/packing/automations.yaml", restoredMomentId: "back-1" }],
     review: [{ path: "trip/packing/collection.yaml", reason: "changed-since" }],
-    runsUndone: 1, runsLeft: 1, runChangesKept: 2, wroteAutomations: true, sendsMessages: true, errorMessage: null,
+    fieldsKept: 0, fieldsMissing: 0, runsUndone: 1, runsLeft: 1, runChangesKept: 2, wroteAutomations: true, sendsMessages: true, errorMessage: null,
   }], LINK);
   const who = await screen.findByRole("combobox", { name: "Who to stop" });
   expect((who as HTMLSelectElement).value).toBe("link:grant-link");
@@ -193,7 +193,7 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
 });
 
 it("carries forward what undoing runs found when a try stopped part way", async () => {
-  const none = { review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
+  const none = { fieldsKept: 0, fieldsMissing: 0, review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
   const f = fixture([
     { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 2, errorMessage: "The workspace engine is not running." },
     { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 1, errorMessage: null },
@@ -207,7 +207,7 @@ it("carries forward what undoing runs found when a try stopped part way", async 
 });
 
 it("keeps the runs a try undid after the files are undone, and after the dialog closed during the try", async () => {
-  const none = { review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
+  const none = { fieldsKept: 0, fieldsMissing: 0, review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
   let finish!: () => void;
   const gate = new Promise<void>((resolve) => { finish = resolve; });
   const f = fixture([

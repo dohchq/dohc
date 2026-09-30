@@ -139,7 +139,7 @@ const StepSchema = z.object({
   collections: z.array(CollectionRefSchema).optional(),
   destinations: z.array(z.object({ path: z.string(), rules: DatasetRulesSchema.nullable() })).optional(),
 });
-const WriteSchema = z.union([
+export const WriteSchema = z.union([
   z.object({
     kind: z.literal("field"),
     recordId: z.string(),
@@ -251,15 +251,15 @@ const UndoCallSchema = z.union([
     idempotencyKey: z.string(),
   }),
 ]);
-// Version 7 plans and saves one step at a time, in the progress file beside
-// the run's state, names each Collection the steps write by its Collection
+// Version 8 requires the fields kept by Undo. It plans and saves each step
+// in the progress file beside the run's state, names each Collection by its
 // id, records when the run ended, qualifies formula-visible fields by
 // dataset and table, and keeps the deletes an Undo may use on each record
 // it added and the calls a dataset Undo saved. A run in any other format
 // cannot be read, and the claim fails instead of starting over or reading
 // bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.literal(7),
+  version: z.literal(8),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -278,6 +278,7 @@ const StoredRunSchema = z.object({
   rules: DatasetRulesSchema.nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
+  undoKept: z.array(z.object({ recordId: z.string(), field: z.string() })),
   settled: z.boolean(),
   outcome: z.union([
     z.object({ state: z.literal("done") }),
@@ -336,7 +337,7 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 7;
+  version: 8;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -397,6 +398,12 @@ export interface StoredRun {
    * that stopped part way resumes.
    */
   undo: "started" | "done" | null;
+  /**
+   * The fields a done Undo left because they no longer held what the run
+   * wrote. Another run may have written them after this one, so Undo and
+   * Stop and restore try them again.
+   */
+  undoKept: Array<{ recordId: string; field: string }>;
   /** The engine accepted this run's claim as done, so nothing will resume it. */
   settled: boolean;
   /**
@@ -617,7 +624,7 @@ export interface AutomationRunStore {
    * its header, so the settle and an Undo never overwrite each other's state
    * with a copy read before it. Throws when the saved run cannot be read.
    */
-  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo">>): Promise<void>;
+  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoKept">>): Promise<void>;
   /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
   /**

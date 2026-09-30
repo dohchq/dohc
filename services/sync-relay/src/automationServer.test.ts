@@ -9,6 +9,8 @@ import type { AutomationReplica, startAutomationReplicas } from "./automationRep
 import type { LiveClaimLedger } from "./automationLiveClaims";
 import { createRunGate, SERVER_RUN_BURST, startAutomationServer, type AutomationServerOptions, type ServerExecutor } from "./automationServer";
 import type { Event } from "@dohc/workspace-engine-client";
+import type { ServerRuns } from "./automationServerRoutes";
+import { AUTOMATION_WORKSPACE_LEAVE_AFTER_MS } from "./storage/automationWorkspaces";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -30,6 +32,11 @@ const HOURLY: ScheduledAutomation = {
   trigger: { kind: "schedule", every: "hour", at: ":00", timezone: "UTC" }, scheduleHash: "hash-hourly", enabledSince: null,
 };
 const PRESSED = "collection:Tasks#pay";
+const HELD = {
+  collectionPath: "Budget",
+  automationId: PRESSED, automationName: "Pay", definitionHash: "0123456789abcdef", step: "0", seq: 7,
+  collection: "Tasks", target: "Invoices", action: "change" as const, stoppedFor: "Ana", fileUnread: false,
+};
 
 // What the laptop and the server each carry in a release.
 const groups = (floorMs: number, messageId: string): AutomationGroupHandover => ({
@@ -60,6 +67,8 @@ function fakeExecutor(
   let hostChanges = 0;
   let claimWakes = 0;
   const holds: CollectionAutomationHold[] = [];
+  // What the owner's routes asked of this executor, in order.
+  const asked: unknown[] = [];
   const executor: ServerExecutor = {
     holds: () => [...holds],
     open: async () => {
@@ -95,8 +104,32 @@ function fakeExecutor(
       marks.set(input.automationId, mark);
       return mark;
     },
+    runs: async (automationId, before) => {
+      asked.push(["runs", automationId, before]);
+      return { runs: [{ claimId: "claim-1", state: "failed", error: "boom", createdAtMs: 1, updatedAtMs: 2, trigger: { kind: "changed", recordId: "record", by: "human", depth: 0, sharedAuthor: null }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false }], next: null };
+    },
+    listedRun: async (automationId, claimId) => {
+      asked.push(["get", automationId, claimId]);
+      return null;
+    },
+    retry: async (input) => {
+      asked.push(["retry", input, await options.mayRetryPress("ana")]);
+      return { status: "queued", press: false };
+    },
+    undo: async (input) => {
+      asked.push(["undo", input]);
+      return { status: "undone", reverted: 1, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0, deleted: 0, keptChanged: 0, gone: 0 };
+    },
+    undoRunsOf: async (definitions, _trash, again) => {
+      asked.push(["restore", definitions, again]);
+      return { undone: definitions.length, left: 0, reverted: 1, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
+    },
+    confirmReach: async (input) => {
+      asked.push(["allow", input]);
+      return input.seq === HELD.seq ? "confirmed" : "changed";
+    },
   };
-  return { executor, options, holds, claims, pressed, claimWakes: () => claimWakes, hostChanges: () => hostChanges, marksAsked: () => marksAsked };
+  return { executor, options, holds, claims, pressed, asked, claimWakes: () => claimWakes, hostChanges: () => hostChanges, marksAsked: () => marksAsked };
 }
 
 type Fake = ReturnType<typeof fakeExecutor>;
@@ -112,7 +145,7 @@ async function relay() {
   return { storage, h, host };
 }
 
-async function server(storage: SyncRelayStorage, h: ReturnType<typeof testHandler>, input: {
+async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testHandler>, "readOwnerShares">, input: {
   datasetHost?: RelayDatasetHost;
   marks?: Map<string, { automationId: string; scheduleHash: string; throughMs: number }>;
   incarnation?: number;
@@ -736,7 +769,7 @@ it.each([
   fake.options.onHoldsChanged();
   await vi.waitFor(() => expect(notices(storage, OWNER)).toHaveLength(1), { timeout: 30_000 });
   expect(notices(storage, OWNER)[0]).toMatchObject({ title: 'Automation "Pay" is waiting',
-    body: `${label} to change "Budget" waits for someone who can edit it to allow it.` });
+    body: `${label} to change "Budget" waits for you. Allow it in Notices, where it shows as waiting on your server.` });
   if (restart) {
     await s.run.close();
     const next = await server(storage, h);
@@ -805,4 +838,218 @@ it.each([false, true])("syncs dataset presses only behind the log head, with a s
   expect(s.sync).toHaveBeenCalledOnce();
   await s.run.pressDataset(auth, input, signal);
   expect(s.sync).toHaveBeenCalledOnce();
+});
+
+describe("the owner's routes to the server's runs", () => {
+  async function owned(changesPerOwner = 60) {
+    clock = at(8);
+    const storage = await testStorage();
+    let serverRuns: ServerRuns | undefined;
+    const h = testHandler(storage, {
+      nowMs: () => clock, automationServer: { label: "My dohc server" }, serverRuns: () => serverRuns,
+      automationHostRateLimiter: new TokenBucketLimiter(changesPerOwner, 1, 10),
+    });
+    await claimWorkspace(h, OWNER, WORKSPACE);
+    // The server keeps a copy of the workspace.
+    storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const s = await server(storage, h);
+    serverRuns = s.run.runs;
+    const call = async (userId: string, action: string, body?: Record<string, unknown>, init: RequestInit = {}) => {
+      const response = await h(request(userId, `/sync/${WORKSPACE}/automation-server/${action}`, { ...(body ? jsonBody(body) : {}), ...init }));
+      return { status: response.status, body: await json(response) };
+    };
+    return { storage, h, s, call };
+  }
+
+  it("answers the owner from the server's copy: runs, Try again, Undo, Stop and restore, and held steps", async () => {
+    const { h, s, call } = await owned();
+    // The server runs this workspace's automations.
+    await h(request(OWNER, `/sync/${WORKSPACE}/automation-host/check-in`, jsonBody({ installId: "laptop", label: "Laptop", claim: true })));
+    const fake = await s.openReplica();
+    fake.holds.push(HELD);
+    s.sync.mockImplementation(async () => { fake.asked.push("sync"); });
+    const runs = await call(OWNER, `runs?automationId=${encodeURIComponent(PRESSED)}`);
+    expect(runs).toMatchObject({ status: 200, body: { ok: true, runs: [{ claimId: "claim-1", state: "failed" }] } });
+    expect(await call(OWNER, "retry", { automationId: PRESSED, claimId: "claim-1", startOver: false }))
+      .toMatchObject({ status: 200, body: { ok: true, status: "queued" } });
+    expect(await call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null }))
+      .toMatchObject({ status: 200, body: { ok: true, status: "undone", reverted: 1 } });
+    const definitions = [{ collectionPath: "Budget", id: "pay", definitionHash: "0123456789abcdef" }];
+    expect(await call(OWNER, "restore", { definitions, again: false })).toMatchObject({ status: 200, body: { ok: true, undone: 1, left: 0, reverted: 1 } });
+    expect(await call(OWNER, "holds")).toMatchObject({ status: 200, body: { ok: true, holds: [HELD] } });
+    const allow = { automationId: PRESSED, definitionHash: HELD.definitionHash, step: "0", seq: 7 };
+    expect(await call(OWNER, "allow", allow)).toMatchObject({ status: 200, body: { ok: true, status: "confirmed" } });
+    expect(await call(OWNER, "allow", { ...allow, seq: 6 })).toMatchObject({ status: 200, body: { status: "changed" } });
+    // The owner's route is the only one that asks for Try again, so a press
+    // may run again. An Undo first brings the copy up to the relay, so it
+    // keeps what anyone changed since.
+    expect(fake.asked).toEqual([
+      ["runs", PRESSED, undefined],
+      ["retry", { automationId: PRESSED, claimId: "claim-1", startOver: false }, true],
+      "sync",
+      ["undo", { automationId: PRESSED, claimId: "claim-1", deletes: null }],
+      "sync",
+      "sync",
+      ["restore", definitions, false],
+      "sync",
+      ["allow", allow],
+      ["allow", { ...allow, seq: 6 }],
+    ]);
+  });
+
+  it("forwards page cursors, old-run lookups, and confirmed deletes through the owner's copy", async () => {
+    const { s, call } = await owned();
+    const fake = await s.openReplica();
+    expect(await call(OWNER, `runs?automationId=${encodeURIComponent(PRESSED)}&before=30%3Aclaim-new`))
+      .toMatchObject({ status: 200, body: { next: null } });
+    expect(fake.asked).toContainEqual(["runs", PRESSED, "30:claim-new"]);
+    expect(await call(OWNER, `runs?automationId=${encodeURIComponent(PRESSED)}&claimId=claim-old`))
+      .toMatchObject({ status: 200, body: { run: null } });
+    expect(fake.asked).toContainEqual(["get", PRESSED, "claim-old"]);
+    const deletes = { token: "preview", chosen: [{ key: "table", operationId: "delete" }] };
+    const input = { automationId: PRESSED, claimId: "claim-1", deletes };
+    expect(await call(OWNER, "undo", input)).toMatchObject({ status: 200, body: { deleted: 0, keptChanged: 0, gone: 0 } });
+    expect(fake.asked).toContainEqual(["undo", input]);
+    const count = fake.asked.length;
+    expect(await call(OWNER, "undo", { ...input, deletes: { token: "preview", chosen: [{ key: "table" }] } }))
+      .toMatchObject({ status: 400 });
+    expect(fake.asked).toHaveLength(count);
+  });
+
+  it("answers anyone else, a browser cookie, or a workspace with no copy here as if nothing were there", async () => {
+    const { storage, h, s, call } = await owned();
+    // Ana can edit Tasks, which makes her no owner.
+    await createShare(h, OWNER, WORKSPACE, { recipientUserId: "ana", paths: ["Tasks"], access: "edit" });
+    // No copy yet: the owner hears what a stranger hears.
+    const none = await call(OWNER, "holds");
+    expect(none.status).toBe(404);
+    const fake = await s.openReplica();
+    for (const attempt of [
+      await call("ana", "holds"),
+      await call("ana", "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null }),
+      await call(OWNER, "holds", undefined, { headers: { cookie: "session=1" } }),
+    ]) expect(attempt).toEqual(none);
+    expect(fake.asked).toEqual([]);
+    // A workspace the relay no longer lists under the owner is not theirs to change.
+    inspectDatabase(storagePath(storage)).prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'someone-else' WHERE workspace_id = ?").run(WORKSPACE);
+    expect(await call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null })).toEqual(none);
+    expect(fake.asked).toEqual([]);
+  });
+
+  it("refuses what the server would not run", async () => {
+    const { s, call } = await owned();
+    const fake = await s.openReplica();
+    expect((await call(OWNER, "retry", { automationId: "plugin:x", claimId: "claim-1", startOver: false })).status).toBe(400);
+    expect((await call(OWNER, "allow", { automationId: PRESSED, definitionHash: "not-a-hash", step: "0", seq: 1 })).status).toBe(400);
+    expect((await call(OWNER, "restore", { definitions: "all" })).status).toBe(400);
+    expect((await call(OWNER, "runs", { automationId: PRESSED })).status, "a list is read, not posted").toBe(405);
+    expect(fake.asked).toEqual([]);
+  });
+
+  it("opens a copy it keeps after the workspace left it for the owner's action, then lets it leave again", async () => {
+    const { storage, s, call } = await owned();
+    // The server ran this workspace's automations, then the owner moved them and the copy left.
+    storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    expect(storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: AUTOMATION_WORKSPACE_LEAVE_AFTER_MS })).not.toBeNull();
+    expect(s.wanted()).toEqual([]);
+
+    const undone = call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null });
+    await vi.waitFor(() => expect(s.wanted()).toEqual([WORKSPACE]));
+    // The replicas module joins the copy again as it opens it.
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: clock });
+    const fake = await s.openReplica();
+    expect(await undone).toMatchObject({ status: 200, body: { status: "undone" } });
+    expect(fake.asked).toEqual([["undo", { automationId: PRESSED, claimId: "claim-1", deletes: null }]]);
+    // Undo pushed what it put back before the action let the copy go.
+    expect(s.sync).toHaveBeenCalledTimes(2);
+    // Try again would queue a run nothing here will run.
+    await expect(s.run.runs.retry({ workspaceId: WORKSPACE, ownerUserId: OWNER }, { automationId: PRESSED, claimId: "claim-1", startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: "Your server no longer runs this workspace's automations, so it will not run this again." });
+    // The action is over: nothing needs the copy, and it keeps the times it
+    // left at, so the action does not extend how long it is kept.
+    expect(s.wanted()).toEqual([]);
+    expect(storage.listAutomationWorkspaces()[0]).toMatchObject({ unwantedSinceMs: 0, leftAtMs: AUTOMATION_WORKSPACE_LEAVE_AFTER_MS });
+    // The host record names no server, so the reopened copy runs no schedules.
+    expect(fake.claims).toEqual([]);
+  });
+
+  it("opens no kept copy past the server's cap, and says so", async () => {
+    clock = at(8);
+    const { storage, h } = await relay();
+    const ids = Array.from({ length: AUTOMATION_SERVER_MAX_WORKSPACES }, (_, index) => `workspace-${index}`);
+    const datasetHost = { automations: { wantedWorkspaces: () => ids }, observeAutomationClaims: () => () => undefined } as unknown as RelayDatasetHost;
+    storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const s = await server(storage, h, { datasetHost });
+    await expect(s.run.runs.list({ workspaceId: WORKSPACE, ownerUserId: OWNER }, PRESSED))
+      .rejects.toMatchObject({ statusCode: 503, message: "Your server has as many workspaces open as it can. Try again later." });
+    expect(s.wanted()).toEqual(ids);
+  });
+
+  it("keeps an admitted action's copy open when another workspace needs the server", async () => {
+    clock = at(8);
+    const { storage, h } = await relay();
+    const ids = Array.from({ length: AUTOMATION_SERVER_MAX_WORKSPACES - 1 }, (_, index) => `workspace-${index}`);
+    const datasetHost = {
+      automations: { wantedWorkspaces: () => ids, metadata: () => "", workspace: () => ({ failures: () => [] }) },
+      observeAutomationClaims: () => () => undefined,
+    } as unknown as RelayDatasetHost;
+    storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const s = await server(storage, h, { datasetHost });
+    const listed = s.run.runs.list({ workspaceId: WORKSPACE, ownerUserId: OWNER }, PRESSED);
+    await vi.waitFor(() => expect(s.wanted()).toContain(WORKSPACE));
+    ids.push("workspace-late");
+    expect(s.wanted()).toContain(WORKSPACE);
+    expect(s.wanted()).toHaveLength(AUTOMATION_SERVER_MAX_WORKSPACES);
+    await s.openReplica();
+    expect((await listed).runs).toHaveLength(1);
+    expect(s.wanted()).toContain("workspace-late");
+  });
+
+  it("holds an open copy for each action until the last one ends", async () => {
+    const { s, call } = await owned();
+    const fake = await s.openReplica();
+    expect(s.wanted(), "nothing runs here, so the copy is waiting to leave").toEqual([]);
+    let finish: () => void = () => undefined;
+    s.sync.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const slow = call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null });
+    await vi.waitFor(() => expect(s.sync).toHaveBeenCalled());
+    expect((await call(OWNER, `runs?automationId=${encodeURIComponent(PRESSED)}`)).status).toBe(200);
+    expect(s.wanted(), "the Undo still holds the copy").toEqual([WORKSPACE]);
+    finish();
+    expect((await slow).status).toBe(200);
+    expect(s.wanted()).toEqual([]);
+    expect(fake.asked.map((entry) => (Array.isArray(entry) ? entry[0] : entry))).toEqual(["runs", "undo"]);
+  });
+
+  it("opens no kept copy for anyone but its owner, or for a workspace it never kept", async () => {
+    const { storage, s, call } = await owned();
+    // The copy was made for another owner, as before the workspace changed hands.
+    inspectDatabase(storagePath(storage)).prepare("UPDATE sync_relay_automation_workspaces SET owner_user_id = 'someone-else'").run();
+    expect((await call(OWNER, `runs?automationId=${encodeURIComponent(PRESSED)}`)).status).toBe(404);
+    inspectDatabase(storagePath(storage)).prepare("DELETE FROM sync_relay_automation_workspaces").run();
+    expect((await call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null })).status).toBe(404);
+    expect(s.wanted()).toEqual([]);
+  });
+
+  it("undoes nothing when the copy cannot catch up with the relay", async () => {
+    const { s, call } = await owned();
+    const fake = await s.openReplica();
+    s.sync.mockRejectedValue(new Error("The relay refused the pull."));
+    expect((await call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null })).status).toBe(500);
+    expect((await call(OWNER, "restore", { definitions: [{ collectionPath: "Budget", id: "pay", definitionHash: "0123456789abcdef" }], again: false })).status).toBe(500);
+    expect(fake.asked).toEqual([]);
+  });
+
+  it("limits the owner's changes, and never their reads", async () => {
+    const { s, call } = await owned(1);
+    const fake = await s.openReplica();
+    const undo = { automationId: PRESSED, claimId: "claim-1", deletes: null };
+    expect((await call(OWNER, "undo", undo)).status).toBe(200);
+    expect(await call(OWNER, "undo", undo)).toMatchObject({ status: 429, body: { code: "automation_host_rate_limited" } });
+    expect((await call(OWNER, "holds")).status).toBe(200);
+    expect(fake.asked).toEqual([["undo", undo]]);
+  });
 });

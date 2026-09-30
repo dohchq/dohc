@@ -171,6 +171,7 @@ import { NoticeCenter } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { AUTOMATION_NOT_HERE_NOTE, useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
+import { serverHoldNoticesKey } from "./shell/sentNoticePlace";
 import type { SentNotices } from "./shell/useSentNotices";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
@@ -3951,6 +3952,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
     workspaceIsReady,
     reportShellError,
+    serverHoldNoticesKey(props.sentNotices?.notices, workspaceId),
   );
   const crashReportNotice = useCrashReport({
     reportError: reportShellError,

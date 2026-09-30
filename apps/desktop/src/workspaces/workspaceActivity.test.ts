@@ -9,6 +9,7 @@ import {
   type WorkspaceCaptureHooks,
 } from "./workspaceActivity";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
+import type { CloudSyncFailure } from "./relaySyncEngine";
 import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
@@ -289,6 +290,33 @@ describe("workspaceActivity cloud sync nudge", () => {
     expect(status.sharingDeclined).toEqual(engine.snapshot().sharingDeclined);
     activity.queueCloudSync("activity-test");
     expect(queued).toBe(1);
+    await activity.stopAll();
+  });
+
+  it("syncs now only when the pass ends without a failure, whatever the status shows first", async () => {
+    let failure: CloudSyncFailure | null = null;
+    let passes = 0;
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      queuePull: () => {},
+      retryNow: async () => { passes += 1; },
+      snapshot: () => ({
+        syncFailure: failure, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
+        // A conflict shows first in the status, and must not hide a failed pass.
+        conflictCount: 1, authExpired: false, sharingDeclined: [],
+      }),
+      stop: async () => {},
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    await activity.open(workspace());
+    await expect(activity.syncNow("activity-test")).resolves.toBeUndefined();
+    failure = { cause: "server-unreachable", detail: "fetch failed", sinceMs: 1, attempts: 1 };
+    await expect(activity.syncNow("activity-test")).rejects.toThrow("dohc could not sync this workspace with your server");
+    expect(passes).toBe(2);
     await activity.stopAll();
   });
 

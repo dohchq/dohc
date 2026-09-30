@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
-import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import type { CollectionAutomationRun, CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import { createServerRuns, type ServerAnswer, type ServerRequest } from "../automations/serverRuns";
 import { CHANNELS } from "./channels";
 import { registerCollectionAutomationsIpc } from "./collectionAutomationsIpc";
 
@@ -15,7 +16,16 @@ const stamp = {
   do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null, operation: null }],
 };
 
-function fixture(options: { file?: string; sharedView?: boolean } = {}) {
+const run = (claimId: string, createdAtMs: number): CollectionAutomationRun => ({
+  claimId, state: "failed", error: "boom", createdAtMs, updatedAtMs: createdAtMs, trigger: { kind: "changed", recordId: "record", by: "human", depth: 0, sharedAuthor: null }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+});
+
+function fixture(options: {
+  file?: string;
+  sharedView?: boolean;
+  /** The relay's answers to the owner's server routes; null: this computer cannot ask as the owner. */
+  server?: (request: ServerRequest) => ServerAnswer | Promise<ServerAnswer>;
+} = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const createFile = vi.fn(async () => ({ path: "Tasks/automations.yaml" }));
   const writeText = vi.fn(async (_event: unknown, payload: { text: string }) => ({ status: "written" as const, contentHash: sha256(payload.text) }));
@@ -40,8 +50,16 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const oldRun = { claimId: "atc_old", state: "done" as const, writes: [] };
   const runs = vi.fn(async () => ({ runs: [], next: null }));
   const listedRun = vi.fn(async (_automationId: string, claimId: string) => (claimId === oldRun.claimId ? oldRun : null));
+  const retry = vi.fn(async () => ({ status: "queued" as const, press: false }));
+  const undo = vi.fn(async () => ({ status: "refused" as const, reason: "here" }));
+  const confirmReach = vi.fn(async () => "confirmed" as const);
+  const asked: Array<[string, ServerRequest]> = [];
+  const serverRuns = createServerRuns(async (workspaceId, request) => {
+    asked.push([workspaceId, request]);
+    return options.server ? await options.server(request) : null;
+  });
   const executor = {
-    runs, listedRun, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false, unprovenPaths: [] }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+    runs, listedRun, retry, undo, confirmReach, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false, unprovenPaths: [] }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -57,6 +75,8 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     showItemInFolder: () => undefined,
     deletePath: async () => undefined,
     watchPress: () => undefined,
+    serverRuns,
+    relayUnreachable: (error) => error instanceof TypeError,
   });
   const write = (payload: Record<string, unknown>) =>
     handlers.get(CHANNELS.writeCollectionAutomations)!({ sender: "window" }, {
@@ -67,7 +87,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const marks = (collectionPath: string) =>
     handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
   const check = (payload: Record<string, unknown>) => call(CHANNELS.checkCollectionAutomation, payload);
-  return { write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, dismissStops, shareImpact, check, createFile, writeText, reindexed };
+  return { asked, retry, undo, confirmReach, write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, dismissStops, shareImpact, check, createFile, writeText, reindexed };
 }
 
 describe("steps a share stops", () => {
@@ -265,7 +285,7 @@ describe("reading a Collection's automation runs", () => {
     const f = fixture({ sharedView: true });
     await expect(f.call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp" }))
       .resolves.toEqual({ status: "unavailable" });
-    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_old" }))
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_old", onServer: false }))
       .resolves.toEqual({ status: "unavailable" });
   });
 
@@ -274,9 +294,106 @@ describe("reading a Collection's automation runs", () => {
     await expect(f.call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp", before: "5:atc_five" }))
       .resolves.toEqual({ status: "listed", runs: [], next: null });
     expect(f.runs).toHaveBeenCalledWith("collection:Tasks#stamp", "5:atc_five");
-    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_old" }))
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_old", onServer: false }))
       .resolves.toEqual({ status: "found", run: f.oldRun });
-    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_gone" }))
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_gone", onServer: false }))
       .resolves.toEqual({ status: "missing" });
+  });
+
+  it("lists the server's runs apart from this computer's, and none where the server has no copy", async () => {
+    const f = fixture({ server: () => ({ status: 200, body: { ok: true, runs: [run("server", 20)], next: null } }) });
+    const automation = { automationId: "collection:Tasks#stamp" };
+    await expect(f.call(CHANNELS.listCollectionAutomationRuns, automation)).resolves.toEqual({
+      status: "listed", runs: [], next: null,
+    });
+    expect(f.asked).toEqual([]);
+    await expect(f.call(CHANNELS.listServerAutomationRuns, automation)).resolves.toEqual({ runs: [run("server", 20)], next: null });
+    expect(f.asked).toEqual([[WORKSPACE_ID, { method: "GET", action: "runs", query: automation }]]);
+    for (const server of [() => null, () => ({ status: 404, body: { code: "not_found" } })]) {
+      await expect(fixture({ server }).call(CHANNELS.listServerAutomationRuns, automation)).resolves.toEqual({ runs: null, next: null });
+    }
+    const shared = fixture({ server: () => ({ status: 200, body: { ok: true, runs: [] } }), sharedView: true });
+    await expect(shared.call(CHANNELS.listServerAutomationRuns, automation)).resolves.toEqual({ runs: null, next: null });
+    expect(shared.asked).toEqual([]);
+  });
+
+  it("reads the server's lists as empty offline, and passes on a failure the relay answered", async () => {
+    const offline = fixture({ server: () => { throw new TypeError("fetch failed"); } });
+    const automation = { automationId: "collection:Tasks#stamp" };
+    await expect(offline.call(CHANNELS.listServerAutomationRuns, automation)).resolves.toEqual({ runs: null, next: null });
+    await expect(offline.call(CHANNELS.listServerAutomationHolds, {})).resolves.toEqual({ holds: [] });
+    await expect(offline.call(CHANNELS.undoCollectionAutomationRun, { ...automation, claimId: "claim-1", deletes: null, onServer: true })).rejects.toThrow("fetch failed");
+    const failing = fixture({ server: () => ({ status: 500, body: {} }) });
+    await expect(failing.call(CHANNELS.listServerAutomationHolds, {})).rejects.toThrow("Your server answered with 500.");
+  });
+
+  it("refuses an answer from the server that is not a run, or not a success", async () => {
+    const automation = { automationId: "collection:Tasks#stamp" };
+    await expect(fixture({ server: () => ({ status: 200, body: { ok: true, runs: [{ claimId: "server" }] } }) })
+      .call(CHANNELS.listServerAutomationRuns, automation)).rejects.toThrow();
+    await expect(fixture({ server: () => ({ status: 500, body: { code: "internal_error" } }) })
+      .call(CHANNELS.listServerAutomationRuns, automation)).rejects.toThrow("Your server answered with 500.");
+  });
+});
+
+describe("acting on a run where it ran", () => {
+  const claim = { automationId: "collection:Tasks#stamp", claimId: "claim-1" };
+
+  it("carries server pages, single-run lookup, delete confirmation, and every Undo count", async () => {
+    const result = { status: "undone", reverted: 1, removed: 2, deleted: 3, kept: 4, keptChanged: 5, gone: 6,
+      changedSince: 7, missing: 8, irreversible: 9, actions: 10, actionsReversed: 11 };
+    const preview = { deletes: 3, unchecked: 1, kept: 4, keptChanged: 5, gone: 6, reverts: 1,
+      irreversible: 9, reverses: 11, actions: 10, choices: [], token: "preview" };
+    const f = fixture({ server: (request) => ({ status: 200, body: { ok: true,
+      ...(request.method === "GET"
+        ? request.query?.claimId ? { run: run("claim-1", 20) } : { runs: [run("claim-1", 20)], next: "20:claim-1" }
+        : request.body.deletes === null ? { status: "confirm", preview } : result),
+    } }) });
+    await expect(f.call(CHANNELS.listServerAutomationRuns, { automationId: claim.automationId, before: "30:new" }))
+      .resolves.toEqual({ runs: [run("claim-1", 20)], next: "20:claim-1" });
+    expect(f.asked.at(-1)?.[1]).toEqual({ method: "GET", action: "runs", query: { automationId: claim.automationId, before: "30:new" } });
+    await expect(f.call(CHANNELS.getCollectionAutomationRun, { ...claim, onServer: true }))
+      .resolves.toEqual({ status: "found", run: run("claim-1", 20) });
+    await expect(f.call(CHANNELS.undoCollectionAutomationRun, { ...claim, deletes: null, onServer: true }))
+      .resolves.toEqual({ status: "confirm", preview });
+    const deletes = { token: "preview", chosen: [{ key: "table", operationId: "delete" }] };
+    await expect(f.call(CHANNELS.undoCollectionAutomationRun, { ...claim, deletes, onServer: true })).resolves.toEqual(result);
+    expect(f.asked.at(-1)?.[1]).toEqual({ method: "POST", action: "undo", body: { ...claim, deletes } });
+  });
+
+  it("runs Try again, Undo, and Allow on this computer unless the run is the server's", async () => {
+    const f = fixture({ server: (request) => ({ status: 200, body: { ok: true, ...(request.action === "allow" ? { status: "changed" } : { status: "refused", reason: "server" }) } }) });
+    await expect(f.call(CHANNELS.retryCollectionAutomation, { ...claim, startOver: false, onServer: false })).resolves.toEqual({ status: "queued", press: false });
+    await expect(f.call(CHANNELS.retryCollectionAutomation, { ...claim, startOver: true, onServer: true })).resolves.toEqual({ status: "refused", reason: "server" });
+    await expect(f.call(CHANNELS.undoCollectionAutomationRun, { ...claim, deletes: null, onServer: false })).resolves.toEqual({ status: "refused", reason: "here" });
+    await expect(f.call(CHANNELS.undoCollectionAutomationRun, { ...claim, deletes: null, onServer: true })).resolves.toEqual({ status: "refused", reason: "server" });
+    const hold = { automationId: claim.automationId, definitionHash: "0123456789abcdef", step: "0", seq: 3 };
+    await expect(f.call(CHANNELS.confirmCollectionAutomationStep, { ...hold, onServer: false })).resolves.toEqual({ status: "confirmed" });
+    await expect(f.call(CHANNELS.confirmCollectionAutomationStep, { ...hold, onServer: true })).resolves.toEqual({ status: "changed" });
+    expect(f.retry).toHaveBeenCalledTimes(1);
+    expect(f.undo).toHaveBeenCalledTimes(1);
+    expect(f.confirmReach).toHaveBeenCalledWith(hold);
+    expect(f.asked.map(([, request]) => request)).toEqual([
+      { method: "POST", action: "retry", body: { ...claim, startOver: true } },
+      { method: "POST", action: "undo", body: { ...claim, deletes: null } },
+      { method: "POST", action: "allow", body: hold },
+    ]);
+  });
+
+  it("says the server no longer has a run it no longer answers for", async () => {
+    const f = fixture({ server: () => ({ status: 404, body: {} }) });
+    await expect(f.call(CHANNELS.undoCollectionAutomationRun, { ...claim, deletes: null, onServer: true }))
+      .resolves.toEqual({ status: "refused", reason: "Your server no longer has this run." });
+    await expect(f.call(CHANNELS.listServerAutomationHolds, {})).resolves.toEqual({ holds: [] });
+  });
+
+  it("lists the steps the server holds, and none in a shared view", async () => {
+    const held = { automationId: "collection:Tasks#stamp", automationName: "Stamp", definitionHash: "0123456789abcdef", step: "0", seq: 3,
+      collectionPath: "Tasks", collection: "Tasks", target: "Invoices", action: "change", stoppedFor: null, fileUnread: false };
+    const server = () => ({ status: 200, body: { ok: true, holds: [held] } });
+    await expect(fixture({ server }).call(CHANNELS.listServerAutomationHolds, {})).resolves.toEqual({ holds: [held] });
+    const shared = fixture({ server, sharedView: true });
+    await expect(shared.call(CHANNELS.listServerAutomationHolds, {})).resolves.toEqual({ holds: [] });
+    expect(shared.asked).toEqual([]);
   });
 });

@@ -134,10 +134,10 @@ describe("automation notices", () => {
   it("asks once to allow a step that reaches more only because an editor left", async () => {
     const hold = {
       automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef",
-      step: "0", seq: 4, collection: "Trip", collectionPath: "Projects/Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test", fileUnread: false,
+      step: "0", seq: 4, collection: "Trip", collectionPath: "Projects/Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test", fileUnread: false, onServer: false,
     };
     const onAllowAutomationHold = vi.fn();
-    renderNotices({ automationHolds: [hold], onAllowAutomationHold });
+    renderNotices({ automationHolds: [hold, { ...hold, onServer: true }], onAllowAutomationHold });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#spend-0");
     expect(notice.textContent).toContain('Automation "Spend" is waiting');
@@ -146,6 +146,12 @@ describe("automation notices", () => {
     );
     await userEvent.click(within(notice).getByRole("button", { name: "Allow" }));
     expect(onAllowAutomationHold).toHaveBeenCalledWith(hold);
+    // The same step held on the owner's server is its own row, and says where it waits.
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const onServer = await screen.findByTestId("notice-automation-hold-server-collection:Trip#spend-0");
+    expect(onServer.textContent).toContain('Automation "Spend" is waiting on your server');
+    await userEvent.click(within(onServer).getByRole("button", { name: "Allow" }));
+    expect(onAllowAutomationHold).toHaveBeenLastCalledWith({ ...hold, onServer: true });
   });
 
   it("names every automation a share stopped in one notice, and dismisses them together", async () => {
@@ -189,7 +195,7 @@ describe("automation notices", () => {
   it("names the Group whose messages a held automation would start from", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#task", automationName: "Add a task", definitionHash: "0123456789abcdef",
-      step: "0", seq: 7, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "read", stoppedFor: "bob@dohc.test", fileUnread: false,
+      step: "0", seq: 7, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "read", stoppedFor: "bob@dohc.test", fileUnread: false, onServer: false,
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#task-0");
@@ -201,7 +207,7 @@ describe("automation notices", () => {
   it("names the Group a held post would post in", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
-      step: "1", seq: 5, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "post", stoppedFor: null, fileUnread: false,
+      step: "1", seq: 5, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "post", stoppedFor: null, fileUnread: false, onServer: false,
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-1");
@@ -211,7 +217,7 @@ describe("automation notices", () => {
   it("says a held step waits because its Collection's automations file does not read in one version", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
-      step: "1", seq: 5, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "post", stoppedFor: null, fileUnread: true,
+      step: "1", seq: 5, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "post", stoppedFor: null, fileUnread: true, onServer: false,
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-1");
@@ -223,7 +229,7 @@ describe("automation notices", () => {
   it("names the person a held notice would go to", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
-      step: "2", seq: 6, collection: "Trip", collectionPath: "Projects/Trip", target: "ana@dohc.test", action: "notify", stoppedFor: null, fileUnread: false,
+      step: "2", seq: 6, collection: "Trip", collectionPath: "Projects/Trip", target: "ana@dohc.test", action: "notify", stoppedFor: null, fileUnread: false, onServer: false,
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-2");
@@ -1467,6 +1473,7 @@ function sentRow(noticeId: string, overrides: Partial<NoticeRow> = {}, folder: s
     },
     folder,
     openable: true,
+    retryable: false,
   };
 }
 
@@ -1562,6 +1569,24 @@ describe("failed run notices", () => {
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("sent-notice-o-open").textContent).toBe("Open automation");
     expect(screen.queryByTestId("sent-notice-o-retry")).toBeNull();
+  });
+});
+
+describe("failed runs of the owner's server", () => {
+  it("offers Try again on the row and the toast of a run the server can run again", async () => {
+    const failed = { ...sentRow("f", { kind: "automation-failed", senderKind: "automation", title: 'Automation "Stamp" failed' }), retryable: true };
+    const onRetrySentNotice = vi.fn();
+    renderNotices({ sentNotices: [failed, sentRow("a")], sentNoticeToast: failed, onOpenSentNotice: vi.fn(async () => null), onRetrySentNotice });
+    // Copy sits beside the failure on the toast and the row; another notice has none.
+    expect(screen.getByTestId("sent-notice-toast-copy")).toBeTruthy();
+    await userEvent.click(screen.getByTestId("sent-notice-toast-retry"));
+    expect(onRetrySentNotice).toHaveBeenCalledWith(failed.notice);
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("sent-notice-a-retry")).toBeNull();
+    await userEvent.click(screen.getByTestId("sent-notice-f-retry"));
+    expect(onRetrySentNotice).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("sent-notice-f-copy")).toBeTruthy();
+    expect(screen.queryByTestId("sent-notice-a-copy")).toBeNull();
   });
 });
 

@@ -146,14 +146,16 @@ async function locate(
  * it. Pass every run of the claim, those already undone too. Safe to run
  * again after it stops part way: a field already back is left alone, and an
  * added record already in the trash is not found again.
+ * `only` retries fields kept by an earlier Undo.
  */
 export async function undoCollectionAutomationRuns(
   dependencies: CollectionAutomationUndoDependencies,
   runs: readonly StoredRun[],
   signal: AbortSignal,
+  only?: ReadonlyArray<{ recordId: string; field: string }>,
   onlyRecordId?: string,
   prepared?: ReturnType<typeof documentUndoChanges>,
-): Promise<CollectionAutomationUndone> {
+): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
   // Each run's records are found where their Collections are now. A
   // Collection no longer here keeps its paths, where no record is found.
   const { added, records } = prepared ?? documentUndoChanges(runs.map((run) => {
@@ -164,11 +166,13 @@ export async function undoCollectionAutomationRuns(
   const undone: CollectionAutomationUndone = {
     reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0,
   };
+  const keptFields: Array<{ recordId: string; field: string }> = [];
+  const tried = only ? new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field]))) : null;
   for (const record of records.values()) {
     if (onlyRecordId !== undefined && record.recordId !== onlyRecordId) continue;
     // A record the run added goes to the trash whole.
-    if (added.has(record.recordId)) continue;
-    const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ from }) => from.length > 0);
+    if (added.has(record.recordId) && tried === null) continue;
+    const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ field, from }) => from.length > 0 && (tried === null || tried.has(JSON.stringify([record.recordId, field]))));
     if (fields.length === 0) continue;
     const path = await locate(dependencies, record.path, record.recordId);
     if (path === null) {
@@ -196,11 +200,12 @@ export async function undoCollectionAutomationRuns(
         if (isDeepStrictEqual(current, entry.to)) continue;
         const again = entry.from.findIndex((candidate, index) => index > entry.attempt && isDeepStrictEqual(candidate, current));
         if (again >= 0) next.push({ ...entry, attempt: again });
-        else undone.changedSince += 1;
+        else { undone.changedSince += 1; keptFields.push({ recordId: record.recordId, field: entry.field }); }
       }
       pending = next;
     }
   }
+  if (tried !== null) return { undone, keptFields };
   for (const [recordId, path] of added) {
     if (onlyRecordId !== undefined && recordId !== onlyRecordId) continue;
     const current = await locate(dependencies, path, recordId);
@@ -208,5 +213,5 @@ export async function undoCollectionAutomationRuns(
     await dependencies.trash(current);
     undone.removed += 1;
   }
-  return undone;
+  return { undone, keptFields };
 }

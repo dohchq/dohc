@@ -302,6 +302,13 @@ describe("notice list", () => {
     expect((await pull(h, "owner")).notices).toEqual([]);
   });
 
+  it("refuses client notices that impersonate a server run", async () => {
+    const { h } = await relay();
+    const response = await post(h, "owner", notice({ noticeId: "server-automation-failed:forged" }));
+    expect(response.status).toBe(400);
+    expect((await pull(h, "owner")).notices).toEqual([]);
+  });
+
   it("reserves notices as a workspace id", async () => {
     const { h } = await relay();
     const response = await h(request("owner", "/sync/workspaces", jsonBody({ workspaceId: "notices" })));

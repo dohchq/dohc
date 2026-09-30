@@ -1,6 +1,7 @@
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import {
   AUTOMATION_SERVER_INSTALL_ID,
+  SERVER_RUN_FAILED_NOTICE_PREFIX,
   isNoticeBody,
   isNoticeLine,
   isNoticeTarget,
@@ -75,6 +76,7 @@ export function createNoticeRoutes(
       const notice = { ...posted, recipientUserId };
       // Only this server posts as the server, in process.
       if (notice.originInstallId === AUTOMATION_SERVER_INSTALL_ID) throw badRequest("originInstallId is reserved for the server");
+      if (notice.noticeId.startsWith(SERVER_RUN_FAILED_NOTICE_PREFIX)) throw badRequest("noticeId is reserved for the server");
       if (notice.recipientUserId === userId) {
         if (notice.noticeId.startsWith(NOTICE_FROM_PREFIX)) {
           throw badRequest(`noticeId must not start with ${NOTICE_FROM_PREFIX}`);

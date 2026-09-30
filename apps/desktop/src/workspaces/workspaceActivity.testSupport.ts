@@ -139,6 +139,11 @@ export function createInMemoryWorkspaceActivity(
       const authority = authorities.get(workspaceId);
       return authority ? service.retryCloudSync(authority.state, reason) : Promise.resolve();
     },
+    syncNow: async (workspaceId: string): Promise<void> => {
+      const authority = authorities.get(workspaceId);
+      if (!authority) throw new Error("This workspace is not open.");
+      await service.syncNow(authority.state);
+    },
     setAgentRun: (
       workspaceId: string,
       run: ActiveAgentRun | null,

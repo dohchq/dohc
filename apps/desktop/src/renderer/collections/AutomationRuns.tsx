@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, CircleDashed, LoaderCircle, Undo2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleDashed, LoaderCircle, Server, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ListCollectionAutomationRunsResult,
@@ -32,10 +32,12 @@ function sentence(text: string): string {
 }
 
 /** What an Undo did, for its notice: "Undid 3 changes. 1 field changed since then." */
-export function undoSentence(undone: Undone): string {
+export function undoSentence(undone: Undone, onServer = false): string {
   const parts: string[] = [];
   if (undone.reverted > 0) parts.push(`Undid ${count(undone.reverted, "change", "changes")}.`);
-  if (undone.removed > 0) parts.push(`Moved ${count(undone.removed, "added record", "added records")} to the trash.`);
+  if (undone.removed > 0) parts.push(onServer
+    ? `Deleted ${count(undone.removed, "added record", "added records")}. History can restore them.`
+    : `Moved ${count(undone.removed, "added record", "added records")} to the trash.`);
   if (undone.actionsReversed > 0) parts.push(`Undid ${count(undone.actionsReversed, "action", "actions")}.`);
   if (undone.deleted > 0) parts.push(`Deleted ${count(undone.deleted, "added record", "added records")}.`);
   if (parts.length === 0) parts.push("Nothing was left to undo.");
@@ -167,6 +169,7 @@ function merged(
 
 function RunRow(props: {
   run: Run;
+  onServer: boolean;
   onRetry: () => void;
   onUndo: () => void;
   undoing: boolean;
@@ -187,12 +190,13 @@ function RunRow(props: {
   return (
     <li
       ref={row}
-      data-testid={`automation-run-${run.claimId}`}
+      data-testid={`automation-run-${props.onServer ? "server-" : ""}${run.claimId}`}
       aria-current={props.opened ? "true" : undefined}
       className={`border-b border-line px-3 py-2 last:border-b-0${props.opened ? " bg-selected" : ""}`}
     >
       <div className="flex items-start gap-2">
         <RunMark run={run} />
+        {props.onServer ? <Server size={13} aria-label="Ran on your server" className="mt-0.5 shrink-0 text-subtle" /> : null}
         <div className="min-w-0 flex-1">
           <p className="m-0 break-words text-[12px] leading-snug text-ink">{runSummary(run)}</p>
           <time dateTime={new Date(run.updatedAtMs).toISOString()} className="font-mono text-[11px] text-subtle">
@@ -238,7 +242,7 @@ export function AutomationRuns(props: {
   run?: string | null;
   /** Rises when the Collection or its automations may have changed. */
   refreshKey: number;
-  onRetry: (target: { automationId: string; claimId: string }) => void;
+  onRetry: (target: { automationId: string; claimId: string; onServer: boolean }) => void;
   onError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onNotice: (message: string) => void;
   /** An Undo changed records. */
@@ -253,6 +257,13 @@ export function AutomationRuns(props: {
   const [list, setList] = useState<{ runs: Run[]; next: string | null; opened: Run | null } | "unavailable" | null>(null);
   const listRef = useRef(list);
   listRef.current = list;
+  const [serverList, setServerList] = useState<{ runs: Run[]; next: string | null; opened: Run | null } | null>(null);
+  const serverListRef = useRef(serverList);
+  serverListRef.current = serverList;
+  const serverTouched = useRef(new Set<string>());
+  const serverRequest = useRequestSequence([workspaceId, automationId, opened]);
+  const serverOpenedChecked = useRef(false);
+  const serverOpenedGone = useRef(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [undoing, setUndoing] = useState<string | null>(null);
   // Runs a person undid or tried again here. A refresh reads each again when
@@ -265,7 +276,7 @@ export function AutomationRuns(props: {
   const reportError = useRef(onError);
   reportError.current = onError;
   // An Undo waiting for the person to read what it will do, and their choice of delete per table.
-  const [previewing, setPreviewing] = useState<{ claimId: string; epoch: number; preview: Preview; chosen: Record<string, string> } | null>(null);
+  const [previewing, setPreviewing] = useState<{ claimId: string; onServer: boolean; epoch: number; preview: Preview; chosen: Record<string, string> } | null>(null);
   const request = useRequestSequence([workspaceId, automationId, opened]);
   // Rises only when the workspace or automation changes, or the view
   // closes, so an Undo that answers after that reports nothing here.
@@ -286,23 +297,50 @@ export function AutomationRuns(props: {
       const read = new Map<string, Run | null>();
       for (const claimId of claims) {
         if (head.runs.some((run) => run.claimId === claimId)) continue;
-        const result = await bridge().getCollectionAutomationRun({ workspaceId, automationId, claimId });
+        const result = await bridge().getCollectionAutomationRun({ workspaceId, automationId, claimId, onServer: false });
         if (!request.isCurrent(token)) return;
         read.set(claimId, result.status === "found" ? result.run : null);
       }
       if (opened !== null && !openedChecked.current) {
         openedChecked.current = true;
         openedGone.current = read.get(opened) === null;
-        if (openedGone.current) reportError.current(MISSING_RUN, new Error(MISSING_RUN));
+        if (openedGone.current && serverOpenedChecked.current && serverOpenedGone.current) reportError.current(MISSING_RUN, new Error(MISSING_RUN));
       }
       setList((current) => merged(current === "unavailable" ? null : current, head, read, opened));
     } catch (error) {
       if (request.isCurrent(token)) reportError.current("dohc could not read this automation's runs.", error, () => void load());
     }
   }, [workspaceId, automationId, opened]);
+  const loadServer = useCallback(async () => {
+    const token = serverRequest.next();
+    try {
+      const head = await bridge().listServerAutomationRuns({ workspaceId, automationId });
+      if (!serverRequest.isCurrent(token)) return;
+      const shown = serverListRef.current;
+      const going = shown?.runs.filter((run) => run.state === "pending" || run.state === "running") ?? [];
+      const claims = new Set([...serverTouched.current, ...going.map((run) => run.claimId)]);
+      if (opened !== null && !serverOpenedGone.current) claims.add(opened);
+      const read = new Map<string, Run | null>();
+      for (const claimId of claims) {
+        if (head.runs?.some((run) => run.claimId === claimId)) continue;
+        const result = head.runs === null ? null : await bridge().getCollectionAutomationRun({ workspaceId, automationId, claimId, onServer: true });
+        if (!serverRequest.isCurrent(token)) return;
+        read.set(claimId, result?.status === "found" ? result.run : null);
+      }
+      if (opened !== null && !serverOpenedChecked.current) {
+        serverOpenedChecked.current = true;
+        serverOpenedGone.current = read.get(opened) === null;
+        if (serverOpenedGone.current && openedChecked.current && openedGone.current) reportError.current(MISSING_RUN, new Error(MISSING_RUN));
+      }
+      setServerList(head.runs === null ? null : merged(shown, { runs: head.runs, next: head.next }, read, opened));
+    } catch (error) {
+      if (serverRequest.isCurrent(token)) reportError.current("dohc could not read this automation's runs on your server.", error, () => void loadServer());
+    }
+  }, [workspaceId, automationId, opened]);
   useEffect(() => {
     void load();
-  }, [load, props.refreshKey]);
+    void loadServer();
+  }, [load, loadServer, props.refreshKey]);
   // Relative times stay honest while the view is open.
   const [, tick] = useState(0);
   useEffect(() => {
@@ -312,11 +350,13 @@ export function AutomationRuns(props: {
 
   // Reads only the page after the runs shown.
   const loadOlder = () => {
-    if (list === null || list === "unavailable" || list.next === null || loadingOlder) return;
+    if (list === null || list === "unavailable" || loadingOlder) return;
     const before = list.next;
+    const serverBefore = serverList?.next ?? null;
+    if (before === null && serverBefore === null) return;
     const epoch = scope.current();
     setLoadingOlder(true);
-    void bridge()
+    const local = before === null ? Promise.resolve() : bridge()
       .listCollectionAutomationRuns({ workspaceId, automationId, before })
       .then((result) => {
         if (!scope.isCurrent(epoch)) return;
@@ -330,36 +370,52 @@ export function AutomationRuns(props: {
       })
       .catch((error: unknown) => {
         if (scope.isCurrent(epoch)) onError("dohc could not read this automation's older runs.", error, loadOlder);
+      });
+    const server = serverBefore === null ? Promise.resolve() : bridge()
+      .listServerAutomationRuns({ workspaceId, automationId, before: serverBefore })
+      .then((result) => {
+        if (!scope.isCurrent(epoch)) return;
+        if (result.runs === null) return setServerList(null);
+        const runs = result.runs;
+        setServerList((current) => current === null || current.next !== serverBefore ? current : {
+          ...current,
+          runs: [...current.runs, ...runs.filter((run) => !current.runs.some((shown) => shown.claimId === run.claimId))],
+          next: result.next,
+        });
       })
-      .finally(() => {
+      .catch((error: unknown) => {
+        if (scope.isCurrent(epoch)) onError("dohc could not read this automation's older runs on your server.", error, loadOlder);
+      });
+    void Promise.all([local, server]).finally(() => {
         if (scope.isCurrent(epoch)) setLoadingOlder(false);
       });
   };
 
-  const undo = (claimId: string, deletes: { token: string; chosen: Array<{ key: string; operationId: string }> } | null) => {
-    touched.current.add(claimId);
+  const undo = (claimId: string, deletes: { token: string; chosen: Array<{ key: string; operationId: string }> } | null, onServer: boolean) => {
+    (onServer ? serverTouched : touched).current.add(claimId);
     const epoch = scope.current();
-    setUndoing(claimId);
+    setUndoing(`${onServer}:${claimId}`);
     void bridge()
-      .undoCollectionAutomationRun({ workspaceId, automationId, claimId, deletes })
+      .undoCollectionAutomationRun({ workspaceId, automationId, claimId, deletes, onServer })
       .then((result) => {
         if (!scope.isCurrent(epoch)) return;
         if (result.status === "refused") {
           onError(result.reason, new Error(result.reason));
         } else if (result.status === "confirm") {
-          setPreviewing({ claimId, epoch, preview: result.preview, chosen: {} });
+          setPreviewing({ claimId, onServer, epoch, preview: result.preview, chosen: {} });
         } else {
-          onNotice(undoSentence(result));
+          onNotice(undoSentence(result, onServer));
           props.onUndone?.();
         }
       })
       .catch((error: unknown) => {
-        if (scope.isCurrent(epoch)) onError("dohc could not undo this run.", error, () => undo(claimId, deletes));
+        if (scope.isCurrent(epoch)) onError("dohc could not undo this run.", error, () => undo(claimId, deletes, onServer));
       })
       .finally(() => {
         if (!scope.isCurrent(epoch)) return;
         setUndoing(null);
         void load();
+        void loadServer();
       });
   };
 
@@ -380,7 +436,7 @@ export function AutomationRuns(props: {
         undo(shownPreview.claimId, {
           token: shownPreview.preview.token,
           chosen: Object.entries(shownPreview.chosen).map(([key, operationId]) => ({ key, operationId })),
-        });
+        }, shownPreview.onServer);
       }}
     >
       {undoPreviewSentences(shownPreview.preview).map((line) => (
@@ -412,28 +468,38 @@ export function AutomationRuns(props: {
     return <p className="m-0 px-3 py-4 text-[12px] text-muted">This Collection's automations run on its owner's computer.</p>;
   }
   const openedRun = list.opened;
-  const shown = openedRun === null || list.runs.some((run) => run.claimId === openedRun.claimId) ? list.runs : [openedRun, ...list.runs];
+  const localShown = openedRun === null || list.runs.some((run) => run.claimId === openedRun.claimId) ? list.runs : [openedRun, ...list.runs];
+  const serverOpened = serverList?.opened ?? null;
+  const serverShown = serverOpened === null || serverList?.runs.some((run) => run.claimId === serverOpened.claimId)
+    ? serverList?.runs ?? [] : [serverOpened, ...serverList?.runs ?? []];
+  const shown = [...localShown.map((run) => ({ run, onServer: false })), ...serverShown.map((run) => ({ run, onServer: true }))]
+    .sort((a, b) => {
+      const pinned = ({ run, onServer }: { run: Run; onServer: boolean }) => run.claimId === opened &&
+        !(onServer ? serverList?.runs : list.runs)?.some((row) => row.claimId === run.claimId);
+      return Number(pinned(b)) - Number(pinned(a)) || (newer(a.run, b.run) ? -1 : newer(b.run, a.run) ? 1 : Number(a.onServer) - Number(b.onServer));
+    });
   if (shown.length === 0) {
-    return <p className="m-0 px-3 py-4 text-[12px] text-muted">This automation has not run on this computer yet.</p>;
+    return <p className="m-0 px-3 py-4 text-[12px] text-muted">{serverList === null ? "This automation has not run on this computer yet." : "This automation has not run on this computer or your server yet."}</p>;
   }
   return (
     <>
       <ul data-testid="automation-runs" className="m-0 list-none p-0">
-        {shown.map((run) => (
+        {shown.map(({ run, onServer }) => (
           <RunRow
-            key={run.claimId}
+            key={`${onServer}:${run.claimId}`}
             run={run}
+            onServer={onServer}
             opened={run.claimId === opened}
-            undoing={undoing === run.claimId}
+            undoing={undoing === `${onServer}:${run.claimId}`}
             onRetry={() => {
-              touched.current.add(run.claimId);
-              props.onRetry({ automationId, claimId: run.claimId });
+              (onServer ? serverTouched : touched).current.add(run.claimId);
+              props.onRetry({ automationId, claimId: run.claimId, onServer });
             }}
-            onUndo={() => undo(run.claimId, null)}
+            onUndo={() => undo(run.claimId, null, onServer)}
           />
         ))}
       </ul>
-      {list.next !== null ? (
+      {list.next !== null || (serverList !== null && serverList.next !== null) ? (
         <div className="flex justify-center px-3 py-2">
           <SecondaryButton size="compact" className="inline-flex items-center gap-1.5" disabled={loadingOlder} aria-busy={loadingOlder} onClick={loadOlder}>
             {loadingOlder ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" /> : null}

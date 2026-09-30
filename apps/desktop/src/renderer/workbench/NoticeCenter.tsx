@@ -81,6 +81,9 @@ export interface SentNotice {
   folder: string | null;
   // Open has somewhere to go, or something to say about why it cannot.
   openable: boolean;
+  // A failed run on the owner's self-hosted server, in this workspace: Try
+  // again runs it there.
+  retryable: boolean;
 }
 
 // Notices about one automation, whose Open goes to the automation.
@@ -820,9 +823,9 @@ export function NoticeCenter(props: {
     for (const hold of props.automationHolds ?? []) {
       const reach = automationReachCopy(hold);
       next.push({
-        id: `automation-hold-${hold.automationId}-${hold.step}${hold.recipient ? `-${hold.recipient}` : ""}`,
+        id: `automation-hold-${hold.onServer ? "server-" : ""}${hold.automationId}-${hold.step}${hold.recipient ? `-${hold.recipient}` : ""}`,
         tone: "warning",
-        title: `Automation "${hold.automationName}" is waiting`,
+        title: `Automation "${hold.automationName}" is waiting${hold.onServer ? " on your server" : ""}`,
         body: hold.stoppedFor
           ? `A step in ${hold.collection} can now ${reach}. It stopped before because ${hold.stoppedFor} could not. Allow it to run?`
           : hold.fileUnread
@@ -1196,7 +1199,7 @@ export function NoticeCenter(props: {
               <span className="min-w-0 flex-1 break-words leading-snug">
                 {sentToast.notice.title}
               </span>
-              {retriesRun(sentToast.notice) && props.onRetrySentNotice ? (
+              {(retriesRun(sentToast.notice) || sentToast.retryable) && props.onRetrySentNotice ? (
                 <button
                   type="button"
                   data-testid="sent-notice-toast-retry"
@@ -1510,7 +1513,7 @@ export function NoticeCenter(props: {
                     Sent to you
                   </SectionLabel>
                   <ul className="m-0 list-none p-0">
-                    {sentShownRows.map(({ notice, folder, openable }) => {
+                    {sentShownRows.map(({ notice, folder, openable, retryable }) => {
                       const key = sentKey(sentAccount, notice);
                       const unread = notice.readAtMs === null;
                       const note = sentNotes.get(key);
@@ -1521,7 +1524,7 @@ export function NoticeCenter(props: {
                       const runNow = notice.kind === "schedule-skipped" && props.onRunSentNoticeNow
                         ? () => void runSentNoticeNow(notice)
                         : undefined;
-                      const retry = retriesRun(notice) && props.onRetrySentNotice
+                      const retry = (retriesRun(notice) || retryable) && props.onRetrySentNotice
                         ? () => props.onRetrySentNotice?.(notice)
                         : undefined;
                       const copies = notice.kind === "automation-failed";
