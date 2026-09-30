@@ -11,7 +11,8 @@ import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, 
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
-import { collectionRecordWrites, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
+import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
+import { desktopRecordEditContext, type DesktopRecordEditHost } from "../workspaces/desktopRecordEdits";
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
@@ -410,7 +411,7 @@ async function world(options: {
     },
   };
 
-  const capture: CollectionRecordEditContext["capture"] = {
+  const capture: DesktopRecordEditHost["capture"] = {
     async openYDocSession({ path }) {
       opens += 1;
       if (failures.openSession > 0 || opens === failOpenAt) {
@@ -541,11 +542,11 @@ async function world(options: {
     withEngine: async (work) => await work(engine),
     withRecordWrites: async (signal, work) => {
       await options.withRecordWrites?.(signal, events);
-      return await work(collectionRecordWrites({
+      return await work(collectionRecordWrites(desktopRecordEditContext({
         capture, workspaceRoot: root, signal,
         withAdapter: async (read) => await read(engine),
         onCaptureSettled: (listener) => { if (failures.capture > 0) { failures.capture--; throw Error("capture offline"); } settleListeners.add(listener); return () => settleListeners.delete(listener); },
-      }));
+      })));
     },
     readText: async (path) => {
       const hook = beforeRead;

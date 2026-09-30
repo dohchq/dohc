@@ -7,7 +7,8 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { bridgeAutomationClaimsToExecutors } from "../workspaces/automationClaimsBridge";
 import { onWorkspaceCaptureSettled } from "../workspaces/captureActivityBridge";
-import { collectionRecordWrites, setCollectionRecordFields, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
+import { collectionRecordWrites, setCollectionRecordFields, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
+import { desktopRecordEditContext } from "../workspaces/desktopRecordEdits";
 import { createTestScratch } from "../workspaces/testTemp";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { waitForPathMoments } from "../workspaces/waitForPathMoments";
@@ -60,7 +61,7 @@ async function harness(automations: string, run: (context: {
       };
       return await work(adapter);
     });
-  const editContext = (signal: AbortSignal): CollectionRecordEditContext => ({
+  const editContext = (signal: AbortSignal): CollectionRecordEditContext => desktopRecordEditContext({
     capture, workspaceRoot: root, signal,
     withAdapter: withEngine,
     onCaptureSettled: (listener) => onWorkspaceCaptureSettled(lifecycle, workspace.workspaceId, listener),

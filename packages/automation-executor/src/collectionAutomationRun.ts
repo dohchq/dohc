@@ -111,8 +111,8 @@ interface RecordFieldsWritten {
 }
 
 /**
- * Record writes with the workspace's write authority. The desktop binds
- * them to its live record documents (collectionRecordEdits.ts).
+ * Record writes with the workspace's write authority, over the record's live
+ * documents (collectionRecordWrites in collectionRecordEdits.ts).
  */
 export interface CollectionRecordWrites {
   setFields(input: {

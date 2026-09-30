@@ -321,7 +321,7 @@ The go signal does not authorize merges, public deployment, live fundraiser migr
 ## Evidence and source map
 
 - Current Collection contract: `CONTEXT.md`, `packages/workspace-contracts/src/collection.ts`.
-- Collection UI and live editing: `apps/desktop/src/renderer/CollectionPage.tsx`, `packages/collection-views/src/table/TableView.tsx`, `apps/desktop/src/workspaces/collectionRecordEdits.ts`.
+- Collection UI and live editing: `apps/desktop/src/renderer/CollectionPage.tsx`, `packages/collection-views/src/table/TableView.tsx`, `packages/automation-executor/src/collectionRecordEdits.ts`.
 - Collection indexing: `crates/dohc-engine-domain/src/collections.rs`.
 - Dataset contracts and limits: `docs/how-to/app-backend.md`, `docs/adr/0011-transactional-datasets-use-a-host-journal-and-worker-materialization.md`, `packages/app-backend-runtime/README.md`.
 - Host commit and authority ordering: `packages/app-backend-runtime/src/dataset-host.ts`, `packages/app-backend-runtime/src/journal.ts`, `services/sync-relay/src/datasetHost.ts`, `apps/desktop/src/workspaces/localDatasetHost.ts`.
