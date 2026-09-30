@@ -679,6 +679,9 @@ function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["aut
   switch (result.status) {
     case "queued":
       return { ok: true, status: "queued" };
+    case "switched-off":
+      return { ok: false, status: result.status, target: result.target,
+        reason: "This automation is switched off. Open its controls to turn it on, then try again." };
     case "definition-changed":
       return {
         ok: false,

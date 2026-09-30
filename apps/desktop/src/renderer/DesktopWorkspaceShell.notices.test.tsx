@@ -9,6 +9,7 @@ import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import type { OwnerLiveDocumentsResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
+import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
@@ -982,7 +983,7 @@ describe("notices sent to you", () => {
 
   function renderWithNotices(
     bridge: ReturnType<typeof makeBridge>,
-    extra: { sentNotices?: SentNotices; openPathOnReady?: string; onSwitchWorkspace?: (workspace: Workspace, openPath?: string) => void },
+    extra: { sentNotices?: SentNotices; openOnReady?: OpenOnSwitch; onSwitchWorkspace?: (workspace: Workspace, open?: OpenOnSwitch) => void },
     workspaces: Workspace[] = [WORKSPACE],
   ) {
     vi.stubGlobal("dohcDesktop", bridge);
@@ -995,7 +996,7 @@ describe("notices sent to you", () => {
           {...shellBootstrapProps(bridge)}
           onSwitchWorkspace={extra.onSwitchWorkspace ?? (() => {})}
           {...(extra.sentNotices ? { sentNotices: extra.sentNotices } : {})}
-          {...(extra.openPathOnReady ? { openPathOnReady: extra.openPathOnReady } : {})}
+          {...(extra.openOnReady ? { openOnReady: extra.openOnReady } : {})}
         />
       </>,
     );
@@ -1108,8 +1109,26 @@ describe("notices sent to you", () => {
   });
 
   it("opens the file a notice named once the workspace it switched to is ready", async () => {
-    renderWithNotices(makeBridge(Promise.resolve(null)), { openPathOnReady: "b.md" });
+    renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: "b.md" });
     await screen.findByTestId("tab-b.md");
+  });
+
+  it("opens a switched-off automation's switch once the workspace it switched to is ready", async () => {
+    const bridge = withRuns(makeBridge(Promise.resolve(null)));
+    const automation = {
+      id: "first", name: "Stamp the date", enabled: false, when: { kind: "record-added" as const, table: null }, if: null,
+      do: [{ kind: "set" as const, values: [{ field: "Done", value: { kind: "literal" as const, value: true } }], records: null, operation: null }],
+    };
+    bridge.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "a".repeat(64), addsStay: [], automations: [{
+      valid: true, automationId: "collection:tasks#first", automation, definitionHash: "0123456789abcdef", cannotRun: null,
+      reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
+    }] });
+    renderWithNotices(bridge, { openOnReady: { automationControls: "collection:tasks#first" } });
+    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    const toggle = within(await screen.findByTestId("automation-first", undefined, { timeout: 15_000 })).getByRole("switch");
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    expect(bridge.findAutomationCollection).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, automationId: "collection:tasks#first" });
+    expect(bridge.listCollectionAutomationRuns).not.toHaveBeenCalled();
   });
 
   describe("through a share this computer has not added", () => {

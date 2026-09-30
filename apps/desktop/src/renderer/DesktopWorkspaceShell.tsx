@@ -170,7 +170,8 @@ import { useAskAgent } from "./shell/useAskAgent";
 import { NoticeCenter } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { AUTOMATION_NOT_HERE_NOTE, useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
+import { AUTOMATION_NOT_HERE_NOTE, useSentNoticeProps, type NoticeShare, type OpenOnSwitch } from "./shell/useSentNoticeProps";
+import type { AutomationFocus } from "./collections/AutomationsPanel";
 import { serverHoldNoticesKey } from "./shell/sentNoticePlace";
 import type { SentNotices } from "./shell/useSentNotices";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
@@ -496,8 +497,8 @@ export function DesktopWorkspaceShell(props: {
   workspaces: Workspace[];
   userSettings: DesktopUserSettingsResult | null;
   refreshWorkspaceRegistry: () => Promise<Workspace[]>;
-  // A notice's Open passes the file to open once the workspace is ready.
-  onSwitchWorkspace: (workspace: Workspace, openPath?: string) => void;
+  // A notice's Open passes what to open once the workspace is ready.
+  onSwitchWorkspace: (workspace: Workspace, open?: OpenOnSwitch) => void;
   // May reject: the shell shows why, with a retry.
   onManageWorkspaces?: () => void | Promise<void>;
   handoffStatus?: ShareHandoffStatus;
@@ -505,7 +506,7 @@ export function DesktopWorkspaceShell(props: {
   onShareHandoffOpened?: () => void;
   // Notices sent to this person, owned above the shell.
   sentNotices?: SentNotices;
-  openPathOnReady?: string;
+  openOnReady?: OpenOnSwitch;
 }) {
   const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const {
@@ -1998,14 +1999,6 @@ export function DesktopWorkspaceShell(props: {
     reportFailure: reportKeptCopyFailure,
     openFile,
   });
-  // Read once: the shell remounts for each workspace.
-  const openPathOnReady = useRef(props.openPathOnReady);
-  useEffect(() => {
-    const path = openPathOnReady.current;
-    if (!workspaceIsReady || path === undefined) return;
-    openPathOnReady.current = undefined;
-    openFile(path);
-  }, [openFile, workspaceIsReady]);
   const openPathWithHeading = useCallback(
     (path: string, target?: string | HeadingTarget) => {
       openFile(
@@ -2065,17 +2058,16 @@ export function DesktopWorkspaceShell(props: {
     [openVirtualTab],
   );
   // Open automation, from a notice: the automation's Collection opens with
-  // the ⚡ panel on its runs, at the run it names. The page takes the ask once and clears it; the
+  // the ⚡ panel on its runs, at the run it names, or on its switch when it
+  // was switched off. The page takes the ask once and clears it; the
   // counter keeps rising after a clear, so each ask is new to the panel.
-  const [automationFocus, setAutomationFocus] = useState<
-    { collectionPath: string; automationId: string; run: string | null; name: string | null; seq: number } | null
-  >(null);
+  const [automationFocus, setAutomationFocus] = useState<(AutomationFocus & { collectionPath: string }) | null>(null);
   const automationFocusSeq = useRef(0);
   // Main finds the Collection by its id, so a Collection that moved still
   // opens. Resolves to a sentence for the notice's row when it cannot open.
   const openAutomation = useCallback(
     // `name` is how the asker already names the automation, for the panel's title before its file is read.
-    async (automationId: string, run: string | null, name: string | null = null): Promise<string | null> => {
+    async (automationId: string, run: string | null, name: string | null = null, controls = false): Promise<string | null> => {
       const owner = workspaceId;
       const found = await bridge().findAutomationCollection({ workspaceId: owner, automationId });
       if (workspaceIdRef.current !== owner) return null;
@@ -2086,6 +2078,7 @@ export function DesktopWorkspaceShell(props: {
         collectionPath: found.collectionPath,
         automationId,
         run,
+        controls,
         name,
         seq: automationFocusSeq.current,
       });
@@ -2093,6 +2086,27 @@ export function DesktopWorkspaceShell(props: {
     },
     [openCollectionTab, workspaceId],
   );
+  const openAutomationControls = useCallback(
+    (automationId: string) => openAutomation(automationId, null, null, true),
+    [openAutomation],
+  );
+  // Read once: the shell remounts for each workspace.
+  const openOnReady = useRef(props.openOnReady);
+  useEffect(() => {
+    const open = openOnReady.current;
+    if (!workspaceIsReady || open === undefined) return;
+    openOnReady.current = undefined;
+    if (typeof open === "string") {
+      openFile(open);
+      return;
+    }
+    void openAutomationControls(open.automationControls).then(
+      (note) => {
+        if (note !== null) reportShellError(note, new Error(note));
+      },
+      (error: unknown) => reportShellError("dohc could not open this automation.", error),
+    );
+  }, [openAutomationControls, openFile, reportShellError, workspaceIsReady]);
   const clearAutomationFocus = useCallback(() => setAutomationFocus(null), []);
   const recordHistory = useRecordHistory(workspaceId, { reportShellError, clearKind, openAutomationRun: openAutomation });
   // A Collection page's errors and notices, which can answer after this
@@ -3947,6 +3961,7 @@ export function DesktopWorkspaceShell(props: {
     workspaces: props.workspaces,
     openFile,
     openAutomation,
+    openAutomationControls,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,

@@ -4,7 +4,8 @@ import { TokenBucketLimiter } from "@dohc/service-http";
 import type { ScheduledAutomation, CollectionAutomationsOptions, DatasetAutomationHost, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
 import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/relay";
 import type { ReachHandover } from "@dohc/automation-executor/reach-verdicts";
-import { DaemonRefusalError, VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover, type MomentRecord } from "@dohc/workspace-engine-client";
+import { AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_EDIT_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
 import type { LiveClaimLedger } from "./automationLiveClaims";
@@ -207,6 +208,16 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
       });
       hooks!.onChanged?.(WORKSPACE);
       await vi.waitFor(() => expect(executors).toHaveLength(1));
+      // Most fake replicas keep no History. A test can provide a real client or override these instance reads.
+      if (input.client === undefined) await executors[0]!.options.withEngine(async (engine) => {
+        if (!(engine instanceof VersionedLiveAdapter)) throw new Error("Expected the replica adapter");
+        vi.spyOn(engine, "flushCapture").mockResolvedValue({ settled: true, running: false, degraded: false });
+        vi.spyOn(engine, "getActiveVersion").mockImplementation((params) => {
+          // Existing write tests supply a prototype implementation.
+          return vi.isMockFunction(VersionedLiveAdapter.prototype.getActiveVersion)
+            ? VersionedLiveAdapter.prototype.getActiveVersion.call(engine, params) : Promise.resolve(null);
+        });
+      });
       return executors[0]!;
     },
   };
@@ -216,6 +227,84 @@ const notices = (storage: SyncRelayStorage, userId: string) =>
   storage.readNoticeChanges({ recipientUserId: userId, cursor: null, limit: 50, nowMs: clock }).notices;
 
 describe("a server that runs a workspace's automations", () => {
+  it("notifies the owner, last editor and triggering person of a breaker with current permission checks", async () => {
+    const { storage, h } = await relay();
+    await createShare(h, OWNER, WORKSPACE, { recipientUserId: "starter", paths: ["Tasks"], access: "edit" });
+    await createShare(h, OWNER, WORKSPACE, { recipientUserId: "editor", paths: ["Tasks"], access: "edit" });
+    const s = await server(storage, h);
+    const fake = await s.openReplica();
+    const before = "version: 1\nautomations:\n  - id: hourly\n    name: Old name\n    when: {field-changed: Status}\n    do: [{set: {X: 1}}]\n";
+    const after = before.replace("Old name", "Hourly");
+    const moment: MomentRecord = { momentOrder: 1, momentId: "edited", versionId: "main", objectId: "object", path: "Tasks/automations.yaml",
+      recordedAtMs: clock, operation: "write", afterContentKind: "text", afterBlobSha256: "after", afterBinarySha256: null,
+      beforePresent: true, beforeContentKind: "text", beforeBlobSha256: "before", beforeBinarySha256: null, beforeLatestMomentId: null,
+      metadataOrigin: "api", authors: [{ kind: "named", userId: "editor", grantId: "grant-editor", grantGeneration: 1 }], syncRecordOnly: false,
+      afterText: after, afterByteLength: after.length, afterInbandLimitBytes: null,
+      beforeText: before, beforeByteLength: before.length, beforeInbandLimitBytes: null };
+    await fake.options.withEngine(async (engine) => {
+      if (!(engine instanceof VersionedLiveAdapter)) throw new Error("Expected the replica adapter");
+      vi.spyOn(engine, "getActiveVersion").mockResolvedValue({ id: "main", workspaceId: WORKSPACE, kind: "main", name: "Main", createdAtMs: 0 });
+      vi.spyOn(engine, "readTextFile").mockResolvedValue({ versionId: "main", path: "Tasks/automations.yaml", objectId: "object", contentKind: "text",
+        text: after, blobSha256: "after", workspaceId: WORKSPACE, sha256: "after", byteLength: after.length, updatedAtMs: clock,
+        latestMomentId: "edited", metadataOrigin: "api" });
+      vi.spyOn(engine, "listMoments").mockResolvedValue({ moments: [moment], nextBeforeMomentOrder: null, latestMomentOrder: 1 });
+      vi.spyOn(engine, "getMoment").mockResolvedValue(moment);
+    });
+    const failure = { automationId: HOURLY.automationId, claimId: "third-timeout", generation: 3,
+      datasetInstance: null, neverStarted: false, chainStopped: false, error: "private-step-token".repeat(2_000), updatedAtMs: clock,
+      switchedOff: { reason: "consecutive-timeouts" as const, collectionPath: "Tasks" } };
+    await fake.options.reportFailure({ failure, name: "Hourly", collectionPath: "Tasks", startedBy: "starter", replaces: null });
+    expect(notices(storage, OWNER)).toHaveLength(1);
+    expect(notices(storage, OWNER)[0]!.body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)).toBe(true);
+    for (const person of ["starter", "editor"]) {
+      expect(notices(storage, person)).toHaveLength(1);
+      expect(notices(storage, person)[0]).toMatchObject({ body: AUTOMATION_SWITCHED_OFF_EDIT_BODY,
+        target: { recovery: "automation-controls", path: "Tasks/automations.yaml", automation: HOURLY.automationId } });
+      expect(notices(storage, person)[0]!.target).not.toHaveProperty("run");
+    }
+    expect(notices(storage, "outsider")).toHaveLength(0);
+    // The last editor now lacks access to Tasks. A later failure must not disclose even its safe copy to them.
+    await fake.options.withEngine(async (engine) => {
+      if (!(engine instanceof VersionedLiveAdapter)) throw new Error("Expected the replica adapter");
+      vi.spyOn(engine, "getMoment").mockResolvedValue({ ...moment, authors: [{ kind: "named", userId: "outsider", grantId: "lost", grantGeneration: 1 }] });
+    });
+    await fake.options.reportFailure({ failure: { ...failure, generation: 4 }, name: "Hourly", collectionPath: "Tasks", startedBy: "starter", replaces: failure });
+    expect(notices(storage, "outsider")).toHaveLength(0);
+    expect(s.errors.some(([context]) => context.includes("another person involved"))).toBe(true);
+  });
+
+  it("tells a viewer to ask an editor and keeps the switch-off fact first", async () => {
+    const { storage, h } = await relay();
+    await createShare(h, OWNER, WORKSPACE, { recipientUserId: "viewer", paths: ["Tasks"], access: "view" });
+    const s = await server(storage, h);
+    const fake = await s.openReplica();
+    await fake.options.reportFailure({ failure: { automationId: HOURLY.automationId, claimId: "third-timeout", generation: 3,
+      datasetInstance: null, neverStarted: false, chainStopped: false, error: "private-step-token", updatedAtMs: clock,
+      switchedOff: { reason: "consecutive-timeouts", collectionPath: "Tasks" } },
+      name: "Hourly", collectionPath: "Tasks", startedBy: "viewer", replaces: null });
+    expect(notices(storage, OWNER)[0]!.body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)).toBe(true);
+    expect(notices(storage, "viewer")[0]!.body).toBe(AUTOMATION_SWITCHED_OFF_VIEW_BODY);
+    expect(notices(storage, "viewer")[0]!.body).not.toContain("private-step-token");
+    await createShare(h, OWNER, WORKSPACE, { recipientUserId: "viewer", paths: ["Tasks"], access: "edit" });
+    await fake.options.reportFailure({ failure: { automationId: HOURLY.automationId, claimId: "fourth-timeout", generation: 4,
+      datasetInstance: null, neverStarted: false, chainStopped: false, error: "private-step-token", updatedAtMs: clock,
+      switchedOff: { reason: "consecutive-timeouts", collectionPath: "Tasks" } },
+      name: "Hourly", collectionPath: "Tasks", startedBy: "viewer", replaces: null });
+    expect(notices(storage, "viewer")[1]!.body).toBe(AUTOMATION_SWITCHED_OFF_EDIT_BODY);
+  });
+
+  it.each(["x".repeat(2_000), "界".repeat(700)])("delivers the owner's Notice when controls exceed the wire limit (%#)", async (collectionPath) => {
+    const { storage, h } = await relay();
+    const s = await server(storage, h);
+    const fake = await s.openReplica();
+    await fake.options.reportFailure({ failure: { automationId: HOURLY.automationId, claimId: "third-timeout", generation: 3,
+      datasetInstance: null, neverStarted: false, chainStopped: false, error: "timeout", updatedAtMs: clock,
+      switchedOff: { reason: "consecutive-timeouts", collectionPath } },
+      name: "Hourly", collectionPath, startedBy: null, replaces: null });
+    expect(notices(storage, OWNER)).toHaveLength(1);
+    expect(notices(storage, OWNER)[0]!.body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)).toBe(true);
+    expect(notices(storage, OWNER)[0]!.target).toEqual({ automation: HOURLY.automationId, run: "third-timeout" });
+  });
   it("returns a conflict for a write precondition refusal and throws other errors", async () => {
     const { storage, h } = await relay();
     const s = await server(storage, h);

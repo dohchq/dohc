@@ -3,7 +3,9 @@ import { posix } from "node:path";
 import { AutomationScheduler, type SchedulerClock, type ScheduleRecord } from "@dohc/automation-executor/automation-scheduler";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { cutText } from "@dohc/automation-executor/automation-chat";
-import { automationFailedNotice, automationFailedNoticeId, type ReportedRun } from "@dohc/automation-executor/automation-failed-notice";
+import { automationFailedNoticeId, type ReportedRun } from "@dohc/automation-executor/automation-failed-notice";
+import { reportAutomationFailure } from "@dohc/automation-executor/automation-failure-reporting";
+import { whoChangedLast, type AutomationsFileHistory } from "@dohc/automation-executor/automation-history";
 import { createAutomationRunStore, type MetadataDirResolver } from "@dohc/automation-executor/automation-run-store";
 import {
   CollectionAutomations,
@@ -533,12 +535,13 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         const read = await readText(ws, path);
         return read === null ? null : read.truncated ? read : { text: read.text, truncated: false, contentHash: read.contentHash };
       },
-      writeText: async (path, text, expectedContentHash) => {
+      writeText: async (path, text, expectedContentHash, automationId) => {
         const read = await readText(ws, path);
         if (read === null || read.truncated || read.contentHash !== expectedContentHash) return { status: "conflict" };
         try {
           await adapter.writeTextFile({
             workspaceId, versionId: read.versionId, path, text, publish: true, expectedSha256: expectedContentHash, metadata: { origin: "api", summary: `Updated ${posix.basename(path)}` },
+            author: { kind: "automation", automationId, depth: 0 },
           });
         } catch (error) {
           if (error instanceof DaemonRefusalError && error.message === "write-precondition-failed") return { status: "conflict" };
@@ -591,17 +594,23 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       readMessageBody: async (messageId) => (await replicaChatStore(replica).getMessage({ workspaceId, messageId })).body,
       postNotice: posterOf(ws),
       onRunsChanged: () => undefined,
-      reportFailure: (report) => ws.reporting = (async () => {
-        const { workspaceId: _workspace, ...notice } = automationFailedNotice({
-          workspaceId,
+      reportFailure: (report) => ws.reporting = reportAutomationFailure({
           computer: { installId: AUTOMATION_SERVER_INSTALL_ID, label: server.label },
-          failure: report.failure,
-          name: report.name,
-          collectionPath: report.collectionPath,
-        });
-        await posterOf(ws)({ ...notice, noticeId: notice.noticeId.replace("automation-failed:", SERVER_RUN_FAILED_NOTICE_PREFIX), recipientUserId: ownerUserId }, replica.signal);
-        if (report.replaces !== null) withdrawFailure(ws, report.replaces);
-      })(),
+          primary: { recipientUserId: ownerUserId },
+          throughShare: false,
+          post: async ({ workspaceId: _workspace, ...notice }) => {
+            if (notice.recipientUserId === undefined) throw new Error("A server Notice needs a recipient.");
+            await posterOf(ws)({ ...notice, recipientUserId: notice.recipientUserId,
+              noticeId: notice.noticeId.replace("automation-failed:", SERVER_RUN_FAILED_NOTICE_PREFIX) }, replica.signal);
+          },
+          withdraw: async () => { if (report.replaces !== null) withdrawFailure(ws, report.replaces); },
+          lastChangedBy: async () => {
+            if (report.collectionPath === null) return null;
+            const id = report.failure.automationId.slice(report.failure.automationId.lastIndexOf("#") + 1);
+            return whoChangedLast(automationHistory(ws), { path: `${report.collectionPath}/automations.yaml`, id, ownerUserId });
+          },
+          onError: options.onError,
+        }, workspaceId, report),
       withdrawFailure: async (failure) => withdrawFailure(ws, failure),
       // The owner's desktop reads author history and sends switch-off notices.
       onSwitchedOff: () => undefined,
@@ -622,6 +631,46 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         return work(options.datasetHost.automations.workspace(workspaceId, ownerUserId, replica.signal));
       },
       nowMs,
+    };
+  }
+
+  function automationHistory(ws: WorkspaceState): AutomationsFileHistory {
+    const { adapter, replica: { workspaceId } } = ws;
+    return {
+      flush: async () => { await adapter.flushCapture(); },
+      fileObjectIdForPath: async (path) => {
+        const version = await adapter.getActiveVersion({ workspaceId });
+        return version === null ? null : (await adapter.readTextFile({ workspaceId, versionId: version.id, path }))?.objectId ?? null;
+      },
+      listMoments: async (input) => {
+        const page = await adapter.listMoments({ workspaceId, ...input });
+        return { moments: page.moments.map(({ momentId }) => ({ id: momentId, protected: false })), nextBeforeMomentOrder: page.nextBeforeMomentOrder };
+      },
+      readMoment: async (momentId) => {
+        const moment = await adapter.getMoment({ workspaceId, momentId });
+        if (moment === null) return null;
+        const authors = moment.authors?.map((author) => {
+          if ("corrupt" in author) throw new Error("This automation's History has unreadable authorship.");
+          return author;
+        });
+        const text = async (side: "before" | "after") => {
+          if (side === "before" && !moment.beforePresent) return undefined;
+          const contentKind = side === "before" ? moment.beforeContentKind : moment.afterContentKind;
+          if (contentKind !== "text") return "";
+          const inline = side === "before" ? moment.beforeText : moment.afterText;
+          if (inline !== null) return inline;
+          const sha256 = side === "before" ? moment.beforeBlobSha256 : moment.afterBlobSha256;
+          const body = sha256 === null ? null : await adapter.readTextBlob({ workspaceId, sha256 });
+          if (body === null) throw new Error("This automation's History could not read its saved text.");
+          return body;
+        };
+        const before = await text("before");
+        const after = moment.operation === "delete" ? "" : await text("after");
+        return { protected: false, moment: { operation: moment.operation,
+          ...(authors === undefined ? {} : { authors }),
+          payload: { ...(before === undefined ? {} : { before: { text: before } }), after: { text: after ?? "" } },
+        } };
+      },
     };
   }
 

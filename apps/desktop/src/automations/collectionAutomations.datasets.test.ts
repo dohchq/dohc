@@ -542,6 +542,7 @@ describe("Collection automations on a dataset", () => {
       notices: { sentFailure: async () => null },
       installId: "install-a",
       holds: async (held) => (await f.executor.run(held.automationId, held.claimId)) !== null,
+      recovery: (automationId) => f.executor.switchedOffTarget(automationId),
       retry: (held) => f.executor.retry(held),
     }, { workspaceId: "workspace", automationId: AUTOMATION, claimId: run!.claimId, startOver: false })).resolves.toEqual(refused);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
@@ -776,7 +777,7 @@ describe("Collection automations on a dataset", () => {
       failure: expect.objectContaining({ automationId: AUTOMATION, error: sentence, generation: 1, chainStopped: false, datasetInstance: expect.any(String) }),
       name: expect.any(String),
       collectionPath: "Budget",
-      startedBy: null,
+      startedBy: "person-local",
       replaces: null,
     }]);
     await f.executor.dispose();

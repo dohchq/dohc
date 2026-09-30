@@ -3973,6 +3973,7 @@ function createCollectionAutomationsFor(
       notices: noticeStore(),
       computer: { installId: localReactorFallbackId(), label: computerLabel(hostname()) },
       throughShare: findWorkspace(workspaceId)?.shareView !== undefined,
+      primaryUserId: localUserId(),
       lastChangedBy: (automationId) => automationLastChangedBy(workspaceId, automationId),
       onError: (context, error) => console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     }, workspaceId, report),
@@ -4194,6 +4195,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
         notices: noticeStore(),
         installId: localReactorFallbackId(),
         holds: async (run) => (await (await opened()).run(run.automationId, run.claimId)) !== null,
+        recovery: async (automationId) => (await opened()).switchedOffTarget(automationId),
         retry: async (run) => (await opened()).retry(run),
       }, { workspaceId: workspace.workspaceId, ...input }),
     };

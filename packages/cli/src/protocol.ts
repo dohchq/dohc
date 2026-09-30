@@ -1093,6 +1093,10 @@ const automationRunResultSchema = z.discriminatedUnion("ok", [
 ]);
 const automationRetryResultSchema = z.union([
   z.object({ ok: z.literal(true), status: z.literal("queued") }).strict(),
+  z.object({
+    ok: z.literal(false), status: z.literal("switched-off"), reason: z.string().min(1),
+    target: z.object({ recovery: z.literal("automation-controls"), automation: z.string().min(1), path: z.string().min(1) }).strict(),
+  }).strict(),
   // Running it again starts from the first step and can repeat changes the
   // run already made, so it needs startOver. `repeatsMessages` says posts,
   // direct messages, and notices it sent may be sent again.

@@ -14,8 +14,8 @@ afterEach(() => {
 const request = (target: { automationId: string; claimId: string; onServer: boolean }, startOver: boolean) =>
   bridge().retryCollectionAutomation({ workspaceId: "ws-a", ...target, startOver });
 
-function Retry(props: { workspaceId: string; onError: () => void; onQueued: () => void }) {
-  const { retry, dialog } = useAutomationRetry({ ...props, request });
+function Retry(props: { workspaceId: string; onError: () => void; onQueued: () => void; onSwitchedOff?: () => void }) {
+  const { retry, dialog } = useAutomationRetry({ ...props, onSwitchedOff: props.onSwitchedOff ?? (() => undefined), request });
   return (
     <>
       <button type="button" onClick={() => retry({ automationId: "collection:Tasks#stamp", claimId: "atc_1", onServer: false })}>
@@ -64,5 +64,30 @@ describe("Try again for an automation run", () => {
     await act(async () => screen.getByTestId("automation-start-over-confirm").click());
     expect(retryCollectionAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "ws-a", startOver: true }));
     expect(onQueued).toHaveBeenCalledTimes(1);
+  });
+
+  it("queues nothing for a switched-off automation and hands its controls over, in this workspace only", async () => {
+    const controls = {
+      recovery: "automation-controls" as const, automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml",
+    };
+    const answers: Array<(value: RetryCollectionAutomationResult) => void> = [];
+    vi.stubGlobal("dohcDesktop", {
+      retryCollectionAutomation: vi.fn(() => new Promise<RetryCollectionAutomationResult>((resolve) => answers.push(resolve))),
+    });
+    const onError = vi.fn();
+    const onQueued = vi.fn();
+    const onSwitchedOff = vi.fn();
+    const { rerender } = render(<Retry workspaceId="ws-a" onError={onError} onQueued={onQueued} onSwitchedOff={onSwitchedOff} />);
+
+    act(() => screen.getByRole("button", { name: "Try again" }).click());
+    await act(async () => answers[0]!({ status: "switched-off", target: controls }));
+    expect(onSwitchedOff).toHaveBeenCalledWith(controls, { automationId: "collection:Tasks#stamp", claimId: "atc_1", onServer: false });
+    expect(onQueued).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+
+    act(() => screen.getByRole("button", { name: "Try again" }).click());
+    rerender(<Retry workspaceId="ws-b" onError={onError} onQueued={onQueued} onSwitchedOff={onSwitchedOff} />);
+    await act(async () => answers[1]!({ status: "switched-off", target: controls }));
+    expect(onSwitchedOff).toHaveBeenCalledTimes(1);
   });
 });

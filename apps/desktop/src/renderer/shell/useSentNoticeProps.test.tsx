@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type { NoticeRow, RetryCollectionAutomationResult, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import {
   ACCESS_ENDED_NOTE,
@@ -45,7 +45,7 @@ const RECEIVED = {
 
 const getRelayReceivedShare = vi.fn();
 const retryAutomationNotice = vi.fn();
-const retryCollectionAutomation = vi.fn(async () => ({ status: "queued", press: false }));
+const retryCollectionAutomation = vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }));
 beforeEach(() => vi.stubGlobal("dohcDesktop", { getRelayReceivedShare, retryAutomationNotice, retryCollectionAutomation }));
 afterEach(() => {
   cleanup();
@@ -83,6 +83,7 @@ function setup(
     workspaces,
     openFile: vi.fn(),
     openAutomation: vi.fn(async (_automationId: string, _run: string | null): Promise<string | null> => null),
+    openAutomationControls: vi.fn(async (_automationId: string): Promise<string | null> => null),
     onSwitchWorkspace: vi.fn(),
     onOpenShare: vi.fn(),
     reportShellError: vi.fn(),
@@ -252,6 +253,95 @@ describe("a failed run's notice", () => {
     expect(reportShellError).not.toHaveBeenCalled();
   });
 
+  const controls = {
+    recovery: "automation-controls" as const, automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml",
+  };
+
+  it("opens a switched-off automation on its switch, not at its run", async () => {
+    const switchedOff = { ...failed, target: { ...controls, run: "atc_1" } };
+    const { result, openAutomation, openAutomationControls } = setup([switchedOff], [workspace("notes")]);
+    await expect(result.current.onOpenSentNotice(switchedOff, live())).resolves.toBeNull();
+    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp");
+    expect(openAutomation).not.toHaveBeenCalled();
+  });
+
+  it("takes Try again to the switch when main finds the automation switched off, and says so when it cannot open", async () => {
+    retryAutomationNotice.mockResolvedValue({ status: "switched-off", target: controls });
+    const { result, openAutomation, openAutomationControls, reportShellError, sentNotices } = setup([failed], [workspace("notes")]);
+    await act(async () => result.current.onRetrySentNotice(failed));
+    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp"));
+    expect(openAutomation).not.toHaveBeenCalled();
+    expect(reportShellError).not.toHaveBeenCalled();
+    expect(sentNotices.dismiss).not.toHaveBeenCalled();
+
+    openAutomationControls.mockResolvedValueOnce(AUTOMATION_NOT_HERE_NOTE);
+    await act(async () => result.current.onRetrySentNotice(failed));
+    await waitFor(() => expect(reportShellError).toHaveBeenCalledWith(AUTOMATION_NOT_HERE_NOTE, expect.any(Error)));
+  });
+
+  it("carries the switch through a switch to the workspace that holds it, for Open and Try again", async () => {
+    const switchedOff = { ...failed, target: { ...controls, run: "atc_1" } };
+    retryAutomationNotice.mockResolvedValue({ status: "switched-off", target: controls });
+    const { result, onSwitchWorkspace, openAutomationControls, openFile } = setup([switchedOff], [workspace("notes"), workspace("trip")], "trip");
+    await result.current.onOpenSentNotice(switchedOff, live());
+    expect(onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), { automationControls: "collection:Tasks#stamp" });
+    onSwitchWorkspace.mockClear();
+    // The owner's own run, tried again from another workspace.
+    await act(async () => result.current.onRetrySentNotice(failed));
+    await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), { automationControls: "collection:Tasks#stamp" }));
+    expect(openAutomationControls).not.toHaveBeenCalled();
+    expect(openFile).not.toHaveBeenCalled();
+  });
+
+  it("gives a collaborator's copy, which names no run, the switch on Open but no Try again", async () => {
+    const copy = { ...failed, postedHere: false, target: controls };
+    const { result, openAutomationControls } = setup([copy], [workspace("notes")]);
+    expect(result.current.sentNotices[0]?.retryable).toBe(false);
+    await result.current.onOpenSentNotice(copy, live());
+    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp");
+  });
+
+  it("opens the automation's file through a share, which lists no automations to switch on", async () => {
+    // A copy for someone who reaches the Collection through a share.
+    const copy = notice({ kind: "automation-failed", workspaceId: null, recipientShareId: "share-1", target: controls });
+    const mounted = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
+    const inMount = setup([copy], [mounted]);
+    await inMount.result.current.onOpenSentNotice(copy, live());
+    expect(inMount.openFile).toHaveBeenCalledWith("shared-with-me/owner/Tasks/automations.yaml");
+    cleanup();
+
+    const view = workspace("trip-view", { shareView: { shareId: "share-1", granterEmail: null } });
+    const inView = setup([copy], [workspace("notes"), view], "trip-view");
+    await inView.result.current.onOpenSentNotice(copy, live());
+    expect(inView.openFile).toHaveBeenCalledWith("Tasks/automations.yaml");
+    cleanup();
+
+    const toView = setup([copy], [workspace("notes"), view]);
+    await toView.result.current.onOpenSentNotice(copy, live());
+    expect(toView.onSwitchWorkspace).toHaveBeenCalledWith(view, "Tasks/automations.yaml");
+    cleanup();
+
+    getRelayReceivedShare.mockResolvedValueOnce(RECEIVED);
+    const notAdded = setup([copy], [workspace("notes")]);
+    await notAdded.result.current.onOpenSentNotice(copy, live());
+    expect(notAdded.onOpenShare).toHaveBeenCalledWith(expect.objectContaining({ path: "Tasks/automations.yaml" }));
+    for (const shown of [inMount, inView, toView, notAdded]) {
+      expect(shown.openAutomationControls).not.toHaveBeenCalled();
+      expect(shown.openAutomation).not.toHaveBeenCalled();
+    }
+  });
+
+  it("opens a target cut to fit, with no path, as a failed run's, and still reaches the switch from Try again", async () => {
+    const cut = { ...failed, target: { automation: "collection:Tasks#stamp", run: "atc_1" } };
+    retryAutomationNotice.mockResolvedValue({ status: "switched-off", target: controls });
+    const { result, openAutomation, openAutomationControls } = setup([cut], [workspace("notes")]);
+    await expect(result.current.onOpenSentNotice(cut, live())).resolves.toBeNull();
+    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1");
+    expect(openAutomationControls).not.toHaveBeenCalled();
+    await act(async () => result.current.onRetrySentNotice(cut));
+    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp"));
+  });
+
   it("reports why main did not run it, as on another computer", async () => {
     retryAutomationNotice.mockResolvedValue({ status: "refused", reason: "Only the computer this run failed on can try it again." });
     const { result, reportShellError } = setup([failed], [workspace("notes")]);
@@ -285,6 +375,16 @@ describe("Try again on a failed run of the owner's server", () => {
     expect(result.current.sentNotices[0]?.retryable).toBe(true);
     await act(async () => result.current.onRetrySentNotice(failed()));
     expect(retryCollectionAutomation).toHaveBeenCalledWith({ workspaceId: "notes", startOver: false, automationId: "collection:Tasks#stamp", claimId: "claim-1", onServer: true });
+  });
+
+  it("goes to the switch when the server finds the automation switched off", async () => {
+    retryCollectionAutomation.mockResolvedValueOnce({ status: "switched-off", target: {
+      recovery: "automation-controls", automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml",
+    } });
+    const { result, openAutomationControls, reportShellError } = setup([failed()], [workspace("notes")]);
+    await act(async () => result.current.onRetrySentNotice(failed()));
+    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp"));
+    expect(reportShellError).not.toHaveBeenCalled();
   });
 
   it("offers it only for the server's own notice, in the workspace it names", async () => {
