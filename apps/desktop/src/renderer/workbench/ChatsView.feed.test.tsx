@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { type ChatsNav } from "./ChatsView";
 import {
+  ChatsView,
   NOW,
   channel,
   thread,
@@ -12,6 +13,7 @@ import {
   personalFeedItem,
   fileThread,
   bridgeMock,
+  emitWorkspaceActivity,
   renderView,
   shareListing,
 } from "./ChatsView.testHarness";
@@ -34,6 +36,37 @@ function choiceFor(picker: HTMLElement, emoji: string) {
 
 async function pickReaction(like: HTMLElement, emoji: string) {
   await userEvent.click(choiceFor(await openPicker(like), emoji));
+}
+
+// A Home item the way main lists it: the viewer is named per thread.
+function homeItem(body: string, id: string) {
+  return { ...personalFeedItem(body, id), viewerAuthorId: "author-you" };
+}
+
+function like(messageId: string, authorId = "author-you") {
+  return {
+    reactionId: `reaction-${messageId}-${authorId}`,
+    messageId,
+    threadId: "thread-1",
+    emoji: "👍",
+    authorId,
+    authorKind: "human" as const,
+    authorDisplayName: authorId,
+  };
+}
+
+// A raw code carries no words of its own, so the caller's sentence is the
+// whole message the test can pin.
+const wireFailure = () => new Error("ECONNRESET");
+
+function feedPill() {
+  return screen.getByTestId("chats-feed-reaction-pill");
+}
+
+// A pending write marks the message's controls aria-disabled and leaves them
+// focusable; a locked group disables them natively.
+function isPending(control: HTMLElement) {
+  return control.getAttribute("aria-disabled") === "true";
 }
 
 describe("ChatsView hybrid feed", () => {
@@ -97,31 +130,343 @@ describe("ChatsView hybrid feed", () => {
     expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(locked ? 0 : 1);
   });
 
-  it("ignores an older Home reaction error after a newer toggle succeeds", async () => {
-    const older = deferred();
+  it("shows a known viewer's Like before the write and its listing answer", async () => {
+    const write = deferred<unknown>();
+    const listing = deferred<unknown>();
     const onError = vi.fn();
-    bridgeMock.listPersonalChatFeed.mockResolvedValue({
-      items: [personalFeedItem("A post", "message-1")],
-    });
-    bridgeMock.setChatReaction.mockImplementationOnce(() => older.promise);
-    bridgeMock.listChatReactions.mockResolvedValue({
-      reactions: [{ reactionId: "like", threadId: "thread-1", messageId: "message-1",
-        emoji: "👍", authorId: "you", authorKind: "human", authorDisplayName: "You" }],
-      viewerAuthorId: "you",
-    });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [homeItem("A post", "message-1")] });
+    bridgeMock.setChatReaction.mockImplementationOnce(() => write.promise);
+    bridgeMock.listChatReactions.mockImplementationOnce(() => listing.promise);
     renderView(vi.fn(), onError);
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
-    const like = await screen.findByTestId("chats-feed-like");
-    await pickReaction(like, "👍");
-    await pickReaction(like, "👍");
-    await waitFor(() =>
-      expect(screen.getByTestId("chats-feed-reaction-pill").dataset.emoji).toBe("👍"),
-    );
+    await pickReaction(await screen.findByTestId("chats-feed-like"), "👍");
+
+    expect(feedPill().dataset.emoji).toBe("👍");
+    expect(feedPill().textContent).toContain("1");
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
+
+    // The write names the reaction's own author, which after sign-in can be a
+    // removed local alias. Only the listing may rename the viewer.
     await act(async () => {
-      older.reject(new Error("Older request failed"));
-      await older.promise.catch(() => undefined);
+      write.resolve({ reaction: { ...like("message-1", "local-you"), state: "added" }, viewerAuthorId: "local-you" });
+      await write.promise;
+    });
+    expect(bridgeMock.listChatReactions).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1" });
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    await act(async () => {
+      listing.resolve({ reactions: [like("message-1")], viewerAuthorId: "author-you" });
+      await listing.promise;
+    });
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    expect(feedPill().textContent).toContain("1");
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("restores the prior reaction when a Home write fails", async () => {
+    const write = deferred<unknown>();
+    const onError = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [{ ...homeItem("Liked by two", "message-1"), reactions: [like("message-1"), like("message-1", "author-peer")] }],
+    });
+    bridgeMock.setChatReaction.mockImplementationOnce(() => write.promise);
+    renderView(vi.fn(), onError);
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const pill = await screen.findByTestId("chats-feed-reaction-pill");
+    expect(pill.textContent).toContain("2");
+    await userEvent.click(pill);
+
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "message-1", emoji: "👍", state: "removed" }),
+    );
+    expect(feedPill().textContent).toContain("1");
+    expect(feedPill().getAttribute("aria-pressed")).toBe("false");
+    await act(async () => {
+      write.reject(wireFailure());
+      await write.promise.catch(() => undefined);
+    });
+    expect(feedPill().textContent).toContain("2");
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    expect(onError).toHaveBeenCalledWith("Could not update that reaction.", expect.any(Error));
+    expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
+    // Home shows no row identity; usePersonalChatFeed.test.ts pins that the
+    // exact prior rows, not a rebuilt one, come back.
+  });
+
+  it("keeps an acknowledged Like when Home cannot reload reactions", async () => {
+    const onError = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [homeItem("A post", "message-1")] });
+    bridgeMock.listChatReactions.mockRejectedValue(wireFailure());
+    renderView(vi.fn(), onError);
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await pickReaction(await screen.findByTestId("chats-feed-like"), "👍");
+
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        "Your reaction was saved, but Home could not reload reactions.",
+        expect.any(Error),
+      ),
+    );
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    expect(feedPill().textContent).toContain("1");
+  });
+
+  it("rests one item's reaction controls while its write is pending and keeps other items usable", async () => {
+    const write = deferred<unknown>();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [homeItem("First", "message-a"), homeItem("Second", "message-b")],
+    });
+    bridgeMock.setChatReaction.mockImplementationOnce(() => write.promise);
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [like("message-a"), like("message-b")],
+      viewerAuthorId: "author-you",
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const likes = await screen.findAllByTestId("chats-feed-like");
+    await pickReaction(likes[0]!, "👍");
+    const items = screen.getAllByTestId("chats-feed-item");
+    const pillA = within(items[0]!).getByTestId("chats-feed-reaction-pill");
+    expect(pillA.getAttribute("aria-pressed")).toBe("true");
+    // The whole message rests: a second emoji would share the same listing.
+    expect(isPending(likes[0]!)).toBe(true);
+    expect(isPending(pillA)).toBe(true);
+    await userEvent.click(pillA);
+    await userEvent.click(likes[0]!);
+    expect(screen.queryByTestId("chats-feed-reaction-picker")).toBeNull();
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(1);
+
+    expect(isPending(likes[1]!)).toBe(false);
+    await pickReaction(likes[1]!, "👍");
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.setChatReaction).toHaveBeenLastCalledWith(
+      expect.objectContaining({ messageId: "message-b", state: "added" }),
+    );
+
+    await act(async () => {
+      write.resolve({ reaction: { ...like("message-a"), state: "added" }, viewerAuthorId: "author-you" });
+      await write.promise;
+    });
+    // Settled: the message's controls come back and the next click writes.
+    await waitFor(() => expect(isPending(likes[0]!)).toBe(false));
+    expect(isPending(pillA)).toBe(false);
+    await pickReaction(likes[0]!, "👍");
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(3);
+    expect(bridgeMock.setChatReaction).toHaveBeenLastCalledWith(
+      expect.objectContaining({ messageId: "message-a", state: "removed" }),
+    );
+  });
+
+  it("frees a reopened Home's controls and lets no old completion free a newer write", async () => {
+    const oldWrite = deferred<unknown>();
+    const oldListing = deferred<unknown>();
+    const newWrite = deferred<unknown>();
+    const onError = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [homeItem("A post", "message-1")] });
+    bridgeMock.setChatReaction
+      .mockImplementationOnce(() => oldWrite.promise)
+      .mockImplementationOnce(() => newWrite.promise);
+    bridgeMock.listChatReactions
+      .mockImplementationOnce(() => oldListing.promise)
+      .mockResolvedValue({ reactions: [like("message-1")], viewerAuthorId: "author-you" });
+    renderView(vi.fn(), onError);
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await pickReaction(await screen.findByTestId("chats-feed-like"), "👍");
+    await userEvent.click(screen.getByTestId("chats-feed-back"));
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+
+    // A fresh Home: nothing rests, and the server has no like yet.
+    const trigger = await screen.findByTestId("chats-feed-like");
+    expect(isPending(trigger)).toBe(false);
+    expect(screen.queryByTestId("chats-feed-reaction-pill")).toBeNull();
+    await pickReaction(trigger, "👍");
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
+    expect(isPending(trigger)).toBe(true);
+
+    // The old write settles in full. It neither repaints nor frees the new claim.
+    await act(async () => {
+      oldWrite.resolve({ reaction: { ...like("message-1"), state: "added" }, viewerAuthorId: "author-you" });
+      await oldWrite.promise;
+      oldListing.resolve({ reactions: [like("message-1"), like("message-1", "author-peer")], viewerAuthorId: "author-you" });
+      await oldListing.promise;
+    });
+    await userEvent.click(trigger);
+    expect(screen.queryByTestId("chats-feed-reaction-picker")).toBeNull();
+    expect(isPending(trigger)).toBe(true);
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
+    expect(feedPill().textContent).toContain("1");
+
+    await act(async () => {
+      newWrite.resolve({ reaction: { ...like("message-1"), state: "added" }, viewerAuthorId: "author-you" });
+      await newWrite.promise;
+    });
+    await waitFor(() => expect(isPending(trigger)).toBe(false));
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("keeps keyboard focus on the Like trigger through a pending write and never moves focus on completion", async () => {
+    const writeA = deferred<unknown>();
+    const writeB = deferred<unknown>();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [homeItem("First", "message-a"), homeItem("Second", "message-b")],
+    });
+    bridgeMock.setChatReaction
+      .mockImplementationOnce(() => writeA.promise)
+      .mockImplementationOnce(() => writeB.promise);
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [like("message-a"), like("message-b")],
+      viewerAuthorId: "author-you",
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const [likeA, likeB] = await screen.findAllByTestId("chats-feed-like");
+
+    // Picking returns focus to the trigger. Pending, it stays focusable and
+    // refuses to open the picker again, so Enter changes nothing.
+    await pickReaction(likeA!, "👍");
+    expect(document.activeElement).toBe(likeA);
+    expect(isPending(likeA!)).toBe(true);
+    expect((likeA as HTMLButtonElement).disabled).toBe(false);
+    await userEvent.keyboard("{Enter}");
+    expect(screen.queryByTestId("chats-feed-reaction-picker")).toBeNull();
+    expect(document.activeElement).toBe(likeA);
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(1);
+
+    // The user stays put: completion leaves focus where it is.
+    await act(async () => {
+      writeA.resolve({ reaction: { ...like("message-a"), state: "added" }, viewerAuthorId: "author-you" });
+      await writeA.promise;
+    });
+    await waitFor(() => expect(isPending(likeA!)).toBe(false));
+    expect(document.activeElement).toBe(likeA);
+
+    // The user moves on: completion must not pull focus back.
+    await pickReaction(likeB!, "👍");
+    expect(document.activeElement).toBe(likeB);
+    const [commentA] = screen.getAllByRole("button", { name: "Comment" });
+    commentA!.focus();
+    await act(async () => {
+      writeB.resolve({ reaction: { ...like("message-b"), state: "added" }, viewerAuthorId: "author-you" });
+      await writeB.promise;
+    });
+    await waitFor(() => expect(isPending(likeB!)).toBe(false));
+    expect(document.activeElement).toBe(commentA);
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a saved Like when a Feed page read before the write lands late", async () => {
+    const stale = deferred<unknown>();
+    bridgeMock.listPersonalChatFeed
+      .mockResolvedValueOnce({ items: [homeItem("A post", "message-1")] })
+      .mockImplementationOnce(() => stale.promise)
+      .mockResolvedValueOnce({
+        items: [{ ...homeItem("A post", "message-1"), reactions: [like("message-1")] }],
+      });
+    bridgeMock.listChatReactions.mockResolvedValue({ reactions: [like("message-1")], viewerAuthorId: "author-you" });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-feed-like");
+
+    // The refresh reads the thread first; the write is acknowledged after.
+    act(() => emitWorkspaceActivity());
+    expect(screen.getByText("Loading…")).toBeTruthy();
+    await pickReaction(screen.getByTestId("chats-feed-like"), "👍");
+    await waitFor(() => expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(1));
+    // The acknowledgement dropped the pre-write page and read it again.
+    expect(bridgeMock.listPersonalChatFeed).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => {
+      stale.resolve({ items: [homeItem("A post", "message-1")] });
+      await stale.promise;
+    });
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByText("Loading…")).toBeNull();
+  });
+
+  it("drops a delayed Home reaction failure after leaving Home", async () => {
+    const write = deferred<unknown>();
+    const onError = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [homeItem("A post", "message-1")] });
+    bridgeMock.setChatReaction.mockImplementationOnce(() => write.promise);
+    renderView(vi.fn(), onError);
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await pickReaction(await screen.findByTestId("chats-feed-like"), "👍");
+    await userEvent.click(screen.getByTestId("chats-feed-back"));
+    await waitFor(() => expect(screen.queryByTestId("chats-personal-feed")).toBeNull());
+
+    await act(async () => {
+      write.reject(wireFailure());
+      await write.promise.catch(() => undefined);
     });
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("drops a delayed Home reaction answer from another workspace", async () => {
+    const write = deferred<unknown>();
+    const onError = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [homeItem("A post", "message-1")] });
+    bridgeMock.setChatReaction.mockImplementationOnce(() => write.promise);
+    bridgeMock.listChatReactions.mockResolvedValue({ reactions: [like("message-1")], viewerAuthorId: "author-you" });
+    const view = (workspaceId: string) => (
+      <ChatsView workspaceId={workspaceId} onOpenFileChat={vi.fn()} onError={onError} />
+    );
+    const { rerender } = render(view("workspace-a"));
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await pickReaction(await screen.findByTestId("chats-feed-like"), "👍");
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+
+    rerender(view("workspace-b"));
+    await waitFor(() => expect(screen.queryByTestId("chats-personal-feed")).toBeNull());
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-feed-like");
+    expect(screen.queryByTestId("chats-feed-reaction-pill")).toBeNull();
+
+    await act(async () => {
+      write.resolve({ reaction: { ...like("message-1"), state: "added" }, viewerAuthorId: "author-you" });
+      await write.promise;
+    });
+    await waitFor(() => expect(bridgeMock.listChatReactions).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1" }));
+    expect(screen.queryByTestId("chats-feed-reaction-pill")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("keeps a pending Home Like through a Feed refresh", async () => {
+    const write = deferred<unknown>();
+    const refresh = deferred<unknown>();
+    bridgeMock.listPersonalChatFeed
+      .mockResolvedValueOnce({ items: [homeItem("A post", "message-1")] })
+      .mockImplementationOnce(() => refresh.promise);
+    bridgeMock.setChatReaction.mockImplementationOnce(() => write.promise);
+    bridgeMock.listChatReactions.mockResolvedValue({ reactions: [like("message-1")], viewerAuthorId: "author-you" });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await pickReaction(await screen.findByTestId("chats-feed-like"), "👍");
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+
+    // The refresh read the thread before the write landed, so it has no like.
+    act(() => emitWorkspaceActivity());
+    expect(bridgeMock.listPersonalChatFeed).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      refresh.resolve({ items: [homeItem("A post, edited", "message-1")] });
+      await refresh.promise;
+    });
+    expect(screen.getByText("A post, edited")).toBeTruthy();
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => {
+      write.resolve({ reaction: { ...like("message-1"), state: "added" }, viewerAuthorId: "author-you" });
+      await write.promise;
+    });
+    await waitFor(() => expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(1));
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    // Settled, so the next click is a new write.
+    await pickReaction(screen.getByTestId("chats-feed-like"), "👍");
+    expect(bridgeMock.setChatReaction).toHaveBeenLastCalledWith(
+      expect.objectContaining({ messageId: "message-1", state: "removed" }),
+    );
   });
 
   it.each([
