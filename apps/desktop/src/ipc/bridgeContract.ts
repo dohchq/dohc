@@ -673,8 +673,8 @@ export const CreateCollectionRecordPayload = z.object({
 export type CreateCollectionRecordPayload = z.infer<typeof CreateCollectionRecordPayload>;
 
 // One page of a document record's field history, newest first. Main names
-// each change's agent or automation author, and says whether this computer
-// keeps the automation run that made it. `beforeHistoryId` is the
+// each change's agent or automation author, and says whether the person can
+// open the automation run that made it without asking the server. `beforeHistoryId` is the
 // `nextBeforeHistoryId` of the page before; that is null after the oldest.
 export const RECORD_HISTORY_PAGE = 50;
 export const GetCollectionRecordHistoryPayload = z.object({
@@ -686,6 +686,10 @@ export const GetCollectionRecordHistoryPayload = z.object({
 export type GetCollectionRecordHistoryPayload = z.infer<typeof GetCollectionRecordHistoryPayload>;
 
 const RecordHistoryValue = z.object({ present: z.boolean(), value: CollectionValueSchema });
+// Whether the person reading History can open a run: "available" when this
+// computer keeps it or the owner's server showed it to them this session,
+// "unchecked" when History must ask with locateRecordHistoryRun.
+const RecordHistoryRunLocation = z.enum(["available", "unchecked"]);
 const RecordHistoryAuthor = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("agent"), name: z.string().min(1).max(4096) }),
   z.object({
@@ -694,7 +698,7 @@ const RecordHistoryAuthor = z.discriminatedUnion("kind", [
     // The automation's name when it ran, or its name now for a change recorded without its run.
     name: z.string().min(1).max(4096),
     // The run that made the change, or null for a change recorded without it.
-    run: z.object({ claimId: z.string().min(1).max(256), onThisComputer: z.boolean() }).nullable(),
+    run: z.object({ claimId: z.string().min(1).max(256), location: RecordHistoryRunLocation }).nullable(),
   }),
 ]);
 export const GetCollectionRecordHistoryResult = z.object({
@@ -4699,6 +4703,19 @@ export type GetCollectionAutomationRunResult =
   | { status: "missing" }
   | { status: "unavailable" };
 
+// Where a record's History can open a run it could not place from this
+// computer. Main asks the owner's server through the relay's owner-only
+// route; "unavailable" when neither shows the run to this person. Rejects
+// when dohc could not check.
+export const LocateRecordHistoryRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  claimId: z.string().min(1).max(256),
+}).strict();
+export type LocateRecordHistoryRunPayload = z.infer<typeof LocateRecordHistoryRunPayload>;
+export const LocateRecordHistoryRunResult = z.object({ location: z.enum(["available", "unavailable"]) });
+export type LocateRecordHistoryRunResult = z.infer<typeof LocateRecordHistoryRunResult>;
+
 // The runs the owner's self-hosted server made, newest first. Read apart
 // from this computer's, so those show without waiting on the server. Null
 // when the server has no copy of the workspace, or this computer cannot ask
@@ -6184,6 +6201,7 @@ export interface DohcDesktopBridge
   getCollectionRecordHistory(
     payload: GetCollectionRecordHistoryPayload,
   ): Promise<GetCollectionRecordHistoryResult>;
+  locateRecordHistoryRun(payload: LocateRecordHistoryRunPayload): Promise<LocateRecordHistoryRunResult>;
   readWorkspaceDatabase(
     payload: ReadWorkspaceDatabasePayload,
   ): Promise<DatabaseSnapshotResult>;

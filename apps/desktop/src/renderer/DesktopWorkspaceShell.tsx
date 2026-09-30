@@ -5670,6 +5670,8 @@ export function DesktopWorkspaceShell(props: {
             onOpenRun={recordHistory.openRun}
             onFailed={recordHistory.failed}
             onRead={recordHistory.read}
+            onRunsUnchecked={recordHistory.runsUnchecked}
+            onRunsChecked={recordHistory.runsChecked}
           />
         </Suspense>
       ) : null}

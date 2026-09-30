@@ -10,7 +10,8 @@ export type CredentialSessionRead<Credentials> =
 export class CredentialSessionCache<Credentials> {
   private credentials: Credentials | null = null;
   private generation = 0;
-  private ready: Promise<void> | null = null;
+  // The current load, resolving to why it failed, or null.
+  private ready: Promise<{ error: unknown } | null> | null = null;
 
   constructor(
     private readonly onChange: (
@@ -25,9 +26,15 @@ export class CredentialSessionCache<Credentials> {
     };
   }
 
-  warm(load: () => Promise<Credentials | null>): Promise<void> {
+  /**
+   * Loads once, or waits on the load already running. Resolves to why that
+   * load failed, so a caller can tell an unreadable store from a sign-out;
+   * null once a later load, set, or clear has replaced it.
+   */
+  warm(load: () => Promise<Credentials | null>): Promise<{ error: unknown } | null> {
     if (this.ready) return this.ready;
-    return this.beginLoad(load).catch(() => undefined);
+    this.beginLoad(load).catch(() => undefined);
+    return this.ready!;
   }
 
   refresh(load: () => Promise<Credentials | null>): Promise<void> {
@@ -51,7 +58,7 @@ export class CredentialSessionCache<Credentials> {
   set(credentials: Credentials): void {
     this.generation += 1;
     this.credentials = credentials;
-    this.ready = Promise.resolve();
+    this.ready = Promise.resolve(null);
     this.publish();
   }
 
@@ -60,7 +67,7 @@ export class CredentialSessionCache<Credentials> {
     this.credentials = null;
     // A cleared cache is an explicit signed-out state. warm() must not reload
     // a credential file that logout is still removing or failed to remove.
-    this.ready = Promise.resolve();
+    this.ready = Promise.resolve(null);
     this.publish();
   }
 
@@ -79,11 +86,11 @@ export class CredentialSessionCache<Credentials> {
       this.publish();
     })();
     const ready = attempt.then(
-      () => undefined,
-      () => {
-        if (this.generation === generation && this.ready === ready) {
-          this.ready = null;
-        }
+      () => null,
+      (error: unknown) => {
+        if (this.generation !== generation) return null;
+        if (this.ready === ready) this.ready = null;
+        return { error };
       },
     );
     this.ready = ready;

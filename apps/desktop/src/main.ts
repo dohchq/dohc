@@ -3695,9 +3695,14 @@ const automationHosts = createAutomationHosts({
 const serverRuns = createServerRuns(async (workspaceId, request) => {
   const workspace = findWorkspace(workspaceId);
   if (!workspace?.remote || workspace.shareView !== undefined) return null;
+  // A sign-in dohc could not read is not a sign-out, so the ask fails. The
+  // failure comes from the load this ask waited on, not from shared state.
+  const unreadable = await credentialSessionCache.warm(() => cloudLogin().credentials());
+  if (unreadable) throw unreadable.error;
   let credentials: CloudSessionCredentials;
+  let credentialGeneration: number;
   try {
-    ({ credentials } = await remoteForWorkspace(workspace));
+    ({ credentials, credentialGeneration } = await remoteForWorkspace(workspace));
   } catch {
     // Signed out, or signed in to another account or server.
     return null;
@@ -3716,7 +3721,11 @@ const serverRuns = createServerRuns(async (workspaceId, request) => {
         signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
       },
   );
-  return { status: response.status, body: await response.json().catch(() => undefined) };
+  return {
+    status: response.status,
+    body: await response.json().catch(() => undefined),
+    asker: { account: credentials.userId, current: () => credentialCacheGeneration === credentialGeneration },
+  };
 });
 
 // Which of the owner's computers runs a workspace's schedules, for settings
@@ -5266,8 +5275,10 @@ function registerIpcHandlers(): void {
     namedAuthorLabel: (workspaceId, author) => rosterAuthorLabel(findWorkspace(workspaceId)?.shareRoster, author),
     automationAuthor, notifyRenderer,
     // A shared view keeps no runs: its automations run on the owner's computer.
+    signedInAccount: () => cachedCredentials?.userId ?? null,
     automationRunOnThisComputer: async (workspaceId, automationId, claimId) =>
       !sharedViewOf(workspaceId) && (await collectionAutomationsOf(workspaceId)?.hasRun(automationId, claimId) ?? false),
+    serverRuns,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),

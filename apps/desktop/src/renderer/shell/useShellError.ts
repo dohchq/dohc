@@ -30,6 +30,7 @@ export type ShellErrorKind =
   | "file-recovery-unavailable"
   | "kept-files"
   | "record-history"
+  | "record-history-run"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 

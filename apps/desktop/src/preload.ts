@@ -135,6 +135,7 @@ const bridge: DohcDesktopBridge = {
   createCollectionRecord: (payload) => ipcRenderer.invoke(CHANNELS.createCollectionRecord, payload),
   getCollectionRecordHistory: (payload) =>
     ipcRenderer.invoke(CHANNELS.getCollectionRecordHistory, payload),
+  locateRecordHistoryRun: (payload) => ipcRenderer.invoke(CHANNELS.locateRecordHistoryRun, payload),
   createWorkspaceFile: (payload) =>
     ipcRenderer.invoke(CHANNELS.createWorkspaceFile, payload),
   createWorkspaceFolder: (payload) =>
