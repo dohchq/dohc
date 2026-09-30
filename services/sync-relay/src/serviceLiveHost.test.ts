@@ -263,7 +263,7 @@ it("runs bounded ordinary preparation in the configured activation lifecycle and
       if(request.method==="sync.materializePendingCursor")return {result:{materialized:true}} as never;
       if(request.method==="sync.commitCursor")return {result:{committed:true,sharingDeclined:[]}} as never;
       return {result:{status:"complete",nextCursor:1,pendingCursor:{kind:"relay",token:"pending"},hasMore:true,
-        fetched:1,applied:1,refused:0,skipped:0,conflictsOpened:0,refusals:[],sharingDeclined:[]}} as never;
+        fetched:1,applied:1,refused:0,skipped:0,conflictsOpened:0,refusals:[],sharingDeclined:[],changedPaths:[]}} as never;
     });return captured.client;
   });
   const host=await startServiceLiveHost(f);

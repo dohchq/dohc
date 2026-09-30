@@ -889,6 +889,46 @@ describe("Collection automations", () => {
       .toHaveLength(1);
   });
 
+  it("takes a claim only once the host admits a run, and says whether one ran", async () => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: sweep",
+      "    name: Sweep",
+      "    when: {schedule: day, at: '09:00', timezone: UTC}",
+      "    do: [{add-record: {Title: Swept}}]",
+    ].join("\n") } });
+    // The first turn waits until the test admits it; later ones come at once.
+    let admitFirst: (() => void) | null = null;
+    const released: boolean[] = [];
+    const turn = { release: (ran: boolean) => { released.push(ran); } };
+    const executor = w.makeExecutor({
+      admitRun: async (signal) => {
+        if (released.length > 0 || admitFirst !== null) return turn;
+        return await new Promise((resolve) => {
+          signal.addEventListener("abort", () => resolve(null), { once: true });
+          admitFirst = () => resolve(turn);
+        });
+      },
+    });
+    // Until dohc can check who edits the Collection, a claim goes back to wait: no run.
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
+    await executor.open();
+    const notice = `schedule-skipped:ws:collection:Tasks#sweep:${Date.UTC(2026, 8, 22, 9)}`;
+    expect(await executor.runNow("collection:Tasks#sweep", notice)).toBe(true);
+    const claim = [...w.claims.values()].find((candidate) => "key" in candidate.trigger && candidate.trigger.key === `run-now:${notice}`)!;
+    await vi.waitFor(() => expect(admitFirst).not.toBeNull());
+    expect(claim.state, "the claim stays pending while no run is admitted").toBe("pending");
+    admitFirst!();
+    await vi.waitFor(() => expect(released).toContain(false));
+    await executor.idle();
+    expect(released, "a claim that waits is not a run").not.toContain(true);
+    w.setRoster(OWNER);
+    executor.rosterChanged();
+    await vi.waitFor(() => expect(claim.state).toBe("done"));
+    // The turn ends once the settle is paid.
+    await vi.waitFor(() => expect(released).toContain(true));
+    await executor.dispose();
+  });
+
   it("closes after a background run and opens again", async () => {
     const w = await world({ automations: { Tasks: [
       "  - id: sweep",

@@ -580,6 +580,30 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return this.readTx(() => collectionWriteStorage.authorizeLinkCollectionWrite(this, input).authorized);
   }
 
+  automationHostRecord(workspaceId: string) {
+    return automationHostStorage.automationHostRecord(this, workspaceId);
+  }
+
+  readAutomationServerSchedules(workspaceId: string) {
+    return this.readTx(() => automationHostStorage.readAutomationServerSchedules(this, workspaceId));
+  }
+
+  beginAutomationServerCopy(input: { workspaceId: string; incarnation: number }) {
+    automationHostStorage.beginAutomationServerCopy(this, input);
+  }
+
+  recordAutomationServerStart(input: Parameters<typeof automationHostStorage.recordAutomationServerStart>[1]) {
+    automationHostStorage.recordAutomationServerStart(this, input);
+  }
+
+  recordAutomationServerTaken(input: { workspaceId: string; generation: number }) {
+    automationHostStorage.recordAutomationServerTaken(this, input);
+  }
+
+  recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }) {
+    automationHostStorage.recordAutomationServerProgress(this, input);
+  }
+
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
     return automationWorkspaceStorage.joinAutomationWorkspace(this, input);
   }

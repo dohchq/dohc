@@ -262,6 +262,20 @@ export class AutomationScheduler {
   }
 
   /**
+   * This host runs the workspace's schedules again in a copy that lost its
+   * marks, as a server does after it rebuilds its copy. A schedule with no
+   * mark starts at `throughMs`, the progress recorded before, so nothing at
+   * or before it runs again, and the due times missed since are skipped and
+   * reported.
+   */
+  resumedHere(workspaceId: string, throughMs: number): void {
+    const workspace = this.workspaces.get(workspaceId);
+    if (!workspace) return;
+    workspace.unmarkedFrom = throughMs;
+    this.wake();
+  }
+
+  /**
    * The owner moved the workspace's schedules to another computer: step
    * them here one last time. Resolves with the time through which every
    * due time ran or was skipped, or null when the step stopped short.

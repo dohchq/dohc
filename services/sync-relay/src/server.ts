@@ -288,6 +288,7 @@ export function createSyncRelayHandler({
   automationServer,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
@@ -507,10 +508,10 @@ export function createSyncRelayHandler({
     namedBrowserInvitation,
   } = createShareSummaries((shareId) => storage.getShareLabels(shareId), lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
 
-  const { respondToShareInventory, respondToWorkspaceLinkInventory } = createShareInventoryRoutes(
+  const shareInventoryRoutes = (claim: (userId: string) => Promise<void>) => createShareInventoryRoutes(
     storage,
     nowMs,
-    claimPendingShares,
+    claim,
     lookupUserEmail,
     requireShareAction,
     grantedShareSummary,
@@ -520,6 +521,11 @@ export function createSyncRelayHandler({
     publicEditRelease,
     shareSenderLabel,
   );
+  const { respondToShareInventory, respondToWorkspaceLinkInventory } = shareInventoryRoutes(claimPendingShares);
+  // The server reads the owner's shares without the owner there, so it
+  // binds none of the owner's pending invites; the roster reads only the
+  // shares the owner granted.
+  const ownerShareReads = shareInventoryRoutes(async () => undefined);
 
   const { respondToShareGrantTransition, respondToWorkspaceShareCreation } = createShareGrantRoutes(
     storage,
@@ -992,6 +998,31 @@ export function createSyncRelayHandler({
   };
   return Object.assign(handle, {
     resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
+    /**
+     * A GET of the owner's share listings, answered in process as the
+     * routes answer the owner, so the server's automations find a
+     * workspace's editors the way the owner's computers do. Only
+     * `/sync/shares` and `/sync/:workspaceId/shares/links` are served.
+     */
+    async readOwnerShares(ownerUserId: string, path: string) {
+      const request = new Request(new URL(path, "http://relay.invalid"));
+      const url = new URL(request.url);
+      let response: Response;
+      try {
+        const parts = url.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+        const actor = { userId: ownerUserId };
+        if (url.pathname === "/sync/shares") {
+          response = await ownerShareReads.respondToShareInventory(request, { route: "shares-list" }, actor);
+        } else if (parts.length === 4 && parts[0] === "sync" && parts[2] === "shares" && parts[3] === "links") {
+          response = await ownerShareReads.respondToWorkspaceLinkInventory(request, parseWorkspaceId(parts[1]), actor);
+        } else {
+          throw notFound();
+        }
+      } catch (error) {
+        response = errorResponse(error);
+      }
+      return { status: response.status, body: await response.json().catch(() => undefined) };
+    },
   });
 }
 

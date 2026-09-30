@@ -241,7 +241,12 @@ import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-no
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { provedNeverShared, readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
-import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
+import { automationPressRelay, relayPressTransport } from "./automations/relayedPresses";
+import {
+  createRelayedPressHost,
+  relayedPressFailureNotice,
+  type RelayedPressHost,
+} from "@dohc/automation-executor/relayed-presses";
 import {
   retryAutomationRun,
   retryFromFailureNotice,
@@ -3731,7 +3736,6 @@ const WM_TIMECHANGE = 0x001e;
 function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
   return createRelayedPressHost({
     workspaceId,
-    installId: localReactorFallbackId(),
     // The one automation host module decides where automations run; this
     // loop only asks it.
     host: {
@@ -3743,13 +3747,17 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
         return automationHosts.stillRuns(workspaceId) && host ? host.generation : null;
       },
     },
-    relay: async () => {
+    transport: async () => {
       await warmCredentialCache();
       const credentials = cachedCredentials;
       const entry = findWorkspace(workspaceId);
       if (!credentials?.relayUrl || !entry?.remote || shareViewIsPresent(entry.shareView)) return null;
       if (credentials.userId !== entry.remote.ownerUserId || !relayUrlsMatch(credentials.relayUrl, entry.remote.serverUrl)) return null;
-      return { baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch };
+      return relayPressTransport(
+        { baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch },
+        workspaceId,
+        localReactorFallbackId(),
+      );
     },
     heldClaim: async (press) => {
       const executor = collectionAutomationsOf(workspaceId);
@@ -3761,20 +3769,8 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
       if (!executor) throw new Error("This workspace was closed.");
       return await executor.pressRelayed(input, (claimId) => watch(claimId));
     },
-    notifyFailure: async ({ press, field, outcome, error }) => {
-      const button = (field ?? "A button").slice(0, 80);
-      const { collectionPath } = press;
-      await noticeStore().postNotice({
-        workspaceId,
-        noticeId: `automation-press:${press.hostPressId}`,
-        kind: "automation-failed",
-        title: outcome === "busy" ? `${button} did not run` : `${button} did not finish`,
-        body: (outcome === "busy"
-          ? "It was already running on this record for someone else. Press it again when that run finishes."
-          : error ?? "The automation failed.").slice(0, 500),
-        target: { path: collectionPath, record: press.recordId, automation: press.automationId },
-        recipientUserId: press.pressedBy,
-      });
+    notifyFailure: async (failure) => {
+      await noticeStore().postNotice({ workspaceId, ...relayedPressFailureNotice(failure) });
     },
     onError: (context, error) => console.warn(`[desktop] Relayed Button presses in ${workspaceId}: ${context}:`, error),
   });

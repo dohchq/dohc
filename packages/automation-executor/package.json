@@ -13,6 +13,7 @@
     "./automation-run-store": "./src/automationRunStore.ts",
     "./automation-scheduler": "./src/automationScheduler.ts",
     "./reach-verdicts": "./src/reachVerdicts.ts",
+    "./relayed-presses": "./src/relayedPresses.ts",
     "./roster-listing": "./src/rosterListing.ts",
     "./collection-automation-run": "./src/collectionAutomationRun.ts",
     "./collection-automations": "./src/collectionAutomations.ts",
