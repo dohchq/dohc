@@ -1,9 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildRelay } from "../scripts/build.mjs";
 
 // Two different clients over a real relay child process (the SYNC_RELAY_TEST_AUTH
 // bearer seam), proving the ephemeral awareness transport end to end: client A
@@ -19,6 +20,18 @@ vi.setConfig({ hookTimeout: 30_000 });
 
 let roots: string[] = [];
 let children: ChildProcess[] = [];
+let buildDirectory: string;
+
+beforeAll(async () => {
+  const output = join(packageRoot(), ".output");
+  await mkdir(output, { recursive: true });
+  buildDirectory = await mkdtemp(join(output, "presence-process-"));
+  await buildRelay(buildDirectory);
+}, 30_000);
+
+afterAll(async () => {
+  if (buildDirectory) await rm(buildDirectory, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   roots = [];
@@ -63,7 +76,7 @@ it("ignores inherited device-delivery config in a presence relay child", async (
 }, 60_000);
 
 async function spawnRelay(dbPath: string): Promise<string> {
-  const child = spawn(process.execPath, ["--import", "tsx/esm", "src/main.ts"], {
+  const child = spawn(process.execPath, [join(buildDirectory, "main.js")], {
     cwd: packageRoot(),
     env: {
       ...process.env,
@@ -84,11 +97,7 @@ async function spawnRelay(dbPath: string): Promise<string> {
     let stderr = "";
     const timeout = setTimeout(
       () => reject(new Error(`relay did not report a port\n${stdout}\n${stderr}`)),
-      // 45s, not 15s. This spawns `node --import tsx/esm src/main.ts`, which
-      // compiles on startup — under load that measured 12-15s. This is the
-      // deadline that failed the presence flakes; not any waiter budget and
-      // not the `it` budget, neither of which the failing test even reached. The
-      // enclosing budgets are 90s, which contains this.
+      // Keep the startup budget for a loaded host after compiling once per file.
       45_000,
     );
     child.stdout.on("data", (chunk) => {

@@ -27,6 +27,15 @@ function append(db: Pick<InspectionDatabase, "prepare">, payload: string, origin
     VALUES (?, 'origin', ?, 'opaque.future.kind', ?, 1)`).run(workspaceId, originSeq, payload);
 }
 
+function arrangeLog(f: Awaited<ReturnType<typeof fixture>>, count: number, payload: (index: number) => string): void {
+  (f.storage as StorageContext).tx(() => {
+    const insert = f.db.prepare(`INSERT INTO sync_relay_log
+      (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
+      VALUES ('w', 'origin', ?, 'opaque.future.kind', ?, 1)`);
+    for (let index = 0; index < count; index++) insert.run(index, payload(index));
+  });
+}
+
 function addRetainedInventory(f: Awaited<ReturnType<typeof fixture>>) {
   const roots = Array.from({ length: 17 }, (_, index) => `9${index.toString(16).padStart(63, "0")}`);
   for (const sha of roots) f.put(sha);
@@ -101,7 +110,7 @@ it("rechecks external log writes and fresh replacement after discovery yields", 
   const replacement = "e".repeat(64);
   const existingRoot = "d".repeat(64);
   for (const sha of [hash, replacement, orphan, existingRoot]) f.put(sha);
-  for (let index = 0; index < 64; index++) append(f.db, index === 0 ? JSON.stringify(existingRoot) : "{}", index);
+  arrangeLog(f, 64, index => index === 0 ? JSON.stringify(existingRoot) : "{}");
   const external = inspectDatabase(storagePath(f.storage), { foreignKeys: true });
   let changed = false;
   const change = new Promise<void>((resolve, reject) => setImmediate(() => {
@@ -178,9 +187,7 @@ it("retains a late-page root and a reference committed between deletion chunks",
   for (const sha of hashes) f.put(sha);
   f.put(hash);
   f.put(orphan);
-  for (let index = 0; index < 96; index++) {
-    append(f.db, JSON.stringify({ value: index === 95 ? hash : "no root" }), index);
-  }
+  arrangeLog(f, 96, index => JSON.stringify({ value: index === 95 ? hash : "no root" }));
   const external = inspectDatabase(storagePath(f.storage), { foreignKeys: true });
   const context = f.storage as StorageContext;
   const originalTx = context.tx.bind(context);
@@ -201,7 +208,7 @@ it("finishes discovery while a writer appends a full page at each yield", async 
   addRetainedInventory(f);
   const existingRoots = ["a".repeat(64), "b".repeat(64)];
   for (const sha of [hash, orphan, ...existingRoots]) f.put(sha);
-  for (let index = 0; index < 32; index++) append(f.db, index === 0 ? JSON.stringify(existingRoots) : "{}", index);
+  arrangeLog(f, 32, index => index === 0 ? JSON.stringify(existingRoots) : "{}");
   const external = inspectDatabase(storagePath(f.storage), { foreignKeys: true });
   let appendedPages = 0;
   let handle: NodeJS.Immediate;
@@ -248,7 +255,7 @@ it("does not delete after a partial locked log scan fails", async () => {
   addRetainedInventory(f);
   const hashes = [hash, orphan, "a".repeat(64), "b".repeat(64)];
   for (const sha of hashes) f.put(sha);
-  for (let index = 0; index < 96; index++) append(f.db, "{}", index);
+  arrangeLog(f, 96, () => "{}");
   const context = f.storage as StorageContext;
   const originalTx = context.tx.bind(context);
   let inWriter = false;

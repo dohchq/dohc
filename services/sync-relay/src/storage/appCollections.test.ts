@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fork, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { backup, DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildRelayFixture } from "../../scripts/build.mjs";
 import { parseAppPublicationCandidate, APP_COLLECTION_RESPONSE_BYTES, type AppPublicationCandidate, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import { openSyncRelayStorage } from "../storage";
@@ -21,6 +22,17 @@ const hash = (value:string|Uint8Array) => createHash("sha256").update(value).dig
 const limits = {maxFiles:10,maxMetadataBytes:16_384,maxBundleBytes:4096};
 const cleanups:(()=>void)[]=[];
 const children=new Map<ChildProcess,Promise<void>>();
+let writerDirectory: string, writerEntry: string;
+beforeAll(async () => {
+  const output = fileURLToPath(new URL("../../.output", import.meta.url));
+  await mkdir(output, { recursive: true });
+  writerDirectory = await mkdtemp(join(output, "collection-writer-"));
+  writerEntry = join(writerDirectory, "writer.mjs");
+  await buildRelayFixture(fileURLToPath(new URL("../testing/appCollectionWriter.ts", import.meta.url)), writerEntry);
+}, 30_000);
+afterAll(async () => {
+  if (writerDirectory) await rm(writerDirectory, { recursive: true, force: true });
+});
 afterEach(async()=>{
   vi.restoreAllMocks();
   for(const [child,exited] of children){if(child.exitCode===null && child.signalCode===null) child.kill();await exited;children.delete(child);}
@@ -156,8 +168,7 @@ it("does not activate a public response route",async()=>{
 });
 
 async function writer(path:string) {
-  const loader=pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
-  const child=fork(fileURLToPath(new URL("../testing/appCollectionWriter.ts",import.meta.url)),[path],{execArgv:["--import",loader],stdio:["ignore","ignore","pipe","ipc"]});
+  const child=fork(writerEntry,[path],{execArgv:[],stdio:["ignore","ignore","pipe","ipc"]});
   children.set(child,new Promise(resolve=>child.once("close",()=>resolve())));
   let errors="";child.stderr!.on("data",data=>{errors+=data.toString();});
   await new Promise<void>((resolve,reject)=>{
