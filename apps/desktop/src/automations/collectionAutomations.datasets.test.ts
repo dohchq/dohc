@@ -1707,7 +1707,7 @@ ${step}`;
     const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS, roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
     await f.writeAutomations(markPaid(settle));
     await f.executor.open();
-    const reason = "Only you can use invoices.settle in Budget, and ana@dohc.test can also edit these automations.";
+    const reason = "Only you can use Settle in Budget, and ana@dohc.test can also edit these automations.";
     expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ reach: { kind: "checked", steps: expect.arrayContaining([{ verdict: "stopped", reason }]) } }] });
     const { id: invoice } = await f.create({});
     const described = owner(f);
@@ -2846,7 +2846,7 @@ describe("code steps on a dataset", () => {
     const { id: invoice } = await f.create({});
     await f.edit(invoice, { [PAID]: true });
     await f.until(() => f.claims()[0]?.state === "failed");
-    expect(f.claims()[0]).toMatchObject({ error: "ana@dohc.test has no grant to use invoices.create in Budget." });
+    expect(f.claims()[0]).toMatchObject({ error: "ana@dohc.test has no grant to use Create in Budget." });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     await f.executor.dispose();
   });
@@ -3299,7 +3299,7 @@ it.each([false, true])("invokes and reverses another authored dataset through th
   expect((await f.record(source.id))?.values[STATUS]).toBe("Open");
   f.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [{ grantId: "source-editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Budget"], access: "edit", versionId: null }, channel: null }] });
   expect(await f.executor.undo({ deletes: null, automationId: AUTOMATION, claimId: f.claims()[0]!.claimId }, async () => undefined))
-    .toMatchObject({ status: "refused", reason: expect.stringContaining("invoices.release in Other") });
+    .toMatchObject({ status: "refused", reason: expect.stringContaining("Release in Other") });
   expect((await other.rows()).result).toMatchObject({ rows: [{ values: { [STATUS]: "On hold" } }] });
   f.setRoster(OWNER);
   expect(await f.executor.undo({ deletes: null, automationId: AUTOMATION, claimId: f.claims()[0]!.claimId }, async () => undefined))

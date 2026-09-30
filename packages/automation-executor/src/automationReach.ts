@@ -1,6 +1,7 @@
 import { isSharedWithMePath, stripWindowsAliasSuffix, validateUserMaterializePath } from "@dohc/workspace-core";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
+import { datasetOperationLabel } from "./datasetOperationLabel";
 
 // The reach check (ADR 0012). An automation belongs to its Collection, and
 // anyone who can edit its definition can change it. So a step may reach only
@@ -104,7 +105,7 @@ export type ReachStep = (
   // operations. File Edit on a dataset grants no record access: every other
   // editor must hold a current data grant that lists the operation, and an
   // operation only the owner can use needs the owner to be the only editor.
-  | { kind: "dataset-operation"; collection: ReachCollection; datasetId: string; operation: ReachDatasetOperation; grants: ReachDatasetGrants }
+  | { kind: "dataset-operation"; collection: ReachCollection; datasetId: string; operation: ReachDatasetOperation; operations: readonly { label: string }[]; grants: ReachDatasetGrants }
   // A dataset field an automation's formulas may see: only while every other
   // editor holds a data grant on a read that shows it. A stopped field is
   // hidden from formulas; it does not stop the run.
@@ -361,11 +362,12 @@ function checkOwnerStep(
       const other = editors[0];
       if (other === undefined) return ALLOWED;
       const { operation, collection: target } = step;
+      const label = datasetOperationLabel(operation, step.operations);
       if (operation.access === "owner") {
-        return stop(`Only you can use ${operation.name} in ${target.name}, and ${nameOf(other)} can also edit these automations.`, nameOf(other));
+        return stop(`Only you can use ${label} in ${target.name}, and ${nameOf(other)} can also edit these automations.`, nameOf(other));
       }
       const blocked = editors.find((person) => !holdsDatasetGrant(person, step.grants, (operationIds) => operationIds.includes(operation.operationId)));
-      return blocked ? stop(`${nameOf(blocked)} has no grant to use ${operation.name} in ${target.name}.`, nameOf(blocked)) : ALLOWED;
+      return blocked ? stop(`${nameOf(blocked)} has no grant to use ${label} in ${target.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "dataset-field": {
       const { field, reads, collection: target } = step;

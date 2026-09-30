@@ -141,7 +141,7 @@ export async function automationUndoReach(
     }
     for (const operation of target.approved.definition.operations) {
       if (!expected.operations.has(operation.operationId)) continue;
-      reach.push({ kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, grants: target.grants, operation });
+      reach.push({ kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, operations: target.approved.definition.operations, grants: target.grants, operation });
     }
   }
   return reach;

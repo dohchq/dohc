@@ -263,13 +263,13 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
           operations.push(operation);
         }
         authorized.set(request, { table, operation: operations[0]!, ...(operations[1] === undefined ? {} : { reader: operations[1] }) });
-        for (const operation of operations) addReach(request.ordinal, { kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, grants, operation });
+        for (const operation of operations) addReach(request.ordinal, { kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, operations: target.approved.definition.operations, grants, operation });
         for (const operation of operations) if (operation.kind === "read") {
           fieldsRead.push(...operation.fieldIds.map((fieldId) => datasetFieldKey(target.approved.datasetId, table.tableId, fieldId)));
         }
       } catch (error) {
         // Schema errors disclose nothing until every editor can use the destination's operations.
-        const schema = target.approved.definition.operations.map((operation): Extract<ReachStep, { kind: "dataset-operation" }> => ({ kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, grants, operation }));
+        const schema = target.approved.definition.operations.map((operation): Extract<ReachStep, { kind: "dataset-operation" }> => ({ kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, operations: target.approved.definition.operations, grants, operation }));
         const allowed = schema.length > 0 && checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: schema }).every((verdict) => verdict.allowed) &&
           (automation.when.kind !== "button" || schema.every((step) => personHoldsOperation(currentRoster, source.personId, step, deps.localPersonId?.())));
         if (allowed) for (const reach of schema) addReach(request.ordinal, reach);

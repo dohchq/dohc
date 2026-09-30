@@ -7,6 +7,7 @@ import type { Automation } from "@dohc/workspace-contracts/automations";
 import { chatReachStepsOf, datasetFindOf, operationsOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
 import type { ChatDirectory } from "./automationChat";
 import { checkAutomationReach, datasetFieldKey, type ReachCollection, type ReachDatasetGrants, type ReachRoster, type ReachStep } from "./automationReach";
+import { datasetOperationLabel } from "./datasetOperationLabel";
 
 // How a dataset Collection's automation maps onto the dataset's approved
 // operations. A dataset changes only through them, so each step names one:
@@ -433,8 +434,8 @@ export function datasetIrreversibleActions(automation: Automation, definition: D
     const action = definition.operations.find((operation) => operation.name === step.operation && operation.kind === "action");
     if (action !== undefined && action.reversedBy === undefined) actions.set(action.name, action);
   }
-  const shared = (label: string) => definition.operations.filter((operation) => operation.kind === "action" && operation.label === label).length > 1;
-  return [...actions.values()].map((action) => ({ name: action.name, label: shared(action.label) ? `${action.label} (${action.name})` : action.label }));
+  const candidates = definition.operations.filter((operation) => operation.kind === "action");
+  return [...actions.values()].map((action) => ({ name: action.name, label: datasetOperationLabel(action, candidates) }));
 }
 
 /** The table and Button field a button automation's trigger names in the rules, or null. */
@@ -485,7 +486,7 @@ export function datasetReachSteps(
   const invokedReads = operations.filter((operation) => operation.kind === "read");
   return [
     ...chatReachStepsOf(automation, chat),
-    ...operations.map((operation): ReachStep => ({ kind: "dataset-operation", collection, datasetId: definition.datasetId, grants, operation: reach(operation) })),
+    ...operations.map((operation): ReachStep => ({ kind: "dataset-operation", collection, datasetId: definition.datasetId, operations: definition.operations, grants, operation: reach(operation) })),
     ...[...tables.values()].flatMap((own) => own.fields.flatMap((field): ReachStep[] => field.type === "button" ||
       (!ownCollection && !invokedReads.some((read) => read.tableId === own.tableId && read.fieldIds.includes(field.fieldId))) ? [] : [{
       kind: "dataset-field", collection, datasetId: definition.datasetId, tableId: own.tableId, grants, field: { fieldId: field.fieldId, name: field.name },
@@ -512,7 +513,7 @@ export function datasetUndoDeletes(
   const verdicts = checkAutomationReach(roster, {
     id: "", collection, codeFiles,
     steps: deletes.map((operation): ReachStep => ({
-      kind: "dataset-operation", collection, datasetId: definition.datasetId, grants,
+      kind: "dataset-operation", collection, datasetId: definition.datasetId, operations: definition.operations, grants,
       operation: { operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access },
     })),
   });
