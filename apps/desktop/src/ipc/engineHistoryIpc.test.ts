@@ -50,6 +50,30 @@ describe("listEngineMomentsForIpc", () => {
     });
   });
 
+  it("preserves every author through list response validation", async () => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    const authors: NonNullable<VersionedTextMoment["authors"]> = [
+      {kind: "human", humanId: "ada", onBehalfOf: "ada"},
+      {kind: "agent", agentId: "agent"},
+      {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1},
+      {kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1},
+      {kind: "link", grantId: "grant", grantGeneration: 1, principalId: "holder"},
+      {kind: "public", principalId: "public", grantId: "grant"},
+    ];
+    const response = await listEngineMomentsForIpc(async () => ({
+      moments: [{...detail.moment, authors, momentOrder: 1, protected: false}],
+      nextBeforeMomentOrder: null,
+      latestMomentOrder: 1,
+      activeVersionId: "main",
+      protectedTruncated: false,
+    }), names);
+    if (!("moments" in response)) throw new Error("Expected ready history");
+    expect(response.moments[0]?.authors).toEqual(authors);
+    expect(response.moments[0]).not.toHaveProperty("namedAuthor");
+    expect(response.moments[0]).not.toHaveProperty("automationAuthor");
+  });
+
   it("does not reclassify an unknown daemon failure", async () => {
     const unknown = new DaemonRefusalError(
       {
@@ -111,18 +135,33 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   it("omits an agent owner label when its principal was not declared", () => {
     const detail = detailWith({before: null, after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
-    detail.moment.author = {kind: "agent", agentId: "agent"};
+    detail.moment.authors = [{kind: "agent", agentId: "agent"}];
     const record = engineMomentDetailForIpc(detail, names);
     expect(record).not.toHaveProperty("agentAuthorName");
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+  });
+  it("names no single author for a moment with several", () => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    detail.moment.authors = [
+      {kind: "agent", agentId: "agent", onBehalfOf: "local"},
+      {kind: "human", humanId: "ada"},
+    ];
+    const agentNamer = vi.fn(names.agent);
+    const record = engineMomentDetailForIpc(detail, { ...names, agent: agentNamer });
+    expect(record).not.toHaveProperty("agentAuthorName");
+    expect(agentNamer).not.toHaveBeenCalled();
+    expect(record.authors).toEqual(detail.moment.authors);
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
   it("preserves the public author without invoking the agent name resolver", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
-    detail.moment.author = {kind: "public", principalId: "holder-2", grantId: "grant-1"};
+    const author = {kind: "public", principalId: "holder-2", grantId: "grant-1"} as const;
+    detail.moment.authors = [author];
     const agentNamer = vi.fn(names.agent);
     const record = engineMomentDetailForIpc(detail, { ...names, agent: agentNamer });
-    expect(record.publicAuthor).toEqual(detail.moment.author);
+    expect(record.publicAuthor).toEqual(author);
     expect(record.agentAuthorName).toBeUndefined();
     expect(agentNamer).not.toHaveBeenCalled();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
@@ -130,19 +169,19 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   it("names an automation author as main reads it, and nothing else", () => {
     const detail = detailWith({before: null, after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
-    detail.moment.author = {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1};
+    detail.moment.authors = [{kind: "automation", automationId: "collection:Tasks#stamp", depth: 1}];
     const record = engineMomentDetailForIpc(detail, names);
     expect(record.automationAuthor).toEqual({ name: "Named collection:Tasks#stamp", collection: "Tasks" });
     expect(record.agentAuthorName).toBeUndefined();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
     // An id outside the Collection namespace keeps the moment's origin label.
-    detail.moment.author = {kind: "automation", automationId: "other:tools/stamp", onBehalfOf: "local", depth: 1};
+    detail.moment.authors = [{kind: "automation", automationId: "other:tools/stamp", onBehalfOf: "local", depth: 1}];
     expect(engineMomentDetailForIpc(detail, names)).not.toHaveProperty("automationAuthor");
   });
   it("names a person the owner shared with as main reads them from the roster", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
-    detail.moment.author = {kind: "named", userId: "ana", grantId: "grant-1", grantGeneration: 1};
+    detail.moment.authors = [{kind: "named", userId: "ana", grantId: "grant-1", grantGeneration: 1}];
     const record = engineMomentDetailForIpc(detail, names);
     expect(record.namedAuthor).toEqual({ userId: "ana", label: "ana@example.com (Edit)" });
     expect(record.agentAuthorName).toBeUndefined();
@@ -153,7 +192,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
     const author = {kind: "link", grantId: "grant-1", grantGeneration: 2, principalId: "holder-1"} as const;
-    detail.moment.author = author;
+    detail.moment.authors = [author];
     const record = engineMomentDetailForIpc(detail, names);
     expect(record.linkAuthor).toEqual(author);
     expect(record.namedAuthor).toBeUndefined();

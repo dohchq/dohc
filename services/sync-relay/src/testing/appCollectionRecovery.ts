@@ -105,7 +105,7 @@ if (phase === "prepare") {
   const f = json("fixture.json"), native = json("native-restored.json");
   const accepted = f.envelopes[1];
   assert.deepEqual(native, {momentId: f.receipt.momentId, objectId: f.receipt.objectId,
-    text: accepted.text, author: accepted.payload.author, importedCount: 1, momentCount: 1});
+    text: accepted.text, authors: accepted.payload.authors, importedCount: 1, momentCount: 1});
   replaceVolume("accepted.sqlite", ".original");
   const {storage} = openRelayDeployment(configPath);
   try {

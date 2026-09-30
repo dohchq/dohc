@@ -2365,7 +2365,7 @@ fn an_agents_moment_author_carries_its_runs_depth() {
         let author =
             moment_author_json(Some("dohc-chat-runner"), Some(&attribution)).expect("author");
         let named: serde_json::Value = serde_json::from_str(&author).expect("author JSON");
-        assert_eq!(named.get("depth").is_some(), depth > 0, "{author}");
+        assert_eq!(named[0].get("depth").is_some(), depth > 0, "{author}");
         assert_eq!(
             moment_author_attribution(Some(&author)),
             (Some("dohc-chat-runner".to_owned()), Some(attribution))

@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod author_coverage;
 pub mod canonical_json;
 mod doc_cache;
 pub mod durable;
@@ -131,11 +132,9 @@ fn check_identifier(value: &str, reason: &'static str) -> Result<(), CollabError
             reason: reason.to_owned(),
         });
     }
-    // Reject NUL and other control characters: the settle job id and payload
-    // fingerprints are NUL-delimited (`"{ws}\0{ver}\0{obj}\0…"`), so a NUL (or
-    // other control char) in a coordinate could forge a collision across
-    // distinct keys. Identifiers are opaque handles, never control bytes.
-    if value.bytes().any(|b| b.is_ascii_control()) {
+    // Coordinates retain their ASCII-control restriction. NUL would collide
+    // with the delimiters in settlement job ids and payload fingerprints.
+    if value.bytes().any(|byte| byte.is_ascii_control()) {
         return Err(CollabError::InvalidIdentifier {
             reason: reason.to_owned(),
         });
@@ -144,8 +143,36 @@ fn check_identifier(value: &str, reason: &'static str) -> Result<(), CollabError
 }
 
 pub(crate) fn validate_actor_origin_id(value: &str) -> Result<(), CollabError> {
-    check_identifier(
-        value,
-        "actor_origin_id must be non-empty, bounded, and contain no control bytes",
-    )
+    // Locally admitted authors appear in History and must contain no controls.
+    if value.is_empty()
+        || value.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "actor_origin_id must be non-empty, bounded, and contain no control characters"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod identifier_tests {
+    use super::DocKey;
+
+    #[test]
+    fn coordinates_preserve_c1_controls_but_refuse_ascii_controls() {
+        for code in 0x80..=0x9f {
+            let coordinate = format!("id{}", char::from_u32(code).unwrap());
+            assert!(DocKey::new(&coordinate, "main", "object").is_ok());
+            assert!(DocKey::new("workspace", &coordinate, "object").is_ok());
+            assert!(DocKey::new("workspace", "main", &coordinate).is_ok());
+        }
+        for control in ['\0', '\n', '\u{007f}'] {
+            let coordinate = format!("id{control}");
+            assert!(DocKey::new(&coordinate, "main", "object").is_err());
+            assert!(DocKey::new("workspace", &coordinate, "object").is_err());
+            assert!(DocKey::new("workspace", "main", &coordinate).is_err());
+        }
+    }
 }

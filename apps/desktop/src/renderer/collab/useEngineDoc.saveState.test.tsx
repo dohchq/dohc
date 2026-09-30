@@ -11,6 +11,7 @@ import {
 } from "../orphanedDrafts";
 import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { useEngineDoc } from "./useEngineDoc";
+import { useAuthorCapacityNotice } from "./useAuthorCapacityNotice";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 
@@ -22,6 +23,7 @@ function Harness(props: {
   enabled?: boolean;
   kind?: "richdoc" | "scene";
   compactDraft?: boolean;
+  reportError?: Parameters<typeof useAuthorCapacityNotice>[0]["reportError"];
 }) {
   const sceneVersion = useRef(1);
   const [retryKey, setRetryKey] = useState(0);
@@ -32,6 +34,11 @@ function Harness(props: {
     enabled: props.enabled ?? true,
     kind: props.kind,
     retryKey,
+  });
+  useAuthorCapacityNotice({
+    workspaceId: props.workspaceId, path: props.path,
+    authorCapacity: engine.authorCapacity, saveState: engine.saveState,
+    reportError: props.reportError, retry: () => setRetryKey((n) => n + 1),
   });
   if (engine.doc !== null) lastBoundDoc = engine.doc;
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
@@ -1227,4 +1234,30 @@ it("degrades to not-engine-backed on a bridge without the save-state channel, in
     expect(screen.getByTestId("available").textContent).toBe("false"),
   );
   expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
+
+it("reports a capacity refusal once with a guarded retry and keeps the edit", async () => {
+  const reportError = vi.fn();
+  const view = render(<Harness workspaceId="ws-1" path="notes/a.md" reportError={reportError} />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  harness.emit("error", 1, undefined, true);
+  expect(screen.getByTestId("save-error").textContent).toContain("too many authors have unsaved edits");
+  expect(reportError).toHaveBeenCalledTimes(1);
+  const [message, error, retry] = reportError.mock.calls[0]!;
+  expect(message).toContain("notes/a.md");
+  expect(error).toBeInstanceOf(Error);
+  expect(retry).toBeTypeOf("function");
+  harness.emit("error", 1, undefined, true);
+  expect(reportError).toHaveBeenCalledTimes(1);
+  const before = lastBoundDoc!.getText("plainText").toString();
+  await act(async () => retry());
+  await waitFor(() => expect(harness.openCount()).toBe(2));
+  expect(lastBoundDoc!.getText("plainText").toString()).toBe(before);
+  view.rerender(<Harness workspaceId="ws-2" path="notes/b.md" reportError={reportError} />);
+  await waitFor(() => expect(harness.openCount()).toBe(3));
+  act(() => retry());
+  expect(harness.openCount()).toBe(3);
 });

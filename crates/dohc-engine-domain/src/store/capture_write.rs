@@ -2072,7 +2072,7 @@ mod tests {
             metadata_origin: "capture".to_owned(),
             metadata_summary: Some("Captured test file".to_owned()),
             metadata_correlation_id: Some("capture-pass-1".to_owned()),
-            author_json: Some(r#"{"kind":"capture-test"}"#.to_owned()),
+            author_json: Some(r#"[{"kind":"capture-test"}]"#.to_owned()),
             now_ms,
             request_id: None,
             claim_foreign_head: false,
@@ -2406,7 +2406,7 @@ mod tests {
                     metadata_origin: "capture".to_owned(),
                     metadata_summary: Some("Captured fresh file".to_owned()),
                     metadata_correlation_id: Some("capture-pass-1".to_owned()),
-                    author_json: Some(r#"{"kind":"capture-test"}"#.to_owned()),
+                    author_json: Some(r#"[{"kind":"capture-test"}]"#.to_owned()),
                     now_ms: 2,
                     request_id: None,
                     claim_foreign_head: false,
@@ -2632,7 +2632,7 @@ mod tests {
             correlation_kind,
             correlation,
             b"some",
-            br#"{"kind":"capture-test"}"#,
+            br#"[{"kind":"capture-test"}]"#,
             b"4",
         ]);
         assert_eq!(

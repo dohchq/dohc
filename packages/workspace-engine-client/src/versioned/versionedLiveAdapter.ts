@@ -995,11 +995,12 @@ export class VersionedLiveAdapter {
     return inputs;
   }
 
-  async checkMove(input: { workspaceId: string; versionId: string; path: string }): Promise<void> {
+  async checkMove(input: { workspaceId: string; versionId: string; path: string; author?: WriteAuthor }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     await this.request(VERSIONED_METHOD.textCheckMove, {
       versionId: input.versionId,
       path: input.path,
+      ...(input.author ? { author: input.author } : {}),
     });
   }
 

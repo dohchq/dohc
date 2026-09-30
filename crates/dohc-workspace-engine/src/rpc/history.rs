@@ -109,10 +109,10 @@ pub(super) fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         "metadataOrigin": moment.metadata_origin,
         "metadataSummary": moment.metadata_summary,
         "metadataCorrelationId": moment.metadata_correlation_id,
-        // PARSED author (TS momentAuthorFromRow parity): absent column =
-        // actor-neutral; unparseable JSON surfaces as an explicit corrupt
-        // marker, never silently dropped and never trusted raw.
-        "author": moment.author_json.as_deref().map(parsed_moment_author),
+        // PARSED authors: absent column = actor-neutral; an entry that does
+        // not parse surfaces as an explicit corrupt marker, never silently
+        // dropped and never trusted raw.
+        "authors": moment.author_json.as_deref().map(parsed_moment_authors),
         "syncRecordOnly": moment.sync_record_only,
         // Hydrated payload text (momentSelectSql parity), each body under
         // the same self-describing in-band cap as every content read.
@@ -165,15 +165,23 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
     })
 }
 
+/// A moment's stored author list, entry by entry. A value that is not a
+/// nonempty list reads as one corrupt entry.
+fn parsed_moment_authors(raw: &str) -> Value {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Array(authors)) if !authors.is_empty() => {
+            Value::Array(authors.into_iter().map(parsed_moment_author).collect())
+        }
+        _ => json!([{ "corrupt": true }]),
+    }
+}
+
 /// Fail-closed author parsing (parity with the TS wire `MomentAuthorSchema`):
 /// only a supported author shape renders as an author. Anything
-/// else, such as bad JSON or a hand-edited shape, surfaces as an explicit
-/// corrupt marker, never a valid-looking attribution.
-fn parsed_moment_author(raw: &str) -> Value {
+/// else, such as a hand-edited shape, surfaces as an explicit corrupt
+/// marker, never a valid-looking attribution.
+fn parsed_moment_author(value: Value) -> Value {
     let corrupt = || json!({ "corrupt": true });
-    let Ok(value) = serde_json::from_str::<Value>(raw) else {
-        return corrupt();
-    };
     let Some(object) = value.as_object() else {
         return corrupt();
     };
@@ -224,6 +232,12 @@ fn parsed_moment_author(raw: &str) -> Value {
                 .is_some_and(|depth| {
                     depth <= u64::from(dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH)
                 });
+        return if valid { value } else { corrupt() };
+    }
+    if object.get("kind").and_then(Value::as_str) == Some("human") {
+        let valid = object.len() == 2 + usize::from(object.contains_key("onBehalfOf"))
+            && bounded_ids(&["humanId"])
+            && principal_ok;
         return if valid { value } else { corrupt() };
     }
     let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
@@ -432,8 +446,56 @@ impl EngineService {
 
 #[cfg(test)]
 mod relay_author_tests {
-    use super::parsed_moment_author;
-    use serde_json::json;
+    use super::parsed_moment_authors;
+    use serde_json::{Value, json};
+
+    /// One stored author, read back as the entry history returns for it.
+    fn parsed_moment_author(raw: &str) -> Value {
+        let value: Value = serde_json::from_str(raw).expect("test author is JSON");
+        let authors = parsed_moment_authors(&json!([value]).to_string());
+        let [author] = authors.as_array().expect("a list").as_slice() else {
+            panic!("one author in, one author out: {authors}");
+        };
+        author.clone()
+    }
+
+    #[test]
+    fn reads_every_author_of_a_moment_and_refuses_a_value_that_is_not_a_list() {
+        let agent = json!({"kind":"agent", "agentId":"agent"});
+        let human = json!({"kind":"human", "humanId":"ada", "onBehalfOf":"ada"});
+        assert_eq!(
+            parsed_moment_authors(&json!([agent, human, {"kind":"agent"}]).to_string()),
+            json!([agent, human, {"corrupt":true}])
+        );
+        for stored in [agent.to_string(), "[]".to_owned(), "not json".to_owned()] {
+            assert_eq!(
+                parsed_moment_authors(&stored),
+                json!([{"corrupt":true}]),
+                "{stored}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_a_person_author_and_refuses_incomplete_or_mixed_shapes() {
+        for author in [
+            json!({"kind":"human", "humanId":"ada"}),
+            json!({"kind":"human", "humanId":"ada", "onBehalfOf":"ada"}),
+        ] {
+            assert_eq!(parsed_moment_author(&author.to_string()), author);
+        }
+        for malformed in [
+            json!({"kind":"human"}),
+            json!({"kind":"human", "humanId":""}),
+            json!({"kind":"human", "humanId":"ada", "onBehalfOf":""}),
+            json!({"kind":"human", "humanId":"ada", "agentId":"agent"}),
+        ] {
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true})
+            );
+        }
+    }
 
     #[test]
     fn preserves_declared_authors_without_inventing_a_principal() {

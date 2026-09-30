@@ -2666,6 +2666,33 @@ ALTER TABLE collection_field_history ADD COLUMN automation_name TEXT
     CHECK ((automation_name IS NULL) = (automation_claim_id IS NULL));
 ";
 
+/// Live edits keep their authors. A moment's `author_json` becomes a list
+/// with one entry per author, so each stored single author becomes a list of
+/// one; NULL stays NULL. `pending_authors_json` holds the authors compaction folded
+/// before a settle covered them. `settle_prior_update_seq` holds the
+/// boundary one unresolved settle replaced: -1 when that boundary was NULL,
+/// and NULL when no settle is unresolved.
+const V2_YDOC_LIVE_EDIT_AUTHORS_DDL: &str = "\
+ALTER TABLE ydoc_docs DROP COLUMN creator_author_json;
+ALTER TABLE ydoc_updates ADD COLUMN is_seed INTEGER NOT NULL DEFAULT 0
+    CHECK (is_seed IN (0, 1));
+UPDATE ydoc_updates SET is_seed=1 WHERE seq=1 AND EXISTS(
+    SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=ydoc_updates.workspace_id
+        AND d.version_id=ydoc_updates.version_id AND d.object_id=ydoc_updates.object_id
+        AND d.seed_source_sha256 IS NOT NULL);
+ALTER TABLE ydoc_inactive_lineages ADD COLUMN pending_authors_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(pending_authors_json) AND json_type(pending_authors_json) = 'array');
+ALTER TABLE ydoc_recovery_decisions ADD COLUMN recovery_author_json TEXT
+    CHECK (recovery_author_json IS NULL OR json_valid(recovery_author_json));
+ALTER TABLE ydoc_docs ADD COLUMN pending_authors_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(pending_authors_json) AND json_type(pending_authors_json) = 'array');
+ALTER TABLE ydoc_docs ADD COLUMN settle_prior_update_seq INTEGER
+    CHECK (settle_prior_update_seq IS NULL OR settle_prior_update_seq >= -1);
+UPDATE moments SET author_json = json_array(json(author_json))
+    WHERE author_json IS NOT NULL AND json_valid(author_json)
+      AND json_type(author_json) = 'object';
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2820,6 +2847,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 25,
         id: "v2-record-history-automation-run",
         sql: V2_RECORD_HISTORY_AUTOMATION_RUN_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 26,
+        id: "v2-ydoc-live-edit-authors",
+        sql: V2_YDOC_LIVE_EDIT_AUTHORS_DDL,
         sets_user_version: None,
     },
 ];
@@ -3179,6 +3212,10 @@ mod tests {
                 "v2-record-history-automation-run",
                 "7a31e23961f026d1e131b1473e9e6f47e867b00c40bb5090ada94d7fedf07a83",
             ),
+            (
+                "v2-ydoc-live-edit-authors",
+                "33ec61e3e1f37d0908e6e5eac829e9e5a749e2834e4ce42729716fc32fe5d938",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3196,10 +3233,8 @@ mod tests {
         let dir = tempdir();
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
-        let before = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == "v2-materialization-text-blobs")
-            .expect("materialization text blobs migration");
+        let before = migration_index("v2-materialization-text-blobs");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 24);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at, kind) VALUES ('before-upgrade', 'fingerprint', 7, 3, 'versioned')", []).unwrap();
         let binary = crate::blob::put_binary_blob(&conn, b"binary").unwrap();
@@ -3387,6 +3422,83 @@ mod tests {
             conn.execute("UPDATE sync_identity SET claim_state='unexpected'", [])
                 .is_err()
         );
+    }
+
+    /// A stored single author becomes a list of one, NULL history stays NULL,
+    /// and every lineage starts with no pending authors and no unresolved
+    /// settle.
+    #[test]
+    fn live_edit_author_migration_turns_single_authors_into_lists() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-ydoc-live-edit-authors")
+            .expect("the live edit author migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'Main', 'main', 1);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES ('ws', 'object', 1);
+             INSERT INTO blobs (sha256, byte_length, text) VALUES ('sha', 1, 'x');",
+        ).unwrap();
+        let agent = r#"{"kind":"agent","agentId":"runner","onBehalfOf":"local"}"#;
+        for (order, author) in [(1, Some(agent)), (2, None)] {
+            conn.execute(
+                "INSERT INTO moments (workspace_id, moment_order, moment_id, version_id, \
+                     object_id, path, recorded_at_ms, operation, after_blob_sha256, \
+                     before_present, metadata_origin, author_json) \
+                 VALUES ('ws', ?1, 'moment-' || ?1, 'main', 'object', 'a.md', 1, 'write', \
+                         'sha', 0, 'api', ?2)",
+                rusqlite::params![order, author],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO ydoc_docs (workspace_id, version_id, object_id, updated_at_ms, \
+                 creator_author_json) VALUES ('ws', 'main', 'object', 1, ?1)",
+            [agent],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+
+        let authors: Vec<Option<String>> = conn
+            .prepare("SELECT author_json FROM moments ORDER BY moment_order")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let list = format!("[{agent}]");
+        assert_eq!(authors, vec![Some(list.clone()), None]);
+        let doc: (String, Option<i64>) = conn
+            .query_row(
+                "SELECT pending_authors_json, settle_prior_update_seq FROM ydoc_docs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(doc, ("[]".to_owned(), None));
+        let creator_columns: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('ydoc_docs') WHERE name='creator_author_json'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(creator_columns, 0);
+        assert!(
+            conn.execute("UPDATE ydoc_docs SET pending_authors_json = '{}'", [])
+                .is_err(),
+            "pending authors are a list"
+        );
+        assert!(
+            conn.execute("UPDATE ydoc_docs SET settle_prior_update_seq = -2", [])
+                .is_err(),
+            "-1 is the only sentinel"
+        );
+        conn.execute("UPDATE ydoc_docs SET settle_prior_update_seq = -1", [])
+            .expect("-1 records a prior NULL boundary");
     }
 
     /// The shipped list is well-formed. `validate_migration_order` runs before

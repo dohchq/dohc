@@ -392,7 +392,10 @@ impl ActorHandle {
 }
 
 fn capture_agent_origin_id(author_json: Option<&str>) -> Option<String> {
-    let author = serde_json::from_str::<serde_json::Value>(author_json?).ok()?;
+    let entries = dohc_engine_domain::moment_author_entries(author_json);
+    let [author] = entries.as_slice() else {
+        return None;
+    };
     let object = author.as_object()?;
     if object.get("kind").and_then(serde_json::Value::as_str) != Some("agent") {
         return None;

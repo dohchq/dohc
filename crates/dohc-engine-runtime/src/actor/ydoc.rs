@@ -772,6 +772,48 @@ impl ActorHandle {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_settle_queued(
+        &self,
+        root_dir: PathBuf,
+        key: DocKey,
+        path: String,
+        content_kind: ContentKind,
+        expected_lineage_claim_id: Option<String>,
+        expected_head_sha: Option<String>,
+        session_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        restore_generation: Option<i64>,
+    ) -> Result<YdocSettleOutcome, RuntimeError> {
+        self.run(move |store, cache| {
+            ydoc_settle_on_store(
+                store,
+                cache,
+                &root_dir,
+                &key,
+                &path,
+                content_kind,
+                false,
+                expected_lineage_claim_id.as_deref(),
+                expected_head_sha,
+                None,
+                &session_id,
+                self_writes.as_ref(),
+                now_ms,
+                faults.as_ref(),
+                &token,
+                None,
+                None,
+                restore_generation,
+                SettlementKind::Document,
+            )
+        })
+        .await
+    }
+
     pub async fn ydoc_resync(
         &self,
         key: DocKey,
@@ -1322,7 +1364,9 @@ fn seed_scene_from_artifact_on_store(
         },
     )?;
     let seed_update = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])?;
-    let request_id = format!(
+    // Groups the asset moments in history. Not an idempotency key: archive
+    // deletes the lineage, but a request ledger row would outlive it.
+    let correlation_id = format!(
         "ydoc-scene-seed-{}",
         hex_sha256(
             format!(
@@ -1356,7 +1400,7 @@ fn seed_scene_from_artifact_on_store(
             }),
             ensure_parent_row: true,
             require_empty_lineage: true,
-            request_id: Some(&request_id),
+            is_seed: true,
             ..Default::default()
         },
         faults,
@@ -1365,14 +1409,7 @@ fn seed_scene_from_artifact_on_store(
             created_moment_ids.clear();
             // The drawing's file is the artifact this seed imported, so the
             // lineage is not ahead of it until another update lands.
-            tx.execute(
-                "UPDATE ydoc_docs SET settled_update_seq = head_update_seq \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                params![key.workspace_id, key.version_id, key.object_id],
-            )
-            .map_err(|error| CollabError::Corrupt {
-                reason: format!("scene seed settle record failed: {error}"),
-            })?;
+            dohc_engine_collab::author_coverage::advance_in(tx, key, false)?;
             let version_is_active: bool = tx
                 .query_row(
                     "SELECT ?2 = COALESCE( \
@@ -1425,7 +1462,7 @@ fn seed_scene_from_artifact_on_store(
                         moment_id: asset.moment_id.clone(),
                         metadata_origin: "ydoc".to_owned(),
                         metadata_summary: Some("Imported drawing asset".to_owned()),
-                        metadata_correlation_id: Some(request_id.clone()),
+                        metadata_correlation_id: Some(correlation_id.clone()),
                         author_json: None,
                         materialize: version_is_active.then_some(Preimage::Absent),
                         now_ms,
@@ -1558,6 +1595,8 @@ pub(super) fn ydoc_open_state_on_store(
         // actor can run any post-transaction hook.
         doc_cache.remove(&key);
         let cleared = store.write_with(&NoFaults, |tx| {
+            dohc_engine_collab::author_coverage::reset_in(tx, &key, false)
+                .map_err(StorageError::persist_public)?;
             tx.execute(
                 "DELETE FROM ydoc_updates                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                 params![key.workspace_id, key.version_id, key.object_id],
@@ -1879,6 +1918,7 @@ pub(super) fn ydoc_record_update_on_store(
             ensure_parent_row: true,
             restore_generation,
             require_empty_lineage,
+            is_seed: seed_source.is_some(),
             seed_source_sha256: seed_source
                 .as_ref()
                 .map(|source| source.blob_sha256.as_str()),
@@ -1887,28 +1927,6 @@ pub(super) fn ydoc_record_update_on_store(
         faults,
         now_ms,
         |tx, outcome, update_sha| {
-            // The lineage's first update names who created it.
-            if outcome.seq == 1
-                && !outcome.deduped
-                && let Some(creator) = dohc_engine_domain::moment_author_json(
-                    actor_origin_id.as_deref(),
-                    attribution.as_ref(),
-                )
-            {
-                tx.execute(
-                    "UPDATE ydoc_docs SET creator_author_json = ?4 \
-                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                    params![
-                        journal_key.workspace_id,
-                        journal_key.version_id,
-                        journal_key.object_id,
-                        creator
-                    ],
-                )
-                .map_err(|error| {
-                    dohc_engine_collab::CollabError::Storage(StorageError::persist_public(error))
-                })?;
-            }
             dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &journal_key,
@@ -2034,6 +2052,7 @@ pub(super) fn ydoc_record_update_on_store(
             let lineage_claim_id = dohc_engine_collab::read_marker(store, key)?
                 .and_then(|marker| marker.lineage_claim_id);
             Ok(YdocAppend {
+                settlement_requested: outcome.settlement_requested,
                 outcome,
                 sharing_declined,
                 lineage_claim_id,
@@ -2044,25 +2063,6 @@ pub(super) fn ydoc_record_update_on_store(
     }
 }
 
-/// Who created a lineage: the author its first update declared, kept on the
-/// lineage so compaction cannot fold it away. The settle that creates the
-/// lineage's file records it, so a record an automation creates in a
-/// document session is added as that automation's change, at its depth.
-fn lineage_creator_json(
-    tx: &rusqlite::Transaction<'_>,
-    key: &DocKey,
-) -> Result<Option<String>, dohc_engine_domain::DomainError> {
-    tx.query_row(
-        "SELECT creator_author_json FROM ydoc_docs \
-         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-        params![key.workspace_id, key.version_id, key.object_id],
-        |row| row.get(0),
-    )
-    .optional()
-    .map(Option::flatten)
-    .map_err(|error| dohc_engine_domain::DomainError::Storage(StorageError::corrupt_public(error)))
-}
-
 /// One recorded Y.Doc append, and what its origination attempt decided.
 ///
 /// The append itself is [`AppendOutcome`]. `sharing_declined` is `Some` only
@@ -2071,6 +2071,8 @@ fn lineage_creator_json(
 /// originate stay silent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YdocAppend {
+    /// The service queues settlement after recording releases the store writer.
+    pub settlement_requested: bool,
     pub outcome: AppendOutcome,
     pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
     pub lineage_claim_id: Option<String>,
@@ -2136,25 +2138,37 @@ fn ydoc_file_holds_head(
 fn record_file_holds_head(
     store: &mut EngineStore,
     key: &DocKey,
+    verified_projection_sha: Option<&str>,
     faults: &dyn FaultInjector,
 ) -> Result<(), RuntimeError> {
-    let (head, settled): (i64, Option<i64>) = store.read_with(|conn| {
+    let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
         conn.query_row(
-            "SELECT head_update_seq, settled_update_seq FROM ydoc_docs \
+            "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]', last_settled_sha FROM ydoc_docs \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![key.workspace_id, key.version_id, key.object_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(StorageError::persist_public)
     })?;
-    if settled == Some(head) {
+    if settled == Some(head)
+        && pending_empty
+        && verified_projection_sha.is_none_or(|sha| last_sha.as_deref() == Some(sha))
+    {
         return Ok(());
     }
     let recorded = store.write_with(faults, |tx| {
+        dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+            .map_err(StorageError::persist_public)?;
         tx.execute(
-            "UPDATE ydoc_docs SET settled_update_seq = head_update_seq \
+            "UPDATE ydoc_docs SET \
+             last_settled_sha=COALESCE(?4,last_settled_sha) \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            params![key.workspace_id, key.version_id, key.object_id],
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                verified_projection_sha
+            ],
         )
         .map_err(StorageError::persist_public)?;
         Ok::<_, StorageError>(())
@@ -2163,6 +2177,49 @@ fn record_file_holds_head(
         return Err(RuntimeError::OperationCrashed);
     }
     Ok(())
+}
+
+fn reconcile_author_coverage(
+    store: &mut EngineStore,
+    key: &DocKey,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<bool, RuntimeError> {
+    let unresolved: bool = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs \
+            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.unwrap_or(false))
+        .map_err(StorageError::persist_public)
+    })?;
+    if !unresolved {
+        return Ok(true);
+    }
+    match store.write_with(faults, |tx| {
+        dohc_engine_collab::author_coverage::reconcile_in(tx, key, now_ms)
+    })? {
+        TxnOutcome::Committed(resolved) => Ok(resolved),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn compensate_author_coverage(
+    store: &mut EngineStore,
+    key: &DocKey,
+    moment_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    match store.write_with(faults, |tx| {
+        dohc_engine_collab::author_coverage::compensate_in(tx, key, Some(moment_id), now_ms)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
 }
 
 fn ydoc_settle_disk_preimage(
@@ -2388,6 +2445,7 @@ pub(super) fn ydoc_settle_on_store(
             }
         }
     }
+    reconcile_author_coverage(store, key, now_ms, faults)?;
     let cold_doc;
     let doc = match store.read_with(|conn| doc_cache.doc_for_consumer(conn, key))? {
         Some(cached) => cached,
@@ -2534,7 +2592,9 @@ pub(super) fn ydoc_settle_on_store(
                 }
             };
             match replay_outcome {
-                JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
+                JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
+                    reconcile_author_coverage(store, key, now_ms, faults)?;
+                }
                 JobOutcome::Blocked => {
                     // Disk did not move and the committed marker still
                     // describes the durable pending job. Preserve it so the
@@ -2545,26 +2605,24 @@ pub(super) fn ydoc_settle_on_store(
                 }
                 JobOutcome::Conflict | JobOutcome::Superseded => {
                     self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
-                    // The disk moved past the prior settle before its job
-                    // replayed: last_settled_sha no longer describes a
-                    // materialized artifact. NULL it so close(settle:false)
-                    // refuses UnsettledClose instead of pruning.
-                    let cleared = store.write_with(faults, |tx| {
-                        tx.execute(
-                            "UPDATE ydoc_docs SET last_settled_sha = NULL, settled_update_seq = NULL, updated_at_ms = ?4                              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                            params![key.workspace_id, key.version_id, key.object_id, now_ms],
-                        )
-                        .map_err(StorageError::persist_public)?;
-                        Ok::<_, StorageError>(())
-                    })?;
-                    if matches!(cleared, TxnOutcome::Crashed { .. }) {
-                        return Err(RuntimeError::OperationCrashed);
-                    }
+                    compensate_author_coverage(
+                        store,
+                        key,
+                        &current.latest_moment_id,
+                        now_ms,
+                        faults,
+                    )?;
                     return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
                 }
                 JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
             }
         }
+    }
+    if !reconcile_author_coverage(store, key, now_ms, faults)? {
+        return Err(dohc_engine_sync::SyncError::RetryableState {
+            reason: "settlement-materialization-pending",
+        }
+        .into());
     }
     let projected_sha = dohc_engine_storage::hex_sha256(
         settled_content_override
@@ -2595,14 +2653,14 @@ pub(super) fn ydoc_settle_on_store(
     // materialization job — the TS driver only settles when the projection
     // differs. Answer with the current head instead (its pending job, if
     // any, was replayed above).
-    if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+    if (dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
         == Some(projected_sha.as_str())
+        || probe_sha.as_deref() == Some(projected_sha.as_str()))
+        && matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
-        if matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
-        {
-            record_file_holds_head(store, key, faults)?;
-        }
+        // Exact projection and disk equality restore the proof a prior prune cleared.
+        record_file_holds_head(store, key, Some(&projected_sha), faults)?;
         if let Some(audit) = live_audit {
             let recorded = store.write_with(faults, |tx| {
                 let id = audit.record_in_tx(
@@ -2657,7 +2715,7 @@ pub(super) fn ydoc_settle_on_store(
         )
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
-        record_file_holds_head(store, key, faults)?;
+        record_file_holds_head(store, key, None, faults)?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
@@ -2742,13 +2800,9 @@ pub(super) fn ydoc_settle_on_store(
             "moment-ydoc-{}",
             dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
         );
-        // A settle that creates the file is the lineage creator's change.
-        // One that edits an existing file names no author, as before.
-        let author_json = if current.snapshot.is_none() {
-            lineage_creator_json(tx, key)?
-        } else {
-            None
-        };
+        let author_json = dohc_engine_collab::author_coverage::interval_in(tx, key, i64::MAX)
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?
+            .moment_json();
         let result = write_projected_text_in_tx(
             tx,
             ProjectedWriteText {
@@ -2779,33 +2833,13 @@ pub(super) fn ydoc_settle_on_store(
             .map_err(search_domain)?;
         }
         enqueue_write(tx, &result, preimage, "ydoc")?;
-        // The settle marker commits atomically with the moment: a crash can
-        // never leave a minted settlement moment whose lineage still reads
-        // as unsettled (which would force a non-idempotent re-settle — the
-        // moment fingerprint includes the per-open session_id). The prior
-        // marker values ride along so a materialization conflict below can
-        // compensate — an errored settle must not leave a marker that lets
-        // close(settle:false) prune the CRDT with no artifact on disk.
-        //
-        // settle_seq namespace: the daemon settle path owns this column and
-        // writes moment_order into it; collab settle()'s +1 generation
-        // counter is never invoked on daemon-settled lineages (C1 has no
-        // collab-settle caller). The close guard reads last_settled_sha only.
-        let prior_marker: (i64, Option<String>) = tx
-            .query_row(
-                "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                params![key.workspace_id, key.version_id, key.object_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|error| {
-                dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
-            })?;
+        // Coverage and the unresolved attempt commit with the moment and job.
         // The projection was taken from the doc at the current head, and this
         // actor is the store's only writer, so the head has not moved since.
+        dohc_engine_collab::author_coverage::advance_moment_in(tx, key, &result.moment.moment_id)
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
         tx.execute(
-            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, \
-             settled_update_seq = head_update_seq \
+            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
                 key.workspace_id,
@@ -2845,9 +2879,9 @@ pub(super) fn ydoc_settle_on_store(
                 result.deduped,
             )?;
         }
-        Ok((result, prior_marker))
+        Ok(result)
     })?;
-    let (write, prior_marker) = match outcome {
+    let write = match outcome {
         TxnOutcome::Committed(write) => write,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
@@ -2901,7 +2935,6 @@ pub(super) fn ydoc_settle_on_store(
             // retry through the idempotent no-op branch, which replays the
             // pending job. Only the in-memory suppression identity is
             // retracted; the no-op replay re-records it before the replace.
-            let _ = prior_marker;
             self_writes.retract(
                 &key.workspace_id,
                 &write.snapshot.path,
@@ -2912,7 +2945,9 @@ pub(super) fn ydoc_settle_on_store(
     };
     let mut materialized = true;
     match job_outcome {
-        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
+        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
+            reconcile_author_coverage(store, key, now_ms, faults)?;
+        }
         JobOutcome::Blocked => {
             // This is the same crash-consistent state as dying after the
             // marker/job commit: the write is durably pending and will land
@@ -2923,32 +2958,7 @@ pub(super) fn ydoc_settle_on_store(
             materialized = false;
         }
         JobOutcome::Conflict | JobOutcome::Superseded => {
-            // The target changed on disk and the job left it untouched: this
-            // settle failed, so the marker committed above must not stand —
-            // it would let close(settle:false) pass the settled check and
-            // prune the CRDT while the artifact was never materialized.
-            // (A crash before this compensation is the pending-job case: the
-            // job itself is durable and drains on reopen.)
-            let compensated = store.write_with(faults, |tx| {
-                tx.execute(
-                    "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, \
-                     settled_update_seq = NULL, updated_at_ms = ?6 \
-                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                    params![
-                        key.workspace_id,
-                        key.version_id,
-                        key.object_id,
-                        prior_marker.0,
-                        prior_marker.1,
-                        now_ms,
-                    ],
-                )
-                .map_err(StorageError::persist_public)?;
-                Ok::<_, StorageError>(())
-            })?;
-            if matches!(compensated, TxnOutcome::Crashed { .. }) {
-                return Err(RuntimeError::OperationCrashed);
-            }
+            compensate_author_coverage(store, key, &write.moment.moment_id, now_ms, faults)?;
             self_writes.retract(
                 &key.workspace_id,
                 &write.snapshot.path,
@@ -3093,6 +3103,7 @@ fn ydoc_close_session_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    reconcile_author_coverage(store, key, now_ms, faults)?;
     // Close is a lineage reset (the local-only branch prunes to the bare
     // marker — a head-rewind the cache's tuple probe cannot see if the same
     // head coordinates are later re-appended). Remove before any branch so
@@ -3551,6 +3562,207 @@ mod scene_seed_transaction_tests {
                 Ok::<_, StorageError>(())
             })
             .expect("inspect rolled-back transaction");
+    }
+
+    fn open_scene(
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        now_ms: i64,
+    ) -> YdocOpenState {
+        ydoc_open_state_on_store(
+            store,
+            cache,
+            "workspace",
+            now_ms,
+            true,
+            None,
+            "main",
+            "drawing.excalidraw",
+            Some(ContentKind::Scene),
+            true,
+            &CancellationToken::new(),
+        )
+        .expect("open scene")
+    }
+
+    /// The open returns durable scene state for the unchanged artifact head.
+    fn assert_opened_artifact(store: &EngineStore, state: &YdocOpenState, artifact: &str) {
+        assert!(state.lineage_existing, "the open returns durable state");
+        assert_eq!(state.content_kind, ContentKind::Scene);
+        assert_eq!(state.key.object_id, "drawing-object");
+        assert_eq!(
+            state.head_blob_sha256,
+            Some(hex_sha256(artifact.as_bytes()))
+        );
+        assert_eq!(
+            state
+                .owner_seed_source
+                .as_ref()
+                .map(|source| source.moment_id.as_str()),
+            Some("artifact-moment")
+        );
+        let head_moment: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT s.latest_moment_id FROM path_aliases a JOIN snapshots s \
+                     ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
+                     AND s.object_id=a.object_id \
+                     WHERE a.workspace_id='workspace' AND a.version_id='main' \
+                     AND a.path='drawing.excalidraw'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("artifact head");
+        assert_eq!(
+            head_moment, "artifact-moment",
+            "the artifact head is unchanged"
+        );
+        let persisted = dohc_engine_collab::load_persisted(store, &state.key)
+            .expect("load")
+            .expect("durable lineage");
+        assert!(ydoc_marker_has_durable_state(&persisted.marker));
+        assert_eq!(state.initial_update, persisted.doc.encode_full_state());
+        let doc = Ydoc::wire();
+        doc.apply(&state.initial_update)
+            .expect("scene state applies");
+        let folded = doc.fold_scene();
+        assert!(
+            folded
+                .elements
+                .iter()
+                .any(
+                    |element| element.get("id").and_then(serde_json::Value::as_str) == Some("rect")
+                ),
+            "the open returns the artifact's drawing"
+        );
+    }
+
+    #[test]
+    fn scene_open_after_retire_or_prune_reseeds_the_same_artifact_moment() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("database"),
+            1,
+        )
+        .expect("store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("version");
+        let key = DocKey::new("workspace", "main", "drawing-object").expect("key");
+        let artifact = r#"{"type":"excalidraw","version":2,"elements":[{"id":"rect","type":"rectangle","version":1,"versionNonce":1,"isDeleted":false,"index":"a0"}],"appState":{},"files":{}}"#;
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "workspace".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: key.object_id.clone(),
+                    path: "drawing.excalidraw".to_owned(),
+                    text: artifact.to_owned(),
+                    moment_id: "artifact-moment".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("artifact head");
+        let mut cache = WriterDocCache::new();
+        // A lost acknowledgement leaves durable state, so the next open resumes
+        // the committed seed instead of seeding again.
+        let crash = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+        let first = seed_scene_from_artifact_on_store(
+            &mut store,
+            &mut cache,
+            &key,
+            "drawing.excalidraw",
+            artifact,
+            "artifact-moment",
+            2,
+            crash.as_ref(),
+        );
+        assert!(matches!(first, Err(RuntimeError::OperationCrashed)));
+        let before = dohc_engine_collab::load_persisted(&store, &key)
+            .expect("load")
+            .expect("committed seed")
+            .doc
+            .encode_full_state();
+        let resumed = open_scene(&mut store, &mut cache, 3);
+        assert_opened_artifact(&store, &resumed, artifact);
+        assert_eq!(
+            resumed.initial_update, before,
+            "the open resumes the committed seed"
+        );
+        cache.remove(&key);
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                    dohc_engine_sync::ResultingHead::Text {
+                        path: "drawing.excalidraw",
+                        text: "outside scene edit",
+                    },
+                    None,
+                    None,
+                    3,
+                )
+            })
+            .expect("retire scene lineage");
+        assert!(
+            dohc_engine_collab::read_marker(&store, &key)
+                .expect("marker")
+                .is_none(),
+            "retire deletes the lineage row"
+        );
+        let reopened = open_scene(&mut store, &mut cache, 4);
+        assert_opened_artifact(&store, &reopened, artifact);
+        assert!(
+            !reopened.unsettled,
+            "this open seeded the lineage from its file"
+        );
+        let reseeded = reopened.initial_update;
+        assert_ne!(before, reseeded, "retire permits a fresh seed");
+        let sha = hex_sha256(artifact.as_bytes());
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET last_settled_sha=?1", [&sha])
+                    .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .expect("artifact proof");
+        let closed = dohc_engine_collab::close_session(
+            &mut store,
+            &key,
+            false,
+            Some(&dohc_engine_collab::CloseProjection {
+                sha256: sha,
+                materialized_seed_source_sha256: None,
+            }),
+            &NoFaults,
+            5,
+        )
+        .expect("close");
+        assert!(matches!(
+            closed,
+            TxnOutcome::Committed(CloseOutcome::Pruned { .. })
+        ));
+        cache.remove(&key);
+        let reopened = open_scene(&mut store, &mut cache, 6);
+        assert_opened_artifact(&store, &reopened, artifact);
+        assert!(
+            !reopened.unsettled,
+            "this open seeded the lineage from its file"
+        );
+        assert_ne!(
+            reseeded, reopened.initial_update,
+            "prune permits a fresh seed"
+        );
     }
 
     #[test]

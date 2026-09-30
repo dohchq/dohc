@@ -36,9 +36,11 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[]): 
     const op = raw as Record<string, unknown>;
     if (op.opKind !== "moment.append") continue;
     const payload = op.payload as Record<string, unknown> | null;
-    const author = payload?.author as Record<string, unknown> | null | undefined;
-    if (author == null) continue;
-    if (!CLIENT_MOMENT_AUTHOR_KINDS.has(author.kind)) throw relayError("authorship_mismatch");
+    const authors = payload?.authors;
+    if (authors == null) continue;
+    if (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
+      !author || typeof author !== "object" || !CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind)
+    )) throw relayError("authorship_mismatch");
   }
 }
 

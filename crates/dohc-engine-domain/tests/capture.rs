@@ -518,7 +518,7 @@ fn request_id_reuse_with_changed_capture_provenance_is_rejected() {
     assert!(matches!(error, DomainError::IdempotencyKeyReuseMismatch));
 
     let mut changed_author = first;
-    changed_author.author_json = Some(r#"{"name":"different-author"}"#.to_owned());
+    changed_author.author_json = Some(r#"[{"name":"different-author"}]"#.to_owned());
     changed_author.now_ms = 30;
     let error = VersionedTextStore::new(&mut store)
         .capture_ingest(&changed_author, &NO_FAULTS)

@@ -49,9 +49,9 @@ export function readOwnerAppCollectionAcceptances(storage: StorageContext, input
     const acceptances: OwnerAppCollectionAcceptance[] = [];
     let pageBytes = 0;
     const firstMoment = storage.db.prepare(`SELECT m.moment_id,m.version_id,m.path,l.origin_id,l.op_kind,
-      json_extract(l.payload_json,'$.author.kind') AS author_kind,
-      json_extract(l.payload_json,'$.author.principalId') AS public_id,
-      json_extract(l.payload_json,'$.author.grantId') AS grant_id,
+      json_extract(l.payload_json,'$.authors[0].kind') AS author_kind,
+      json_extract(l.payload_json,'$.authors[0].principalId') AS public_id,
+      json_extract(l.payload_json,'$.authors[0].grantId') AS grant_id,
       json_extract(l.payload_json,'$.operation') AS operation
       FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq=m.relay_seq AND l.workspace_id=m.workspace_id
       WHERE m.workspace_id=? AND m.object_id=? ORDER BY m.relay_seq LIMIT 1`);

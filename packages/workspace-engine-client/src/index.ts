@@ -13,6 +13,7 @@ export {
   isFileLockedRefusal,
   isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
+  isYdocAuthorCapacityRefusal,
   isWorkspaceUpdatingRefusal,
   isYdocArtifactAssetsInvalidRefusal,
   isYdocObjectChangedRefusal,

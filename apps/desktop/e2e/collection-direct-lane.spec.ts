@@ -159,7 +159,7 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
       .poll(async () => (await directPaths(relay!, ownerWorkspaceId)).sort(), { timeout: 60_000, intervals: [1_000] })
       .toEqual([AUTOMATIONS_PATH, SCHEMA_PATH]);
     const direct = (await ownerLog(relay, ownerWorkspaceId)).filter((op) => op.originId.startsWith("relay:collection-file:"));
-    expect(direct.every((op) => (op.payload.author as { kind: string; userId: string }).userId === RECIPIENT_USER)).toBe(true);
+    expect(direct.every((op) => ((op.payload.authors as Array<{ kind: string; userId: string }>)[0]!).userId === RECIPIENT_USER)).toBe(true);
     // Nothing waited for the owner's review.
     const proposals = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${ownerWorkspaceId}/proposals`);
     expect((JSON.parse(proposals.body) as { proposals: unknown[] }).proposals).toEqual([]);

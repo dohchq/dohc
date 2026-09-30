@@ -47,7 +47,7 @@ pub(crate) struct MomentAppendPayload {
     payload_after_content_kind: Option<String>,
     payload_after_byte_length: Option<i64>,
     metadata: Metadata,
-    author: Option<MomentAuthor>,
+    authors: Option<Vec<MomentAuthor>>,
     before_present: String,
     before_object_id: Option<String>,
     before_version_id: Option<String>,
@@ -104,6 +104,18 @@ enum MomentAuthor {
             skip_serializing_if = "Option::is_none"
         )]
         depth: Option<u32>,
+    },
+    #[serde(rename = "human")]
+    Human {
+        #[serde(rename = "humanId")]
+        human_id: String,
+        #[serde(
+            rename = "onBehalfOf",
+            default,
+            deserialize_with = "optional_author_principal",
+            skip_serializing_if = "Option::is_none"
+        )]
+        on_behalf_of: Option<String>,
     },
     #[serde(rename = "public")]
     Public {
@@ -317,7 +329,11 @@ pub fn apply_moment_envelope_detailed(
             })?;
         validate_payload_bounds(&payload)?;
         validate_payload(&payload)?;
-        if matches!(payload.author.as_ref(), Some(MomentAuthor::Public { .. }))
+        if payload
+            .authors
+            .iter()
+            .flatten()
+            .any(|author| matches!(author, MomentAuthor::Public { .. }))
             && !envelope.origin_id.starts_with("relay:collection-create:")
         {
             return Err(SyncError::InvalidInput {
@@ -1228,7 +1244,20 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
             .before_metadata
             .as_ref()
             .is_some_and(|metadata| !valid_replicated_origin(&metadata.origin))
-        || payload.author.as_ref().is_some_and(|author| match author {
+        || payload.authors.as_ref().is_some_and(|authors| {
+            // The relay mints a public or named author alone.
+            authors.is_empty()
+                || (authors.len() > 1
+                    && authors.iter().any(|author| {
+                        matches!(
+                            author,
+                            MomentAuthor::Public { .. }
+                                | MomentAuthor::Named { .. }
+                                | MomentAuthor::Link { .. }
+                        )
+                    }))
+        })
+        || payload.authors.iter().flatten().any(|author| match author {
             MomentAuthor::Agent {
                 agent_id,
                 on_behalf_of,
@@ -1239,6 +1268,10 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                     || on_behalf_of.as_ref().is_some_and(String::is_empty)
                     || agent_run_id.as_ref().is_some_and(String::is_empty)
             }
+            MomentAuthor::Human {
+                human_id,
+                on_behalf_of,
+            } => human_id.is_empty() || on_behalf_of.as_ref().is_some_and(String::is_empty),
             MomentAuthor::Public {
                 principal_id,
                 grant_id,
@@ -1307,12 +1340,12 @@ fn verify_direct_write_author(
     let lane_grant = envelope
         .origin_id
         .strip_prefix(COLLECTION_FILE_ORIGIN_PREFIX);
-    let (author_grant, author_keys): (Option<&str>, &[&str]) = match &payload.author {
-        Some(MomentAuthor::Named { grant_id, .. }) => (
+    let (author_grant, author_keys): (Option<&str>, &[&str]) = match payload.authors.as_deref() {
+        Some([MomentAuthor::Named { grant_id, .. }]) => (
             Some(grant_id.as_str()),
             &["kind", "userId", "grantId", "grantGeneration"],
         ),
-        Some(MomentAuthor::Link { grant_id, .. }) => (
+        Some([MomentAuthor::Link { grant_id, .. }]) => (
             Some(grant_id.as_str()),
             &["kind", "grantId", "grantGeneration", "principalId"],
         ),
@@ -1324,8 +1357,10 @@ fn verify_direct_write_author(
     if author_grant.is_some()
         && !envelope
             .payload
-            .get("author")
-            .and_then(serde_json::Value::as_object)
+            .get("authors")
+            .and_then(serde_json::Value::as_array)
+            .filter(|authors| authors.len() == 1)
+            .and_then(|authors| authors[0].as_object())
             .is_some_and(|author| {
                 author.len() == author_keys.len()
                     && author_keys.iter().all(|key| author.contains_key(*key))
@@ -1481,7 +1516,7 @@ fn validate_every_path_field(payload: &MomentAppendPayload) -> Result<(), SyncEr
         payload_after_content_kind: _,
         payload_after_byte_length: _,
         metadata: _,
-        author: _,
+        authors: _,
         before_present: _,
         before_object_id: _,
         before_version_id: _,
@@ -1930,12 +1965,12 @@ fn insert_moment(
         MomentBefore::Absent | MomentBefore::Null => (None, None, None, None, None, None, None),
     };
     let author_json = payload
-        .author
+        .authors
         .as_ref()
         .map(serde_json::to_string)
         .transpose()
         .map_err(|_| SyncError::InvalidInput {
-            reason: "moment.append author is invalid",
+            reason: "moment.append authors are invalid",
         })?;
     let payload_before_kind = payload
         .payload_before_path

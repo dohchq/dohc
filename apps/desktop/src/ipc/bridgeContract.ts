@@ -1452,6 +1452,44 @@ export type RebuildEngineStoreResult = z.infer<typeof RebuildEngineStoreResult>;
 
 const MOMENT_TEXT = engineStoredText("moment body");
 
+const EngineMomentAuthor = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("agent"),
+    agentId: z.string().min(1),
+    onBehalfOf: z.string().min(1).optional(),
+    agentRunId: z.string().min(1).optional(),
+    depth: z.number().int().positive().optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("human"),
+    humanId: z.string().min(1),
+    onBehalfOf: z.string().min(1).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("public"),
+    principalId: z.string().min(1),
+    grantId: z.string().min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal("named"),
+    userId: z.string().min(1),
+    grantId: z.string().min(1),
+    grantGeneration: z.number().int().positive(),
+  }).strict(),
+  z.object({
+    kind: z.literal("link"),
+    grantId: z.string().min(1),
+    grantGeneration: z.number().int().positive(),
+    principalId: z.string().min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal("automation"),
+    automationId: z.string().min(1),
+    onBehalfOf: z.string().min(1).optional(),
+    depth: z.number().int().nonnegative(),
+  }).strict(),
+]);
+
 export const EngineMomentRecord = z.object({
   id: OPAQUE_ID,
   versionId: OPAQUE_ID,
@@ -1459,6 +1497,7 @@ export const EngineMomentRecord = z.object({
   recordedAtMs: z.number(),
   operation: z.enum(["write", "rename", "delete"]),
   origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc"]),
+  authors: z.array(EngineMomentAuthor).min(1).optional(),
   // Present only when a dohc-tracked agent run authored the moment; main
   // resolves the configured agent name for local runs.
   agentAuthorName: z.string().min(1).max(500).optional(),
@@ -5986,6 +6025,7 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 // local edit — otherwise an in-flight settle's success would claim edits it
 // never carried.
 export const EngineYDocSaveStateEvent = z.object({
+  authorCapacity: z.boolean().optional(),
   sessionId: ENGINE_YDOC_SESSION_ID,
   state: z.enum(ENGINE_YDOC_SAVE_STATES),
   seq: z.number().int().nonnegative(),

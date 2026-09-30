@@ -264,7 +264,7 @@ describe("executeCli", () => {
       operation: "write" as const,
       path: "notes/plan.md",
       versionId: "main",
-      author: { kind: "agent" as const, agentId: "claude", onBehalfOf: "user:ice" },
+      authors: [{ kind: "agent" as const, agentId: "claude", onBehalfOf: "user:ice" }],
       fileCount: 1 as const,
     };
     const list = vi.fn(async () => ({ changes: [change], count: 1, totalAvailable: 3, hasMore: true, cursorMs: change.recordedAtMs }));

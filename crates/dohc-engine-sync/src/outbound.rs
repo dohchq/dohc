@@ -119,7 +119,7 @@ pub(crate) fn moment_append_payload_in_tx(
             },
         )
         .map_err(SyncError::corrupt)?;
-    let author = row
+    let authors = row
         .author_json
         .as_deref()
         .map(serde_json::from_str::<serde_json::Value>)
@@ -155,7 +155,7 @@ pub(crate) fn moment_append_payload_in_tx(
             "summary": row.metadata_summary,
             "correlationId": row.metadata_correlation_id,
         },
-        "author": author,
+        "authors": authors,
         "beforePresent": if row.before_present == 2 { "present" } else { "null" },
         "beforeObjectId": row.before_object_id,
         "beforeVersionId": row.before_version_id,
@@ -553,12 +553,12 @@ mod tests {
                 "summary": &metadata,
                 "correlationId": &metadata,
             },
-            "author": {
+            "authors": [{
                 "kind": "agent",
                 "agentId": &author_field,
                 "onBehalfOf": &author_field,
                 "agentRunId": &author_field,
-            },
+            }],
             "beforePresent": "present",
             "beforeObjectId": &identifier,
             "beforeVersionId": &identifier,
@@ -578,13 +578,13 @@ mod tests {
         let with_before_metadata = measured_json_len(&payload).expect("measure full payload");
         payload["beforeMetadata"] = serde_json::Value::Null;
         let without_before_metadata = measured_json_len(&payload).expect("measure trimmed payload");
-        assert_eq!(with_before_metadata, 413_587);
-        assert_eq!(without_before_metadata, 216_935);
+        assert_eq!(with_before_metadata, 413_590);
+        assert_eq!(without_before_metadata, 216_938);
         assert!(with_before_metadata > PAYLOAD_PACKING_TARGET_BYTES);
         assert!(without_before_metadata < PAYLOAD_PACKING_TARGET_BYTES);
         assert_eq!(
             PAYLOAD_PACKING_TARGET_BYTES - without_before_metadata,
-            41_113
+            41_110
         );
     }
 }

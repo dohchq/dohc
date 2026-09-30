@@ -45,6 +45,7 @@ import {
   isFileLockedRefusal,
   isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
+  isYdocAuthorCapacityRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocObjectChangedRefusal,
   isYdocUnsettledCloseRefusal,
@@ -259,7 +260,7 @@ export interface WorkspaceEngineMomentSummary {
   contentKind?: "text" | "binary";
   byteLength?: number;
   metadata: MomentMetadata;
-  author?: MomentAuthor;
+  authors?: MomentAuthor[];
   momentOrder: number;
   protected: boolean;
 }
@@ -557,7 +558,7 @@ export interface WorkspaceEngineCapture {
     // Tokens identify settles across daemon generations. Lifecycle events are
     // separate from visible state: a busy outcome still reports "settling".
     // Opening and corrective status reports claim no edits.
-    onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent) => void;
+    onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
@@ -3758,9 +3759,10 @@ export function createWorkspaceEngineCapture(
           state: EngineYDocSaveState,
           token: number,
           event: EngineYDocSaveEvent,
+          authorCapacity?: boolean,
         ): void => {
           try {
-            input.onSaveState?.(state, token, event);
+            input.onSaveState?.(state, token, event, authorCapacity);
           } catch {
             // Observer boundary: a renderer-facing status hook must never
             // re-enter the session or wedge the settle chain.
@@ -4003,7 +4005,12 @@ export function createWorkspaceEngineCapture(
           if (!(error instanceof YdocOwnerDraftPendingError)) {
             onError(`ydoc settle of ${input.path}`, error);
           }
-          reportSaveState(settleFailureSaveState(error), saveToken, "outcome");
+          reportSaveState(
+            settleFailureSaveState(error),
+            saveToken,
+            "outcome",
+            hasRefusalInCauseChain(error, isYdocAuthorCapacityRefusal),
+          );
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
@@ -5151,16 +5158,17 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("authored path change", async () => {
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);
-        const ensureAllowed = async () => {
-          for (const path of paths) {
+        const ensureAllowed = async (author?: MomentWriteAuthor) => {
+          for (const [index, path] of paths.entries()) {
             try {
-              await engine.checkMove({ workspaceId, versionId, path });
+              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}) });
             } catch (error) {
               throw liveDocumentMutationRefusal(error, path, authored.operation) ?? error;
             }
           }
         };
-        await ensureAllowed();
+        // Validate the author once before settlement or disk changes.
+        await ensureAllowed(authored.author);
         await settleAndCloseLiveYDocSessions(match, "Saved latest edits before moving or deleting the file");
         const source = paths[0];
         if (authored.operation === "move" && source !== undefined) {
@@ -6072,11 +6080,11 @@ export function createWorkspaceEngineCapture(
         const engine=await engineStore(), versionId=await activeVersionIdOf(engine);
         if(versionId!==input.versionId)return {status:"conflict" as const};
         await engine.flushCapture?.();
-        const creation=await engine.getMoment({workspaceId,momentId:input.momentId});
+        const creation=await engine.getMoment({workspaceId,momentId:input.momentId}), creator=creation?.authors?.length===1?creation.authors[0]:undefined;
         if(!creation || creation.workspaceId!==workspaceId || creation.objectId!==input.objectId || creation.versionId!==versionId ||
             creation.operation!=="write" || creation.syncRecordOnly || creation.payload.before!==null ||
             creation.path!==input.path || creation.path!==`${input.collectionPath}/${input.acceptanceId}.md` ||
-            creation.author?.kind!=="public" || creation.author.principalId!==input.publicPrincipalId || creation.author.grantId!==input.grantId) return {status:"conflict" as const};
+            creator?.kind!=="public" || creator.principalId!==input.publicPrincipalId || creator.grantId!==input.grantId) return {status:"conflict" as const};
         let page=await engine.listMoments({workspaceId,versionId,objectId:input.objectId,limit:100});
         const lastKnownPath=page.moments[0]?.path??input.path;
         let previous=page.moments.find(moment=>moment.operation==="delete" && moment.metadata.correlationId===input.requestId);

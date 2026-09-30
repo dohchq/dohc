@@ -69,7 +69,20 @@ use sha2::{Digest, Sha256};
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
-pub const MAX_AUTHOR_JSON_BYTES: usize = 10 * 1024;
+// Without control characters, quotes and backslashes take at most 2 bytes.
+// The largest live entry is a 66-byte automation skeleton + 2 * 2 * 512
+// bytes of identity fields = 2,114 bytes.
+pub const MAX_AUTHOR_ENTRY_BYTES: usize =
+    r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len()
+        + 2 * 2 * MAX_AUTHOR_FIELD_BYTES;
+const _: () = assert!(crate::MAX_CHANGE_ATTRIBUTION_DEPTH < 100);
+pub const MAX_MOMENT_AUTHORS: usize = 1_024;
+// The journal embeds authors as a JSON value, with no second string encoding.
+// 128 KiB of authors leaves 256 - 128 = 128 KiB for the moment envelope.
+// Live settlements have fixed metadata; optional beforeMetadata is shed by
+// the journal when needed. Admission measures the escaped list, including
+// array punctuation, and reserves the few bytes a known author's depth can grow.
+pub const MAX_AUTHOR_JSON_BYTES: usize = 128 * 1024;
 
 /// The in-band content cap every capped read binds into its SQL and every
 /// RPC references — one definition, so the query guard and the wire
@@ -1374,28 +1387,46 @@ pub(crate) fn validate_moment_metadata(
             observed_bytes: author_json.len(),
         });
     }
-    let Ok(author) = serde_json::from_str::<serde_json::Value>(author_json) else {
-        return Ok(());
-    };
-    let Some(author) = author.as_object() else {
-        return Ok(());
-    };
-    for field in [
-        "agentId",
-        "onBehalfOf",
-        "agentRunId",
-        "principalId",
-        "grantId",
-    ] {
-        let Some(value) = author.get(field).and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if value.len() > MAX_AUTHOR_FIELD_BYTES {
-            return Err(DomainError::PayloadTooLarge {
-                constraint: "MAX_AUTHOR_FIELD_BYTES",
-                limit_bytes: MAX_AUTHOR_FIELD_BYTES,
-                observed_bytes: value.len(),
+    // A moment records its authors as a nonempty list of objects; a moment
+    // that names none records NULL.
+    let authors = match serde_json::from_str::<serde_json::Value>(author_json) {
+        Ok(serde_json::Value::Array(authors)) if !authors.is_empty() => authors,
+        _ => {
+            return Err(DomainError::InvalidInput {
+                reason: "moment authors must be a nonempty list",
             });
+        }
+    };
+    if authors.len() > MAX_MOMENT_AUTHORS {
+        return Err(DomainError::InvalidInput {
+            reason: "moment author count exceeds its limit",
+        });
+    }
+    for author in &authors {
+        let Some(author) = author.as_object() else {
+            return Err(DomainError::InvalidInput {
+                reason: "moment authors must be a nonempty list",
+            });
+        };
+        for field in [
+            "agentId",
+            "automationId",
+            "humanId",
+            "onBehalfOf",
+            "agentRunId",
+            "principalId",
+            "grantId",
+        ] {
+            let Some(value) = author.get(field).and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if value.len() > MAX_AUTHOR_FIELD_BYTES {
+                return Err(DomainError::PayloadTooLarge {
+                    constraint: "MAX_AUTHOR_FIELD_BYTES",
+                    limit_bytes: MAX_AUTHOR_FIELD_BYTES,
+                    observed_bytes: value.len(),
+                });
+            }
         }
     }
     Ok(())

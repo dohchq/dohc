@@ -217,12 +217,20 @@ function isLiveSettlementCapacityRefusal(error: unknown): boolean {
 }
 
 // Refusals that clear on their own: a program holding the artifact, busy
-// SQLite writers, or occupied native live capacity. MEMBERSHIP of
+// SQLite writers, occupied live capacity, or pending author coverage. MEMBERSHIP of
 // that class lives here, at the protocol boundary, because three layers ask
 // the question — the settle ladder that re-arms, the journal write that must
 // be resent, and the session that must not be quarantined for one.
+export function isYdocAuthorCapacityRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "LIMIT_EXCEEDED") === "ydoc-author-capacity";
+}
+
+function isYdocSettlementPendingRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") === "settlement-materialization-pending";
+}
+
 export function isTransientEngineRefusal(error: unknown): boolean {
-  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error);
+  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error);
 }
 
 // The store refusals the desktop names and recovers from. Each is the

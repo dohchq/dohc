@@ -115,9 +115,10 @@ pub use collections::{
     index_collection_frontmatter_apply_in_tx, index_collection_record_text_in_tx,
     is_collection_record_bound_in_tx, is_record_id, list_collections,
     list_pending_collection_adoptions, mint_record_id, moment_author_attribution,
-    moment_author_json, parse_collection_schema, query_collection_records,
-    reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
-    synchronize_collection_frontmatter_index_in_tx, validate_field_value,
+    moment_author_depth, moment_author_entries, moment_author_json, moment_author_list_json,
+    parse_collection_schema, query_collection_records, reconcile_collections_in_tx,
+    set_collection_adoption_state_in_tx, synchronize_collection_frontmatter_index_in_tx,
+    validate_field_value,
 };
 pub use conflicts::{
     BINARY_COMBINED_TEXT_REFUSAL, BinaryResolveWrite, CONFLICT_METADATA_BUDGET_BYTES,
@@ -163,19 +164,19 @@ pub use secrets::{
 };
 pub use store::{
     CaptureIngestBatchContext, CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES,
-    MAX_AUTHOR_FIELD_BYTES, MAX_AUTHOR_JSON_BYTES, MAX_CAPTURE_BINARY_FILE_BYTES,
-    MAX_METADATA_FIELD_BYTES, MAX_TEXT_BYTES, ProjectedWriteText, SECRET_SEED_SENTINEL_SHA,
-    VersionedTextStore, binary_rollback_job_identity, capture_ingest_binary_in_tx,
-    capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
-    capture_ingest_in_tx, capture_ingest_with_admission_in_tx, capture_manifest_seed,
-    capture_retire_in_tx, decode_binary_rollback_job_identity, delete_text_in_tx,
-    delete_text_in_tx_checked, derive_capture_moment_id, derive_capture_object_id,
-    derive_capture_retire_moment_id, ensure_main_version_in_tx, normalize_tracked_workspace_path,
-    object_has_live_alias, rollback_compensating_moment_id, validate_addressable_plaintext_path,
-    validate_delete_input, validate_plaintext_storable_path, validate_write_input,
-    write_binary_in_tx, write_history_text_in_tx, write_projected_text_in_tx,
-    write_published_binary_in_tx, write_published_history_text_in_tx, write_published_text_in_tx,
-    write_text_in_tx,
+    MAX_AUTHOR_ENTRY_BYTES, MAX_AUTHOR_FIELD_BYTES, MAX_AUTHOR_JSON_BYTES,
+    MAX_CAPTURE_BINARY_FILE_BYTES, MAX_METADATA_FIELD_BYTES, MAX_MOMENT_AUTHORS, MAX_TEXT_BYTES,
+    ProjectedWriteText, SECRET_SEED_SENTINEL_SHA, VersionedTextStore, binary_rollback_job_identity,
+    capture_ingest_binary_in_tx, capture_ingest_binary_with_admission_in_tx,
+    capture_ingest_in_batch_with_admission_in_tx, capture_ingest_in_tx,
+    capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
+    decode_binary_rollback_job_identity, delete_text_in_tx, delete_text_in_tx_checked,
+    derive_capture_moment_id, derive_capture_object_id, derive_capture_retire_moment_id,
+    ensure_main_version_in_tx, normalize_tracked_workspace_path, object_has_live_alias,
+    rollback_compensating_moment_id, validate_addressable_plaintext_path, validate_delete_input,
+    validate_plaintext_storable_path, validate_write_input, write_binary_in_tx,
+    write_history_text_in_tx, write_projected_text_in_tx, write_published_binary_in_tx,
+    write_published_history_text_in_tx, write_published_text_in_tx, write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.

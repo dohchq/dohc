@@ -2011,7 +2011,7 @@ describe("YdocLiveAdapter", () => {
     text: string,
     options?: {
       settleDebounceMs?: number;
-      blocker?: "file-locked" | "engine-store-busy";
+      blocker?: "file-locked" | "engine-store-busy" | "settlement-materialization-pending";
     },
   ) {
     const engine = seedPlaintextEngine();
@@ -2072,6 +2072,22 @@ describe("YdocLiveAdapter", () => {
       delays: scheduler.delays,
     };
   }
+
+  it("retries materialization pending until the prior settlement finishes", async () => {
+    const {provider, blocked, refusal, settleErrors, settled, scheduler} =
+      await openAgainstABlockedSettle("typed after a pending settlement", {blocker: "settlement-materialization-pending"});
+    scheduler.fire();
+    await drain();
+    expect(settleErrors).toEqual([refusal]);
+    expect(settled).toEqual([]);
+    expect(scheduler.armed).toHaveLength(1);
+    blocked.held = false;
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({content: expect.stringContaining("typed after a pending settlement")});
+    await provider.close({settle: false});
+  });
 
   it("retries a file-locked settle on a doubling delay until the lock releases", async () => {
     // A settle refused `file-locked` leaves the write durably pending
@@ -2177,12 +2193,12 @@ describe("YdocLiveAdapter", () => {
   // `refusals` counts recordUpdate attempts, and one edit costs two of them:
   // the write, then `recoverCanonicalState`'s replay. So 2 is the smallest
   // number that gets past the adapter's own recovery and reaches the ladder.
-  async function openAgainstABusyJournal(text: string, refusals: number) {
+  async function openAgainstABusyJournal(text: string, refusals: number, authorCapacity = false) {
     const engine = seedPlaintextEngine();
     const busy = new DaemonRefusalError(
       {
-        code: "OVERLOADED",
-        message: "engine-store-busy",
+        code: authorCapacity ? "LIMIT_EXCEEDED" : "OVERLOADED",
+        message: authorCapacity ? "ydoc-author-capacity" : "engine-store-busy",
         retry: "afterBackoff",
       },
       new Error("daemon response"),
@@ -2202,6 +2218,7 @@ describe("YdocLiveAdapter", () => {
       },
     };
     const settled: YdocSettleResult[] = [];
+    const settleErrors: unknown[] = [];
     const scheduler = settleScheduler();
     const provider = await openEngineYdocProviderSession({
       transport,
@@ -2211,7 +2228,7 @@ describe("YdocLiveAdapter", () => {
       contentKind: "plaintext",
       settleDebounceMs: 100,
       onRemoteUpdate: () => undefined,
-      onSettleError: () => undefined,
+      onSettleError: (error) => settleErrors.push(error),
       onSettled: (result) => {
         settled.push(result);
       },
@@ -2221,8 +2238,27 @@ describe("YdocLiveAdapter", () => {
       body.insert(0, text);
     });
     const journaled = provider.applyLocalUpdate(update);
-    return { provider, busy, settled, scheduler, journaled, methods };
+    return { provider, busy, settled, settleErrors, scheduler, journaled, methods };
   }
+
+
+  it("surfaces a persistent record capacity refusal through the settle error observer", async () => {
+    const { provider, busy, settled, settleErrors, scheduler, journaled } =
+      await openAgainstABusyJournal("typed while authors were full", 3, true);
+    await expect(journaled).rejects.toBe(busy);
+    expect(settleErrors).toEqual([]);
+    scheduler.fire();
+    await drain();
+    expect(settleErrors).toEqual([busy]);
+    expect(settled).toEqual([]);
+    expect(provider.doc.getText("plainText").toString()).toContain("typed while authors were full");
+    expect(scheduler.armed).toHaveLength(1);
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.content).toContain("typed while authors were full");
+    await provider.close({settle: false});
+  });
 
   it("sends the engine the state a busy journal write left it missing", async () => {
     // The journal write happens once, at applyLocalUpdate, and
@@ -2445,15 +2481,18 @@ describe("YdocLiveAdapter", () => {
     );
   });
 
-  it("evicts once the resend clears the debt the refusal left", async () => {
+  it.each([
+    {code: "OVERLOADED" as const, message: "engine-store-busy"},
+    {code: "LIMIT_EXCEEDED" as const, message: "ydoc-author-capacity"},
+  ])("evicts once resend clears $message debt", async ({code, message}) => {
     // The narrowness guard for the refusal above. A debt that can be paid is
     // paid, and then the evict proceeds — otherwise the orphan this exit
     // exists for would be wedged by a refusal that has already cleared.
     const engine = seedPlaintextEngine();
     const busy = new DaemonRefusalError(
       {
-        code: "OVERLOADED",
-        message: "engine-store-busy",
+        code,
+        message,
         retry: "afterBackoff",
       },
       new Error("daemon response"),

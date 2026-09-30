@@ -149,7 +149,7 @@ async function agent(s: Stack): Promise<Client> {
   return client;
 }
 
-type Moment = { originId: string; payload: { path?: string; author?: Record<string, unknown> } };
+type Moment = { originId: string; payload: { path?: string; authors?: Record<string, unknown>[] } };
 
 async function directMoments(s: Stack): Promise<Moment[]> {
   const log = await (await s.owner(`/sync/${WORKSPACE}/log?since=0&limit=1000`)).json() as { ops: Moment[] };
@@ -183,10 +183,10 @@ it("lets a browser and an agent holding only an Edit link change a Collection, e
   expect(moments.map((moment) => moment.payload.path)).toEqual([SCHEMA_PATH, AUTOMATIONS_PATH, "trip/gear/collection.yaml", "trip/gear/tent.md"]);
   for (const moment of moments) {
     expect(moment.originId).toBe(`relay:collection-file:${s.link.grantId}`);
-    expect(moment.payload.author).toEqual({ kind: "link", grantId: s.link.grantId, grantGeneration: 1, principalId: expect.any(String) });
+    expect(moment.payload.authors?.[0]).toEqual({ kind: "link", grantId: s.link.grantId, grantGeneration: 1, principalId: expect.any(String) });
   }
-  expect(moments[0]!.payload.author!.principalId).not.toBe(moments[1]!.payload.author!.principalId);
-  expect(moments[1]!.payload.author!.principalId).toBe(moments[2]!.payload.author!.principalId);
+  expect(moments[0]!.payload.authors?.[0]!.principalId).not.toBe(moments[1]!.payload.authors?.[0]!.principalId);
+  expect(moments[1]!.payload.authors?.[0]!.principalId).toBe(moments[2]!.payload.authors?.[0]!.principalId);
   expect(JSON.stringify(moments)).not.toContain(s.secret);
   // Share-web forwards the capability and the profile, and nothing of the browser's own.
   const writes = s.relayCalls.filter((call) => new URL(call.url).pathname === "/sync/link/collection-writes");

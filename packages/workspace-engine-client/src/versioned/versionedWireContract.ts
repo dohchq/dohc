@@ -469,7 +469,8 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.textRead]: VersionedTextReadParams;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobParams;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameParams;
-  [VERSIONED_METHOD.textCheckMove]: JsonObject & { versionId: string; path: string };
+  // Preflight the author of the following rename or delete.
+  [VERSIONED_METHOD.textCheckMove]: JsonObject & { versionId: string; path: string; author?: WriteAuthor };
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteParams;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackParams;
   [VERSIONED_METHOD.textList]: VersionedTextListParams;
@@ -654,16 +655,24 @@ const AutomationAuthorSchema = mutableStruct({
   onBehalfOf: Schema.optionalKey(Schema.String),
   depth: Schema.Int,
 });
+const HumanAuthorSchema = mutableStruct({
+  kind: Schema.Literal("human"),
+  humanId: Schema.String,
+  onBehalfOf: Schema.optionalKey(Schema.String),
+});
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
-const MomentAuthorSchema = Schema.NullOr(
-  Schema.Union([
-    AgentAuthorSchema,
-    PublicAuthorSchema,
-    NamedAuthorSchema,
-    LinkAuthorSchema,
-    AutomationAuthorSchema,
-    CorruptAuthorSchema,
-  ]),
+const MomentAuthorsSchema = Schema.NullOr(
+  Schema.mutable(Schema.Array(
+    Schema.Union([
+      AgentAuthorSchema,
+      HumanAuthorSchema,
+      PublicAuthorSchema,
+      NamedAuthorSchema,
+      LinkAuthorSchema,
+      AutomationAuthorSchema,
+      CorruptAuthorSchema,
+    ]),
+  )),
 );
 
 const MomentRecordSchema = mutableStruct({
@@ -685,7 +694,7 @@ const MomentRecordSchema = mutableStruct({
   metadataOrigin: Schema.String,
   metadataSummary: Schema.optionalKey(NullableString),
   metadataCorrelationId: Schema.optionalKey(NullableString),
-  author: MomentAuthorSchema,
+  authors: MomentAuthorsSchema,
   syncRecordOnly: Schema.Boolean,
   afterText: NullableString,
   afterByteLength: NullableInt,

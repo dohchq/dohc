@@ -1127,7 +1127,7 @@ async fn forced_pre_fork_capture_retains_the_active_agent_author() {
         .expect("valid author");
     assert_eq!(
         captured,
-        Some(author),
+        Some(json!([author])),
         "pass None to reconcile_full_for_switch. The only scan allowed to observe this edit records an actor-neutral moment."
     );
 }

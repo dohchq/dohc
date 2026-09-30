@@ -255,7 +255,7 @@ describe("share op filter", () => {
           correlationId: "LEAK-correlation-id",
           author: "LEAK-author",
         },
-        author: { kind: "agent", agentRunId: "LEAK-agent-run-id", displayName: "LEAK-agent" },
+        authors: [{ kind: "agent", agentRunId: "LEAK-agent-run-id", displayName: "LEAK-agent" }],
       }),
     );
     expect(decision.allowed).toBe(true);

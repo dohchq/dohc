@@ -125,7 +125,7 @@ function conflictResolveFixture(workspaceId = "workspace-a"): ConflictResolveFix
         ? Buffer.byteLength(contents.result)
         : Buffer.byteLength(contents.current),
     metadata,
-    author: null,
+    authors: null,
     beforePresent,
     beforeObjectId: beforePresent === "present" ? "object-a" : null,
     beforeVersionId: beforePresent === "present" ? "main" : null,
@@ -273,7 +273,7 @@ function compactConflictResolveFixture(
     payloadAfterContentKind: current.contentKind,
     payloadAfterByteLength: current.byteLength,
     metadata,
-    author: canonicalAuthor,
+    authors: [canonicalAuthor],
     beforePresent: "present",
     beforeObjectId: current.objectId,
     beforeVersionId: "main",
@@ -304,7 +304,7 @@ function compactConflictResolveFixture(
     payloadAfterContentKind: result.contentKind,
     payloadAfterByteLength: result.byteLength,
     metadata,
-    author: canonicalAuthor,
+    authors: [canonicalAuthor],
     beforePresent: "null",
     beforeObjectId: null,
     beforeVersionId: null,
@@ -417,12 +417,12 @@ function worstValidCanonicalMoment(momentId: string): Record<string, unknown> {
     payloadAfterContentKind: "text",
     payloadAfterByteLength: 1,
     metadata,
-    author: {
+    authors: [{
       kind: "agent",
       agentId: authorField,
       onBehalfOf: authorField,
       agentRunId: authorField,
-    },
+    }],
     beforePresent: "present",
     beforeObjectId: identifier,
     beforeVersionId: identifier,
@@ -1510,23 +1510,23 @@ describe("sync relay handler", () => {
         (effect) => effect.payloadSha256,
       ),
     ).toEqual([
-      "8b196309f6d6a69295119febd37fa5d090b09df28d4faff97a238735729ddcd8",
-      "a605f5800e5591dd9700a75790bebf15de053df6158ec2433258e479ac034ab0",
+      "6565626bd98b1ba635e6261f86f333829436bcb19b8953632aedc23f93862da6",
+      "a640c8eb7e29218c60ae210ab4fc66a792ae1b89582cb019a0e2177139398e2b",
     ]);
   });
 
   it("proves that two worst-valid canonical moment effects cannot fit the relay payload cap", () => {
     const first = worstValidCanonicalMoment('"'.repeat(512));
     const second = worstValidCanonicalMoment(`\\${'"'.repeat(511)}`);
-    expect(Buffer.byteLength(JSON.stringify(first), "utf8")).toBe(216_935);
-    expect(Buffer.byteLength(JSON.stringify(second), "utf8")).toBe(216_935);
+    expect(Buffer.byteLength(JSON.stringify(first), "utf8")).toBe(216_938);
+    expect(Buffer.byteLength(JSON.stringify(second), "utf8")).toBe(216_938);
     const payload = structuredClone(conflictResolveFixture().payload);
     payload.effects = [
       { opKind: "moment.append", payload: first },
       { opKind: "moment.append", payload: second },
     ];
     const observedBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
-    expect(observedBytes).toBe(436_038);
+    expect(observedBytes).toBe(436_044);
     expect(observedBytes).toBeGreaterThan(MAX_PAYLOAD_JSON_BYTES);
   });
 

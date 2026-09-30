@@ -143,7 +143,8 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
-  checkMove(input: { workspaceId: string; versionId: string; path: string }): Promise<void>;
+  // Preflight the author of the following rename or delete.
+  checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }): Promise<void>;
   listPendingCollectionAdoptions?(input?: {
     limit?: number;
     cursor?: CollectionPendingAdoptionCursor;
@@ -253,13 +254,23 @@ function snapshotFromWire(
   };
 }
 
-function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefined {
-  if (author === null) return undefined;
+function authorsFromWire(authors: MomentRecord["authors"]): MomentAuthor[] | undefined {
+  return authors === null ? undefined : authors.map(authorFromWire);
+}
+
+function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): MomentAuthor {
   if ("corrupt" in author) {
     throw new VersionedTextStoreError(
       "state-corrupt",
       "Engine moment contains corrupt author provenance.",
     );
+  }
+  if (author.kind === "human") {
+    return {
+      kind: "human",
+      humanId: author.humanId,
+      ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
+    };
   }
   if (author.kind === "public") return { kind: "public", principalId: author.principalId, grantId: author.grantId };
   if (author.kind === "named") {
@@ -330,7 +341,7 @@ function momentFromWire(
   moment: MomentRecord,
   suppliedMetadata?: ActorNeutralWriteMetadata,
 ): VersionedTextMoment {
-  const author = authorFromWire(moment.author);
+  const authors = authorsFromWire(moment.authors);
   const before = moment.beforePresent
     ? payloadSnapshot(moment, "before")
     : null;
@@ -360,7 +371,7 @@ function momentFromWire(
         : {}),
       ...suppliedMetadata,
     }),
-    ...(author !== undefined ? { author } : {}),
+    ...(authors !== undefined ? { authors } : {}),
     ...(moment.syncRecordOnly ? { syncRecordOnly: true } : {}),
   };
 }
@@ -369,7 +380,7 @@ function momentSummaryFromWire(
   workspaceId: string,
   moment: MomentRecord,
 ): VersionedTextMomentSummary {
-  const author = authorFromWire(moment.author);
+  const authors = authorsFromWire(moment.authors);
   return {
     id: moment.momentId,
     workspaceId,
@@ -391,7 +402,7 @@ function momentSummaryFromWire(
         ? { correlationId: moment.metadataCorrelationId }
         : {}),
     }),
-    ...(author !== undefined ? { author } : {}),
+    ...(authors !== undefined ? { authors } : {}),
     momentOrder: moment.momentOrder,
     ...(moment.syncRecordOnly ? { syncRecordOnly: true } : {}),
   };
@@ -870,8 +881,8 @@ export function createCaptureLiveStores(
       return value === null ? null : snapshotFromWire(value);
     },
 
-    checkMove: (input: { workspaceId: string; versionId: string; path: string }) =>
-      runRead(async (adapter) => await adapter.checkMove(input)),
+    checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }) =>
+      runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
 
     async listTextFileMetadata(input: {
       workspaceId: string;

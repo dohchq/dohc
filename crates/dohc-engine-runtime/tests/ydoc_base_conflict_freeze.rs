@@ -1070,11 +1070,11 @@ async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_su
             metadata_summary: Some(format!("reviewed {case}")),
             metadata_correlation_id: Some(format!("correlation-{case}")),
             author_json: Some(
-                serde_json::json!({
+                serde_json::json!([{
                     "kind": "agent",
                     "agentId": "agent-1",
                     "onBehalfOf": "user-1"
-                })
+                }])
                 .to_string(),
             ),
             now_ms: 11,

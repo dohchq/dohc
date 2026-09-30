@@ -79,8 +79,8 @@ export function readOwnerCollectionWrites(
          json_extract(payload_json, '$.path') AS path,
          json_extract(payload_json, '$.operation') AS operation,
          json_extract(payload_json, '$.beforePresent') AS before_present,
-         json_extract(payload_json, '$.author.kind') AS author_kind,
-         json_extract(payload_json, '$.author.grantId') AS author_grant_id
+         json_extract(payload_json, '$.authors[0].kind') AS author_kind,
+         json_extract(payload_json, '$.authors[0].grantId') AS author_grant_id
        FROM sync_relay_log
        WHERE workspace_id = ? AND origin_id = ? AND origin_seq BETWEEN ? AND ?
        ORDER BY origin_seq`,

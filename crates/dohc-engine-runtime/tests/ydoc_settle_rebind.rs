@@ -42,6 +42,15 @@ fn remove_dir_alias(path: &std::path::Path) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applied() {
+    settle_with_parked_remote_update(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_settle_preserves_parked_remote_updates_for_client_resync() {
+    settle_with_parked_remote_update(true).await;
+}
+
+async fn settle_with_parked_remote_update(queued: bool) {
     const WS: &str = "ws-settle-identity-refusal";
     const PATH: &str = "notes/client.md";
     const WRONG_PATH: &str = "notes/stale-remote-name.md";
@@ -143,30 +152,54 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 5).expect("open actor").actor;
-    let refused = handle
-        .ydoc_settle(
-            scratch.path().to_path_buf(),
-            key.clone(),
-            PATH.to_owned(),
-            ContentKind::Plaintext,
-            Some(lineage_claim_id),
-            Some(expected_head_sha),
-            "identity-refusal-session".to_owned(),
-            Arc::new(()),
-            6,
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .expect("settle resolves");
-    assert!(
-        matches!(
-            refused,
-            dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { .. }
-        ),
-        "excluding identity-refused applied rows from drained lets settle succeed: {refused:?}"
-    );
+    if queued {
+        let settled = handle
+            .ydoc_settle_queued(
+                scratch.path().to_path_buf(),
+                key.clone(),
+                PATH.to_owned(),
+                ContentKind::Plaintext,
+                Some(lineage_claim_id.clone()),
+                Some(expected_head_sha.clone()),
+                "identity-refusal-session".to_owned(),
+                Arc::new(()),
+                6,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("queued settle");
+        assert!(matches!(
+            settled,
+            dohc_engine_runtime::YdocSettleOutcome::Settled(_)
+        ));
+    } else {
+        let refused = handle
+            .ydoc_settle(
+                scratch.path().to_path_buf(),
+                key.clone(),
+                PATH.to_owned(),
+                ContentKind::Plaintext,
+                Some(lineage_claim_id),
+                Some(expected_head_sha),
+                "identity-refusal-session".to_owned(),
+                Arc::new(()),
+                6,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("settle resolves");
+        assert!(
+            matches!(
+                refused,
+                dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { .. }
+            ),
+            "excluding identity-refused applied rows from drained lets settle succeed: {refused:?}"
+        );
+    }
     supervisor.close(&db).expect("close actor");
 
     assert_eq!(
@@ -192,8 +225,8 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
         .expect("drain disposition");
     assert_eq!(
         (updates, deferred, refusals),
-        (1, 0, 1),
-        "the CRDT bytes apply and the already-ACKed stale identity is consumed"
+        if queued { (0, 1, 0) } else { (1, 0, 1) },
+        "only a client settle may drain remote bytes"
     );
 }
 

@@ -522,7 +522,7 @@ describe("the base rewrite", () => {
     expect(moment.operation).toBe("write");
     expect(moment.versionId).toBe("main");
     // A moment cannot name a human author; the summary is what History shows.
-    expect(moment.author).toBeUndefined();
+    expect(moment.authors).toBeUndefined();
     expect((moment.metadata as Record<string, unknown>).summary).toBe(
       `Accepted changes from ${RECIPIENT}@dohc.test`,
     );

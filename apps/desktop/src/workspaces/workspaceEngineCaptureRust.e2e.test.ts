@@ -356,7 +356,7 @@ it.skipIf(engine.missing)(
       await capture.setActiveAgentRun(null);
       // A run a person started names no depth: absent means 0.
       const { depth: _personDepth, ...personRun } = activeRun;
-      expect(agentMoment?.author).toEqual({ kind: "agent", ...personRun });
+      expect(agentMoment?.authors).toEqual([{ kind: "agent", ...personRun }]);
 
       // A run an automation started names its depth, and history keeps it.
       const wokenRun = { ...activeRun, agentRunId: "run-rust-capture-woken", depth: 3 };
@@ -365,7 +365,7 @@ it.skipIf(engine.missing)(
       capture.captureBatch([{ path: "woken-note.md", operation: "update" }]);
       const [wokenMoment] = await waitForPathMoments(capture, "woken-note.md", 1);
       await capture.setActiveAgentRun(null);
-      expect(wokenMoment?.author).toEqual({ kind: "agent", ...wokenRun });
+      expect(wokenMoment?.authors).toEqual([{ kind: "agent", ...wokenRun }]);
 
       const draft = await capture.createVersion("Draft");
       await writeFile(join(root, "note.md"), draftText, "utf8");

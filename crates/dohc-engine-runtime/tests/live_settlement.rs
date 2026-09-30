@@ -2490,3 +2490,27 @@ async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_
         assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 0);
     }
 }
+
+#[tokio::test]
+async fn unchanged_configured_bootstrap_materializes_before_noop_coverage() {
+    for apply_noop in [false, true] {
+        let f = Fixture::new().await;
+        let path = f.root.path().join(&f.binding.current_path);
+        assert!(!path.exists());
+        let terminal = if apply_noop {
+            Some(f.apply(1, vec![0, 0]).await)
+        } else {
+            None
+        };
+        let result = f
+            .settle(terminal, 4, Arc::new(NoFaults))
+            .await
+            .expect("first unchanged settle");
+        assert!(result.materialized);
+        assert!(
+            path.exists(),
+            "a no-op cannot prove an absent bootstrap artifact"
+        );
+        f.assert_projection();
+    }
+}

@@ -402,7 +402,7 @@ describe("workspace engine IPC registrations", () => {
       moments: ["person-local", "user-pat"].map((onBehalfOf, index) => ({
         id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
-        author: { kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf },
+        authors: [{ kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf }],
       })),
       nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
     });
@@ -416,7 +416,7 @@ describe("workspace engine IPC registrations", () => {
       moment: {
         id: "detail", workspaceId: "workspace", versionId: "main", objectId: "object",
         path: "notes/a.md", recordedAtMs: 1, operation: "write", metadata: { origin: "local-file" },
-        author: { kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf: "person-local" },
+        authors: [{ kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf: "person-local" }],
         payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
       },
     });
@@ -431,7 +431,7 @@ describe("workspace engine IPC registrations", () => {
       moments: [{ agentId: "agent", agentRunId: "run-1" }, { agentId: "Pat" }, { agentId: "dohc-mcp" }].map((identity, index) => ({
         id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
-        author: { kind: "agent", onBehalfOf: "person-local", ...identity },
+        authors: [{ kind: "agent", onBehalfOf: "person-local", ...identity }],
       })),
       nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
     });
@@ -447,7 +447,7 @@ describe("workspace engine IPC registrations", () => {
       moment: {
         id: "detail", workspaceId: "workspace", versionId: "main", objectId: "object",
         path: "notes/a.md", recordedAtMs: 1, operation: "write", metadata: { origin: "local-file" },
-        author: { kind: "agent", agentId: "agent", onBehalfOf: "person-local", agentRunId: "run-1" },
+        authors: [{ kind: "agent", agentId: "agent", onBehalfOf: "person-local", agentRunId: "run-1" }],
         payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
       },
     });

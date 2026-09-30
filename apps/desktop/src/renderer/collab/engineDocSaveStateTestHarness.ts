@@ -235,10 +235,11 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       | "deleted",
     seq: number,
     sessionId?: string,
+    authorCapacity?: boolean,
   ): void {
     const target = sessionId ?? openedSessionId;
     if (target === null) throw new Error("session not open yet");
-    const event = { sessionId: target, state, seq };
+    const event = { sessionId: target, state, seq, authorCapacity };
     act(() => {
       for (const listener of [...saveStateListeners]) listener(event);
     });

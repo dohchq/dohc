@@ -1025,7 +1025,8 @@ fn wire_author_value(author: Option<&AgentAuthorV1>) -> Value {
     })
 }
 
-fn author_value(author: Option<&AgentAuthorV1>) -> Value {
+/// The effect moment's authors: the resolving agent as a list of one.
+fn authors_value(author: Option<&AgentAuthorV1>) -> Value {
     let Some(author) = author else {
         return Value::Null;
     };
@@ -1040,7 +1041,7 @@ fn author_value(author: Option<&AgentAuthorV1>) -> Value {
             .expect("agent author is an object")
             .insert("agentRunId".to_owned(), json!(agent_run_id));
     }
-    value
+    json!([value])
 }
 
 fn delete_shadow(
@@ -1076,7 +1077,7 @@ fn delete_shadow(
         "payloadAfterContentKind": current.content_kind.as_str(),
         "payloadAfterByteLength": current.byte_length,
         "metadata": metadata_value(&payload.effect_context.metadata),
-        "author": author_value(payload.effect_context.author.as_ref()),
+        "authors": authors_value(payload.effect_context.author.as_ref()),
         "beforePresent": "present",
         "beforeObjectId": current.object_id,
         "beforeVersionId": payload.target_version_id,
@@ -1127,7 +1128,7 @@ fn write_shadow(
         "payloadAfterContentKind": result.content_kind.as_str(),
         "payloadAfterByteLength": result.byte_length,
         "metadata": metadata_value(&payload.effect_context.metadata),
-        "author": author_value(payload.effect_context.author.as_ref()),
+        "authors": authors_value(payload.effect_context.author.as_ref()),
         "beforePresent": if before.is_some() { "present" } else { "null" },
         "beforeObjectId": before.map(|head| head.object_id.as_str()),
         "beforeVersionId": before.map(|_| payload.target_version_id.as_str()),
@@ -3553,8 +3554,13 @@ fn local_author(author_json: Option<&str>) -> Result<Option<AgentAuthorV1>, Sync
     let value: Value = serde_json::from_str(author_json).map_err(|_| SyncError::InvalidInput {
         reason: "conflict.resolve author is not valid JSON",
     })?;
-    let record = value.as_object().ok_or(SyncError::InvalidInput {
-        reason: "conflict.resolve author must be an object",
+    // A resolution declares one agent, stored as a list of one.
+    let record = match value.as_array().map(Vec::as_slice) {
+        Some([author]) => author.as_object(),
+        _ => None,
+    }
+    .ok_or(SyncError::InvalidInput {
+        reason: "conflict.resolve author must be a list of one object",
     })?;
     if record.keys().any(|field| {
         !matches!(
@@ -4108,12 +4114,12 @@ mod tests {
                 {
                     "kind": "delete",
                     "momentId": "moment-delete",
-                    "payloadSha256": "8b196309f6d6a69295119febd37fa5d090b09df28d4faff97a238735729ddcd8",
+                    "payloadSha256": "6565626bd98b1ba635e6261f86f333829436bcb19b8953632aedc23f93862da6",
                 },
                 {
                     "kind": "write",
                     "momentId": "moment-write",
-                    "payloadSha256": "a605f5800e5591dd9700a75790bebf15de053df6158ec2433258e479ac034ab0",
+                    "payloadSha256": "a640c8eb7e29218c60ae210ab4fc66a792ae1b89582cb019a0e2177139398e2b",
                 },
             ],
             "lineageTransition": {
@@ -6897,8 +6903,8 @@ mod tests {
         assert_eq!(
             validated.shadow_sha256s,
             [
-                "8b196309f6d6a69295119febd37fa5d090b09df28d4faff97a238735729ddcd8",
-                "a605f5800e5591dd9700a75790bebf15de053df6158ec2433258e479ac034ab0",
+                "6565626bd98b1ba635e6261f86f333829436bcb19b8953632aedc23f93862da6",
+                "a640c8eb7e29218c60ae210ab4fc66a792ae1b89582cb019a0e2177139398e2b",
             ]
         );
     }
@@ -7044,7 +7050,7 @@ mod tests {
             MAX_PAYLOAD_JSON_BYTES - built.validated.encoded_payload_bytes
         );
         assert_eq!(built.validated.encoded_payload_bytes, 218_319);
-        assert_eq!(shadow_sizes, [216_040, 208_719]);
+        assert_eq!(shadow_sizes, [216_043, 208_722]);
         assert_eq!(
             MAX_PAYLOAD_JSON_BYTES - built.validated.encoded_payload_bytes,
             43_825
@@ -7076,7 +7082,7 @@ mod tests {
     #[test]
     fn local_author_rejects_unknown_fields() {
         let error = local_author(Some(
-            r#"{"kind":"agent","agentId":"agent-1","onBehalfOf":"user-1","unexpected":true}"#,
+            r#"[{"kind":"agent","agentId":"agent-1","onBehalfOf":"user-1","unexpected":true}]"#,
         ))
         .expect_err("unknown author fields must not be silently dropped");
 
@@ -7086,6 +7092,24 @@ mod tests {
                 reason: "conflict.resolve author has unknown fields"
             }
         ));
+    }
+
+    #[test]
+    fn local_author_reads_a_list_of_one_agent() {
+        let agent = r#"{"kind":"agent","agentId":"agent-1","onBehalfOf":"user-1"}"#;
+        assert!(local_author(Some(&format!("[{agent}]"))).is_ok_and(|author| author.is_some()));
+        for refused in [
+            agent.to_owned(),
+            format!("[{agent},{agent}]"),
+            "[]".to_owned(),
+        ] {
+            assert!(matches!(
+                local_author(Some(&refused)),
+                Err(SyncError::InvalidInput {
+                    reason: "conflict.resolve author must be a list of one object"
+                })
+            ));
+        }
     }
 
     #[test]

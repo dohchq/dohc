@@ -714,14 +714,12 @@ async fn an_automations_write_replicated_to_the_live_host_keeps_its_depth_and_cl
 
 const CRASH_CLAIM: &str = "atc_crash_recovery_claim";
 
-/// A record created in a document session is its creator's change: the
-/// settle that creates its file names the author of the lineage's first
-/// update, which compaction cannot fold away, whoever edited it after.
-/// Reconcile then adds the record for every automation but an automation
-/// that created it, at the creator's chain depth; a creation at the depth
-/// cap stops the chain.
+/// The creating settle credits every author in its unsettled interval.
+/// Compaction preserves those authors and their maximum chain depth.
+/// Reconcile skips each automation that contributed to the interval.
+/// An interval at the depth cap stops the chain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_record_created_in_a_document_session_is_added_as_its_creators_change() {
+async fn a_record_created_in_a_document_session_credits_its_interval_authors() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     {
@@ -814,8 +812,8 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
             principal: None,
             editor: Some(Some(1)),
             compact: false,
-            claimers: &["collection:tasks#other", AUTOMATION],
-            depth: 0,
+            claimers: &["collection:tasks#other"],
+            depth: 1,
         },
         Case {
             name: "epsilon",
@@ -946,12 +944,16 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
             assert_eq!(claim.change.kind, AutomationChangeKind::Added);
             assert_eq!(
                 claim.change.author_origin_id.as_deref(),
-                case.creator.map(|_| AUTOMATION),
-                "{}: the creator is the author",
+                case.creator.or(case.editor.flatten()).map(|_| AUTOMATION),
+                "{}: the interval records the automation author",
                 case.name
             );
             assert_eq!(claim.depth, case.depth, "{}", case.name);
-            assert_eq!(claim.change.on_behalf_of.as_deref(), case.principal);
+            assert_eq!(
+                claim.change.on_behalf_of.as_deref(),
+                case.principal
+                    .or_else(|| case.editor.flatten().map(|_| "user:ice")),
+            );
             assert_eq!(claim.chain_stopped(), case.depth == cap);
         }
     }

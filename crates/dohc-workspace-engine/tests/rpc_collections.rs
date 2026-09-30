@@ -3730,7 +3730,7 @@ automations: []
                 "payloadAfterContentKind": "text",
                 "payloadAfterByteLength": text.len(),
                 "metadata": { "origin": "sync" },
-                "author": author,
+                "authors": [author],
             }),
         };
         let applied = apply_replication_envelope(
@@ -3780,14 +3780,14 @@ automations: []
             json!({ "momentId": moment }),
         )
         .await;
-        assert_eq!(&detail["author"], author);
+        assert_eq!(detail["authors"], json!([author]));
         let listed = page["moments"]
             .as_array()
             .expect("moments")
             .iter()
             .find(|row| &row["momentId"] == moment)
             .expect("direct write in History");
-        assert_eq!(&listed["author"], author);
+        assert_eq!(listed["authors"], json!([author]));
     }
     call(&transport, &handle, 5, "workspace.close", json!({})).await;
 }
@@ -3852,7 +3852,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
             "payloadAfterContentKind": "text",
             "payloadAfterByteLength": text.len(),
             "metadata": { "origin": "sync" },
-            "author": author,
+            "authors": [author],
         }),
     };
     let connection = rusqlite::Connection::open(&db).expect("seed replication connection");
@@ -4057,7 +4057,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         json!({ "momentId": MOMENT }),
     )
     .await;
-    assert_eq!(original["author"], author);
+    assert_eq!(original["authors"], json!([author]));
     assert_eq!(original["afterText"], text);
     call(&transport, &handle, 63, "workspace.close", json!({})).await;
     drop(transport);
@@ -4101,7 +4101,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         hex_sha256(settled.as_bytes())
     );
     assert!(
-        adoption["author"].is_null(),
+        adoption["authors"].is_null(),
         "owner settlement must not impersonate the public voter"
     );
     let mut retry = EngineStore::open(&db, 3).expect("retry store");

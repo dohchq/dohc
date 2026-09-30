@@ -60,7 +60,7 @@ List workspace history, newest first: workspace-engine moments (the recorder for
 - `includeFiles`: `boolean`
 - `path`: `string`
 
-Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
+Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
 
 ### `dohc_list_kept_copies`
 
@@ -88,7 +88,7 @@ Read one history entry by id: a workspace-engine moment with its full before/aft
 
 - `id`: `string`. Required.
 
-Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files, before, after } } | { ok: false, reason }`.
+Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason }`.
 
 ### `dohc_list_files`
 
@@ -1242,7 +1242,7 @@ With a path, list that file's own changes, across its renames. Each line starts 
 
 - `--limit <count>`: List at most this many changes. The default is 50, the most 500.
 
-With `--json`, prints `{ schemaVersion, changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
+With `--json`, prints `{ schemaVersion, changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
 
 #### `dohc history show`
 
@@ -1256,7 +1256,7 @@ Find the change's ID with history list. With --json, print both sides and the ch
 
 - `--before`: Print the text from before the change instead.
 
-With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files, before, after } }`.
+With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } }`.
 
 ### `dohc automation`
 

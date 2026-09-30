@@ -486,14 +486,15 @@ function sameObjectAndProjectedContent(left: Side, right: Side): boolean {
   return left.objectId === right.objectId && sameProjectedContent(left, right);
 }
 
-function canonicalAuthor(value: AgentAuthor | null): Record<string, unknown> | null {
+// The effect moment's authors: the resolving agent as a list of one.
+function canonicalAuthors(value: AgentAuthor | null): Record<string, unknown>[] | null {
   if (value === null) return null;
-  return {
+  return [{
     kind: "agent",
     agentId: value.agentId,
     onBehalfOf: value.onBehalfOf,
     ...(value.agentRunId === null ? {} : { agentRunId: value.agentRunId }),
-  };
+  }];
 }
 
 function deleteShadow(
@@ -525,7 +526,7 @@ function deleteShadow(
     payloadAfterContentKind: current.contentKind,
     payloadAfterByteLength: current.byteLength,
     metadata: payload.effectContext.metadata,
-    author: canonicalAuthor(payload.effectContext.author),
+    authors: canonicalAuthors(payload.effectContext.author),
     beforePresent: "present",
     beforeObjectId: current.objectId,
     beforeVersionId: payload.targetVersionId,
@@ -572,7 +573,7 @@ function writeShadow(
     payloadAfterContentKind: result.contentKind,
     payloadAfterByteLength: result.byteLength,
     metadata: payload.effectContext.metadata,
-    author: canonicalAuthor(payload.effectContext.author),
+    authors: canonicalAuthors(payload.effectContext.author),
     beforePresent: before === null ? "null" : "present",
     beforeObjectId: before?.objectId ?? null,
     beforeVersionId: before === null ? null : payload.targetVersionId,

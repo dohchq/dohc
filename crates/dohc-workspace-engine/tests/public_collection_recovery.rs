@@ -168,7 +168,7 @@ fn paired_public_collection_backup_preserves_acceptance_and_refuses_stale_relay(
     let moment_id = fixture["receipt"]["momentId"]
         .as_str()
         .expect("accepted moment");
-    let (author, moment_count, imported_count): (String, i64, i64) = restored.read_with(|conn| conn.query_row(
+    let (authors, moment_count, imported_count): (String, i64, i64) = restored.read_with(|conn| conn.query_row(
         "SELECT author_json, \
          (SELECT count(*) FROM moments WHERE workspace_id='w' AND moment_id=?1), \
          (SELECT count(*) FROM replication_log WHERE workspace_id='w' AND origin_id='relay:collection-create:g' AND imported=1) \
@@ -176,11 +176,11 @@ fn paired_public_collection_backup_preserves_acceptance_and_refuses_stale_relay(
         [moment_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )).expect("read restored acceptance and public provenance");
     assert_eq!((moment_count, imported_count), (1, 1));
-    let author: Value = serde_json::from_str(&author).expect("public author JSON");
-    assert_eq!(author, accepted.payload["author"]);
+    let authors: Value = serde_json::from_str(&authors).expect("public authors JSON");
+    assert_eq!(authors, accepted.payload["authors"]);
     drop(restored);
     std::fs::write(scratch.path().join("native-restored.json"), serde_json::to_vec(&json!({
-        "momentId": moment_id, "objectId": snapshot.object_id, "text": snapshot.text, "author": author,
+        "momentId": moment_id, "objectId": snapshot.object_id, "text": snapshot.text, "authors": authors,
         "importedCount": imported_count, "momentCount": moment_count,
     })).expect("native restore receipt")).expect("write native restore receipt");
     relay_phase(scratch.path(), "verify");
@@ -541,8 +541,8 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
     )
     .await;
     assert_eq!(
-        original["author"],
-        fixture["envelopes"][1]["payload"]["author"]
+        original["authors"],
+        fixture["envelopes"][1]["payload"]["authors"]
     );
     call(&transport, &handle, 83, "workspace.close", json!({})).await;
     export_owner_journal(&db, scratch.path(), "owner-restored", &deleted, &request_id);

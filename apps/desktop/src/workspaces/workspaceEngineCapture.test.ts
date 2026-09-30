@@ -267,16 +267,16 @@ function failableLoopback(match: (request: Request) => boolean = () => true): {
   return { loopback, state };
 }
 
-// The daemon-path equivalent of readEngineMomentAuthors: the author each
-// recorded moment carries, oldest first, with null for actor-neutral.
+// The authors each recorded moment carries, oldest first, with null for
+// actor-neutral.
 async function liveMomentAuthors(
   engine: WorkspaceEngineCapture,
-): Promise<Array<MomentAuthor | null>> {
+): Promise<Array<MomentAuthor[] | null>> {
   const page = await engine.listMoments({ limit: 500 });
   return [...page.moments]
     .reverse()
     .filter((moment) => !moment.protected)
-    .map((moment) => moment.author ?? null);
+    .map((moment) => moment.authors ?? null);
 }
 
 describe("workspaceEngineCapture batch capture", () => {
@@ -1025,7 +1025,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     await store.renameTextFile({workspaceId:WORKSPACE_ID,versionId:"main",fromPath:created.snapshot.path,toPath:"responses/moved.md",metadata:{origin:"api"}});
     await write(root,"responses/moved.md","response");
@@ -1058,7 +1058,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     await write(root,"responses/accepted-a.md","response");
     const engine=capture(root,{store,rustEngineSessions:sessions});
@@ -1080,7 +1080,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
     const engine=capture(root,{store,rustEngineSessions:sessions});
@@ -1114,7 +1114,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     await store.renameTextFile({workspaceId:WORKSPACE_ID,versionId:"main",fromPath:created.snapshot.path,toPath:"responses/moved.md",metadata:{origin:"api"}});
     await write(root,"responses/moved.md","response");
@@ -1141,7 +1141,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     expect(await engine.undoAcceptedAppResponse(selection)).toEqual({status:"conflict"});
     expect(await readFile(join(root,created.snapshot.path),"utf8")).toBe("disk edit");
@@ -1542,10 +1542,21 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it("reports the open-time settle's own failure once", async () => {
+  it.each([
+    { label: "ordinary", authorCapacity: false, failure: new Error("the settle started and failed") },
+    {
+      label: "author-capacity",
+      authorCapacity: true,
+      failure: new DaemonRefusalError(
+        { code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" },
+        null,
+      ),
+    },
+  ])("reports an $label failure once with its logical save token", async ({ failure, authorCapacity }) => {
     const root = await createTestScratch("dohc-engine-capture-");
     await write(root, "note.md", EDITOR_TEXT);
-    const states: string[] = [];
+    const states: Array<{ state: string; token: number; authorCapacity?: boolean }> = [];
+    const events: string[] = [];
     const engine = capture(root, {
       openRustYDocProviderSession: async (options: EngineYdocProviderSessionOptions) =>
         ({
@@ -1559,9 +1570,8 @@ describe("workspaceEngineCapture batch capture", () => {
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
-            const failure = new Error("the settle started and failed");
-            options.onSettleStart?.(1);
-            options.onSettleError?.(failure, 1);
+            options.onSettleStart?.(47);
+            options.onSettleError?.(failure, 47);
             throw failure;
           },
           close: async () => undefined,
@@ -1570,12 +1580,20 @@ describe("workspaceEngineCapture batch capture", () => {
     const session = await engine.openYDocSession({
       path: "note.md",
       onRemoteUpdate: () => undefined,
-      onSaveState: (state) => states.push(state),
+      onSaveState: (state, token, event, authorCapacity) => {
+        states.push({ state, token, authorCapacity });
+        events.push(event);
+      },
     });
-    await vi.waitFor(() => expect(states).toContain("error"));
+    await vi.waitFor(() => expect(states.some(({ state }) => state === "error")).toBe(true));
     await session.close({ settle: false });
     await engine.stop();
-    expect(states).toEqual(["settling", "settling", "error"]);
+    expect(states).toEqual([
+      { state: "settling", token: 0, authorCapacity: undefined },
+      { state: "settling", token: 1, authorCapacity: undefined },
+      { state: "error", token: 1, authorCapacity },
+    ]);
+    expect(events).toEqual(["status", "start", "outcome"]);
   });
 
   it("keeps an edit made outside dohc when the open document's session closes", async () => {
@@ -2775,7 +2793,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     expect(await readFile(join(root, "large.txt"), "utf8")).toBe(text);
     expect(requests.find(request => request.method === VERSIONED_METHOD.textWriteBlob)?.idempotencyKey).toBe("stable");
     await engine.writeAuthoredFile(join(root, "large.txt"), text, author, { createOnly: true, requestId: "stable" });
-    expect(await liveMomentAuthors(engine)).toEqual([author]);
+    expect(await liveMomentAuthors(engine)).toEqual([[author]]);
     await engine.stop();
   });
 
@@ -2790,7 +2808,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const request = requests.find(request => request.method === VERSIONED_METHOD.binaryWrite);
     expect(request).toMatchObject({ params: { bytes: [0, 255, 1], author, createOnly: true, requestId: "binary", correlationId: "batch" } });
     expect(requests.findIndex(request => request.method === "capture.flush")).toBeLessThan(requests.indexOf(request!));
-    expect(await liveMomentAuthors(engine)).toEqual([author]);
+    expect(await liveMomentAuthors(engine)).toEqual([[author]]);
     await engine.stop();
   });
 
@@ -2804,7 +2822,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     await engine.writeAuthoredFile(join(root, "output.txt"), "Written by an agent\n", author);
 
     expect(await readFile(join(root, "output.txt"), "utf8")).toBe("Written by an agent\n");
-    expect(await liveMomentAuthors(engine)).toEqual([author]);
+    expect(await liveMomentAuthors(engine)).toEqual([[author]]);
     await engine.stop();
   });
 
@@ -2823,7 +2841,7 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     await engine.writeAuthoredFile(target, "version: 1\nautomations: []\n", author, { expectedContentHash: hash("version: 1\n") });
     expect(await readFile(target, "utf8")).toBe("version: 1\nautomations: []\n");
-    expect(await liveMomentAuthors(engine)).toContainEqual(author);
+    expect(await liveMomentAuthors(engine)).toContainEqual([author]);
     await engine.stop();
   });
 

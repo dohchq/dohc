@@ -88,12 +88,12 @@ function momentFixtures(
       origin: "local-file",
       summary: `Updated ${suffix}`,
     },
-    author: {
+    authors: [{
       kind: "agent",
       agentId: `agent_${suffix}`,
       onBehalfOf: `user_${suffix}`,
       agentRunId: `run_${suffix}`,
-    },
+    }],
     momentOrder: 1,
   };
   return {
@@ -117,7 +117,7 @@ function momentFixtures(
         },
       },
       metadata: summary.metadata,
-      author: summary.author,
+      authors: summary.authors,
     },
   };
 }

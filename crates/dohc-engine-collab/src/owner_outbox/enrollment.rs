@@ -176,6 +176,7 @@ pub fn enroll_in_tx(
             .ok_or(OwnerOutboxError::Frozen)?
     };
     if head != marker.head_update_seq {
+        crate::author_coverage::reset_in(tx, &key, true).map_err(collab)?;
         let vector_digest = hex_sha256(&input.host_vector);
         put_binary_blob_with_sha(tx, &input.host_vector, &vector_digest)?;
         tx.execute("INSERT INTO ydoc_snapshots (workspace_id,version_id,object_id,up_to_seq,snapshot_blob_sha256,state_vector_blob_sha256,recorded_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![key.workspace_id,key.version_id,key.object_id,head,checkpoint_digest,vector_digest,now_ms]).map_err(write_sql)?;

@@ -108,7 +108,9 @@ export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"
 }
 
 // Optional authorship carried by a MOMENT (never by snapshot metadata, which
-// stays actor-neutral). Tracked agent runs stamp the agent variant. Relay
+// stays actor-neutral). A moment names a nonempty list of authors, one per
+// person or agent whose edits it covers. Tracked agent runs stamp the agent
+// variant, and a person's live edits the human variant. Relay
 // collection creates stamp the public variant using a grant-scoped public
 // principal mapping, never an internal principal or account ID. A named
 // recipient's direct write to a Collection's own files stamps the named
@@ -128,6 +130,12 @@ interface AgentMomentAuthor {
   // claims its writes cause carry the chain on. Named only past 0: a run a
   // person started names none, and absent means 0.
   depth?: number;
+}
+
+interface HumanMomentAuthor {
+  kind: "human";
+  humanId: string;
+  onBehalfOf?: string;
 }
 
 interface PublicMomentAuthor {
@@ -164,6 +172,7 @@ interface AutomationMomentAuthor {
 
 export type MomentAuthor =
   | AgentMomentAuthor
+  | HumanMomentAuthor
   | PublicMomentAuthor
   | NamedMomentAuthor
   | LinkMomentAuthor
@@ -313,7 +322,7 @@ export interface MomentAppendPayload {
   payloadAfterContentKind?: VersionedFileContentKind;
   payloadAfterByteLength?: number;
   metadata: ActorNeutralWriteMetadata;
-  author?: MomentAuthor;
+  authors?: MomentAuthor[];
   beforePresent: SyncMomentBeforePresence;
   beforeObjectId?: WorkspaceObjectId;
   beforeVersionId?: VersionId;
@@ -375,8 +384,8 @@ export interface VersionedTextMoment {
   operation: "write" | "rename" | "delete";
   payload: VersionedTextMomentPayload;
   metadata: MomentMetadata;
-  // Present only when a dohc-tracked agent run authored this moment.
-  author?: MomentAuthor;
+  // Present only when the moment recorded who made it.
+  authors?: MomentAuthor[];
   before?: TextFileSnapshot | null;
   // Present (true) only for sync divergence record-only rows: history that a
   // peer recorded but that never touched this store's materialized file
@@ -399,8 +408,8 @@ export interface VersionedTextMomentSummary {
   contentKind?: VersionedFileContentKind;
   byteLength?: number;
   metadata: MomentMetadata;
-  // Present only when a dohc-tracked agent run authored this moment.
-  author?: MomentAuthor;
+  // Present only when the moment recorded who made it.
+  authors?: MomentAuthor[];
   momentOrder: number;
   // Present (true) only for sync divergence record-only rows — see
   // VersionedTextMoment.syncRecordOnly.

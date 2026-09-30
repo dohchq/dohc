@@ -92,7 +92,7 @@ it("accepts one durable workspace moment and payload-bound receipt across retrie
   expect(record).toMatchObject({destination:"Tokyo",name:"Sam",created_at:20,grant_id:"g",acceptance_id:receipt.acceptanceId});
   expect(record).not.toHaveProperty("idempotency_key");
   expect(record).not.toHaveProperty("id");expect(record.created_by).toMatch(/^public_/);
-  expect(payload).toMatchObject({metadata:{origin:"sync"},author:{kind:"public",principalId:record.created_by,grantId:"g"}});
+  expect(payload).toMatchObject({metadata:{origin:"sync"},authors:[{kind:"public",principalId:record.created_by,grantId:"g"}]});
   const privatePrincipal=f.raw.prepare("SELECT principal_id FROM sync_relay_link_principals").get()!.principal_id;
   expect(JSON.stringify(payload)+Buffer.from(blob).toString()).not.toContain(privatePrincipal);
   expect(f.accept({fields:{name:"Sam",destination:"Tokyo"}})).toEqual(receipt);

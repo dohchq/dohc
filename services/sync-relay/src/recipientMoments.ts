@@ -205,7 +205,7 @@ export function proposalMomentPayload(
       summary: context.summary,
       correlationId: null,
     },
-    ...(context.author ? { author: context.author } : {}),
+    ...(context.author ? { authors: [context.author] } : {}),
     beforePresent: statesBefore ? "present" : "null",
   };
 

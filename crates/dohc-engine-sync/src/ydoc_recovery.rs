@@ -59,6 +59,7 @@ struct RecoveryDecision {
     recovery_object_id: String,
     recovery_moment_id: String,
     recorded_at_ms: i64,
+    recovery_author_json: Option<String>,
 }
 
 struct RecoveryDecisionInsert<'a> {
@@ -94,7 +95,7 @@ fn read_decision(
             "SELECT version_id,object_id,original_path,incoming_content_kind,
                     incoming_update_blob_sha256,incoming_lineage_claim_id,
                     incoming_is_base_state,recovered_path,losing_claim_id,
-                    recovery_collision_ordinal,recovery_object_id,recovery_moment_id,recorded_at_ms
+                    recovery_collision_ordinal,recovery_object_id,recovery_moment_id,recorded_at_ms,recovery_author_json
                FROM ydoc_recovery_decisions
               WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
             params![workspace_id, origin_id, origin_seq],
@@ -113,6 +114,7 @@ fn read_decision(
                     row.get::<_, String>(10)?,
                     row.get::<_, String>(11)?,
                     row.get::<_, i64>(12)?,
+                    row.get::<_, Option<String>>(13)?,
                 ))
             },
         )
@@ -132,6 +134,7 @@ fn read_decision(
         recovery_object_id,
         recovery_moment_id,
         recorded_at_ms,
+        recovery_author_json,
     )) = row
     else {
         return Ok(None);
@@ -153,6 +156,7 @@ fn read_decision(
         recovery_object_id,
         recovery_moment_id,
         recorded_at_ms,
+        recovery_author_json,
     }))
 }
 
@@ -403,7 +407,7 @@ fn verify_recovery(
                    AND moment.after_blob_sha256=?7 AND moment.after_binary_sha256 IS NULL
                    AND moment.metadata_origin='sync' AND moment.metadata_summary=?8
                    AND moment.metadata_correlation_id=?9
-                   AND moment.author_json IS NULL AND moment.sync_record_only IS NULL
+                   AND moment.author_json IS ?12 AND moment.sync_record_only IS NULL
                    AND blob.byte_length=?10 AND blob.text=?11
              )",
             params![
@@ -418,6 +422,7 @@ fn verify_recovery(
                 identity.correlation_id,
                 markdown.len() as i64,
                 markdown,
+                decision.recovery_author_json,
             ],
             |row| row.get(0),
         )
@@ -511,8 +516,8 @@ fn record_decision(
              incoming_content_kind,incoming_update_blob_sha256,
              incoming_lineage_claim_id,incoming_is_base_state,
              losing_claim_id,recovered_path,recovery_collision_ordinal,
-             recovery_object_id,recovery_moment_id,recorded_at_ms
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+             recovery_object_id,recovery_moment_id,recorded_at_ms,recovery_author_json
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
         params![
             insert.workspace_id,
             insert.origin_id,
@@ -534,6 +539,7 @@ fn record_decision(
             decision.recovery_object_id,
             decision.recovery_moment_id,
             decision.recorded_at_ms,
+            decision.recovery_author_json,
         ],
     )
     .map_err(SyncError::persist)?;
@@ -553,6 +559,7 @@ pub(crate) fn recover_lineage_in_tx(
     incoming: RecoveryEnvelopeBinding<'_>,
     losing_claim_id: &str,
     markdown: &str,
+    author_json: Option<&str>,
     origin_id: &str,
     origin_seq: i64,
     recorded_at_ms: i64,
@@ -594,7 +601,7 @@ pub(crate) fn recover_lineage_in_tx(
         });
     }
 
-    let created = create_recovery_in_tx(
+    let created = create_recovery_with_correlation_in_tx(
         tx,
         key,
         original_path,
@@ -603,6 +610,8 @@ pub(crate) fn recover_lineage_in_tx(
         0,
         recorded_at_ms,
         search_policy,
+        None,
+        author_json,
     )?;
     let decision = RecoveryDecision {
         version_id: key.version_id.clone(),
@@ -618,6 +627,7 @@ pub(crate) fn recover_lineage_in_tx(
         recovery_object_id: created.object_id.clone(),
         recovery_moment_id: created.moment_id.clone(),
         recorded_at_ms,
+        recovery_author_json: author_json.map(str::to_owned),
     };
     verify_recovery(tx, key, &decision, markdown)?;
     record_decision(
@@ -653,6 +663,7 @@ pub(crate) fn create_recovery_in_tx(
         recorded_at_ms,
         search_policy,
         None,
+        None,
     )
 }
 
@@ -667,6 +678,7 @@ fn create_recovery_with_correlation_in_tx(
     recorded_at_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
     correlation: Option<&str>,
+    author_json: Option<&str>,
 ) -> Result<CreatedRecovery, SyncError> {
     let mut collision_ordinal = first_collision_ordinal;
     let mut identity = loop {
@@ -726,7 +738,7 @@ fn create_recovery_with_correlation_in_tx(
             metadata_origin: "sync".to_owned(),
             metadata_summary: Some(identity.summary.clone()),
             metadata_correlation_id: Some(identity.correlation_id.clone()),
-            author_json: None,
+            author_json: author_json.map(str::to_owned),
             now_ms: recorded_at_ms,
             request_id: None,
         },
@@ -773,6 +785,7 @@ pub(crate) fn recover_inactive_projection_in_tx(
     content: &str,
     previous_sha: &str,
     state_sha: &str,
+    author_json: Option<&str>,
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
@@ -802,6 +815,7 @@ pub(crate) fn recover_inactive_projection_in_tx(
             now_ms,
             search_policy,
             Some(&correlation),
+            author_json,
         )?;
         return Ok(());
     };
@@ -819,7 +833,7 @@ pub(crate) fn recover_inactive_projection_in_tx(
             metadata_origin: "sync".to_owned(),
             metadata_summary: Some(recovery_summary(path.as_str())),
             metadata_correlation_id: Some(correlation),
-            author_json: None,
+            author_json: author_json.map(str::to_owned),
             now_ms,
             request_id: None,
         },

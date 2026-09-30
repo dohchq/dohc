@@ -15,7 +15,8 @@ use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 use crate::collections::{
     ChangeActorKind, CollectionFieldChangeFact, CollectionRecordApplyFacts,
     CollectionRecordLifecycle, CollectionRecordLifecycleKind, SharedChangeAuthor, field_fact_value,
-    indexed_record_fields, moment_author_attribution, parent_path,
+    indexed_record_fields, moment_author_attribution, moment_author_depth, moment_author_entries,
+    parent_path,
 };
 use crate::error::DomainError;
 use dohc_engine_storage::{
@@ -2225,8 +2226,8 @@ fn moment_is_local(
     .map_err(DomainError::sql_corrupt)
 }
 
-/// A moment's author as a claim names it, with the chain depth it declared
-/// ([`moment_author_attribution`]).
+/// A moment's author as a claim names it ([`moment_author_attribution`]),
+/// with the deepest chain its authors declared ([`moment_author_depth`]).
 fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (AutomationChange, u32) {
     let (author_origin_id, attribution) = moment_author_attribution(author_json);
     let change = AutomationChange {
@@ -2242,10 +2243,7 @@ fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (Auto
         shared_author: None,
         live_cursor: None,
     };
-    (
-        change,
-        attribution.map_or(0, |attribution| attribution.depth),
-    )
+    (change, moment_author_depth(author_json))
 }
 
 /// Whether any automation wants removed records, so reconcile reads a
@@ -2346,6 +2344,17 @@ pub fn claim_record_lifecycle_in_tx(
                 continue;
             }
             let (change, depth) = moment_change(kind, moment.author_json.as_deref());
+            let author_ids: Vec<String> = moment_author_entries(moment.author_json.as_deref())
+                .iter()
+                .filter_map(|author| match author.get("kind").and_then(Value::as_str) {
+                    Some("automation") => author.get("automationId"),
+                    Some("agent") => author.get("agentId"),
+                    Some("human") => author.get("humanId"),
+                    _ => None,
+                })
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
             let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
             let mut claiming: Vec<&str> = Vec::new();
             for subscription in &subscriptions {
@@ -2353,7 +2362,7 @@ pub fn claim_record_lifecycle_in_tx(
                 if claiming.last() == Some(&automation_id)
                     || !prefix_contains(&subscription.prefix, &record.collection_path)
                     || subscription.created_at_ms > moment.recorded_at_ms
-                    || change.author_origin_id.as_deref() == Some(automation_id)
+                    || author_ids.iter().any(|author| author == automation_id)
                 {
                     continue;
                 }

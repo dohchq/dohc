@@ -19,7 +19,7 @@ const validMoment = {
   beforeBinarySha256: null,
   beforeLatestMomentId: null,
   metadataOrigin: "api",
-  author: null,
+  authors: null,
   syncRecordOnly: false,
   afterText: "a",
   afterByteLength: 1,
@@ -33,10 +33,24 @@ describe("versioned result decoder rejection", () => {
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },
+    { kind: "human", humanId: "ada" },
   ])("keeps a $kind author without a declared principal", (author) => {
-    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author })?.author).toEqual(author);
+    const authors = [author];
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors).toEqual(authors);
     expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
-      ...validMoment, author: { ...author, onBehalfOf: null },
+      ...validMoment, authors: [{ ...author, onBehalfOf: null }],
+    })).toThrow(ProtocolShapeError);
+  });
+
+  it("keeps every author of a moment and each corrupt entry", () => {
+    const authors = [
+      { kind: "human", humanId: "ada", onBehalfOf: "ada" },
+      { kind: "agent", agentId: "agent" },
+      { corrupt: true },
+    ];
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors).toEqual(authors);
+    expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
+      ...validMoment, authors: { kind: "agent", agentId: "agent" },
     })).toThrow(ProtocolShapeError);
   });
 
@@ -120,21 +134,22 @@ describe("versioned result decoder rejection", () => {
 
   it("accepts a named author only with its user, grant, and integer generation", () => {
     const author = { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 };
-    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author })?.author).toEqual(author);
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })?.authors)
+      .toEqual([author]);
     for (const malformed of [
       { kind: "named", userId: "ana", grantId: "grant" },
       { ...author, grantGeneration: 1.5 },
       { ...author, email: "ana@example.com" },
     ]) {
       expect(() =>
-        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author: malformed }),
+        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [malformed] }),
       ).toThrow(ProtocolShapeError);
     }
   });
 
   it("accepts a link author only with its grant, integer generation, and principal", () => {
     const author = { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" };
-    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author })?.author).toEqual(author);
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })?.authors).toEqual([author]);
     for (const malformed of [
       { kind: "link", grantId: "grant", grantGeneration: 2 },
       { ...author, grantGeneration: 1.5 },
@@ -142,7 +157,7 @@ describe("versioned result decoder rejection", () => {
       { ...author, displayName: "Ana" },
     ]) {
       expect(() =>
-        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author: malformed }),
+        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [malformed] }),
       ).toThrow(ProtocolShapeError);
     }
   });

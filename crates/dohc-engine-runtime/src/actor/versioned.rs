@@ -1529,6 +1529,63 @@ fn versioned_text_rollback_on_store(
     let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
+        |tx, moment| {
+            let key = DocKey {
+                workspace_id: input.workspace_id.clone(),
+                version_id: moment.version_id.clone(),
+                object_id: moment.object_id.clone(),
+            };
+            let owns_attempt = tx
+                .query_row(
+                    "SELECT settle_prior_update_seq IS NOT NULL AND settle_seq=?4 FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        moment.moment_order
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()
+                .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?
+                .unwrap_or(false);
+            let job_id = format!("ydoc-mat_{}", moment.moment_id);
+            let matches_moment: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE job_id=?1 \
+                     AND workspace_id=?2 AND target_path=?3 AND target_generation=?4 \
+                     AND content_sha256=?5 AND operation='write')",
+                    params![
+                        job_id,
+                        key.workspace_id,
+                        moment.path,
+                        moment.moment_order,
+                        moment.after_blob_sha256
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+            if owns_attempt && !matches_moment {
+                return Err(DomainError::StateCorrupt {
+                    reason: "rolled-back settlement has no matching materialization job",
+                });
+            }
+            if matches_moment {
+                tx.execute(
+                    "UPDATE materialization_jobs SET status='cancelled',completed_at_ms=?2 \
+                     WHERE job_id=?1 AND status='pending'",
+                    params![job_id, moment.recorded_at_ms],
+                )
+                .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+            }
+            if owns_attempt {
+                // Recredit the reserved authors while the original moment still exists.
+                dohc_engine_collab::author_coverage::reconcile_in(tx, &key, moment.recorded_at_ms)
+                    .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+            }
+            Ok(())
+        },
         |tx, object_id, restored_text, compensating_moment_id, recorded_at_ms| {
             restored_asset_jobs = restore_deleted_scene_assets_in_tx(
                 tx,

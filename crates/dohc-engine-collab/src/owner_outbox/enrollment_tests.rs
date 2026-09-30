@@ -254,3 +254,44 @@ fn bad_cut_capture_race_and_capacity_failure_leave_original_work_unchanged() {
             .unwrap();
     }
 }
+
+#[test]
+fn enrollment_folds_unsettled_authors_before_removing_native_update_rows() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let key = key(&observed.binding).unwrap();
+    let local = Ydoc::wire();
+    local.apply(&checkpoint).unwrap();
+    let delta = local.richdoc_append_paragraph("attributed private edit");
+    let attribution = dohc_engine_domain::ChangeAttribution {
+        actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+        on_behalf_of: Some("person".into()),
+        depth: 2,
+        run: None,
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::record_update_in_tx(tx, &key, &delta, Some("writer"), Some(&attribution), 3)
+        })
+        .unwrap();
+    let before = store
+        .read_with(|conn| crate::author_coverage::interval_in(conn, &key, i64::MAX))
+        .unwrap()
+        .json();
+    assert!(before.contains("writer"));
+    let enrollment = input(&store, &observed, checkpoint);
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    assert!(
+        enrolled.pending_bytes > 0,
+        "private content stays in its outbox"
+    );
+    let (rows, pending, attempt): (i64, String, Option<i64>) = store.read_with(|conn| {
+        conn.query_row("SELECT (SELECT COUNT(*) FROM ydoc_updates),pending_authors_json,settle_prior_update_seq FROM ydoc_docs", [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(read_sql)
+    }).unwrap();
+    assert_eq!(rows, 0);
+    assert_eq!(
+        pending, before,
+        "removed update authors remain available for settlement"
+    );
+    assert_eq!(attempt, None);
+}

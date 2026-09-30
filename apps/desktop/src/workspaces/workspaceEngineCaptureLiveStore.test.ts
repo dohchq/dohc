@@ -225,7 +225,7 @@ const moment = {
   metadataOrigin: "api",
   metadataSummary: "Resolved note.md",
   metadataCorrelationId: "conflict-1",
-  author: null,
+  authors: null,
   syncRecordOnly: false,
   afterText: "hello",
   afterByteLength: 5,
@@ -1500,7 +1500,7 @@ describe("createCaptureLiveStores", () => {
   it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(
     "rejects corrupt author provenance returned by %s",
     async (method) => {
-      const corruptMoment = { ...moment, author: { corrupt: true } as const };
+      const corruptMoment = { ...moment, authors: [{ kind: "agent", agentId: "agent" }, { corrupt: true }] };
       const client = clientFor(async (request) => ({
         id: request.id,
         result:
@@ -1533,10 +1533,12 @@ describe("createCaptureLiveStores", () => {
     { method, author: { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" } as const },
     { method, author: { kind: "agent", agentId: "agent" } as const },
     { method, author: { kind: "automation", automationId: "collection:Tasks#stamp", depth: 4 } as const },
+    { method, author: { kind: "human", humanId: "ada", onBehalfOf: "ada" } as const },
   ]))(
     "keeps $author.kind authorship returned by $method",
     async ({ method, author }) => {
-      const namedMoment = { ...moment, author };
+      const authors = [author, { kind: "agent", agentId: "helper" } as const];
+      const namedMoment = { ...moment, authors };
       const client = clientFor(async (request) => ({
         id: request.id,
         result:
@@ -1557,7 +1559,7 @@ describe("createCaptureLiveStores", () => {
         method === VERSIONED_METHOD.momentsGet
           ? await store.getMoment({ workspaceId: WORKSPACE_ID, momentId: "resolved-moment" })
           : (await store.listMoments({ workspaceId: WORKSPACE_ID })).moments[0];
-      expect(read?.author).toEqual(author);
+      expect(read?.authors).toEqual(authors);
     },
   );
 

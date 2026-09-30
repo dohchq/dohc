@@ -17,7 +17,7 @@ import type {
 import { ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 
-type MomentAuthor = NonNullable<VersionedTextMomentSummary["author"]>;
+type MomentAuthor = NonNullable<VersionedTextMomentSummary["authors"]>[number];
 
 // Main supplies how an author reads. An agent working for this computer's
 // person reads as the configured agent name, and any other agent as
@@ -58,11 +58,13 @@ export async function listEngineMomentsForIpc(
 function engineMomentBaseForIpc(
   moment: Pick<
     WorkspaceEngineMomentSummary,
-    "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata" | "author"
+    "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata" | "authors"
   >,
   names: EngineMomentAuthorNames,
 ) {
-  const agentAuthorName = moment.author?.kind === "agent" ? names.agent(moment.author) : undefined;
+  // Keep every author in IPC. Existing display fields name singleton authors.
+  const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
+  const agentAuthorName = author?.kind === "agent" ? names.agent(author) : undefined;
   return {
     id: moment.id,
     versionId: moment.versionId,
@@ -70,14 +72,15 @@ function engineMomentBaseForIpc(
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
     origin: moment.metadata.origin,
+    ...(moment.authors !== undefined ? { authors: moment.authors } : {}),
     ...(agentAuthorName !== undefined
       ? { agentAuthorName }
       : {}),
-    ...(moment.author?.kind === "public" ? { publicAuthor: moment.author } : {}),
-    ...(moment.author?.kind === "link" ? { linkAuthor: moment.author } : {}),
-    ...automationAuthorOf(moment.author, names),
-    ...(moment.author?.kind === "named"
-      ? { namedAuthor: { userId: moment.author.userId, label: names.named(moment.author) } }
+    ...(author?.kind === "public" ? { publicAuthor: author } : {}),
+    ...(author?.kind === "link" ? { linkAuthor: author } : {}),
+    ...automationAuthorOf(author, names),
+    ...(author?.kind === "named"
+      ? { namedAuthor: { userId: author.userId, label: names.named(author) } }
       : {}),
     ...(moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }

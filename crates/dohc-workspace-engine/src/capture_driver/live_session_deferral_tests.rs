@@ -475,7 +475,7 @@ async fn an_outside_write_to_a_held_new_file_keeps_capture_unsettled_until_recor
     );
     assert_eq!(files.handle().stats().await.expect("stats").deferred, 1);
 
-    let author = r#"{"kind":"agent","agentId":"e2e-agent","onBehalfOf":"local"}"#;
+    let author = r#"[{"kind":"agent","agentId":"e2e-agent","onBehalfOf":"local"}]"#;
     harness.author_json = Some(author.to_owned());
     std::fs::write(harness.root.join(NEW_FILE), "Written by the agent.\n").expect("outside write");
     files.handle().request_rescan();

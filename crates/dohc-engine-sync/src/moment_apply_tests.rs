@@ -49,9 +49,79 @@ fn text_sha(text: &str) -> String {
 }
 
 #[test]
+fn maximum_live_author_summary_journals_with_payload_headroom() {
+    let (_scratch, mut store) = test_store();
+    crate::adopt_join_identity(&mut store, "ws", "source", "epoch", "stream", 1, &NoFaults)
+        .expect("identity");
+    let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+    let field = dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
+    for index in 0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS {
+        let id = format!("{index:04}{}", "\"".repeat(field - 4));
+        let entry = dohc_engine_domain::moment_author_json(
+            Some(&id),
+            Some(&dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Automation,
+                on_behalf_of: Some("\"".repeat(field)),
+                depth: dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH,
+                run: None,
+            }),
+        )
+        .expect("entry");
+        let mut next = dohc_engine_collab::author_coverage::Authors::default();
+        next.union_json(&authors.json()).expect("prior authors");
+        next.union_json(&entry).expect("bounded entry");
+        if next.journal_bytes() > dohc_engine_domain::MAX_AUTHOR_JSON_BYTES {
+            break;
+        }
+        authors = next;
+    }
+    let author_json = authors.json();
+    assert!(
+        author_json.len()
+            > dohc_engine_domain::MAX_AUTHOR_JSON_BYTES
+                - dohc_engine_domain::MAX_AUTHOR_ENTRY_BYTES
+                - 1
+    );
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "author-limit".into(),
+                path: "authors.md".into(),
+                text: "all authors".into(),
+                moment_id: "limit-moment".into(),
+                metadata_origin: "ydoc".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: Some(author_json),
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("maximum author moment");
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::journal_moment_append_in_tx(tx, "ws", "limit-moment")
+        })
+        .expect("maximum author moment journals");
+    let bytes: i64 = store.read_with(|conn| conn.query_row(
+        "SELECT length(CAST(payload_json AS BLOB)) FROM replication_log WHERE op_kind='moment.append'",
+        [], |row| row.get(0),
+    ).map_err(dohc_engine_storage::StorageError::persist_public)).expect("payload bytes");
+    assert!(bytes < crate::MAX_PAYLOAD_JSON_BYTES as i64);
+    assert!(crate::MAX_PAYLOAD_JSON_BYTES as i64 - bytes > 120 * 1024);
+}
+
+#[test]
 fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history() {
     use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, moment_author_json};
-    for kind in [ChangeActorKind::Agent, ChangeActorKind::Automation] {
+    for kind in [
+        ChangeActorKind::Human,
+        ChangeActorKind::Agent,
+        ChangeActorKind::Automation,
+    ] {
         for principal in [None, Some("owner")] {
             let (_source_scratch, mut source) = test_store();
             let (_peer_scratch, mut peer) = test_store();
@@ -156,7 +226,7 @@ fn a_peer_keeps_the_depth_an_agent_moment_names() {
     });
     let (_scratch, mut peer) = test_store();
     let mut payload = absent_text_payload("woken", "object", "doc.md", "content");
-    payload["author"] = author.clone();
+    payload["authors"] = json!([author]);
     hydrate_texts(&mut peer, &["content"]);
     assert_eq!(
         apply_moment_envelope(&mut peer, &envelope("source", 0, "ws", payload), &NoFaults)
@@ -169,7 +239,33 @@ fn a_peer_keeps_the_depth_an_agent_moment_names() {
         .expect("replicated moment");
     assert_eq!(
         serde_json::from_str::<Value>(history.author_json.as_deref().expect("author")).unwrap(),
-        author,
+        json!([author]),
+    );
+}
+
+#[test]
+fn a_peer_applies_pre_upgrade_control_character_authors() {
+    let authors = json!([
+        {"kind":"agent", "agentId":"old\nagent", "onBehalfOf":"old\u{0085}person"},
+        {"kind":"human", "humanId":"old\u{0085}human"}
+    ]);
+    let (_scratch, mut peer) = test_store();
+    let mut payload = absent_text_payload("legacy-authors", "object", "doc.md", "content");
+    payload["authors"] = authors.clone();
+    hydrate_texts(&mut peer, &["content"]);
+    assert_eq!(
+        apply_moment_envelope(&mut peer, &envelope("source", 0, "ws", payload), &NoFaults)
+            .expect("peer applies legacy authors"),
+        ApplyOutcome::new(ApplyDisposition::Applied(0)),
+    );
+    let history = VersionedTextStore::new(&mut peer)
+        .get_moment("ws", "legacy-authors")
+        .expect("peer history")
+        .expect("moment");
+    assert_eq!(
+        serde_json::from_str::<Value>(history.author_json.as_deref().expect("authors"))
+            .expect("author JSON"),
+        authors
     );
 }
 
@@ -181,12 +277,12 @@ fn a_peer_imports_an_older_computers_agent_moment_with_an_unchecked_depth() {
     for depth in [json!(0), json!(65), json!("3")] {
         let (_scratch, mut peer) = test_store();
         let mut payload = absent_text_payload("older", "object", "doc.md", "content");
-        payload["author"] = json!({
+        payload["authors"] = json!([{
             "kind": "agent",
             "agentId": "claude-code",
             "onBehalfOf": "owner",
             "depth": depth,
-        });
+        }]);
         let op = envelope("older-peer", 0, "ws", payload);
         hydrate_texts(&mut peer, &["content"]);
         assert_eq!(
@@ -200,7 +296,7 @@ fn a_peer_imports_an_older_computers_agent_moment_with_an_unchecked_depth() {
             .expect("replicated moment");
         assert_eq!(
             serde_json::from_str::<Value>(history.author_json.as_deref().expect("author")).unwrap(),
-            json!({"kind": "agent", "agentId": "claude-code", "onBehalfOf": "owner"}),
+            json!([{"kind": "agent", "agentId": "claude-code", "onBehalfOf": "owner"}]),
             "depth {depth}",
         );
         let kept: String = peer
@@ -220,14 +316,16 @@ fn a_peer_imports_an_older_computers_agent_moment_with_an_unchecked_depth() {
 #[test]
 fn declared_moment_authors_refuse_a_null_empty_or_non_string_principal() {
     for author in [
+        json!({"kind":"human", "humanId":"creator"}),
         json!({"kind":"agent", "agentId":"creator"}),
         json!({"kind":"automation", "automationId":"creator", "depth":4}),
     ] {
         for principal in [Value::Null, json!(""), json!(42)] {
             let (_scratch, mut peer) = test_store();
             let mut payload = absent_text_payload("bad-author", "object", "doc.md", "content");
-            payload["author"] = author.clone();
-            payload["author"]["onBehalfOf"] = principal.clone();
+            let mut author = author.clone();
+            author["onBehalfOf"] = principal.clone();
+            payload["authors"] = json!([author]);
             hydrate_texts(&mut peer, &["content"]);
             let result =
                 apply_moment_envelope(&mut peer, &envelope("source", 0, "ws", payload), &NoFaults)
@@ -803,8 +901,8 @@ fn public_create_author_survives_replay_and_payload_export() {
         "poll/response.md",
         "---\nanswer: Lisbon\n---\n",
     );
-    let author = json!({"kind":"public", "principalId":"public-holder", "grantId":"grant"});
-    payload["author"] = author.clone();
+    let authors = json!([{"kind":"public", "principalId":"public-holder", "grantId":"grant"}]);
+    payload["authors"] = authors.clone();
     let op = envelope("relay:collection-create:grant", 0, "ws", payload);
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("accept"),
@@ -823,7 +921,7 @@ fn public_create_author_survives_replay_and_payload_export() {
             assert_eq!(count, 1);
             let (exported, _) =
                 crate::outbound::moment_append_payload_in_tx(tx, "ws", "accepted-create").unwrap();
-            assert_eq!(exported["author"], author);
+            assert_eq!(exported["authors"], authors);
             Ok::<_, SyncError>(())
         })
         .unwrap();
@@ -839,7 +937,7 @@ fn public_author_is_refused_from_an_ordinary_origin() {
         "poll/response.md",
         "answer",
     );
-    payload["author"] = json!({"kind":"public", "principalId":"holder", "grantId":"grant"});
+    payload["authors"] = json!([{"kind":"public", "principalId":"holder", "grantId":"grant"}]);
     let result = apply_moment_envelope(
         &mut store,
         &envelope("device-origin", 0, "ws", payload),
@@ -868,7 +966,7 @@ fn direct_write_authors(grant_id: &str) -> [Value; 2] {
 }
 
 fn with_author(mut payload: Value, author: Value) -> Value {
-    payload["author"] = author;
+    payload["authors"] = json!([author]);
     payload
 }
 
@@ -980,8 +1078,53 @@ fn direct_write_authors_write_a_collections_own_files_from_their_grant_origin() 
     for (seq, stored) in (0_i64..).zip(authors) {
         assert_eq!(
             serde_json::from_str::<Value>(&stored).expect("author JSON"),
-            author(seq)
+            json!([author(seq)])
         );
+    }
+}
+
+#[test]
+fn moment_authors_are_a_nonempty_list_and_a_relay_author_stands_alone() {
+    let agent = json!({"kind":"agent", "agentId":"runner", "onBehalfOf":"owner"});
+    let person = json!({"kind":"human", "humanId":"ana"});
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["content"]);
+    let mut payload = absent_text_payload("both", "object", "doc.md", "content");
+    payload["authors"] = json!([person, agent]);
+    assert_eq!(
+        apply_moment_envelope(&mut store, &envelope("source", 0, "ws", payload), &NoFaults)
+            .expect("apply"),
+        ApplyOutcome::new(ApplyDisposition::Applied(0)),
+    );
+    let history = VersionedTextStore::new(&mut store)
+        .get_moment("ws", "both")
+        .expect("history")
+        .expect("moment");
+    assert_eq!(
+        serde_json::from_str::<Value>(history.author_json.as_deref().expect("authors")).unwrap(),
+        json!([person, agent]),
+    );
+    for (origin, authors) in [
+        ("source", json!([])),
+        ("source", agent.clone()),
+        (NAMED_ORIGIN, json!([named_author("grant"), agent])),
+        (
+            "relay:collection-create:grant",
+            json!([{"kind":"public", "principalId":"holder", "grantId":"grant"}, agent]),
+        ),
+    ] {
+        let (_scratch, mut store) = test_store();
+        hydrate_texts(&mut store, &["content"]);
+        let mut payload = absent_text_payload("refused", "object", "doc.md", "content");
+        payload["authors"] = authors.clone();
+        let result =
+            apply_moment_envelope(&mut store, &envelope(origin, 0, "ws", payload), &NoFaults)
+                .expect("refusal is recorded");
+        assert!(
+            matches!(result.primary, ApplyDisposition::Refused(_)),
+            "{authors}"
+        );
+        assert_eq!(store.table_row_count("moments").unwrap(), 0);
     }
 }
 
@@ -1319,7 +1462,7 @@ fn direct_write_authors_are_refused_outside_a_collections_own_files() {
             "direct-write author may write only a Collection's own files",
             "{path} {} {}",
             op.payload["momentId"],
-            op.payload["author"]["kind"]
+            op.payload["authors"][0]["kind"]
         );
     }
     assert_eq!(
@@ -1919,8 +2062,8 @@ fn stopped_binary_moment() -> (
     payload["payloadAfterBlobSha256"] = json!(hex_sha256(&bytes));
     payload["payloadAfterContentKind"] = json!("binary");
     payload["payloadAfterByteLength"] = json!(bytes.len());
-    payload["author"] =
-        json!({"kind":"agent","agentId":"original-agent","onBehalfOf":"original-owner"});
+    payload["authors"] =
+        json!([{"kind":"agent","agentId":"original-agent","onBehalfOf":"original-owner"}]);
     (
         scratch,
         store,

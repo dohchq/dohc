@@ -30,29 +30,32 @@ describe("moment author results", () => {
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },
     { kind: "named", userId: "user_ana", grantId: "grant", grantGeneration: 2 },
     { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" },
-  ])("keeps a $kind author", (author) => {
-    const result = {
-      changes: [{
-        id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
-        path: "tasks/a.md", versionId: "main", fileCount: 1, author,
-      }],
-      count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
-    };
+    { kind: "human", humanId: "ada" },
+  ])("keeps a $kind author without a declared principal", (author) => {
+    const result = momentsResult([author]);
     expect(parseCliResult("moments", result)).toEqual(result);
   });
 
+  it("keeps every author of a change and refuses an empty list", () => {
+    const result = momentsResult([{ kind: "human", humanId: "ada" }, { kind: "agent", agentId: "agent" }]);
+    expect(parseCliResult("moments", result)).toEqual(result);
+    expect(() => parseCliResult("moments", momentsResult([]))).toThrow();
+  });
+
   it("refuses a link author that claims a person", () => {
-    const author = { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", userId: "user_ana" };
-    const result = {
-      changes: [{
-        id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
-        path: "tasks/a.md", versionId: "main", fileCount: 1, author,
-      }],
-      count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
-    };
-    expect(() => parseCliResult("moments", result)).toThrow();
+    expect(() => parseCliResult("moments", momentsResult([{ kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", userId: "user_ana" }]))).toThrow();
   });
 });
+
+function momentsResult(authors: unknown[]) {
+  return {
+    changes: [{
+      id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
+      path: "tasks/a.md", versionId: "main", fileCount: 1, authors,
+    }],
+    count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
+  };
+}
 
 function request(verb: string, args: Record<string, unknown>) {
   return {

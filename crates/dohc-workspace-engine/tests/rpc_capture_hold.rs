@@ -94,7 +94,8 @@ async fn held_capture_leaves_one_authored_row_per_moved_or_deleted_file() {
             continue;
         }
         assert_eq!(
-            row["author"], author,
+            row["authors"],
+            json!([author]),
             "every new row names the agent: {row}"
         );
         let operation = row["operation"].as_str().expect("operation");
@@ -153,6 +154,42 @@ async fn a_hold_keeps_capture_out_until_release_and_a_write_under_an_ended_hold_
     assert_eq!(refused.message, "capture-hold-ended");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn check_move_refuses_an_author_history_would_refuse_before_anything_changes() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "notes.txt", b"notes");
+    let (transport, handle) = open(&scratch).await;
+    reconcile_until_settled(&transport, &handle, 10).await;
+
+    let oversized = "x".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES + 1);
+    let invalid = [
+        json!({ "kind": "agent", "agentId": "Test\u{0085}agent", "onBehalfOf": "person-1" }),
+        json!({ "kind": "agent", "agentId": "Test agent", "onBehalfOf": "person\n1" }),
+        json!({ "kind": "agent", "agentId": oversized, "onBehalfOf": "person-1" }),
+    ];
+    for (id, author) in (11_u64..).zip(invalid) {
+        let params = json!({ "versionId": "main", "path": "notes.txt", "author": author });
+        let refused = call_error(
+            &transport,
+            &handle,
+            id,
+            "versionedText.checkMove",
+            params.clone(),
+        )
+        .await;
+        assert_eq!(refused.message, "invalid-metadata", "{params}");
+    }
+    let author = json!({ "kind": "agent", "agentId": "Test agent", "onBehalfOf": "person-1" });
+    let params = json!({ "versionId": "main", "path": "notes.txt", "author": author });
+    let allowed = call(&transport, &handle, 14, "versionedText.checkMove", params).await;
+    assert_eq!(allowed, json!({ "allowed": true }));
+    assert_eq!(
+        std::fs::read(scratch.path().join("notes.txt")).expect("notes"),
+        b"notes"
+    );
+}
+
 /// An overwrite that fails puts the staged destination back, then rolls its
 /// delete back. The rollback's restore finds the same bytes already there,
 /// so the file keeps them and capture finds nothing to record.
@@ -196,7 +233,8 @@ async fn a_binary_delete_rolled_back_after_its_file_returns_keeps_its_bytes_with
     for row in moment_rows(&transport, &handle, 17).await {
         if !seen.contains(&moment_id(&row)) {
             assert_eq!(
-                row["author"], author,
+                row["authors"],
+                json!([author]),
                 "capture recorded a row of its own: {row}"
             );
         }
@@ -221,7 +259,7 @@ async fn a_change_made_during_a_hold_is_captured_after_release_and_close_does_no
         .find(|row| row["path"] == json!("outside.txt"))
         .expect("the outside edit is captured after release");
     assert!(
-        outside["author"].is_null(),
+        outside["authors"].is_null(),
         "an outside edit stays neutral: {outside}"
     );
 

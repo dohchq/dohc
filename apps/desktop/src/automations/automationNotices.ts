@@ -171,14 +171,20 @@ const isOn = (entry: AutomationEntry | null): boolean | null =>
  * with is their relay user id. The owner's own edits and their agents'
  * carry no person, so they are the owner, made on one of the owner's
  * computers. An automation's change is dohc's. An Edit link's change is the
- * link's, whose holder is not a person dohc can notify, and a public link's
- * names nobody.
+ * link's, whose holder is not a person dohc can notify. A public link names
+ * nobody. Several authors name one only when they agree.
  */
 type ChangeAuthor = { kind: "person"; userId: string } | { kind: "link" } | { kind: "dohc" } | { kind: "nobody" };
-function authorOf(author: MomentAuthor | undefined, ownerUserId: string): ChangeAuthor {
+function authorOf(authors: MomentAuthor[] | undefined, ownerUserId: string): ChangeAuthor {
+  const each = (authors ?? []).map((author) => entryAuthorOf(author, ownerUserId));
+  const [first = entryAuthorOf(undefined, ownerUserId)] = each;
+  return each.every((author) => isDeepStrictEqual(author, first)) ? first : { kind: "nobody" };
+}
+function entryAuthorOf(author: MomentAuthor | undefined, ownerUserId: string): ChangeAuthor {
   switch (author?.kind) {
     case undefined:
     case "agent":
+    case "human":
       return { kind: "person", userId: ownerUserId };
     case "named":
       return { kind: "person", userId: author.userId };
@@ -222,7 +228,7 @@ async function* entryChanges(
       const before = entryIn(moment.payload.before?.text, input.id);
       const after = moment.operation === "delete" ? null : entryIn(text, input.id);
       if (isDeepStrictEqual(before, after)) continue;
-      yield { before, after, author: authorOf(moment.author, input.ownerUserId), text };
+      yield { before, after, author: authorOf(moment.authors, input.ownerUserId), text };
     }
     if (page.nextBeforeMomentOrder === null) return;
     beforeMomentOrder = page.nextBeforeMomentOrder;

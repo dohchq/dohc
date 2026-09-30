@@ -188,7 +188,7 @@ const VERSIONED_PARAM_SHAPES = {
     optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
-  [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"] },
+  [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"], optionalJson: ["author"] },
   [VERSIONED_METHOD.textReadBlob]: {
     requiredStrings: ["workspaceId", "sha256"],
   },
@@ -1187,6 +1187,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       case VERSIONED_METHOD.textRead:
         return this.textRead(state, workspace, params);
       case VERSIONED_METHOD.textCheckMove:
+        // The daemon refuses the author it is about to record under first.
+        this.validatedAuthorValue(params);
         return { allowed: true };
       case VERSIONED_METHOD.textReadBlob:
         return this.textReadBlob(state, params);
@@ -2926,7 +2928,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
   private writeAuthorFingerprint(params: JsonObject): string | null {
     this.validatedAuthorValue(params);
     if (params.author !== undefined && params.author !== null) {
-      return stableJsonStringify(params.author);
+      return stableJsonStringify([params.author]);
     }
     return null;
   }
@@ -3019,6 +3021,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const value = params.author;
     if (value === undefined || value === null) return undefined;
     if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-metadata");
+    if (Object.values(value).some(field => typeof field === "string" && /\p{Cc}/u.test(field)) ||
+        ["agentId", "automationId", "humanId", "onBehalfOf", "agentRunId", "principalId", "grantId"]
+          .some(field => typeof value[field] === "string" && utf8Length(value[field]) > 512) ||
+        utf8Length(JSON.stringify([value])) > 128 * 1024) {
+      throw new Error("invalid-metadata");
+    }
     const { kind, agentId, onBehalfOf, agentRunId, depth } = value;
     if (
       kind !== "agent" ||
@@ -3065,7 +3073,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         // `invalid-metadata` for a malformed author, exactly as the daemon
         // refuses the request before mutating anything.
         const author = this.validatedAuthorValue(params);
-        return author === undefined ? {} : { author };
+        return author === undefined ? {} : { authors: [author] };
       })(),
     };
   }
@@ -3107,7 +3115,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: after.metadataOrigin,
       // Supplied through `metadata` by the write paths that carry one (see
       // momentMetadataFields); absent means actor-neutral, never undefined.
-      author: (metadata.author as MomentRecord["author"] | undefined) ?? null,
+      authors: (metadata.authors as MomentRecord["authors"] | undefined) ?? null,
       syncRecordOnly: false,
       afterText,
       afterByteLength:

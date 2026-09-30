@@ -72,6 +72,7 @@ export type UseEngineDoc = {
   // A known terminal save failure. The save-state chip uses this instead of
   // its generic error text so it can name the constraint and measured bytes.
   saveError: string | null;
+  authorCapacity: boolean;
   // The path is not in the version this workspace is on: a version switch
   // removed it while this open was queued behind that switch.
   // The caller must not fall back to the writable plain editor, whose autosave
@@ -240,6 +241,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     versionId,
     saveState: settled?.saveState ?? "saved",
     saveError: settled?.saveError ?? null,
+    authorCapacity: settled?.authorCapacity ?? false,
     notInVersion,
     documentUnavailable,
     liveHostUnavailable: outcome?.kind === "live-host-unavailable",

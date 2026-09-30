@@ -185,6 +185,28 @@ const openPayload = {
 };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("keeps the person attribution used by renderer record automations", async () => {
+    const h = harness(providerSession());
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+    const update = new Uint8Array([0, 0]);
+    expect(h.ipc.applyUpdate(sender, {sessionId: openPayload.sessionId, update, seq: 1, lineageGeneration: 1})).toEqual({accepted: true});
+    expect(h.session.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), {attribution: {actorKind: "human", onBehalfOf: "person-local"}});
+    await h.ipc.shutdown();
+  });
+
+  it("preserves author capacity refusal on the owned session's save event", async () => {
+    const h = harness(providerSession());
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+    h.capturedOpen()?.onSaveState?.("error", 1, "outcome", true);
+    expect(sender.sent).toContainEqual({
+      channel: CHANNELS.engineYDocSaveState,
+      payload: {sessionId: openPayload.sessionId, state: "error", seq: 0, authorCapacity: true},
+    });
+    await h.ipc.shutdown();
+  });
+
   it("routes shared Markdown through the named provider and pauses when that host stops", async () => {
     let live = true;
     const shared = Object.assign(providerSession(), {liveWritable: () => live});

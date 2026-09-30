@@ -2908,17 +2908,45 @@ pub fn agent_author_depth(value: Option<&Value>) -> Option<u32> {
         .filter(|depth| (1..=MAX_CHANGE_ATTRIBUTION_DEPTH).contains(depth))
 }
 
-/// The actor and attribution a moment's recorded author declares. An agent
-/// (`{kind: "agent", agentId, onBehalfOf, depth?}`) writes as itself at its
-/// run's depth ([`agent_author_depth`]), 0 when it names none; an automation (`{kind: "automation",
-/// automationId, onBehalfOf, depth}`) writes as itself at its depth. Any
-/// other author, or none, declares neither, as a person's write does.
+/// The entries of a moment's recorded authors. `author_json` is a list with
+/// one entry per author the moment covers, or NULL when it names none. A
+/// value that is not a list names none.
+pub fn moment_author_entries(author_json: Option<&str>) -> Vec<Value> {
+    match author_json.and_then(|json| serde_json::from_str::<Value>(json).ok()) {
+        Some(Value::Array(entries)) => entries,
+        _ => Vec::new(),
+    }
+}
+
+/// The actor and attribution a moment's recorded authors declare, when they
+/// name exactly one author. An agent (`{kind: "agent", agentId, onBehalfOf,
+/// depth?}`) writes as itself at its run's depth ([`agent_author_depth`]), 0
+/// when it names none; an automation (`{kind: "automation", automationId,
+/// onBehalfOf, depth}`) writes as itself at its depth; a person (`{kind:
+/// "human", humanId, onBehalfOf?}`) writes as themself at depth 0. Several
+/// authors, any other author, or none declare neither. The chain depth of
+/// several authors is [`moment_author_depth`].
 pub fn moment_author_attribution(
     author_json: Option<&str>,
 ) -> (Option<String>, Option<ChangeAttribution>) {
-    let Some(author) = author_json.and_then(|json| serde_json::from_str::<Value>(json).ok()) else {
-        return (None, None);
-    };
+    match moment_author_entries(author_json).as_slice() {
+        [author] => author_entry_attribution(author),
+        _ => (None, None),
+    }
+}
+
+/// The deepest automation chain any of a moment's authors declares, so a
+/// change several authors made still stops at the chain cap.
+pub fn moment_author_depth(author_json: Option<&str>) -> u32 {
+    moment_author_entries(author_json)
+        .iter()
+        .filter_map(|author| author_entry_attribution(author).1)
+        .map(|attribution| attribution.depth)
+        .max()
+        .unwrap_or(0)
+}
+
+fn author_entry_attribution(author: &Value) -> (Option<String>, Option<ChangeAttribution>) {
     let text = |key: &str| {
         author
             .get(key)
@@ -2944,6 +2972,7 @@ pub fn moment_author_attribution(
                         .min(MAX_CHANGE_ATTRIBUTION_DEPTH)
                 }),
         ),
+        Some("human") => (text("humanId"), ChangeActorKind::Human, 0),
         _ => return (None, None),
     };
     let Some(actor) = actor else {
@@ -2958,9 +2987,10 @@ pub fn moment_author_attribution(
     (Some(actor), Some(attribution))
 }
 
-/// The author a moment records for a write made by `actor` with
-/// `attribution`, the inverse of [`moment_author_attribution`]. A person's
-/// write, with no declared agent or automation, records none.
+/// The authors a moment records for a write made by `actor` with
+/// `attribution`: a list of one, the inverse of
+/// [`moment_author_attribution`]. A write that names no actor or no
+/// attribution records none.
 pub fn moment_author_json(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
@@ -2983,12 +3013,20 @@ pub fn moment_author_json(
             "automationId": actor,
             "depth": attribution.depth,
         }),
-        ChangeActorKind::Human => return None,
+        ChangeActorKind::Human => serde_json::json!({
+            "kind": "human",
+            "humanId": actor,
+        }),
     };
     if let Some(on_behalf_of) = &attribution.on_behalf_of {
         author["onBehalfOf"] = serde_json::json!(on_behalf_of);
     }
-    Some(author.to_string())
+    Some(Value::Array(vec![author]).to_string())
+}
+
+/// A single declared author as the list a moment records.
+pub fn moment_author_list_json(author: &Value) -> String {
+    Value::Array(vec![author.clone()]).to_string()
 }
 
 impl ChangeAttribution {
@@ -2999,7 +3037,8 @@ impl ChangeAttribution {
     pub fn validate(&self) -> Result<(), &'static str> {
         if let Some(on_behalf_of) = &self.on_behalf_of
             && (on_behalf_of.is_empty()
-                || on_behalf_of.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES)
+                || on_behalf_of.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+                || on_behalf_of.chars().any(char::is_control))
         {
             return Err("attribution onBehalfOf must be non-empty and bounded");
         }
@@ -3012,11 +3051,13 @@ impl ChangeAttribution {
             }
             if run.claim_id.is_empty()
                 || run.claim_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+                || run.claim_id.chars().any(char::is_control)
             {
                 return Err("attribution run claim id must be non-empty and bounded");
             }
             if run.automation_name.trim().is_empty()
                 || run.automation_name.len() > MAX_AUTOMATION_RUN_NAME_BYTES
+                || run.automation_name.chars().any(char::is_control)
             {
                 return Err("attribution run automation name must be non-empty and bounded");
             }
@@ -6378,6 +6419,29 @@ mod attribution_tests {
     use serde_json::json;
 
     use super::{AutomationRunAttribution, ChangeActorKind, ChangeAttribution};
+
+    #[test]
+    fn attribution_ids_and_names_refuse_control_characters() {
+        let valid = ChangeAttribution {
+            actor_kind: ChangeActorKind::Automation,
+            on_behalf_of: Some("person".into()),
+            depth: 0,
+            run: Some(AutomationRunAttribution {
+                claim_id: "claim".into(),
+                automation_name: "Build".into(),
+            }),
+        };
+        assert!(valid.validate().is_ok());
+        for field in ["scope", "claim", "name"] {
+            let mut invalid = valid.clone();
+            match field {
+                "scope" => invalid.on_behalf_of = Some("person\n".into()),
+                "claim" => invalid.run.as_mut().expect("run").claim_id = "claim\u{0085}".into(),
+                _ => invalid.run.as_mut().expect("run").automation_name = "Build\t".into(),
+            }
+            assert!(invalid.validate().is_err(), "{field}");
+        }
+    }
 
     /// The run rides the replicated update beside the attribution, so a peer
     /// records it too; a write that names none sends what it sent before.
