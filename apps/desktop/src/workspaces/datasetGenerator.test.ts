@@ -139,8 +139,17 @@ describe("initial dataset source", { timeout: 60_000 }, () => {
   });
 
   it("queries full board groups and date ranges independently of the table's first page", async () => {
-    const app = await runtime();
-    for (let n=0;n<55;n++) await app.call("submit",{values:{[id(4)]:`Person ${n}`,[id(8)]:n<52?"2026-09-01":"2026-10-01",[id(11)]:n%10}});
+    const definition = fixture(), app = await runtime(definition);
+    const source = generateDatasetSources(definition).files[definition.operationsPath] + `
+globalThis.operations.seed = (ctx, input) => input.rows.map((values, index) =>
+  globalThis.operations.submit({ ...ctx, requestId: "seed-" + index }, { values }));
+`;
+    const seeded = (await app.call("seed", { rows: Array.from({ length: 55 }, (_, n) => ({
+      [id(4)]: `Person ${n}`, [id(8)]: n < 52 ? "2026-09-01" : "2026-10-01", [id(11)]: n % 10,
+    })) }, owner, { source })).result as { id: string; version: number }[];
+    expect(seeded).toHaveLength(55);
+    expect(new Set(seeded.map(row => row.id)).size).toBe(55);
+    expect(seeded.every(row => row.version === 1)).toBe(true);
     const group = {fieldId:id(8),value:"2026-10-01"};
     const grouped = (await app.call("read",{limit:2,group})).result as {rows:unknown[];nextCursor:JsonValue;group:unknown};
     expect(grouped.rows).toHaveLength(2);expect(grouped.group).toEqual(group);
