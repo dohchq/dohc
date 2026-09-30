@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
+import { AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_EDIT_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import { SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT } from "@dohc/security-contract/share-discussion";
 import {
   NOTICE_DISMISSED_RETENTION_MS,
@@ -20,6 +21,7 @@ import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { authorizeShareGrantAction } from "./shareAuthorization";
 import {
   claimWorkspace,
+  createShare,
   closeTestStorage,
   closeTestStorages,
   countRows,
@@ -180,6 +182,19 @@ async function expectRateLimited(response: Response): Promise<void> {
 }
 
 describe("notice list", () => {
+  it.each([
+    ["owner", "edit", AUTOMATION_SWITCHED_OFF_BODY],
+    ["ana", "edit", AUTOMATION_SWITCHED_OFF_EDIT_BODY],
+    ["ana", "view", AUTOMATION_SWITCHED_OFF_VIEW_BODY],
+  ] as const)("chooses switch-off wording for %s with %s access", async (recipient, access, expected) => {
+    const { h } = await relay();
+    if (recipient !== "owner") await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: recipient, access });
+    const response = await post(h, "owner", notice({ recipientUserId: recipient, body: AUTOMATION_SWITCHED_OFF_BODY,
+      target: { path: "trip/tasks/automations.yaml", automation: "finished-date", recovery: "automation-controls" } }));
+    expect(response.status).toBe(200);
+    expect((await pull(h, recipient)).notices.find((row) => row.kind === "automation-failed")?.body).toBe(expected);
+  });
+
   it("posts to your own list and serves it to your other computers", async () => {
     const { h } = await relay();
     const own = notice({ kind: "agent-run", noticeId: "agent-run:1", title: "Your agent finished", target: {} });

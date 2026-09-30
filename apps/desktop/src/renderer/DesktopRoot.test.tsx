@@ -47,15 +47,15 @@ vi.mock("./DesktopWorkspaceShell", () => ({
     handoffStatus: ShareHandoffStatus;
     onDismissShareHandoff: () => void;
     onShareHandoffOpened: () => void;
-    onSwitchWorkspace: (workspace: Workspace, openPath?: string) => void;
-    openPathOnReady?: string;
+    onSwitchWorkspace: (workspace: Workspace, open?: string | { automationControls: string }) => void;
+    openOnReady?: string | { automationControls: string };
   }) => {
     shellRenders.count += 1;
     return (
     <div data-testid="workspace-shell">
       <span data-testid="active-workspace">{props.workspace.workspaceId}</span>
       <span data-testid="workspace-count">{props.workspaces.length}</span>
-      <span data-testid="open-path-on-ready">{props.openPathOnReady ?? ""}</span>
+      <span data-testid="open-on-ready">{JSON.stringify(props.openOnReady ?? null)}</span>
       {props.workspaces.map((next) => (
         <span key={next.workspaceId}>
           <button type="button" onClick={() => props.onSwitchWorkspace(next)}>
@@ -63,6 +63,9 @@ vi.mock("./DesktopWorkspaceShell", () => ({
           </button>
           <button type="button" onClick={() => props.onSwitchWorkspace(next, "trip/day-1.md")}>
             {`Open a notice in ${next.workspaceId}`}
+          </button>
+          <button type="button" onClick={() => props.onSwitchWorkspace(next, { automationControls: "collection:tasks#stamp" })}>
+            {`Open an automation in ${next.workspaceId}`}
           </button>
         </span>
       ))}
@@ -664,11 +667,16 @@ describe("opening a notice in another workspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open a notice in b" }));
     expect(screen.getByTestId("active-workspace").textContent).toBe("b");
-    expect(screen.getByTestId("open-path-on-ready").textContent).toBe("trip/day-1.md");
+    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify("trip/day-1.md"));
 
     fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
     fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
     expect(screen.getByTestId("active-workspace").textContent).toBe("b");
-    expect(screen.getByTestId("open-path-on-ready").textContent).toBe("");
+    expect(screen.getByTestId("open-on-ready").textContent).toBe("null");
+
+    // A switched-off automation's switch, asked for from another workspace.
+    fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open an automation in b" }));
+    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ automationControls: "collection:tasks#stamp" }));
   });
 });

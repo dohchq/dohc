@@ -24,8 +24,8 @@ import {
   type NoticeReach,
 } from "@dohc/workspace-contracts/relay";
 import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contracts/engine";
-import { ListNoticesResult } from "../ipc/bridgeContract";
-import { FAILED_ELSEWHERE_BODY } from "@dohc/automation-executor/automation-failed-notice";
+import { ListNoticesResult, RetryAutomationNoticeResult } from "../ipc/bridgeContract";
+import { FAILED_ELSEWHERE_BODY, AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_EDIT_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import {
   RETRY_ELSEWHERE,
   retryAutomationRun,
@@ -1152,6 +1152,51 @@ describe("automation notices reach the people involved", () => {
   const refOf = (row: { store: "local" | "account"; noticeId: string }) => ({ store: row.store, noticeId: row.noticeId });
   const failedIn = async (each: Computer) => (await each.store.list()).notices.filter((row) => row.kind === "automation-failed");
 
+  it.each(["view", "edit"] as const)("keeps switch-off controls and %s recovery wording through Notice storage and IPC", async (access) => {
+    const server = await relay();
+    await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana", access });
+    const owner = await computer(account(server, "owner"), { installId: "install-a" });
+    const ana = await computer(account(server, "ana"), { installId: "install-b" });
+    const stopped = { ...report(3, { startedBy: "ana" }), failure: { ...failure(3), error: "private-step-token".repeat(200),
+      switchedOff: { reason: "consecutive-timeouts" as const, collectionPath: "trip/tasks" } } };
+    await sendFailureNotices(sender(owner.store, "install-a"), WORKSPACE, stopped);
+    await owner.store.sync();
+    await ana.store.sync();
+    const ownerOther = await computer(account(server, "owner"), { installId: "install-other" });
+    await ownerOther.store.sync();
+    const target = { recovery: "automation-controls" as const, automation: AUTOMATION, path: "trip/tasks/automations.yaml" };
+    let off = true;
+    const recovery = async () => off ? target : null;
+    const remoteRetry = vi.fn(async () => ({ status: "queued" as const, press: false }));
+    await expect(retryAutomationRun({ notices: ownerOther.store, installId: "install-other", holds: async () => false, recovery, retry: remoteRetry },
+      { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false }))
+      .resolves.toEqual({ status: "switched-off", target });
+    expect(remoteRetry).not.toHaveBeenCalled();
+    const [received] = await failedIn(ana);
+    expect(received?.body).toBe(access === "edit" ? AUTOMATION_SWITCHED_OFF_EDIT_BODY : AUTOMATION_SWITCHED_OFF_VIEW_BODY);
+    expect((await failedIn(owner))[0]!.body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)).toBe(true);
+    expect(received?.target).toEqual(target);
+    const retry = vi.fn(async () => ({ status: "queued" as const, press: false }));
+    expect(ListNoticesResult.parse(await ana.store.list()).notices[0]!.target).toEqual(received!.target);
+    expect(retry).not.toHaveBeenCalled();
+    expect(await failedIn(ana)).toHaveLength(1);
+    off = false;
+    await expect(retryAutomationRun({ notices: ownerOther.store, installId: "install-other", holds: async () => false, recovery, retry: remoteRetry },
+      { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false }))
+      .resolves.toMatchObject({ status: "refused", reason: RETRY_ELSEWHERE });
+    const elsewhere = (await failedIn(ownerOther))[0]!;
+    await expect(retryFromFailureNotice({ notices: ownerOther.store, retry: remoteRetry },
+      { notice: refOf(elsewhere), account: ownerOther.signedIn!.key, startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: RETRY_ELSEWHERE });
+    expect(remoteRetry).not.toHaveBeenCalled();
+    const own = (await failedIn(owner))[0]!;
+    const result = await retryFromFailureNotice({ notices: owner.store, retry }, { notice: refOf(own), account: owner.signedIn!.key, startOver: false });
+    expect(RetryAutomationNoticeResult.parse(result)).toEqual(result);
+    expect(result).toEqual({ status: "queued", press: false });
+    expect(retry).toHaveBeenCalledOnce();
+    expect(await failedIn(owner)).toHaveLength(0);
+  });
+
   it("reaches the owner's other computer, tries again only where it ran, and dismisses everywhere once queued", async () => {
     const server = await relay();
     const laptop = await computer(account(server, "owner"), { installId: "install-a" });
@@ -1203,7 +1248,7 @@ describe("automation notices reach the people involved", () => {
       reason: RETRY_ELSEWHERE,
       notice: { title: 'Automation "Stamp the finish date" failed', body: "The record is open elsewhere. It ran on Computer install-a." },
     };
-    const onDesktop = { notices: desktop.store, installId: "install-b", holds: async () => false, retry };
+    const onDesktop = { notices: desktop.store, installId: "install-b", holds: async () => false, recovery: async () => null, retry };
 
     await expect(retryAutomationRun(onDesktop, run)).resolves.toEqual(elsewhere);
     // Dismissed on this computer, the notice still names where the run is.
@@ -1219,7 +1264,7 @@ describe("automation notices reach the people involved", () => {
 
     // The computer that holds the claim runs it, as the panel's Try again does, without reading notices.
     const sentFailure = vi.fn(laptop.store.sentFailure);
-    await expect(retryAutomationRun({ notices: { sentFailure }, installId: "install-a", holds: async () => true, retry }, run))
+    await expect(retryAutomationRun({ notices: { sentFailure }, installId: "install-a", holds: async () => true, recovery: async () => null, retry }, run))
       .resolves.toEqual({ status: "queued", press: false });
     expect(retry).toHaveBeenLastCalledWith({ automationId: AUTOMATION, claimId: "atc_1", startOver: false });
     expect(sentFailure).not.toHaveBeenCalled();
@@ -1240,7 +1285,7 @@ describe("automation notices reach the people involved", () => {
     expect((await owner.store.list()).notices).toEqual([expect.objectContaining({ workspaceId: WORKSPACE, target: expect.objectContaining({ run: "atc_1" }) })]);
     const retry = vi.fn(async () => ({ status: "queued" as const, press: false }));
     await expect(retryAutomationRun(
-      { notices: owner.store, installId: "install-a", holds: async () => false, retry },
+      { notices: owner.store, installId: "install-a", holds: async () => false, recovery: async () => null, retry },
       { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false },
     )).resolves.toEqual({ status: "queued", press: false });
     expect(retry).toHaveBeenCalledTimes(1);
@@ -1365,7 +1410,7 @@ describe("automation notices reach the people involved", () => {
     const own = vi.fn(async () => ({ status: "queued" as const, press: false }));
     for (const holds of [true, false]) {
       await expect(retryAutomationRun(
-        { notices: ana.store, installId: "install-c", holds: async () => holds, retry: own },
+        { notices: ana.store, installId: "install-c", holds: async () => holds, recovery: async () => null, retry: own },
         { workspaceId: WORKSPACE, automationId: AUTOMATION, claimId: "atc_1", startOver: false },
       )).resolves.toEqual({ status: "queued", press: false });
     }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import type { AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
 import type { RetryCollectionAutomationResult } from "../../ipc/bridgeContract";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { useRequestSequence } from "../useRequestSequence";
@@ -7,7 +8,8 @@ import { useRequestSequence } from "../useRequestSequence";
 // notice. `request` asks main, which queues the claim and wakes the
 // executor's drain; `onQueued` re-reads what the caller shows. A run whose
 // automation changed since it failed is not a retry: it starts over, so the
-// person confirms that first.
+// person confirms that first. A switched-off automation queues nothing:
+// `onSwitchedOff` takes the person to the switch that turns it on.
 
 export const START_OVER_SENTENCE =
   "This automation changed since it failed. Running it again starts from the beginning and can repeat changes it already made.";
@@ -18,8 +20,9 @@ export function useAutomationRetry<Target>(options: {
   request: (target: Target, startOver: boolean) => Promise<RetryCollectionAutomationResult>;
   onError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onQueued: () => void;
+  onSwitchedOff: (controls: AutomationControlsTarget, target: Target) => void;
 }): { retry: (target: Target) => void; dialog: ReactNode } {
-  const { workspaceId, request, onError, onQueued } = options;
+  const { workspaceId, request, onError, onQueued, onSwitchedOff } = options;
   // Rises when the workspace changes: an answer for another workspace, and
   // a confirmation it opened, never reach this one.
   const workspace = useRequestSequence([workspaceId]);
@@ -35,13 +38,14 @@ export function useAutomationRetry<Target>(options: {
           if (!workspace.isCurrent(epoch)) return;
           if (result.status === "definition-changed") setConfirming({ target, epoch, repeatsMessages: result.repeatsMessages });
           else if (result.status === "refused") onError(result.reason, new Error(result.reason));
+          else if (result.status === "switched-off") onSwitchedOff(result.target, target);
           else onQueued();
         })
         .catch((error: unknown) => {
           if (workspace.isCurrent(epoch)) onError("dohc could not run the automation again.", error, again);
         });
     },
-    [request, onError, onQueued],
+    [request, onError, onQueued, onSwitchedOff],
   );
 
   const retry = useCallback((target: Target) => run(target, false), [run]);

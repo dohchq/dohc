@@ -11,10 +11,17 @@ import { HISTORY_READ_FAILED } from "./useRecordHistory";
 // A record's History: its field changes, newest first, a page at a time,
 // read only while the dialog is open. An automation's changes name it as it
 // was called when it ran, and open that run in the ⚡ panel when this
-// computer keeps it. The author stays when the run does not.
+// computer or the owner's server keeps it and shows it to this person. The
+// page shows at once; a run this computer does not keep says nothing until
+// main has asked the server. The author stays when the run does not.
 
 type Author = NonNullable<RecordHistoryEntry["author"]>;
 type AutomationAuthor = Extract<Author, { kind: "automation" }>;
+/** Where this person can open a run; "pending" while main asks, "unknown" when it could not. */
+type RunState = "available" | "unavailable" | "unknown" | "pending";
+
+// Asked at once, so a page of runs does not flood the relay.
+const LOOKUPS_AT_ONCE = 4;
 
 /** Changes one author made together: an automation run's, or one change. */
 interface Group {
@@ -36,6 +43,11 @@ function valueText(side: RecordHistoryEntry["previous"]): string {
 
 function runOf(author: RecordHistoryEntry["author"]): string | null {
   return author?.kind === "automation" && author.run !== null ? `${author.automationId}\n${author.run.claimId}` : null;
+}
+
+function runState(author: AutomationAuthor, located: ReadonlyMap<string, RunState>): RunState | null {
+  if (author.run === null) return null;
+  return author.run.location === "available" ? "available" : located.get(runOf(author)!) ?? "pending";
 }
 
 /** Newest first, with an automation run's changes side by side. */
@@ -67,10 +79,10 @@ function AuthorName(props: { author: Author; id: string }) {
   );
 }
 
-function RunLink(props: { author: AutomationAuthor; describedBy: string; onOpenRun: (automationId: string, claimId: string, name: string) => void }) {
-  const { author } = props;
-  if (author.run === null) return null;
-  if (!author.run.onThisComputer) {
+function RunLink(props: { author: AutomationAuthor; state: RunState | null; describedBy: string; onOpenRun: (automationId: string, claimId: string, name: string) => void }) {
+  const { author, state } = props;
+  if (author.run === null || state === null || state === "pending" || state === "unknown") return null;
+  if (state === "unavailable") {
     // Padded as View run is, so the two line up down the list.
     return <span data-testid="record-history-run-not-here" className="shrink-0 px-1.5 text-[11px] text-subtle">{RUN_NOT_HERE}</span>;
   }
@@ -87,14 +99,16 @@ function RunLink(props: { author: AutomationAuthor; describedBy: string; onOpenR
   );
 }
 
-function GroupRow(props: { group: Group; onOpenRun: (automationId: string, claimId: string, name: string) => void }) {
+function GroupRow(props: { group: Group; located: ReadonlyMap<string, RunState>; onOpenRun: (automationId: string, claimId: string, name: string) => void }) {
   const { group } = props;
   const authorId = useId();
   return (
     <li data-testid="record-history-entry" className="border-b border-line py-2 last:border-b-0">
       <div className="flex items-center gap-2">
         {group.author === null ? null : <AuthorName author={group.author} id={authorId} />}
-        {group.author?.kind === "automation" ? <RunLink author={group.author} describedBy={authorId} onOpenRun={props.onOpenRun} /> : null}
+        {group.author?.kind === "automation" ? (
+          <RunLink author={group.author} state={runState(group.author, props.located)} describedBy={authorId} onOpenRun={props.onOpenRun} />
+        ) : null}
         <time
           dateTime={new Date(group.recordedAtMs).toISOString()}
           title={new Date(group.recordedAtMs).toLocaleString()}
@@ -127,6 +141,10 @@ export function RecordHistoryDialog(props: {
   onFailed: (before: number | null, error: unknown) => void;
   /** A read landed: where the page after it starts, or null at the end. */
   onRead: (next: number | null) => void;
+  /** dohc could not place a run shown; Try again reads back to `until`, the oldest page read. */
+  onRunsUnchecked: (until: number | null, error: unknown, runs: readonly string[]) => void;
+  /** dohc placed these runs, by their automation and claim ids. */
+  onRunsChecked: (runs: readonly string[]) => void;
 }) {
   const { workspaceId, collectionPath, recordId } = props;
   const [page, setPage] = useState<{ entries: RecordHistoryEntry[]; next: number | null } | null>(null);
@@ -146,6 +164,41 @@ export function RecordHistoryDialog(props: {
   reports.current = props;
   // A slow answer for another record, workspace, or an earlier read never lands.
   const request = useRequestSequence([workspaceId, collectionPath, recordId]);
+  // Where each run this computer does not keep can be opened, by runOf.
+  const [located, setLocated] = useState<ReadonlyMap<string, RunState>>(new Map());
+  // Each run is asked about once, a few at a time, while the record stays.
+  const lookups = useRequestSequence([workspaceId, collectionPath, recordId]);
+  const asked = useRef(new Set<string>());
+  const queue = useRef<Array<{ key: string; automationId: string; claimId: string }>>([]);
+  const asking = useRef(0);
+  const lookupError = useRef<unknown>(null);
+  // The runs Notices already says dohc could not place.
+  const reportedUnchecked = useRef(new Set<string>());
+  // The oldest page read, by the beforeHistoryId it asked with.
+  const oldest = useRef<number | null>(null);
+
+  const lookUp = useCallback((): void => {
+    const epoch = lookups.current();
+    while (asking.current < LOOKUPS_AT_ONCE && queue.current.length > 0) {
+      const run = queue.current.shift()!;
+      asking.current += 1;
+      void (async () => {
+        let state: RunState;
+        let error: unknown = null;
+        try {
+          state = (await bridge().locateRecordHistoryRun({ workspaceId, automationId: run.automationId, claimId: run.claimId })).location;
+        } catch (caught) {
+          state = "unknown";
+          error = caught;
+        }
+        if (!lookups.isCurrent(epoch)) return;
+        asking.current -= 1;
+        if (state === "unknown") lookupError.current ??= error;
+        setLocated((current) => new Map(current).set(run.key, state));
+        lookUp();
+      })();
+    }
+  }, [workspaceId, lookups]);
 
   const load = useCallback((before: number | null) => {
     const token = request.next();
@@ -158,6 +211,15 @@ export function RecordHistoryDialog(props: {
         const focused = document.activeElement;
         focusPanel.current = focused === retry.current || (focused === older.current && result.nextBeforeHistoryId === null);
         setFailed(null);
+        oldest.current = before;
+        for (const { author } of result.entries) {
+          if (author?.kind !== "automation" || author.run?.location !== "unchecked") continue;
+          const key = runOf(author)!;
+          if (asked.current.has(key)) continue;
+          asked.current.add(key);
+          queue.current.push({ key, automationId: author.automationId, claimId: author.run.claimId });
+        }
+        lookUp();
         setPage((current) => {
           if (before === null || current === null) return { entries: result.entries, next: result.nextBeforeHistoryId };
           const shown = new Set(current.entries.map((entry) => entry.historyId));
@@ -178,13 +240,35 @@ export function RecordHistoryDialog(props: {
       .finally(() => {
         if (request.isCurrent(token)) setLoading(null);
       });
-  }, [workspaceId, collectionPath, recordId, request]);
+  }, [workspaceId, collectionPath, recordId, request, lookUp]);
 
   useEffect(() => {
     setPage(null);
     setFailed(null);
+    setLocated(new Map());
+    asked.current = new Set();
+    queue.current = [];
+    asking.current = 0;
+    lookupError.current = null;
+    reportedUnchecked.current = new Set();
+    oldest.current = null;
     load(null);
   }, [load]);
+
+  // Said once the reads and lookups settle, so Try again reads back to every
+  // page shown, and said again only for a run newly left unplaced.
+  useEffect(() => {
+    if (page === null || loading !== null) return;
+    const states = page.entries.flatMap(({ author }) =>
+      author?.kind === "automation" && author.run !== null ? [{ key: runOf(author)!, state: runState(author, located) }] : []);
+    if (states.some(({ state }) => state === "pending")) return;
+    const placed = states.filter(({ state }) => state === "available" || state === "unavailable").map(({ key }) => key);
+    if (placed.length > 0) reports.current.onRunsChecked(placed);
+    const unknown = states.filter(({ state }) => state === "unknown").map(({ key }) => key);
+    if (unknown.every((key) => reportedUnchecked.current.has(key))) return;
+    for (const key of unknown) reportedUnchecked.current.add(key);
+    reports.current.onRunsUnchecked(oldest.current, lookupError.current, unknown);
+  }, [page, located, loading]);
 
   const status = failed !== null ? HISTORY_READ_FAILED
     : page === null ? "Loading history…"
@@ -224,7 +308,7 @@ export function RecordHistoryDialog(props: {
       {page === null || page.entries.length === 0 ? null : (
         <ul className="m-0 min-h-0 list-none overflow-auto p-0">
           {recordHistoryGroups(page.entries).map((group) => (
-            <GroupRow key={group.key} group={group} onOpenRun={props.onOpenRun} />
+            <GroupRow key={group.key} group={group} located={located} onOpenRun={props.onOpenRun} />
           ))}
         </ul>
       )}
@@ -248,7 +332,7 @@ export function RecordHistoryDialog(props: {
         )}
       </div>
       {/* Said once, as text everyone reads, not in a tooltip on each row. */}
-      {page?.entries.some(({ author }) => author?.kind === "automation" && author.run !== null && !author.run.onThisComputer) ? (
+      {page?.entries.some(({ author }) => author?.kind === "automation" && runState(author, located) === "unavailable") ? (
         <p data-testid="record-history-run-not-here-why" className="m-0 text-[12px] text-muted">{RUN_NOT_HERE_WHY}</p>
       ) : null}
       {page !== null && page.next !== null && failed === null ? (

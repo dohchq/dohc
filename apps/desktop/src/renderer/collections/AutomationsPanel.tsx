@@ -460,6 +460,19 @@ export function useCollectionAutomations(workspaceId: string, collectionPath: st
   return { ...state, reload };
 }
 
+/**
+ * A notice's ask to open one automation: its runs, at the run it names, or
+ * with `controls`, its row in the list with its switch focused, to turn it
+ * on again. `seq` rises with each ask.
+ */
+export interface AutomationFocus {
+  automationId: string;
+  run: string | null;
+  controls?: boolean;
+  name?: string | null;
+  seq: number;
+}
+
 export function AutomationsPanel(props: {
   workspaceId: string;
   collectionPath: string;
@@ -472,8 +485,7 @@ export function AutomationsPanel(props: {
   fields: readonly FieldDefinition[];
   /** Rises each time the page's header asks the panel to close. */
   closeAsk?: number;
-  /** A notice asked to open one automation's runs, at the run it names; `seq` rises with each ask. */
-  focus: { automationId: string; run: string | null; name?: string | null; seq: number } | null;
+  focus: AutomationFocus | null;
   /**
    * The page asked to build a new automation from this draft, as for a button
    * nothing uses yet; `seq` rises with each ask.
@@ -531,6 +543,15 @@ export function AutomationsPanel(props: {
     if (editingRef.current) setLeaving(() => then);
     else then();
   };
+  // A switched-off automation's notice, and Try again on its run, go to its
+  // switch in the list, which takes focus once its row shows.
+  const [switchOf, setSwitchOf] = useState<{ automationId: string } | null>(null);
+  const showControls = (automationId: string) => leave(() => {
+    setEditing(null);
+    setRunsOf(null);
+    returnFocusTo.current = null;
+    setSwitchOf({ automationId });
+  });
   const [saving, setSaving] = useState(false);
   const [reformat, setReformat] = useState<(() => void) | null>(null);
   // Rises when the workspace or Collection changes, or the panel closes: a
@@ -572,6 +593,10 @@ export function AutomationsPanel(props: {
     // Before the file is read, or once the automation is gone, the name the asker gave, else the id's last part.
     const name = summary?.valid ? summary.automation.name : (props.focus.name ?? props.focus.automationId.split("#").at(-1) ?? "");
     const { automationId, run } = props.focus;
+    if (props.focus.controls) {
+      showControls(automationId);
+      return;
+    }
     leave(() => {
       setEditing(null);
       setRunsOf({ automationId, name, run });
@@ -594,7 +619,13 @@ export function AutomationsPanel(props: {
       bridge().retryCollectionAutomation({ workspaceId, ...target, startOver }),
     [workspaceId],
   );
-  const { retry, dialog: retryDialog } = useAutomationRetry({ workspaceId, request: requestRetry, onError, onQueued: () => void load() });
+  const { retry, dialog: retryDialog } = useAutomationRetry({
+    workspaceId,
+    request: requestRetry,
+    onError,
+    onQueued: () => void load(),
+    onSwitchedOff: (target) => showControls(target.automation),
+  });
 
   /**
    * Saves `change` of the automations over the file the panel read. A file
@@ -668,6 +699,17 @@ export function AutomationsPanel(props: {
     const row = automationId === null ? undefined : rowElements.current.get(automationId.split("#").at(-1) ?? "");
     row?.querySelector<HTMLElement>('[aria-haspopup="menu"]')?.focus();
   }, [runsOf]);
+  useEffect(() => {
+    if (switchOf === null || runsOf !== null || editing !== null || file === null) return;
+    setSwitchOf(null);
+    const entry = file.status === "read"
+      ? file.automations.find((summary) => summary.valid && summary.automationId === switchOf.automationId)
+      : undefined;
+    const row = entry?.valid ? rowElements.current.get(entry.automation.id) : undefined;
+    // A switch this person cannot change still shows; focus stays on its row.
+    (row?.querySelector<HTMLElement>('[role="switch"]:enabled') ?? row?.querySelector<HTMLElement>('[aria-haspopup="menu"]') ??
+      closeButton.current)?.focus();
+  }, [switchOf, runsOf, editing, file]);
   const [focusAfterDelete, setFocusAfterDelete] = useState<{ neighbor: string | null } | null>(null);
   useEffect(() => {
     if (focusAfterDelete === null || saving) return;

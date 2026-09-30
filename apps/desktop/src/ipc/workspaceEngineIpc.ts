@@ -7,14 +7,16 @@ import {
   RestoreEngineMomentFileResult, RetryCloudSyncPayload, WorkspaceIdPayload, SyncStatusResult,
   RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
   GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, RECORD_HISTORY_PAGE,
+  LocateRecordHistoryRunPayload, LocateRecordHistoryRunResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { engineMomentDetailForIpc, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
-import { recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
+import { createRunLocator, recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
 import { rebuildEngineStoreRequest, type moveEngineStoreAside } from "../workspaces/engineStoreRebuild";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import type { WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
+import type { ServerRuns } from "../automations/serverRuns";
 import type { WorkspaceEngineCapture, probeEngineStoreRefusal } from "../workspaces/workspaceEngineCapture";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
@@ -53,6 +55,10 @@ export function createWorkspaceEngineIpc<
   namedAuthorLabel(workspaceId: string, author: Parameters<EngineMomentAuthorNames["named"]>[0]): string;
   /** Whether this computer keeps an automation's run, so a record's history can open it. */
   automationRunOnThisComputer(workspaceId: string, automationId: string, claimId: string): Promise<boolean>;
+  /** The owner's server's runs; the relay answers only the workspace's owner. */
+  serverRuns: Pick<ServerRuns, "shownTo">;
+  /** The signed-in account now, or null when signed out. */
+  signedInAccount(): string | null;
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
@@ -78,12 +84,17 @@ export function createWorkspaceEngineIpc<
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, automationAuthor, namedAuthorLabel,
-    automationRunOnThisComputer,
+    automationRunOnThisComputer, serverRuns, signedInAccount,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
   } = dependencies;
+  const runLocator = createRunLocator({
+    onThisComputer: automationRunOnThisComputer,
+    onServer: (workspaceId, automationId, claimId) => serverRuns.shownTo(workspaceId, automationId, claimId),
+    signedInAccount,
+  });
 
   function registerCollections(): void {
     // Collections: read-only engine index queries. list answers
@@ -169,10 +180,25 @@ export function createWorkspaceEngineIpc<
           const authors: RecordHistoryAuthors = {
             agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
             automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
-            runOnThisComputer: (automationId, claimId) => automationRunOnThisComputer(workspaceId, automationId, claimId),
+            runAvailable: (automationId, claimId) => runLocator.available(workspaceId, automationId, claimId),
           };
           return GetCollectionRecordHistoryResult.parse(await recordHistoryForIpc(result, authors));
         },
+      );
+    });
+
+    // A run History could not place from this computer, one at a time, so
+    // the page shows at once and each run fills in as its answer comes.
+    registerHandler(CHANNELS.locateRecordHistoryRun, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = LocateRecordHistoryRunPayload.parse(payload);
+      return withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "Record history stopped loading because this window changed workspaces.",
+        async (operation) => LocateRecordHistoryRunResult.parse({
+          location: await runLocator.locate(operation.workspace.workspaceId, input.automationId, input.claimId),
+        }),
       );
     });
   }

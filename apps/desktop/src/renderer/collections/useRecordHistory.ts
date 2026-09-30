@@ -5,8 +5,11 @@ import type { ShellErrorKind } from "../shell/useShellError";
 // in Notices; its Try again opens that record's History again and reads back
 // to the page that failed, even after the dialog or the record's file closed.
 // The row clears once the dialog shows that page, or the entries past it.
+// A run dohc could not place keeps its own row the same way, until a dialog
+// of that record has placed each run the row names.
 
 export const HISTORY_READ_FAILED = "dohc could not read this record's history.";
+export const RUN_NOT_CHECKED = "dohc could not check where this run is.";
 
 /** A record whose History a person opens, and the name its page shows. */
 export interface RecordHistoryTarget {
@@ -42,6 +45,8 @@ export function useRecordHistory(workspaceId: string, shell: {
   const live = useRef<number | null>(null);
   // The record and page whose failed read Notices holds; a null page is the first.
   const failedRead = useRef<{ record: string; before: number | null } | null>(null);
+  // The record and runs Notices says dohc could not place, and the oldest page to read back to.
+  const unplaced = useRef<{ record: string; runs: Set<string>; until: number | null } | null>(null);
 
   const show = useCallback((forWorkspace: string, target: RecordHistoryTarget, until: number | null) => {
     key.current += 1;
@@ -72,6 +77,26 @@ export function useRecordHistory(workspaceId: string, shell: {
     failedRead.current = null;
     deps.current.clearKind("record-history");
   }, []);
+  const runsUnchecked = useCallback((shown: RecordHistorySession, until: number | null, error: unknown, runs: readonly string[]) => {
+    if (shown.key !== live.current || shown.workspaceId !== workspace.current) return;
+    const record = recordOf(shown);
+    const held = unplaced.current?.record === record ? unplaced.current : null;
+    // A null page is the first, so any page id is older.
+    const oldest = held === null || held.until === null ? until : until === null ? held.until : Math.min(held.until, until);
+    unplaced.current = { record, runs: new Set([...(held?.runs ?? []), ...runs]), until: oldest };
+    deps.current.reportShellError(RUN_NOT_CHECKED, error, () => {
+      if (workspace.current === shown.workspaceId) show(shown.workspaceId, shown.target, oldest);
+    }, "record-history-run");
+  }, [show]);
+  const runsChecked = useCallback((shown: RecordHistorySession, runs: readonly string[]) => {
+    if (shown.key !== live.current || shown.workspaceId !== workspace.current) return;
+    const held = unplaced.current;
+    if (held === null || held.record !== recordOf(shown)) return;
+    for (const run of runs) held.runs.delete(run);
+    if (held.runs.size > 0) return;
+    unplaced.current = null;
+    deps.current.clearKind("record-history-run");
+  }, []);
 
   // The ⚡ panel takes focus.
   const openRun = useCallback((automationId: string, claimId: string, name: string) => {
@@ -100,6 +125,14 @@ export function useRecordHistory(workspaceId: string, shell: {
     /** The dialog shown now read a page: `next` is where the page after it starts, or null at the end. */
     read: (next: number | null) => {
       if (shown) read(shown, next);
+    },
+    /** The dialog shown now could not place these runs; Try again reads back to `until`. */
+    runsUnchecked: (until: number | null, error: unknown, runs: readonly string[]) => {
+      if (shown) runsUnchecked(shown, until, error, runs);
+    },
+    /** The dialog shown now placed these runs. */
+    runsChecked: (runs: readonly string[]) => {
+      if (shown) runsChecked(shown, runs);
     },
   };
 }

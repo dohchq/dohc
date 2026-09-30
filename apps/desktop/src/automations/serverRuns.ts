@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { WriteSchema } from "@dohc/automation-executor/automation-run-store";
+import { AutomationControlsTargetShape } from "../ipc/bridgeContract";
 import type { DatasetUndoConfirmed } from "@dohc/automation-executor/dataset-automation-undo";
 import type {
   CollectionAutomationHold,
@@ -13,8 +14,14 @@ import type {
 // these calls read them and act on them through the relay's owner routes.
 // The relay decides who the owner is; this computer only asks.
 
+/** The account a relay answer was asked as, and whether that sign-in is still the current one. */
+export interface ServerAsker {
+  account: string;
+  current(): boolean;
+}
+
 /** A relay answer, or null when this computer cannot ask as the workspace's owner. */
-export type ServerAnswer = { status: number; body: unknown } | null;
+export type ServerAnswer = { status: number; body: unknown; asker: ServerAsker } | null;
 
 export type ServerRequest =
   | { method: "GET"; action: "runs" | "holds"; query?: Record<string, string> }
@@ -43,6 +50,7 @@ const Run = z.object({
 const Retry = z.discriminatedUnion("status", [
   z.object({ status: z.literal("queued"), press: z.boolean() }),
   z.object({ status: z.literal("definition-changed"), repeatsMessages: z.boolean() }),
+  z.object({ status: z.literal("switched-off"), target: AutomationControlsTargetShape }),
   z.object({ status: z.literal("refused"), reason: z.string() }),
 ]);
 const Count = z.number().int().nonnegative();
@@ -83,7 +91,9 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
   // The answer's body when it is the relay's success; null for no copy of
   // the workspace on the server, or no way to ask as its owner.
   async function ask<T>(workspaceId: string, request: ServerRequest, schema: z.ZodType<T>): Promise<T | null> {
-    const answer = await send(workspaceId, request);
+    return read(await send(workspaceId, request), schema);
+  }
+  function read<T>(answer: ServerAnswer, schema: z.ZodType<T>): T | null {
     if (answer === null || answer.status === 404) return null;
     const body = answer.body as { ok?: unknown } | undefined;
     if (answer.status !== 200 || body?.ok !== true) {
@@ -96,6 +106,15 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
     /** One automation's newest runs on the server, or null when it has no copy of the workspace. */
     async runs(workspaceId: string, automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null> {
       return ask(workspaceId, { method: "GET", action: "runs", query: { automationId, ...(before === undefined ? {} : { before }) } }, z.object({ runs: z.array(Run), next: z.string().nullable() }));
+    },
+    /**
+     * Whether the server shows this computer's sign-in a run, and who asked,
+     * for a yes or a no alike. Null when this computer cannot ask as the owner.
+     */
+    async shownTo(workspaceId: string, automationId: string, claimId: string): Promise<{ shown: boolean; asker: ServerAsker } | null> {
+      const answer = await send(workspaceId, { method: "GET", action: "runs", query: { automationId, claimId } });
+      if (answer === null) return null;
+      return { shown: Boolean(read(answer, z.object({ run: Run.nullable() }))?.run), asker: answer.asker };
     },
     async get(workspaceId: string, automationId: string, claimId: string): Promise<CollectionAutomationRun | null> {
       const answer = await ask(workspaceId, { method: "GET", action: "runs", query: { automationId, claimId } }, z.object({ run: Run.nullable() }));

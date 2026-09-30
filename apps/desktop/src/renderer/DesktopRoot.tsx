@@ -16,6 +16,7 @@ import { ChevronRight } from "lucide-react";
 import { readError } from "../ipc/errorWords";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useSentNotices } from "./shell/useSentNotices";
+import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { useStatesPageOpen } from "./dev/statesRoute";
 
 // Development only, and its own chunk: the app's bundle does not carry it.
@@ -42,10 +43,10 @@ export function DesktopRoot() {
   const userSettingsRequests = useRequestSequence();
   const shareHandoffRevision = useRef(0);
   const sentNotices = useSentNotices(!isManagerWindow);
-  // A file to open once the workspace a notice's Open switched to is ready.
+  // What to open once the workspace a notice's Open switched to is ready.
   const [openOnSwitch, setOpenOnSwitch] = useState<{
     workspaceId: string;
-    path: string;
+    open: OpenOnSwitch;
   } | null>(null);
 
   const refreshWorkspaceRegistry = useCallback(async (): Promise<Workspace[]> => {
@@ -332,9 +333,9 @@ export function DesktopRoot() {
       onManageWorkspaces={() => bridge().openWorkspaceManager()}
       sentNotices={sentNotices}
       {...(openOnSwitch?.workspaceId === workspace.workspaceId
-        ? { openPathOnReady: openOnSwitch.path }
+        ? { openOnReady: openOnSwitch.open }
         : {})}
-      onSwitchWorkspace={(next, openPath) => {
+      onSwitchWorkspace={(next, open) => {
         // File ▸ Open Workspace… can hand us a workspace the registry list
         // didn't know yet — keep the switcher list complete.
         setWorkspaces((known) =>
@@ -342,7 +343,7 @@ export function DesktopRoot() {
             ? known
             : [...known, next],
         );
-        setOpenOnSwitch(openPath ? { workspaceId: next.workspaceId, path: openPath } : null);
+        setOpenOnSwitch(open ? { workspaceId: next.workspaceId, open } : null);
         setWorkspace(next);
       }}
     />

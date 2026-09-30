@@ -110,7 +110,7 @@ async function harness() {
     cloudLogin: () => login,
     clearCachedCredentials: () => { steps.push("clear"); cache.clear(); },
     refreshCredentialCache: async () => { steps.push("refresh"); await cache.refresh(login.credentials); },
-    warmCredentialCache: () => cache.warm(login.credentials),
+    warmCredentialCache: async () => { await cache.warm(login.credentials); },
     currentCredentials: () => cache.snapshot().credentials,
     loadAndCacheCurrentCredentials: async () => {
       const loaded = await cache.adoptCurrent(login.credentials);

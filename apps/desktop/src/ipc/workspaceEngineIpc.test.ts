@@ -16,6 +16,9 @@ import type { WorkspaceEngineCapture, WorkspaceEngineYDocProviderSession, probeE
 import { EngineStoreRecoveryFailedError } from "../workspaces/engineStoreRebuild";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { deferred } from "../testing/deferred";
+import { createServerRuns, type ServerAnswer, type ServerRequest } from "../automations/serverRuns";
+
+type ServerReply = Omit<NonNullable<ServerAnswer>, "asker"> | null;
 
 class Sender implements EngineYDocIpcSender {
   constructor(readonly id: number) {}
@@ -144,6 +147,20 @@ async function harness() {
   const retryOwnerLiveDelivery = vi.fn();
   const retryCloudSync = vi.fn(async (_workspaceId: string, _reason: "person" | "reconnect") => undefined);
   const automationRunOnThisComputer = vi.fn(async (_workspaceId: string, _automationId: string, claimId: string) => claimId === "claim-here");
+  // The relay's owner-only routes. It answers 404 to anyone but the owner.
+  const relay = vi.fn(async (_workspaceId: string, _request: ServerRequest): Promise<ServerReply> => ({ status: 404, body: { ok: false } }));
+  // The sign-in: every sign-in, sign-out, or credential load starts a new generation.
+  const session: { account: string | null; generation: number; loaded: Promise<void> } = { account: "person-local", generation: 1, loaded: Promise.resolve() };
+  // As main asks: nothing when signed out, and each answer names the sign-in it asked as.
+  const sent = vi.fn();
+  const serverRuns = createServerRuns(async (workspaceId, request): Promise<ServerAnswer> => {
+    sent();
+    await session.loaded;
+    const { account, generation } = session;
+    if (account === null) return null;
+    const reply = await relay(workspaceId, request);
+    return reply && { ...reply, asker: { account, current: () => session.generation === generation } };
+  });
   const registrations = createWorkspaceEngineIpc({
     localPersonId: () => "person-local",
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
@@ -155,7 +172,7 @@ async function harness() {
     },
     requireEngineCapture, localAgentDisplayName: displayName,
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
-    automationRunOnThisComputer,
+    automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
     namedAuthorLabel: () => "Someone you shared with",
     retryOwnerLiveDelivery, retryCloudSync,
@@ -178,13 +195,23 @@ async function harness() {
     workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
-    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, automationRunOnThisComputer, setMissingAdapter: () => { missingAdapter = true; },
+    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
+    sent,
+    signIn: (account: string | null) => { session.account = account; session.generation += 1; },
+    /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
+    loading: () => {
+      const load = deferred<void>();
+      session.account = null;
+      session.generation += 1;
+      session.loaded = load.promise;
+      return (account: string) => { session.account = account; load.resolve(); };
+    },
   };
 }
 
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
-  CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
+  CHANNELS.locateRecordHistoryRun, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
@@ -332,10 +359,10 @@ describe("workspace engine IPC registrations", () => {
     expect(page).toMatchObject({
       nextBeforeHistoryId: 3,
       entries: [
-        { historyId: 9, field: "Finished", author: { kind: "automation", automationId: stamp, name: "Stamp the finish date", run: { claimId: "claim-here", onThisComputer: true } } },
-        { historyId: 8, author: { kind: "automation", name: "Stamp the finish date", run: { claimId: "claim-here", onThisComputer: true } } },
-        // The name it had when it ran, and a run this computer does not keep.
-        { historyId: 7, author: { kind: "automation", name: "Old name", run: { claimId: "claim-gone", onThisComputer: false } } },
+        { historyId: 9, field: "Finished", author: { kind: "automation", automationId: stamp, name: "Stamp the finish date", run: { claimId: "claim-here", location: "available" } } },
+        { historyId: 8, author: { kind: "automation", name: "Stamp the finish date", run: { claimId: "claim-here", location: "available" } } },
+        // The name it had when it ran, and a run History must still place.
+        { historyId: 7, author: { kind: "automation", name: "Old name", run: { claimId: "claim-gone", location: "unchecked" } } },
         // Written before runs were recorded: its name now, and no run to open.
         { historyId: 6, author: { kind: "automation", name: stamp, run: null } },
         { historyId: 5, author: { kind: "agent", name: "You" } },
@@ -348,6 +375,126 @@ describe("workspace engine IPC registrations", () => {
       ["workspace", stamp, "claim-here"],
       ["workspace", stamp, "claim-gone"],
     ]);
+    // The page never waits on the server.
+    expect(h.relay).not.toHaveBeenCalled();
+  });
+
+  it("places a run the owner's server keeps, remembers it for that account, and never waits the page on the server", async () => {
+    const h = await harness();
+    const stamp = "collection:tasks-id#stamp";
+    const serverRun = {
+      claimId: "claim-server", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2,
+      trigger: { sharedAuthor: null, kind: "changed", recordId: "rec_a", by: "human", depth: 0 },
+      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false,
+    };
+    h.relay.mockImplementation(async (_workspaceId, request) => {
+      const claimId = request.method === "GET" ? request.query?.claimId : undefined;
+      if (claimId === "claim-server") return { status: 200, body: { ok: true, run: serverRun } };
+      if (claimId === "claim-expired") return { status: 200, body: { ok: true, run: null } };
+      if (claimId === "claim-offline") throw new TypeError("fetch failed");
+      // The relay answers anyone but the owner as if there were no run.
+      return { status: 404, body: { ok: false } };
+    });
+    const locate = (claimId: string) => h.invoke(CHANNELS.locateRecordHistoryRun, { workspaceId: "workspace", automationId: stamp, claimId });
+    await expect(locate("claim-here")).resolves.toEqual({ location: "available" });
+    expect(h.relay).not.toHaveBeenCalled();
+    await expect(locate("claim-server")).resolves.toEqual({ location: "available" });
+    await expect(locate("claim-expired")).resolves.toEqual({ location: "unavailable" });
+    await expect(locate("claim-not-owner")).resolves.toEqual({ location: "unavailable" });
+    // A failed lookup proves nothing about the run.
+    await expect(locate("claim-offline")).rejects.toThrow("fetch failed");
+    expect(h.relay.mock.calls.map(([, request]) => request)).toEqual(
+      ["claim-server", "claim-expired", "claim-not-owner", "claim-offline"].map((claimId) => ({ method: "GET", action: "runs", query: { automationId: stamp, claimId } })),
+    );
+
+    // Runs do not move: the server's answer stands for the session.
+    h.relay.mockClear();
+    await expect(locate("claim-server")).resolves.toEqual({ location: "available" });
+    const change = (historyId: number, claimId: string) => ({
+      historyId, field: "Status", previous: { present: true, value: "Open" }, next: { present: true, value: "Done" },
+      authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1,
+      recordedAtMs: 1_000 - historyId, automationRun: { claimId, automationName: "Stamp" },
+    });
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks-id", status: "valid", reasons: [] },
+      record: { id: "rec_a", path: "tasks/a.md", conflicted: false, values: [] },
+      history: [change(2, "claim-server"), change(1, "claim-expired")],
+      nextBeforeHistoryId: null,
+    });
+    await expect(h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "rec_a" })).resolves.toMatchObject({
+      entries: [
+        { historyId: 2, author: { run: { claimId: "claim-server", location: "available" } } },
+        { historyId: 1, author: { run: { claimId: "claim-expired", location: "unchecked" } } },
+      ],
+    });
+    expect(h.relay).not.toHaveBeenCalled();
+
+    // Another account asks the relay again, and is refused.
+    h.signIn("person-other");
+    h.relay.mockResolvedValue({ status: 404, body: { ok: false } });
+    await expect(locate("claim-server")).resolves.toEqual({ location: "unavailable" });
+    expect(h.relay).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a server's answer only for the sign-in it asked as", async () => {
+    const h = await harness();
+    const stamp = "collection:tasks-id#stamp";
+    const serverRun = {
+      claimId: "claim-server", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2,
+      trigger: { sharedAuthor: null, kind: "changed", recordId: "rec_a", by: "human", depth: 0 },
+      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false,
+    };
+    const shown = { status: 200, body: { ok: true, run: serverRun } };
+    const locate = () => h.invoke(CHANNELS.locateRecordHistoryRun, { workspaceId: "workspace", automationId: stamp, claimId: "claim-server" });
+
+    // The person signs out while the owner's answer is on its way: it is no answer.
+    const late = deferred<ServerReply>();
+    h.relay.mockImplementationOnce(() => late.promise);
+    const asking = locate();
+    await vi.waitFor(() => expect(h.relay).toHaveBeenCalledOnce());
+    h.signIn(null);
+    late.resolve(shown);
+    await expect(asking).rejects.toThrow("Your sign-in changed");
+    // A refusal for an older sign-in proves nothing either, a 404 or no run alike.
+    for (const refusal of [{ status: 404, body: { ok: false } }, { status: 200, body: { ok: true, run: null } }]) {
+      h.signIn("person-local");
+      h.relay.mockClear();
+      const refused = deferred<ServerReply>();
+      h.relay.mockImplementationOnce(() => refused.promise);
+      const refusing = locate();
+      await vi.waitFor(() => expect(h.relay).toHaveBeenCalledOnce());
+      h.signIn("person-other");
+      refused.resolve(refusal);
+      await expect(refusing).rejects.toThrow("Your sign-in changed");
+    }
+    h.signIn(null);
+    h.relay.mockClear();
+    // Signed out, the run is not offered, and nothing asks the relay.
+    await expect(locate()).resolves.toEqual({ location: "unavailable" });
+    expect(h.relay).not.toHaveBeenCalled();
+
+    // While a credential load reads the store, the answer is kept under the account it asked as.
+    h.relay.mockResolvedValue(shown);
+    h.sent.mockClear();
+    const loaded = h.loading();
+    const whileLoading = locate();
+    await vi.waitFor(() => expect(h.sent).toHaveBeenCalled());
+    loaded("person-local");
+    await expect(whileLoading).resolves.toEqual({ location: "available" });
+    h.relay.mockClear();
+    await expect(locate()).resolves.toEqual({ location: "available" });
+    expect(h.relay).not.toHaveBeenCalled();
+    // After a sign-out, that answer is not offered to the person signed out.
+    h.signIn(null);
+    await expect(locate()).resolves.toEqual({ location: "unavailable" });
+  });
+
+  it("places no run for a workspace this renderer does not show", async () => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.locateRecordHistoryRun, { workspaceId: "other", automationId: "collection:tasks-id#stamp", claimId: "claim-server" }))
+      .rejects.toThrow("window changed workspaces");
+    expect(h.automationRunOnThisComputer).not.toHaveBeenCalled();
+    expect(h.relay).not.toHaveBeenCalled();
   });
 
   it("reads no record history for a workspace this renderer does not show", async () => {
@@ -356,6 +503,7 @@ describe("workspace engine IPC registrations", () => {
       .rejects.toThrow("window changed workspaces");
     expect(h.adapter.getCollectionRecord).not.toHaveBeenCalled();
     expect(h.automationRunOnThisComputer).not.toHaveBeenCalled();
+    expect(h.relay).not.toHaveBeenCalled();
   });
 
   it("rejects a collection result after the renderer changes attachment", async () => {

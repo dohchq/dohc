@@ -411,7 +411,7 @@ Changes the workspace, so a shared view does not offer it.
 - `run`: `string`. Required.
 - `startOver`: `boolean`
 
-Returns `{ ok: true, status: "queued" } | { ok: false, status: "definition-changed", repeatsMessages, reason } | { ok: false, reason, notice?: { title, body } }`.
+Returns `{ ok: true, status: "queued" } | { ok: false, status: "switched-off", reason, target: { recovery: "automation-controls", automation, path } } | { ok: false, status: "definition-changed", repeatsMessages, reason } | { ok: false, reason, notice?: { title, body } }`.
 
 ### `dohc_press_button`
 

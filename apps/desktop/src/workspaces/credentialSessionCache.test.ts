@@ -49,7 +49,8 @@ describe("CredentialSessionCache", () => {
     const warming = cache.warm(load);
     cache.clear();
     pending.reject(new Error("stale read failure"));
-    await warming;
+    // The sign-out replaced that load, so it reports no failure.
+    await expect(warming).resolves.toBeNull();
 
     await cache.warm(load);
     expect(load).toHaveBeenCalledTimes(1);
@@ -77,15 +78,30 @@ describe("CredentialSessionCache", () => {
       return "current-session";
     };
 
-    await expect(cache.warm(load)).resolves.toBeUndefined();
+    await expect(cache.warm(load)).resolves.toEqual({ error: new Error("temporary read failure") });
     expect(cache.snapshot()).toEqual({ credentials: null, generation: 1 });
 
-    await expect(cache.warm(load)).resolves.toBeUndefined();
+    await expect(cache.warm(load)).resolves.toBeNull();
     expect(attempts).toBe(2);
     expect(cache.snapshot()).toEqual({
       credentials: "current-session",
       generation: 2,
     });
+  });
+
+  it("tells each warm caller why the load it waited on failed, even after a later load starts", async () => {
+    const cache = new CredentialSessionCache<string>();
+    const unreadable = new Error("EACCES: credentials.json");
+    const failing = deferred<string | null>();
+    const first = cache.warm(() => failing.promise);
+    const joined = cache.warm(async () => "unused");
+    failing.reject(unreadable);
+    await expect(first).resolves.toEqual({ error: unreadable });
+    await expect(joined).resolves.toEqual({ error: unreadable });
+    // A later load that reads the store says nothing failed, and changes no earlier answer.
+    await expect(cache.warm(async () => null)).resolves.toBeNull();
+    await expect(first).resolves.toEqual({ error: unreadable });
+    expect(cache.snapshot().credentials).toBeNull();
   });
 
   it("refuses to adopt a store read that crossed a clear", async () => {
