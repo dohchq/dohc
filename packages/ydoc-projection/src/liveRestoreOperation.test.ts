@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import * as Y from "yjs";
 import { registered, host, DatabaseSync, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
 import { openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
@@ -11,6 +11,7 @@ import type { StorageContext } from "../../../services/sync-relay/src/storage/co
 import { beginStopRestore, advanceStopRestoreFence, readStopRestore, type StopRestoreIntent } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import { attachLiveJournalHistory, createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
 import { initializeLiveRestoreOperationSchema } from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
+import { buildRelayFixture } from "../../../services/sync-relay/scripts/build.mjs";
 
 afterEach(cleanupLiveDeliveryFixtures);
 const named = { kind: "named", userId: "reader", grantId: "grant" } as const;
@@ -345,12 +346,26 @@ it.each([false, true])("handles the final available global cursor without a part
 
 const crashFixture = fileURLToPath(new URL("../../../services/sync-relay/src/liveRestoreOperationCrash.fixture.ts", import.meta.url));
 const tsx = pathToFileURL(createRequire(crashFixture).resolve("tsx")).href;
-it.each(["before-operation", "invalidation-before-commit", "invalidation-after-commit", "fence-before-commit", "fence-after-commit", "complete-before-commit", "complete-after-commit", "native-before-commit", "native-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
+let buildDirectory: string;
+let compiledCrashFixture: string;
+beforeAll(async () => {
+  const output = fileURLToPath(new URL("../../../services/sync-relay/.output", import.meta.url));
+  mkdirSync(output, { recursive: true });
+  buildDirectory = mkdtempSync(join(output, "restore-crash-"));
+  compiledCrashFixture = join(buildDirectory, "restore-crash.js");
+  await buildRelayFixture(crashFixture, compiledCrashFixture);
+}, 30_000);
+afterAll(() => {
+  if (buildDirectory) rmSync(buildDirectory, { recursive: true, force: true });
+});
+
+function assertCrashRecovery(boundary: string, sourceEntry = false) {
   const f = fixture(true);
   const intentPath = join(dirname(f.configPath), "intent.json");
   writeFileSync(intentPath, JSON.stringify(f.intent));
   f.close();
-  const child = spawnSync(process.execPath, ["--import", tsx, crashFixture, f.configPath, intentPath, boundary],
+  const entryArguments = sourceEntry ? ["--import", tsx, crashFixture] : [compiledCrashFixture];
+  const child = spawnSync(process.execPath, [...entryArguments, f.configPath, intentPath, boundary],
     { encoding: "utf8", windowsHide: true, timeout: 20_000 });
   expect(child.error).toBeUndefined();
   expect(child.stderr).toBe("");
@@ -375,4 +390,12 @@ it.each(["before-operation", "invalidation-before-commit", "invalidation-after-c
       if (boundary === "fence-after-commit") expect(initial).toEqual(final);
     } finally { reopened.close(); }
   }
+}
+
+it.each(["before-operation", "invalidation-before-commit", "invalidation-after-commit", "fence-before-commit", "fence-after-commit", "complete-before-commit", "complete-after-commit", "native-before-commit", "native-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
+  assertCrashRecovery(boundary);
+}, 30_000);
+
+it("opens the configured deployment from the source crash fixture", () => {
+  assertCrashRecovery("before-operation", true);
 }, 30_000);
