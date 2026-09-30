@@ -3,6 +3,7 @@ import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
+import { useRecordHistory } from "./collections/useRecordHistory";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -310,6 +311,9 @@ const EMPTY_SHARE_MOUNTS: NonNullable<Workspace["shareMounts"]> = [];
 
 const LazyRelayShareDialog = lazy(() =>
   import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
+);
+const LazyRecordHistoryDialog = lazy(() =>
+  import("./collections/RecordHistoryDialog").then((mod) => ({ default: mod.RecordHistoryDialog })),
 );
 const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 
@@ -2090,6 +2094,7 @@ export function DesktopWorkspaceShell(props: {
     [openCollectionTab, workspaceId],
   );
   const clearAutomationFocus = useCallback(() => setAutomationFocus(null), []);
+  const recordHistory = useRecordHistory(workspaceId, { reportShellError, clearKind, openAutomationRun: openAutomation });
   // A Collection page's errors and notices, which can answer after this
   // window has left their workspace. Those are dropped, never shown in the
   // next workspace.
@@ -5117,7 +5122,7 @@ export function DesktopWorkspaceShell(props: {
                 knownMarkdownFiles={markdownWikilinkFiles}
                 onButtonError={reportShellError}
                 onButtonNotice={showSuccessNotice}
-                onOpenAutomationRun={openAutomation}
+                onOpenRecordHistory={recordHistory.open}
                 readOnly={
                   (!!shareView && !shareViewDocumentsWritable) ||
                   isMountedSharePath(tabPath)
@@ -5651,6 +5656,22 @@ export function DesktopWorkspaceShell(props: {
           }}
           onError={reportShellError}
         />
+      ) : null}
+      {recordHistory.session ? (
+        <Suspense fallback={null}>
+          <LazyRecordHistoryDialog
+            key={recordHistory.session.key}
+            workspaceId={workspaceId}
+            collectionPath={recordHistory.session.target.collectionPath}
+            recordId={recordHistory.session.target.recordId}
+            recordName={recordHistory.session.target.recordName}
+            until={recordHistory.session.until}
+            onClose={recordHistory.close}
+            onOpenRun={recordHistory.openRun}
+            onFailed={recordHistory.failed}
+            onRead={recordHistory.read}
+          />
+        </Suspense>
       ) : null}
       {reviewProposalId ? (
         <ProposalReviewDialog

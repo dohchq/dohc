@@ -6,6 +6,7 @@ import { Overlay } from "../Overlay";
 import { relativeTime } from "../relativeTime";
 import { SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
+import { HISTORY_READ_FAILED } from "./useRecordHistory";
 
 // A record's History: its field changes, newest first, a page at a time,
 // read only while the dialog is open. An automation's changes name it as it
@@ -118,9 +119,14 @@ export function RecordHistoryDialog(props: {
   collectionPath: string;
   recordId: string;
   recordName: string;
+  /** An older page to read back to after the first, by its beforeHistoryId. */
+  until?: number | null;
   onClose: () => void;
   onOpenRun: (automationId: string, claimId: string, name: string) => void;
-  onError: (fallback: string, error: unknown, retry: (() => void) | null) => void;
+  /** A read failed: the page it asked for, or null for the first. */
+  onFailed: (before: number | null, error: unknown) => void;
+  /** A read landed: where the page after it starts, or null at the end. */
+  onRead: (next: number | null) => void;
 }) {
   const { workspaceId, collectionPath, recordId } = props;
   const [page, setPage] = useState<{ entries: RecordHistoryEntry[]; next: number | null } | null>(null);
@@ -135,23 +141,20 @@ export function RecordHistoryDialog(props: {
   const focusPanel = useRef(false);
   // Older changes had focus when its page failed, so Try again, which takes its place, takes focus.
   const focusRetry = useRef(false);
-  // A caller may pass a new function each render; a read must not start again for that.
-  const reportError = useRef(props.onError);
-  reportError.current = props.onError;
+  // A caller may pass new functions each render; a read must not start again for that.
+  const reports = useRef(props);
+  reports.current = props;
   // A slow answer for another record, workspace, or an earlier read never lands.
   const request = useRequestSequence([workspaceId, collectionPath, recordId]);
-  // Rises only when the record or workspace changes, or the dialog closes, so
-  // a Try again kept from before starts nothing.
-  const scope = useRequestSequence([workspaceId, collectionPath, recordId]);
 
   const load = useCallback((before: number | null) => {
-    const epoch = scope.current();
     const token = request.next();
     setLoading(before === null ? "first" : "older");
     void bridge()
       .getCollectionRecordHistory({ workspaceId, collectionPath, recordId, ...(before === null ? {} : { beforeHistoryId: before }) })
       .then((result) => {
         if (!request.isCurrent(token)) return;
+        reports.current.onRead(result.nextBeforeHistoryId);
         const focused = document.activeElement;
         focusPanel.current = focused === retry.current || (focused === older.current && result.nextBeforeHistoryId === null);
         setFailed(null);
@@ -160,20 +163,22 @@ export function RecordHistoryDialog(props: {
           const shown = new Set(current.entries.map((entry) => entry.historyId));
           return { entries: [...current.entries, ...result.entries.filter((entry) => !shown.has(entry.historyId))], next: result.nextBeforeHistoryId };
         });
+        // Read on until the page asked for is shown.
+        const until = reports.current.until ?? null;
+        const next = result.nextBeforeHistoryId;
+        if (until !== null && next !== null && next >= until) load(next);
       })
       .catch((error: unknown) => {
         if (request.isCurrent(token)) {
           focusRetry.current = document.activeElement === older.current;
           setFailed(before ?? "first");
-          reportError.current("dohc could not read this record's history.", error, () => {
-            if (scope.isCurrent(epoch)) load(before);
-          });
+          reports.current.onFailed(before, error);
         }
       })
       .finally(() => {
         if (request.isCurrent(token)) setLoading(null);
       });
-  }, [workspaceId, collectionPath, recordId, request, scope]);
+  }, [workspaceId, collectionPath, recordId, request]);
 
   useEffect(() => {
     setPage(null);
@@ -181,7 +186,7 @@ export function RecordHistoryDialog(props: {
     load(null);
   }, [load]);
 
-  const status = failed !== null ? "dohc could not read this record's history."
+  const status = failed !== null ? HISTORY_READ_FAILED
     : page === null ? "Loading history…"
     : page.entries.length === 0 ? "No field of this record has changed yet." : "";
 
