@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { buildRelayFixture } from "../scripts/build.mjs";
 import { normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import {
   LINK_DISCUSSION_BODY_CODE_POINT_LIMIT,
@@ -42,6 +46,17 @@ const OWNER = "owner";
 const RECIPIENT = "recipient";
 
 afterEach(closeTestStorages);
+let raceDirectory: string, raceEntry: string;
+beforeAll(async () => {
+  const output = fileURLToPath(new URL("../.output", import.meta.url));
+  await mkdir(output, { recursive: true });
+  raceDirectory = await mkdtemp(join(output, "discussion-writer-"));
+  raceEntry = join(raceDirectory, "writer.mjs");
+  await buildRelayFixture(fileURLToPath(new URL("./recipientBudgetRaceWorker.test-helper.ts", import.meta.url)), raceEntry);
+}, 30_000);
+afterAll(async () => {
+  if (raceDirectory) await rm(raceDirectory, { recursive: true, force: true });
+});
 
 async function openStorage(
   options: OpenSyncRelayStorageOptions = {},
@@ -171,8 +186,8 @@ async function raceDiscussionAppends(
   operations: readonly [RecipientBudgetRaceOperation, RecipientBudgetRaceOperation],
 ): Promise<unknown[]> {
   const workers = operations.map((operation, index) =>
-    new Worker(new URL("./recipientBudgetRaceWorker.test-helper.ts", import.meta.url), {
-      execArgv: ["--import", "tsx"],
+    new Worker(raceEntry, {
+      execArgv: [],
       workerData: {
         dbPath,
         idPrefix: `race-${index + 1}`,
