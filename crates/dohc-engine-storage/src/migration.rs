@@ -2656,6 +2656,16 @@ WHEN OLD.sha256 <> NEW.sha256
 BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
 ";
 
+/// Record history names the automation run that wrote a change: the claim
+/// it ran for and the automation's name when it ran. Only an automation's
+/// change names one, and the two are set together.
+const V2_RECORD_HISTORY_AUTOMATION_RUN_DDL: &str = "\
+ALTER TABLE collection_field_history ADD COLUMN automation_claim_id TEXT
+    CHECK (automation_claim_id IS NULL OR actor_kind = 'automation');
+ALTER TABLE collection_field_history ADD COLUMN automation_name TEXT
+    CHECK ((automation_name IS NULL) = (automation_claim_id IS NULL));
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2804,6 +2814,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 24,
         id: "v2-materialization-text-blobs",
         sql: V2_MATERIALIZATION_TEXT_BLOBS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 25,
+        id: "v2-record-history-automation-run",
+        sql: V2_RECORD_HISTORY_AUTOMATION_RUN_DDL,
         sets_user_version: None,
     },
 ];
@@ -3159,6 +3175,10 @@ mod tests {
                 "v2-materialization-text-blobs",
                 "2f5662203a97d14c1ecd6e1902a1dfd2d1b0dfe11734fe7c12b4a2982fc317ca",
             ),
+            (
+                "v2-record-history-automation-run",
+                "7a31e23961f026d1e131b1473e9e6f47e867b00c40bb5090ada94d7fedf07a83",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3176,8 +3196,10 @@ mod tests {
         let dir = tempdir();
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
-        let before = BASELINE_MIGRATIONS.len() - 1;
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 24);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-materialization-text-blobs")
+            .expect("materialization text blobs migration");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at, kind) VALUES ('before-upgrade', 'fingerprint', 7, 3, 'versioned')", []).unwrap();
         let binary = crate::blob::put_binary_blob(&conn, b"binary").unwrap();

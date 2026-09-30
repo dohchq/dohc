@@ -1964,9 +1964,9 @@ async function requestCli<Verb extends CliVerb>(
 export async function dataset(ctx: ToolContext, input: unknown) {
   if (ctx.shareAccess !== undefined) return {ok:false as const,reason:"Collections require the owning workspace."};
   const parsed = DatasetRequest.safeParse(input);
-  if (!parsed.success) return {ok:false as const,reason:"Invalid Collection request. Use a supported action and its required fields."};
-  if (parsed.data.action === "prepareRecovery" && !parsed.data.sourcePath) return {ok:false as const,reason:"Collection recovery requires an explicit absolute sourcePath ending in .dohc-recovery."};
-  if (parsed.data.action === "export" && !parsed.data.savePath) return {ok:false as const,reason:"Collection export requires an explicit savePath ending in .dohc-recovery."};
+  if (!parsed.success) return {ok:false as const,reason: parsed.error.issues.find(issue => issue.path[0] === "datasetPath")?.message ?? "Invalid Collection request. Use a supported action and its required fields."};
+  if (parsed.data.action === "prepareRecovery" && !parsed.data.sourcePath) return {ok:false as const,reason:"Collection recovery requires an explicit sourcePath ending in .dohc-recovery."};
+  if (parsed.data.action === "export" && !parsed.data.savePath) return {ok:false as const,reason:"Collection export requires an explicit absolute savePath outside the workspace ending in .dohc-recovery."};
   return requestCli(ctx, "dataset", {request:parsed.data});
 }
 

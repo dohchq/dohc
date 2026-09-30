@@ -25,6 +25,7 @@ import {
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
@@ -551,6 +552,46 @@ describe("CLI socket server", () => {
     expect(await createApp(ctx, { appRoot: "partial" })).toEqual({
       ok: false, written: ["partial/index.html"], path: "partial/styles.css", reason: "Cannot write partial/styles.css: disk full. Free space.",
     });
+  });
+
+  it("publishes the app created from a subfolder and returns caller-relative source paths", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    context.writeFiles = async files => {
+      for (const file of files) {
+        const absolute = join(workspaceRoot, file.path);
+        await mkdir(dirname(absolute), { recursive: true });
+        await writeFile(absolute, Buffer.from(file.contentBase64, "base64"));
+      }
+      return { ok: true, written: files.map(file => file.path) };
+    };
+    const ctx: ToolContext = { root: cwd, home: stateDir, request: request => invoke(request.verb, request.args) };
+    expect(await createApp(ctx, { appRoot: "site" })).toMatchObject({ ok: true, appRoot: "site" });
+    const publication = vi.fn<NonNullable<CliWorkspaceContext["appPublication"]>>(async request => {
+      if (request.action !== "prepare") throw new Error("Expected prepare");
+      await expect(readFile(join(workspaceRoot, request.appRoot, "index.html"), "utf8")).resolves.toContain("<!doctype html>");
+      return { kind: "prepared", approvalId: "00000000-0000-4000-8000-000000000001",
+        candidateDigest: "a".repeat(64), appRoot: request.appRoot, versionId: "version-site",
+        sourceRevision: "b".repeat(64), sourcePaths: [request.appRoot + "/index.html", request.appRoot + "/styles.css"],
+        capabilities: [], externalNetwork: true };
+    });
+    context.appPublication = publication;
+    expect(await invoke("appPublication", { cwd, actor: "agent", request: {
+      action: "prepare", workspaceId: WORKSPACE_ID, appRoot: "site", shareId: "share-site", grantId: "grant-site",
+    } })).toMatchObject({ kind: "prepared", appRoot: "site", sourcePaths: ["site/index.html", "site/styles.css"] });
+    expect(publication).toHaveBeenCalledWith(expect.objectContaining({ appRoot: "app/site" }));
+    publication.mockResolvedValueOnce({ kind: "published", publicationId: "c".repeat(64), authorityRevision: 1 });
+    expect(await invoke("appPublication", { cwd, actor: "agent", request: {
+      action: "approve", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001", candidateDigest: "a".repeat(64),
+    } })).toEqual({ kind: "published", publicationId: "c".repeat(64), authorityRevision: 1 });
+    publication.mockRejectedValueOnce(new Error("Cannot publish app/site/index.html"));
+    await expect(invoke("appPublication", { cwd, actor: "agent", request: {
+      action: "prepareLocal", workspaceId: WORKSPACE_ID, appRoot: "site",
+    } })).rejects.toThrow("Cannot publish site/index.html");
+    await expect(invoke("appPublication", { cwd, actor: "agent", request: {
+      action: "listLocal", workspaceId: WORKSPACE_ID, appRoot: "../site",
+    } })).rejects.toThrow("traversal");
+    expect(publication).toHaveBeenCalledTimes(3);
   });
 
   it("refuses traversal in a fileWrite before cwd translation", async () => {
@@ -1341,6 +1382,7 @@ describe("CLI socket server", () => {
               onBehalfOf: "person-local",
               depth: 0,
               recordedAtMs: SERVER_NOW_MS,
+              automationRun: null,
             },
           ],
           nextBeforeHistoryId: null,
@@ -1757,6 +1799,169 @@ describe("CLI socket server", () => {
     ]);
   });
 
+  it("rebases MCP document and Collection paths from a subfolder and returns caller paths", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const documents = new Map([["notes.md", "Root"], ["app/notes.md", "Subfolder"]]);
+    context.documents = {
+      async read(path) { return { path, markdown: documents.get(path) ?? "Missing" }; },
+      async edit({ path, edit }) { documents.set(path, edit.replacement); return { path, changed: true }; },
+      async create({ path, markdown }) { documents.set(path, markdown); return { path }; },
+    };
+    await expect(invoke("documentRead", { cwd, actor: "agent", path: "notes.md" })).resolves.toEqual({ ok: true, path: "notes.md", markdown: "Subfolder" });
+    await expect(invoke("documentEdit", { cwd, actor: "agent", path: "notes.md", replacement: "Edited" })).resolves.toEqual({ ok: true, path: "notes.md", changed: true });
+    await expect(invoke("documentCreate", { cwd, actor: "agent", path: "new.md", markdown: "Created" })).resolves.toEqual({ ok: true, path: "new.md" });
+    expect(documents.get("notes.md")).toBe("Root");
+    expect(documents.get("app/notes.md")).toBe("Edited");
+    expect(documents.get("app/new.md")).toBe("Created");
+    const setFields = vi.fn(async (input: Parameters<CliCollectionWriteSeam["setFields"]>[0]) => ({ path: input.recordPath }));
+    const createRecord = vi.fn(async (input: Parameters<CliCollectionWriteSeam["createRecord"]>[0]): Promise<Awaited<ReturnType<CliCollectionWriteSeam["createRecord"]>>> => ({ path: `${input.collectionPath}/${input.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" }));
+    context.collections = { query: vi.fn(), getRecord: vi.fn(), writes: { setFields, createRecord } };
+    await expect(invoke("collectionSetFields", { cwd, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } })).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
+    expect(setFields).toHaveBeenCalledWith(expect.objectContaining({ recordPath: "app/tasks/a.md" }));
+    await expect(invoke("collectionCreateRecord", { cwd, actor: "agent", collectionPath: "tasks", name: "b", fields: {} })).resolves.toMatchObject({ ok: true, recordPath: "tasks/b.md" });
+    expect(createRecord).toHaveBeenCalledWith(expect.objectContaining({ collectionPath: "app/tasks" }));
+    const record = { id: "rec_abcdefghijklmnopqrstuvwxyz", path: "app/tasks/a.md", conflicted: false, values: [] };
+    context.collections.query = vi.fn(async () => ({ collection: { path: "app/tasks", objectId: "collection-app", status: "valid" as const, reasons: [] }, records: [record], groups: [{ value: "open", records: [record] }], nextCursor: { sortValues: [], recordPath: "app/tasks/a.md", recordId: record.id } }));
+    await expect(invoke("collectionQuery", { cwd, actor: "agent", collectionPath: "tasks", cursor: { sortValues: [], recordPath: "tasks/a.md", recordId: record.id } })).resolves.toMatchObject({ collection: { path: "tasks" }, records: [{ path: "tasks/a.md" }], groups: [{ records: [{ path: "tasks/a.md" }] }], nextCursor: { recordPath: "tasks/a.md" } });
+    expect(context.collections.query).toHaveBeenLastCalledWith(expect.objectContaining({ collectionPath: "app/tasks", cursor: expect.objectContaining({ recordPath: "app/tasks/a.md" }) }));
+    context.collections.getRecord = vi.fn(async () => ({ collection: { path: "app/tasks", objectId: "collection-app", status: "valid" as const, reasons: [] }, record, history: [], nextBeforeHistoryId: null }));
+    await expect(invoke("collectionRecord", { cwd, actor: "agent", collectionPath: "tasks", recordId: record.id, historyLimit: 25 })).resolves.toMatchObject({ collection: { path: "tasks" }, record: { path: "tasks/a.md" } });
+    createRecord.mockResolvedValueOnce({ kind: "partial", created: ["app/tasks/b.md"], failedStage: "fields", reason: "Cannot set app/tasks/b.md", retry: { mode: "resume", instruction: "Retry app/tasks/b.md", recordId: record.id } });
+    await expect(invoke("collectionCreateRecord", { cwd, actor: "agent", collectionPath: "tasks", name: "b", fields: {} })).resolves.toMatchObject({ ok: false, partial: { created: ["tasks/b.md"], reason: "Cannot set tasks/b.md", retry: { instruction: "Retry tasks/b.md" } } });
+    setFields.mockRejectedValueOnce(new Error("Cannot edit app/tasks/a.md"));
+    await expect(invoke("collectionSetFields", { cwd, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } })).resolves.toMatchObject({ ok: false, reason: "Cannot edit tasks/a.md" });
+    for (const path of ["../notes.md", "x/../notes.md", "../.dohc/private.md"]) {
+      await expect(invoke("documentRead", { cwd, actor: "agent", path })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(path) });
+      await expect(invoke("documentEdit", { cwd, actor: "agent", path, replacement: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(path) });
+      await expect(invoke("documentCreate", { cwd, actor: "agent", path, markdown: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(path) });
+    }
+    await expect(invoke("collectionSetFields", { cwd, actor: "agent", recordPath: "../tasks/a.md", fields: { status: "done" } })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("../tasks/a.md") });
+    await expect(invoke("documentRead", { cwd: tempRoot, actor: "agent", path: "notes.md" })).rejects.toThrow("not inside a dohc workspace");
+    await expect(invoke("documentRead", { cwd: workspaceRoot, actor: "agent", path: "notes.md" })).resolves.toEqual({ ok: true, path: "notes.md", markdown: "Root" });
+  });
+
+  it("maps change-list paths and preserves root errors without any path mappings", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
+    context.listMoments = async () => [{ ...moments.summary, path: "app/notes.md" }];
+    await expect(invoke("moments", { cwd, actor: "agent" })).resolves.toMatchObject({ changes: [{ path: "notes.md" }] });
+    context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "unavailable", message: "Cannot open (missing)" }));
+    await expect(invoke("dataset", { cwd: workspaceRoot, actor: "agent", request: { action: "list", workspaceId: WORKSPACE_ID } })).resolves.toMatchObject({ message: "Cannot open (missing)" });
+  });
+
+  it("returns a change path relative to the caller at the root and in a subfolder", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
+    context.readMoment = async () => ({ ...moments.detail, path: "app/notes.md", payload: { before: { ...moments.detail.payload.after!, path: "app/old.md" }, after: { ...moments.detail.payload.after!, path: "app/notes.md" } } });
+    await expect(invoke("moment", { cwd, actor: "agent", id: moments.detail.id })).resolves.toMatchObject({ change: { path: "notes.md", before: { path: "old.md" }, after: { path: "notes.md" } } });
+    await expect(invoke("moment", { cwd: workspaceRoot, actor: "agent", id: moments.detail.id })).resolves.toMatchObject({ change: { path: "app/notes.md", before: { path: "app/old.md" }, after: { path: "app/notes.md" } } });
+  });
+
+  it("rebases both file chat verbs from a subfolder", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    context.fileObjectIdForPath = vi.fn(async path => path === "app/notes.md" ? "object_subfolder" : null);
+    context.filePathForObjectId = vi.fn(async objectId => objectId === "object_subfolder" ? "app/notes.md" : null);
+    const started = await invoke("fileChatStart", { cwd, actor: "agent", path: "notes.md", title: "Subfolder", body: "Comment" });
+    expect(started).toMatchObject({ ok: true, path: "notes.md" });
+    await expect(invoke("fileChats", { cwd, actor: "agent", path: "notes.md" })).resolves.toMatchObject({ ok: true, path: "notes.md", fileObjectId: "object_subfolder", threads: [{ linkedPathHint: "notes.md" }] });
+    expect(context.fileObjectIdForPath).toHaveBeenCalledWith("app/notes.md");
+    await expect(invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "notes.md" })).resolves.toMatchObject({ ok: true, threads: [] });
+    await expect(invoke("fileChatStart", { cwd, actor: "agent", path: "missing.md", title: "Missing", body: "Comment" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("does not track missing.md") });
+  });
+
+  it("preserves absolute recovery export destinations for writer validation", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const savePath = join(tempRoot, "backup.dohc-recovery");
+    const dataset = vi.fn(async () => ({ kind: "exported" as const, savedPath: savePath }));
+    context.dataset = dataset;
+    for (const folder of [cwd, workspaceRoot]) {
+      await expect(invoke("dataset", { cwd: folder, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath } })).resolves.toEqual({ kind: "exported", savedPath: savePath });
+    }
+    dataset.mockClear();
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: "backup.dohc-recovery" } })).resolves.toMatchObject({ kind: "refused", code: "path_rejected" });
+    expect(dataset).not.toHaveBeenCalled();
+    context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "unavailable", message: "Cannot open " + savePath }));
+    for (const folder of [cwd, workspaceRoot]) {
+      await expect(invoke("dataset", { cwd: folder, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).resolves.toMatchObject({ message: "Cannot open " + savePath });
+    }
+    const absoluteWorkspacePath = join(workspaceRoot, "data", "dataset.json");
+    context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "unavailable", message: "Cannot open " + absoluteWorkspacePath }));
+    await expect(invoke("dataset", { cwd: workspaceRoot, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).resolves.toMatchObject({ message: "Cannot open " + absoluteWorkspacePath });
+  });
+
+  it("refuses colon segments for read, write, materialize, and chat paths", async () => {
+    for (const path of ["C:foo.md", "folder/C:foo.md", "foo:bar.md", ...(process.platform === "win32" ? [] : ["C:/foo.md"])]) {
+      await expect(invoke("documentRead", { cwd: workspaceRoot, actor: "agent", path })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("documentEdit", { cwd: workspaceRoot, actor: "agent", path, replacement: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("documentCreate", { cwd: workspaceRoot, actor: "agent", path, markdown: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("fileChatStart", { cwd: workspaceRoot, actor: "agent", path, title: "Wrong", body: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("moments", { cwd: workspaceRoot, actor: "agent", path })).rejects.toThrow("colon");
+      await expect(invoke("export", { cwd: workspaceRoot, actor: "agent", scope: { kind: "all" }, outDir: path })).rejects.toThrow("colon");
+      await expect(invoke("post", { cwd: workspaceRoot, actor: "agent", group: "general", body: "Wrong", attachments: [path], needsDecision: false })).rejects.toThrow("colon");
+      await expect(invoke("reply", { cwd: workspaceRoot, actor: "agent", thread: "thread", body: "Wrong", attachments: [path], needsDecision: false })).rejects.toThrow("colon");
+      await expect(invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request: { action: "listLocal", workspaceId: WORKSPACE_ID, appRoot: path } })).rejects.toThrow("colon");
+      for (const action of ["prepareRecovery", "export"] as const) {
+        const request = action === "prepareRecovery" ? { action, workspaceId: WORKSPACE_ID, sourcePath: path } : { action, workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: path };
+        await expect(invoke("dataset", { cwd: workspaceRoot, actor: "agent", request })).resolves.toMatchObject({ kind: "refused", code: "path_rejected", message: expect.stringContaining("colon") });
+      }
+    }
+  });
+
+  it("rebases automation paths while preserving planned, current, and undo JSON", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const payload = { path: "app/notes.md", reason: "Keep app/notes.md" };
+    const kept = { kind: "kept" as const, recordId: "rec_1", path: "app/tasks/a.md", field: "Data", planned: payload, current: payload };
+    const action = { kind: "dataset-action" as const, rules: { datasetId: "dataset", revision: 1, revisionSha256: "hash" }, operationId: "operation", tableId: "table", name: "Save", revision: 1, undo: payload };
+    context.automations = {
+      automationIdAt: vi.fn(async () => "collection:app-tasks#stamp"),
+      runs: vi.fn(),
+      retry: vi.fn(),
+      run: vi.fn(async () => ({ claimId: "atc_1", state: "done" as const, error: null, createdAtMs: 1, updatedAtMs: 2, trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 }, definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, steps: [{ step: 1, writes: [kept, action] }], failedStep: null, startsOver: false })),
+    };
+    await expect(invoke("automationRun", { cwd, actor: "agent", collectionPath: "tasks", automation: "stamp", run: "atc_1" })).resolves.toMatchObject({ ok: true, run: { steps: [{ changes: [{ ...kept, path: "tasks/a.md" }, action] }] } });
+    expect(context.automations.automationIdAt).toHaveBeenLastCalledWith("app/tasks", "stamp");
+    context.buttons = { press: vi.fn(async () => ({ result: { busy: false as const, relayed: true as const }, waiting: null })) };
+    await expect(invoke("automationPress", { cwd, actor: "agent", collectionPath: "tasks", field: "Save", record: "rec_1", confirm: [] })).resolves.toEqual({ ok: true, relayed: true });
+    expect(context.buttons.press).toHaveBeenLastCalledWith(expect.objectContaining({ collectionPath: "app/tasks" }), expect.anything());
+  });
+
+  it("rebases dataset descriptor, migration, export, and form paths", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    context.dataset = vi.fn(async request => request.action === "export"
+      ? { kind: "exported" as const, savedPath: request.savePath ?? null }
+      : { kind: "refused" as const, code: "unavailable", message: "Cannot open app/data/dataset.json" });
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: join(tempRoot, "backup.dohc-recovery") } })).resolves.toEqual({ kind: "exported", savedPath: join(tempRoot, "backup.dohc-recovery") });
+    expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ datasetPath: "app/data/dataset.json", savePath: join(tempRoot, "backup.dohc-recovery") }), { depth: 0 });
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).resolves.toMatchObject({ kind: "refused", message: "Cannot open data/dataset.json" });
+    context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "custom_rules", message: "Update app/data/operations.js to change a field." }));
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).resolves.toMatchObject({ message: "Update data/operations.js to change a field." });
+    context.dataset = vi.fn(async () => { throw new DatasetSchemaChangeError("notes.md uses custom rules. Update shared/my rules.js, then choose Review source change.", ["shared/my rules.js"]); });
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).rejects.toThrow("notes.md uses custom rules. Update ../shared/my rules.js, then choose Review source change.");
+    context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "unavailable", message: "Unavailable" }));
+    await invoke("dataset", { cwd, actor: "agent", request: { action: "prepare", workspaceId: WORKSPACE_ID, descriptorPath: "data/dataset.json" } });
+    expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ descriptorPath: "app/data/dataset.json" }), { depth: 0 });
+    await invoke("dataset", { cwd, actor: "agent", request: { action: "prepareMigration", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", migrationPath: "migration.sql" } });
+    expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ migrationPath: "app/migration.sql" }), { depth: 0 });
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: "../export.zip" } })).resolves.toMatchObject({ kind: "refused", message: expect.stringContaining("../export.zip") });
+    await invoke("dataset", { cwd, actor: "agent", request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: "backup.dohc-recovery" } });
+    expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ sourcePath: join(cwd, "backup.dohc-recovery") }), { depth: 0 });
+    context.dataset = vi.fn(async () => ({ kind: "form-created" as const, appRoot: "app/form", paths: ["app/form/index.html", "app/form/app.json"] }));
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "createForm", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", revision: 1, revisionSha256: "a".repeat(64), tableId: "00000000-0000-4000-8000-000000000001", createOperationId: "00000000-0000-4000-8000-000000000002", appRoot: "form", fieldIds: ["00000000-0000-4000-8000-000000000003"] } })).resolves.toEqual({ kind: "form-created", appRoot: "form", paths: ["form/index.html", "form/app.json"] });
+    expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ appRoot: "app/form" }), { depth: 0 });
+    const payload = { path: "app/notes.md", reason: "Keep app/notes.md" };
+    context.dataset = vi.fn(async () => ({ kind: "invoked" as const, result: payload, revision: 1, replayed: false }));
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "invoke", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", operationId: "00000000-0000-4000-8000-000000000002", revision: 1, revisionSha256: "a".repeat(64), input: payload, idempotencyKey: "stable" } })).resolves.toMatchObject({ result: payload });
+
+  });
+
   it("resolves document CLI paths from the caller's folder and refuses workspace escapes", async () => {
     const cwd = join(workspaceRoot, "notes");
     await mkdir(cwd);
@@ -1772,10 +1977,10 @@ describe("CLI socket server", () => {
           argv: ["document", verb, path, ...(verb === "read" ? [] : ["--text", "Body"])], cwd,
           request: (request) => invoke(request.verb, request.args),
         });
-        expect(result.exitCode, result.stderr).toBe(path.includes("outside") || path.includes("private") ? 1 : 0);
+        expect(result.exitCode, result.stderr).toBe(path === "plan.md" ? 0 : 1);
       }
     }
-    expect(paths).toEqual(Array.from({ length: 3 }, () => ["notes/plan.md", "root.md", "notes/absolute.md"]).flat());
+    expect(paths).toEqual(Array.from({ length: 3 }, () => ["notes/plan.md"]).flat());
   });
 
   it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {

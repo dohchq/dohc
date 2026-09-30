@@ -473,7 +473,7 @@ export function AutomationsPanel(props: {
   /** Rises each time the page's header asks the panel to close. */
   closeAsk?: number;
   /** A notice asked to open one automation's runs, at the run it names; `seq` rises with each ask. */
-  focus: { automationId: string; run: string | null; seq: number } | null;
+  focus: { automationId: string; run: string | null; name?: string | null; seq: number } | null;
   /**
    * The page asked to build a new automation from this draft, as for a button
    * nothing uses yet; `seq` rises with each ask.
@@ -569,7 +569,8 @@ export function AutomationsPanel(props: {
     const summary = file?.status === "read"
       ? file.automations.find((entry) => entry.valid && entry.automationId === props.focus?.automationId)
       : undefined;
-    const name = summary?.valid ? summary.automation.name : (props.focus.automationId.split("#").at(-1) ?? "");
+    // Before the file is read, or once the automation is gone, the name the asker gave, else the id's last part.
+    const name = summary?.valid ? summary.automation.name : (props.focus.name ?? props.focus.automationId.split("#").at(-1) ?? "");
     const { automationId, run } = props.focus;
     leave(() => {
       setEditing(null);
@@ -838,7 +839,11 @@ export function AutomationsPanel(props: {
     reach: entry.reach,
   });
 
-  const title = editing ? (editing.start.id === "" ? "New automation" : editing.start.name) : runsOf?.name ?? null;
+  // A run opened before the file was read, as from a record's History, takes the automation's name once it is.
+  const listed = runsOf === null || file?.status !== "read" ? undefined
+    : file.automations.find((entry) => entry.valid && entry.automationId === runsOf.automationId);
+  const title = editing ? (editing.start.id === "" ? "New automation" : editing.start.name)
+    : runsOf === null ? null : listed?.valid ? listed.automation.name : runsOf.name;
   const header = title !== null ? (
     <>
       <IconButton

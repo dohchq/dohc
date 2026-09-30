@@ -386,6 +386,15 @@ describe("the automation run store", () => {
     await expect(store.readReachVerdicts()).resolves.toEqual({ ...reach, unreadable: false, missing: false });
   });
 
+  it("persists a computed read hold with its operation label", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-read-hold-"), testMetadataDir);
+    const verdicts = [{ automationId: AUTOMATION, definitionHash: "h", step: "0", verdict: "held" as const,
+      stoppedFor: "Ana", seq: 1, recipient: { id: JSON.stringify(["operation", "dataset", "read"]), name: "Budget: View invoices", action: "find" as const } }];
+    const reach = { verdicts, hostRecord: 0, unproven: [], unprovenAll: false, unprovenFolders: [], unprovenPaths: [], pending: null, taken: null };
+    await store.saveReachVerdicts(reach);
+    expect(await store.readReachVerdicts()).toEqual({ ...reach, unreadable: false, missing: false });
+  });
+
   it("fails closed on old unqualified reach keys", async () => {
     const store = createAutomationRunStore(await createTestScratch("dohc-reach-old-"), testMetadataDir);
     await writeFile(await store.reachVerdictsPath(), JSON.stringify({ version: 2, verdicts: [{

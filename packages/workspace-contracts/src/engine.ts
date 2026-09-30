@@ -1,3 +1,5 @@
+import type { AutomationRunAttribution } from "./collection";
+
 type WorkspaceObjectId = string;
 export type VersionId = string;
 export type WorkspaceId = string;
@@ -1563,11 +1565,13 @@ export type ChangeAuthor =
   // running, never from a request. automationId is the engine subscription
   // id ("collection:<collection id>#<automation id>"), and depth is the
   // write's automation-chain depth: one greater than its trigger's.
-  // onBehalfOf is the run's person, left out when it has none.
+  // onBehalfOf is the run's person, left out when it has none. run names
+  // the claim and the automation's name, for record history.
   | {
       kind: "automation";
       automationId: string;
       onBehalfOf?: string;
       depth: number;
+      run: AutomationRunAttribution;
     }
   | { kind: "local"; label: NonEmptyLocalAuthorLabel };

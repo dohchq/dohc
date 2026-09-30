@@ -124,7 +124,14 @@ fn seed_captured_richdoc_lineage_from_markdown(
 
 fn snapshot(db: &Path, path: &str) -> Option<dohc_engine_domain::TextSnapshot> {
     let mut store = EngineStore::open(db, 100).expect("reopen store");
-    VersionedTextStore::new(&mut store)
+    snapshot_from_store(&mut store, path)
+}
+
+fn snapshot_from_store(
+    store: &mut EngineStore,
+    path: &str,
+) -> Option<dohc_engine_domain::TextSnapshot> {
+    VersionedTextStore::new(store)
         .read_text(WORKSPACE_ID, VERSION_ID, path)
         .expect("read captured text")
 }
@@ -169,6 +176,10 @@ fn secret_tip_len(db: &Path, path: &str) -> Option<i64> {
 
 fn moment_count(db: &Path, path: &str) -> i64 {
     let store = EngineStore::open(db, 100).expect("reopen store");
+    moment_count_from_store(&store, path)
+}
+
+fn moment_count_from_store(store: &EngineStore, path: &str) -> i64 {
     store
         .read_with(|conn| {
             conn.query_row(
@@ -182,6 +193,13 @@ fn moment_count(db: &Path, path: &str) -> i64 {
 
 fn collection_record(db: &Path, path: &str) -> Option<(Option<String>, String)> {
     let store = EngineStore::open(db, 100).expect("reopen store");
+    collection_record_from_store(&store, path)
+}
+
+fn collection_record_from_store(
+    store: &EngineStore,
+    path: &str,
+) -> Option<(Option<String>, String)> {
     store
         .read_with(|conn| {
             conn.query_row(

@@ -8,6 +8,7 @@ fn native_tail_edit(f: &mut Fixture, source: &str, now: i64) -> owner_outbox::Ow
         actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
         on_behalf_of: Some("owner".into()),
         depth: 1,
+        run: None,
     };
     crate::record_local_update(
         &mut f.store,

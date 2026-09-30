@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { link, lstat, open, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
+import { isInside } from "../security/pathContainment";
+
 export const DATASET_RECOVERY_EXTENSION = ".dohc-recovery";
 
 /** The owner chooses the destination; app source never receives this filesystem capability. */
 export async function writeDatasetRecoveryExport(input: {
   path: string; overwrite?: boolean; stream: AsyncIterable<Uint8Array>; maxBytes: number;
-  signal: AbortSignal; authorize(): void;
+  signal: AbortSignal; authorize(): void; workspaceRoots: readonly string[];
 }): Promise<{ savedPath: string; byteLength: number }> {
   if (!isAbsolute(input.path) || !input.path.toLowerCase().endsWith(DATASET_RECOVERY_EXTENSION)) {
     throw new Error("Choose an absolute path ending in .dohc-recovery.");
@@ -15,8 +17,18 @@ export async function writeDatasetRecoveryExport(input: {
   if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1) throw new Error("The recovery export has an invalid size limit.");
   const current = () => { input.signal.throwIfAborted(); input.authorize(); };
   current();
-  const parent = await realpath(dirname(input.path)); current();
+  const parent = await realpath(dirname(input.path)).catch(() => { throw new Error("Choose an existing folder outside all workspaces."); }); current();
   const destination = join(parent, basename(input.path));
+  for (const root of input.workspaceRoots) {
+    const canonicalRoot = await realpath(root).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    current();
+    if (canonicalRoot && isInside(canonicalRoot, destination)) {
+      throw new Error("Save the private recovery archive outside all workspaces.");
+    }
+  }
   const exists = () => lstat(destination).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
   const original = await exists(); current();
   if (original && (!input.overwrite || !original.isFile() || original.isSymbolicLink())) throw new Error("A file already exists there. Choose another location.");

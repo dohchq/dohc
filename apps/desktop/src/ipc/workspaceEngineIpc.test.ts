@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import type { CollectionGetRecordResult } from "@dohc/workspace-contracts";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
@@ -102,6 +103,7 @@ async function harness() {
     queryCollectionRecords: vi.fn<VersionedLiveAdapter["queryCollectionRecords"]>(async () => ({
       collection: { path: "data", objectId: "object-data", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
     })),
+    getCollectionRecord: vi.fn<VersionedLiveAdapter["getCollectionRecord"]>(async () => { throw new Error("record boundary"); }),
   };
   const capture = {
     listMoments: vi.fn<WorkspaceEngineCapture["listMoments"]>(async () => ({
@@ -141,6 +143,7 @@ async function harness() {
   const requireSessions = vi.fn(() => sessions);
   const retryOwnerLiveDelivery = vi.fn();
   const retryCloudSync = vi.fn(async (_workspaceId: string, _reason: "person" | "reconnect") => undefined);
+  const automationRunOnThisComputer = vi.fn(async (_workspaceId: string, _automationId: string, claimId: string) => claimId === "claim-here");
   const registrations = createWorkspaceEngineIpc({
     localPersonId: () => "person-local",
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
@@ -152,6 +155,7 @@ async function harness() {
     },
     requireEngineCapture, localAgentDisplayName: displayName,
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
+    automationRunOnThisComputer,
     notifyRenderer: notify,
     namedAuthorLabel: () => "Someone you shared with",
     retryOwnerLiveDelivery, retryCloudSync,
@@ -174,12 +178,12 @@ async function harness() {
     workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
-    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, setMissingAdapter: () => { missingAdapter = true; },
+    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, automationRunOnThisComputer, setMissingAdapter: () => { missingAdapter = true; },
   };
 }
 
 const channels = [
-  CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords,
+  CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
@@ -265,8 +269,8 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     h.setMissingAdapter();
     await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [] });
-    for (const channel of [CHANNELS.getCollection, CHANNELS.queryCollectionRecords]) {
-      await expect(h.invoke(channel, { workspaceId: "workspace", collectionPath: "data" })).rejects.toThrow("engine is not running");
+    for (const channel of [CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory]) {
+      await expect(h.invoke(channel, { workspaceId: "workspace", collectionPath: "data", recordId: "rec_a" })).rejects.toThrow("engine is not running");
     }
   });
 
@@ -298,6 +302,60 @@ describe("workspace engine IPC registrations", () => {
       collection: { path: "", objectId: "object-data", status: "valid", reasons: [] }, records: [], groups: null, nextCursor: null,
     });
     await expect(h.invoke(CHANNELS.queryCollectionRecords, { workspaceId: "workspace", collectionPath: "data" })).rejects.toThrow();
+  });
+
+  it("reads a record's history page, naming each author and looking up each run once", async () => {
+    const h = await harness();
+    const stamp = "collection:tasks-id#stamp";
+    const side = (value: string | null) => ({ present: value !== null, value });
+    const entry = (historyId: number, overrides: Partial<CollectionGetRecordResult["history"][number]>) => ({
+      historyId, field: "Status", previous: side("Open"), next: side("Done"), authorOriginId: null, actorKind: null,
+      onBehalfOf: null, depth: null, recordedAtMs: 1_000 - historyId, automationRun: null, ...overrides,
+    });
+    const automation = { authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1 };
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks-id", status: "valid", reasons: [] },
+      record: { id: "rec_a", path: "tasks/a.md", conflicted: false, values: [] },
+      history: [
+        entry(9, { ...automation, field: "Finished", automationRun: { claimId: "claim-here", automationName: "Stamp the finish date" } }),
+        entry(8, { ...automation, automationRun: { claimId: "claim-here", automationName: "Stamp the finish date" } }),
+        entry(7, { ...automation, automationRun: { claimId: "claim-gone", automationName: "Old name" } }),
+        entry(6, automation),
+        entry(5, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
+        entry(4, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "user-ana", depth: 0 }),
+        entry(3, { actorKind: "human" }),
+      ],
+      nextBeforeHistoryId: 3,
+    });
+    const page = await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "rec_a", beforeHistoryId: 10 });
+    expect(h.adapter.getCollectionRecord).toHaveBeenCalledWith({ collectionPath: "tasks", recordId: "rec_a", historyLimit: 50, beforeHistoryId: 10 });
+    expect(page).toMatchObject({
+      nextBeforeHistoryId: 3,
+      entries: [
+        { historyId: 9, field: "Finished", author: { kind: "automation", automationId: stamp, name: "Stamp the finish date", run: { claimId: "claim-here", onThisComputer: true } } },
+        { historyId: 8, author: { kind: "automation", name: "Stamp the finish date", run: { claimId: "claim-here", onThisComputer: true } } },
+        // The name it had when it ran, and a run this computer does not keep.
+        { historyId: 7, author: { kind: "automation", name: "Old name", run: { claimId: "claim-gone", onThisComputer: false } } },
+        // Written before runs were recorded: its name now, and no run to open.
+        { historyId: 6, author: { kind: "automation", name: stamp, run: null } },
+        { historyId: 5, author: { kind: "agent", name: "You" } },
+        // Another person's agent, as the file timeline names it.
+        { historyId: 4, author: { kind: "agent", name: "Agent" } },
+        { historyId: 3, author: null },
+      ],
+    });
+    expect(h.automationRunOnThisComputer.mock.calls).toEqual([
+      ["workspace", stamp, "claim-here"],
+      ["workspace", stamp, "claim-gone"],
+    ]);
+  });
+
+  it("reads no record history for a workspace this renderer does not show", async () => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "other", collectionPath: "tasks", recordId: "rec_a" }))
+      .rejects.toThrow("window changed workspaces");
+    expect(h.adapter.getCollectionRecord).not.toHaveBeenCalled();
+    expect(h.automationRunOnThisComputer).not.toHaveBeenCalled();
   });
 
   it("rejects a collection result after the renderer changes attachment", async () => {

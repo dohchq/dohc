@@ -99,10 +99,10 @@ export type AutomationErrorCode = "syntax" | "runtime" | "timeout" | "memory" | 
 export interface AutomationError { code: AutomationErrorCode; message: string }
 export type AutomationOutcome<T> = { ok: true; value: T } | { ok: false; error: AutomationError };
 
-/** A record change a code step asks for. `collection` is the Collection's workspace path; `id` names the record to change. */
+/** A code change in any reachable Collection. `collection` is its workspace path; `table` selects a dataset table; `id` names the record. */
 export type AutomationRecordChange =
-  | { action: "add"; collection: string; fields: JsonObject }
-  | { action: "change"; collection: string; id: string; fields: JsonObject };
+  | { action: "add"; collection: string; table?: string; fields: JsonObject }
+  | { action: "change"; collection: string; table?: string; id: string; fields: JsonObject };
 /** What a code step returns. The executor applies it with its own checks; the evaluator never writes. */
 export interface CodeStepReturn {
   set?: JsonObject;

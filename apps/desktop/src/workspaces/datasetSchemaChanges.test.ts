@@ -6,11 +6,14 @@ import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { datasetColumnFields, datasetRevisionsPreserveAccess, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
-import { generateDatasetSchemaChange } from "./datasetSchemaChanges";
+import { DatasetSchemaChangeError, generateDatasetSchemaChange } from "./datasetSchemaChanges";
 import { generateDatasetSources } from "./datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { datasetDefinitionFromDrafts } from "../renderer/collections/datasetDefinitionFromDrafts";
+import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+
+const compileFixture = createDatasetFixtureCompiler();
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js",
@@ -27,7 +30,7 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const run of cleanup.splice(0).reverse()) await run(); });
 async function fixture(initial: DatasetDefinition = definition, remote = false) {
   const root = await mkdtemp(join(tmpdir(), "dohc-schema-evolution-"));
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024 });
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024, compile: compileFixture });
   cleanup.push(async () => { await host.close(); await rm(root, { recursive: true, force: true }); });
   const files = new Map(Object.entries(generateDatasetSources(initial).files));
   const adapter = sourceCaptureAdapter(files);
@@ -164,7 +167,12 @@ it("refuses changed capture, stale revision and missing required defaults while 
   const addition = generateDatasetSchemaChange({ ...artifacts, operationSource: customSource, change: { kind: "addField", tableId: id(2), field: {name:"Notes",type:"text",required:false,unique:false} } });
   expect(addition.operationSource).toBe(customSource);
   expect(addition.definition.operations).toEqual(artifacts.revision.definition.operations);
-  expect(() => generateDatasetSchemaChange({ ...artifacts, operationSource: customSource, change: { kind: "changeField", tableId:id(2), fieldId:id(4), type:"number",required:true } })).toThrow(/custom rules.*people\/operations.js/);
+  let customRulesFailure: unknown;
+  try {
+    generateDatasetSchemaChange({ ...artifacts, operationSource: customSource, change: { kind: "changeField", tableId:id(2), fieldId:id(4), type:"number",required:true } });
+  } catch (error) { customRulesFailure = error; }
+  expect(customRulesFailure).toBeInstanceOf(DatasetSchemaChangeError);
+  expect(customRulesFailure).toMatchObject({ message: expect.stringMatching(/custom rules.*people\/operations.js/), workspacePaths: ["people/operations.js"] });
   f.tamper(paths => { const migration = paths.find(path => path.endsWith("migration.sql"))!; f.files.set(migration, "DELETE FROM people;"); });
   await expect(f.prepare({ kind: "renameCollection", name: "Guests" })).rejects.toThrow("differs from this review");
   expect(f.host.describe(id(1)).revision).toBe(1);

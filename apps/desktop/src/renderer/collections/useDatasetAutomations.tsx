@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DatasetDescribedField, DatasetDescription } from "@dohc/security-contract/dataset";
-import type { FieldDefinition } from "@dohc/workspace-contracts";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { FindDatasetCollectionResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { SecondaryButton } from "../ui/controls";
@@ -12,7 +11,7 @@ import {
   AutomationsPanel,
   useCollectionAutomations,
 } from "./AutomationsPanel";
-import type { AutomationTable } from "./automationDraft";
+import { automationTableOf, builderFields, type AutomationTable } from "./automationDraft";
 import type { Automation } from "./automationSentence";
 import { useDatasetFieldMarks, type FieldMarks } from "./collectionFieldMarks";
 
@@ -24,29 +23,6 @@ import { useDatasetFieldMarks, type FieldMarks } from "./collectionFieldMarks";
 type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 
 const FIND_FAILED = "dohc could not read this Collection's automations.";
-
-/**
- * A dataset table's fields as the builder offers them. A file needs an
- * upload, so it is not offered. A button stays for the button trigger. A
- * relation holds the related record's key, which the builder takes as text.
- */
-export function builderFields(fields: readonly DatasetDescribedField[]): FieldDefinition[] {
-  return fields.flatMap((field): FieldDefinition[] => {
-    switch (field.type) {
-      case "button":
-        return [{ name: field.name, type: "button" }];
-      case "attachment":
-        return [];
-      case "select":
-      case "multi-select":
-        return [{ name: field.name, type: field.type, options: field.options ?? [] }];
-      case "relation":
-        return [{ name: field.name, type: "text" }];
-      default:
-        return [{ name: field.name, type: field.type }];
-    }
-  });
-}
 
 export function useDatasetAutomations(props: {
   workspaceId: string;
@@ -75,17 +51,7 @@ export function useDatasetAutomations(props: {
 } {
   const { workspaceId, datasetId, tableId, dataset, onError } = props;
   const described = dataset?.tables.find((candidate) => candidate.tableId === tableId);
-  const table = useMemo((): AutomationTable | undefined => described && {
-    name: described.name,
-    tables: new Map(dataset?.tables.map((candidate) => [candidate.name, {
-      fields: builderFields(candidate.fields),
-      operations: dataset.operations.flatMap((operation) =>
-        (operation.tableId === candidate.tableId ? [{ name: operation.name, kind: operation.kind }] : [])),
-    }])),
-    actions: (dataset?.operations ?? []).flatMap((operation) => operation.kind === "action"
-      ? [{ name: operation.name, label: operation.label, table: dataset?.tables.find((candidate) => candidate.tableId === operation.tableId)?.name ?? "", reversible: operation.reversedBy !== undefined }]
-      : []),
-  }, [dataset, tableId]);
+  const table = useMemo((): AutomationTable | undefined => dataset !== null && described !== undefined ? automationTableOf(dataset, described.name) : undefined, [dataset, tableId]);
   const tableName = table?.name;
   // What main answered, or "failed" when dohc could not ask it; null while it asks.
   const [found, setFound] = useState<FindDatasetCollectionResult | "failed" | null>(null);

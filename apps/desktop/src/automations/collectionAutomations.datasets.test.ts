@@ -9,6 +9,7 @@ import {
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { JsonValue } from "@dohc/app-backend-runtime";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
@@ -87,6 +88,8 @@ ${step}`;
 
 const sharedEvaluator = createAutomationFormulaEvaluator();
 afterAll(() => sharedEvaluator.close());
+
+const compileFixture = createDatasetFixtureCompiler();
 const hosts: LocalDatasetHost[] = [];
 const drains: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -183,6 +186,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
   });
   const settledChecks = async () => { while (checking.size > 0) await Promise.all([...checking]); };
   const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
+    compile: compileFixture,
     agentRun: options.agentRun,
     onAutomationClaims: (failed) => { executor?.notifyClaimed(); if (failed) executor?.failuresChanged(); wake(); },
     onDatasetsChanged: () => executor?.datasetsChanged() });
@@ -365,6 +369,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     };
   const makeExecutor = () => executor = new CollectionAutomations({
     personName: (userId) => `Person ${userId}`,
+    localPersonId: () => "user-ana",
     mayRetryPress: async () => options.mayRetryPress ?? false,
     onPressSettled: (event) => { settled.push(event); wake(); },
     onPressWaiting: (event) => { waiting.push(event); wake(); },
@@ -2809,8 +2814,8 @@ describe("code steps on a dataset", () => {
     ["a field no approved edit changes", "return { set: { 'Finished on': '2026-09-27' } };",
       "The code in step 1 changes records in Invoices. Budget has no approved edit that changes Finished on."],
     ["a field the table lacks", "return { set: { Nope: 1 } };", "The code in step 1 sets Nope, which is not a field in Invoices."],
-    ["another Collection", "return { records: [{ action: 'add', collection: 'Tasks', fields: {} }] };",
-      "The code in step 1 changes records in Tasks. Automations on Budget can use only its own records for now."],
+    ["a missing Collection", "return { records: [{ action: 'add', collection: 'Tasks', fields: {} }] };",
+      "The code in step 1 changes records in Tasks. dohc cannot find the Collection Tasks."],
     ["a record the table does not have", "return { records: [{ action: 'change', collection: 'Budget', id: 'gone', fields: { Notes: 'x' } }] };",
       "The code in step 1 changes record gone, which is not in Budget."],
   ])("fails a run whose code changes %s, before anything is written", async (_problem, code, error) => {
@@ -2898,6 +2903,43 @@ describe("code steps on a dataset", () => {
     expect(runs).toBe(1);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Closed");
     expect((await f.records()).filter((row) => row.values[NOTES] === "log")).toHaveLength(1);
+    await f.executor.dispose();
+  });
+
+  it("resumes saved code changes after a field rename and compatible re-approval", async () => {
+    const f = await world();
+    await f.writeAutomations(coded("return { set: { Status: 'Closed' }, records: [{ action: 'add', collection: 'Budget', fields: { Status: 'Added' } }] };"));
+    await f.executor.open();
+    let closed: Promise<void> | undefined;
+    f.afterNextSave(() => { closed = f.executor.close(); });
+    const invoice = await f.create({});
+    await f.edit(invoice.id, { [PAID]: true });
+    await f.until(() => closed !== undefined);
+    await closed;
+    const renamed = structuredClone(definition);
+    renamed.tables[0]!.fields.find((field) => field.fieldId === STATUS)!.name = "State";
+    await writeFile(join(f.root, "Budget/dataset.json"), JSON.stringify(renamed));
+    await writeFile(join(f.root, "Budget/rename.sql"), "SELECT 1;");
+    const prepared = await f.host.prepareMigration({ datasetId: BUDGET, descriptorPath: "Budget/dataset.json", migrationPath: "Budget/rename.sql", adapter: f.adapter });
+    await f.host.approveMigration({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256, approvalDigest: prepared.approvalDigest });
+    expect(f.host.automations.resolves(f.rules)).toBe(true);
+    await f.executor.open();
+    await f.until(() => ["done", "failed"].includes(f.claims()[0]?.state ?? ""));
+    expect(f.claims()[0]).toMatchObject({ state: "done" });
+    expect((await f.record(invoice.id))?.values[STATUS]).toBe("Closed");
+    expect((await f.records()).map((row) => row.values[STATUS])).toContain("Added");
+    await f.executor.dispose();
+  });
+
+  it("shows additions stay when a code-file editor cannot delete them", async () => {
+    const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [
+      { grantId: "code", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Budget/run.js"], access: "edit", versionId: null }, channel: null },
+      { grantId: "view", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Budget"], access: "view", versionId: null }, channel: null },
+    ] } });
+    await f.writeAutomations(closePaid("      - run-file: run.js\n"));
+    await writeFile(join(f.root, "Budget/run.js"), "return {};\n");
+    await f.executor.open();
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ addsStay: ["Invoices"] });
     await f.executor.dispose();
   });
 
@@ -3030,7 +3072,7 @@ it("lists and confirms a held cross-Collection step after its editor leaves", as
   await f.executor.dispose();
 });
 
-it("runs a document source's code and dataset writes through the real host", async () => {
+it("runs a document source's cross-Collection code changes through the real host", async () => {
   const f = await world({ documents: true });
   await mkdir(join(f.root, "Log"), { recursive: true });
   await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
@@ -3040,11 +3082,10 @@ automations:
     name: Copy
     when: record-added
     do:
-      - run: "return { output: ctx.record.Status };"
-        as: priorStatus
-      - add-record: {Status: '=priorStatus'}
+      - run: "return { records: [{ action: 'add', collection: 'Budget', table: 'Invoices', fields: { Status: ctx.record.Status } }, { action: 'add', collection: 'Budget', fields: { Status: 'Second' } }] };"
+      - find: record.Status == "Original"
         collection: Budget
-        operation: invoices.create
+        operation: invoices.list
         as: added
       - set: {Status: From document}
         records: added
@@ -3060,10 +3101,45 @@ automations:
   f.executor.notifyClaimed();
   await f.until(() => claim.state === "done" || claim.state === "failed");
   expect(claim.state).toBe("done");
-  expect(await f.records()).toMatchObject([{ values: { [STATUS]: "From document" } }]);
+  expect((await f.records()).map((row) => row.values[STATUS]).sort()).toEqual(["From document", "Second"]);
   expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({
     automation: { automationId: "collection:Log#copy", depth: 1 },
   });
+  await f.executor.dispose();
+});
+
+it("shows a computed dataset operation hold and resumes only after confirmation", async () => {
+  const editor = { grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com",
+    files: { paths: ["Log"], versionId: null, access: "edit" as const }, channel: null };
+  const f = await world({ documents: true, roster: { kind: "owner", ownerUserId: "user-owner", grants: [editor] }, mayRetryPress: true });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: copy
+    name: Copy
+    when: record-added
+    do:
+      - run: "return { records: [{ action: 'add', collection: ['Bud', 'get'].join(''), fields: { Status: 'Copied' } }] };"
+`);
+  f.documents.set("document", { id: "document", path: "Log/document.md", status: "Original" });
+  await f.executor.open();
+  const claim: AutomationClaim = { ...engineClaim("code-hold", "pending", Date.now(), "collection:Log#copy"),
+    collectionPath: "Log", recordId: "document", trigger: { historyId: 1 },
+    change: { kind: "added", authorOriginId: null, actorKind: "human", onBehalfOf: "user-owner", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 } };
+  f.engineClaims.push(claim);
+  f.executor.notifyClaimed();
+  await f.until(() => claim.state === "failed");
+  expect(await f.records()).toEqual([]);
+  f.setRoster(OWNER);
+  f.executor.rosterChanged();
+  expect(await f.executor.retry({ automationId: claim.automationId, claimId: claim.claimId, startOver: false })).toMatchObject({ status: "queued" });
+  await f.until(() => f.executor.holds().some((hold) => hold.recipient === JSON.stringify(["operation", BUDGET, CREATE])));
+  expect(await f.records()).toEqual([]);
+  for (const hold of f.executor.holds()) expect(await f.executor.confirmReach(hold)).toBe("confirmed");
+  await f.until(() => claim.state === "done" || claim.state === "failed");
+  expect(claim.state).toBe("done");
+  expect(await f.records()).toMatchObject([{ values: { [STATUS]: "Copied" } }]);
   await f.executor.dispose();
 });
 
@@ -3173,5 +3249,251 @@ automations:
   expect((await f.record(invoice.id))?.values[STATUS]).toBe("Someone else's edit");
   expect(f.host.history({ datasetId: definition.datasetId }).entries).toEqual(before);
   expect(await undo()).toMatchObject({ status: "refused", reason: expect.stringContaining("History") });
+  await f.executor.dispose();
+});
+
+async function authoredDestination(f: Awaited<ReturnType<typeof world>>) {
+  const destination: DatasetDefinition = { ...JSON.parse(ACTION_DESCRIPTOR) as DatasetDefinition, datasetId: id(200), name: "Other",
+    schemaPath: "Other/schema.sql", operationsPath: "Other/operations.js" };
+  const sources = { "Other/dataset.json": JSON.stringify(destination), "Other/schema.sql": files[definition.schemaPath]!, "Other/operations.js": ACTION_OPERATIONS };
+  for (const [path, text] of Object.entries(sources)) {
+    await mkdir(dirname(join(f.root, path)), { recursive: true });
+    await writeFile(join(f.root, path), text);
+  }
+  const prepared = await f.host.prepare({ descriptorPath: "Other/dataset.json", adapter: f.adapter });
+  const approved = await f.host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
+  const rules = { datasetId: destination.datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
+  const created = await f.host.action({ ...rules, operationId: CREATE, input: { values: { [STATUS]: "Original" } }, idempotencyKey: "seed-other" });
+  const record = created.result as { id: string };
+  return { rules, record, rows: () => f.host.query({ ...rules, operationId: LIST, input: { limit: 50 }, idempotencyKey: "check-other" }) };
+}
+
+it("keeps source field marks when the automation also invokes another Collection", async () => {
+  const f = await world();
+  const other = await authoredDestination(f);
+  await f.writeAutomations(closePaid(`      - set: {Status: Closed}
+        operation: invoices.status
+      - invoke: invoices.hold
+        collection: Other
+        input: {id: '${other.record.id}'}
+`));
+  await f.executor.open();
+  expect(await f.executor.datasetFieldMarks(BUDGET, "Invoices")).toEqual([{ field: "Status", automations: ["Close paid invoices"] }]);
+  expect(await f.executor.datasetFieldMarks(other.rules.datasetId, "Invoices")).toEqual([]);
+  await f.executor.dispose();
+});
+
+it.each([false, true])("invokes and reverses another authored dataset through the real host from authored source %s", async (authoredSource) => {
+  const f = await world(authoredSource ? { descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS } : {});
+  const other = await authoredDestination(f);
+  await f.writeAutomations(closePaid(`      - invoke: invoices.hold
+        collection: Other
+        input: {id: '${other.record.id}'}
+`));
+  await f.executor.open();
+  const source = await f.create({});
+  await f.edit(source.id, { [PAID]: true });
+  await f.until(() => f.claims()[0]?.state === "done" || f.claims()[0]?.state === "failed");
+  expect(f.claims()[0]).toMatchObject({ state: "done" });
+  expect((await other.rows()).result).toMatchObject({ rows: [{ values: { [STATUS]: "On hold" } }] });
+  expect((await f.record(source.id))?.values[STATUS]).toBe("Open");
+  f.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [{ grantId: "source-editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Budget"], access: "edit", versionId: null }, channel: null }] });
+  expect(await f.executor.undo({ deletes: null, automationId: AUTOMATION, claimId: f.claims()[0]!.claimId }, async () => undefined))
+    .toMatchObject({ status: "refused", reason: expect.stringContaining("invoices.release in Other") });
+  expect((await other.rows()).result).toMatchObject({ rows: [{ values: { [STATUS]: "On hold" } }] });
+  f.setRoster(OWNER);
+  expect(await f.executor.undo({ deletes: null, automationId: AUTOMATION, claimId: f.claims()[0]!.claimId }, async () => undefined))
+    .toMatchObject({ status: "undone", actionsReversed: 1 });
+  expect((await other.rows()).result).toMatchObject({ rows: [{ values: { [STATUS]: "Original" } }] });
+  await f.executor.dispose();
+});
+
+it("checks source buttons against destination action grants and destination-qualified confirmations", async () => {
+  const f = await world();
+  const other = await authoredDestination(f);
+  await f.writeAutomations(`  - id: cross-action
+    name: Cross action
+    when: {button: Mark paid}
+    do:
+      - invoke: invoices.settle
+        collection: Other
+        input: {id: '${other.record.id}', note: Button}
+`);
+  await f.executor.open();
+  const source = await f.create({});
+  const input = { datasetId: BUDGET, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(source.id), pressId: id(205), pressedBy: "user-owner", by: { kind: "human" as const }, confirmed: ["invoices.settle"] };
+  const denied = async (datasetId: string) => {
+    const description = f.host.describe(datasetId);
+    return datasetId === BUDGET ? description : { ...description, operations: [] };
+  };
+  await expect(f.executor.pressDataset(input, denied, () => undefined)).rejects.toThrow("Only people who can edit Invoices");
+  const describe = async (datasetId: string) => f.host.describe(datasetId);
+  await expect(f.executor.pressDataset(input, describe, () => undefined)).rejects.toThrow("changed after it was pressed");
+  const name = `${other.rules.datasetId}/invoices.settle`;
+  expect(await f.executor.datasetButtons(BUDGET, [{ field: input.field, table: input.table }], describe))
+    .toMatchObject([{ kind: "ready", irreversible: [{ name, label: "Other: Settle" }] }]);
+  const pressed = await f.executor.pressDataset({ ...input, confirmed: [name] }, describe, () => undefined);
+  if (pressed.busy) throw new Error("Unexpected busy press");
+  const automationId = `collection:${BUDGET}#cross-action`;
+  await f.until(() => f.host.automations.claim(automationId, pressed.claimId)?.state === "done");
+  expect((await other.rows()).result).toMatchObject({ rows: [{ values: { [STATUS]: `Settled by ${automationId}: Button` } }] });
+  await f.executor.dispose();
+});
+
+it("checks document buttons against the caller's destination grant and refuses an unconfirmed action before claiming", async () => {
+  const f = await world({ documents: true, descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Send:\n    type: button\n");
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: send
+    name: Send
+    when: {button: Send}
+    do:
+      - invoke: invoices.settle
+        collection: Budget
+        input: {id: destination}
+`);
+  await f.executor.open();
+  const input = { collectionPath: "Log", field: "Send", recordId: "source", pressId: id(206), pressedBy: "user-owner", by: { kind: "human" as const } };
+  const describe = async (datasetId: string) => f.host.describe(datasetId);
+  expect(await f.executor.buttons("Log", ["Send"])).toMatchObject([{ state: { kind: "disabled" } }]);
+  expect(await f.executor.buttons("Log", ["Send"], async (id) => ({ ...await describe(id), operations: [] }))).toMatchObject([{ state: { kind: "disabled" } }]);
+  expect(await f.executor.buttons("Log", ["Send"], describe)).toMatchObject([{ state: { kind: "ready", irreversible: [{ name: `${BUDGET}/invoices.settle` }] } }]);
+  await expect(f.executor.press(input, () => undefined, async () => undefined, describe)).rejects.toThrow("changed after it was pressed");
+  expect(f.engineClaims).toEqual([]);
+  await f.executor.dispose();
+});
+
+it("invokes and reverses an authored action from a document claim through the real host", async () => {
+  const f = await world({ documents: true, descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
+  const destination = await f.create({ [STATUS]: "Original" });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: hold
+    name: Hold
+    when: record-added
+    do:
+      - invoke: invoices.hold
+        collection: Budget
+        input: {id: '${destination.id}'}
+`);
+  f.documents.set("document", { id: "document", path: "Log/document.md", status: "Source" });
+  await f.executor.open();
+  const automationId = "collection:Log#hold";
+  const claim: AutomationClaim = { ...engineClaim("document-action", "pending", Date.now(), automationId),
+    collectionPath: "Log", recordId: "document", trigger: { historyId: 1 },
+    change: { kind: "added", authorOriginId: null, actorKind: "human", onBehalfOf: "document-author",
+      sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 } };
+  f.engineClaims.push(claim);
+  f.executor.notifyClaimed();
+  await f.until(() => claim.state === "done" || claim.state === "failed");
+  expect(claim.state).toBe("done");
+  expect((await f.record(destination.id))?.values[STATUS]).toBe("On hold");
+  expect(f.host.history({ datasetId: BUDGET }).entries[0]).toMatchObject({ automation: { automationId, depth: 1 } });
+  expect(await f.executor.undo({ deletes: null, automationId, claimId: claim.claimId }, async () => undefined))
+    .toMatchObject({ status: "undone", actionsReversed: 1 });
+  expect((await f.record(destination.id))?.values[STATUS]).toBe("Original");
+  expect(f.documents.get("document")!.status).toBe("Source");
+  await f.executor.dispose();
+});
+
+it("lists every dataset for the builder with each operation's reach, and names one generic steps cannot use", async () => {
+  const f = await world({ documents: true });
+  await authoredDestination(f);
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await f.executor.open();
+  const targets = await f.executor.targetsFor("Log");
+  expect(targets.map((target) => [target.path, target.kind])).toEqual([["Budget", "dataset"], ["Log", "document"], ["Other", "dataset"]]);
+  const budget = targets.find((target) => target.path === "Budget");
+  expect(budget).toMatchObject({ kind: "dataset", datasetId: BUDGET, stopped: null, findStopped: null, editStopped: null, actionsStopped: "Budget has no approved actions." });
+  expect(budget?.kind === "dataset" ? budget.operations.map(({ name, kind, stopped }) => [name, kind, stopped]) : []).toEqual([
+    ["invoices.list", "read", null], ["invoices.create", "create", null], ["invoices.edit", "edit", null],
+    ["invoices.status", "edit", null], ["invoices.delete", "delete", null],
+  ]);
+  // Operations someone wrote run only as actions, so Add, Find, and Set name why, and actions stay.
+  expect(targets.find((target) => target.path === "Other")).toMatchObject({
+    kind: "dataset", stopped: "Other's operations were written or changed outside dohc, so Set fields, Add record, and Find steps cannot use them.", actionsStopped: null,
+  });
+  // An editor of Log without a data grant in Budget cannot use its operations, so Add and Find there say why.
+  f.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [{ grantId: "log-editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Log"], access: "edit", versionId: null }, channel: null }] });
+  const narrowed = (await f.executor.targetsFor("Log")).find((target) => target.path === "Budget");
+  expect(narrowed?.kind === "dataset" && narrowed.operations.every((operation) => typeof operation.stopped === "string")).toBe(true);
+  expect(narrowed).toMatchObject({ stopped: expect.any(String), findStopped: expect.any(String), actionsStopped: "Budget has no approved actions." });
+  await f.executor.dispose();
+});
+
+it("pins a document Collection's steps in a dataset when the builder saves, marks the fields they set there, and warns a share about them", async () => {
+  const f = await world({ documents: true });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  const add = { kind: "add-record" as const, values: [{ field: "Status", value: { kind: "literal" as const, value: "Logged" } }], collection: "Budget", as: "added", operation: null };
+  const find = { kind: "find" as const, condition: "record.Paid == true", collection: "Budget", as: "paid", operation: null };
+  const set = { kind: "set" as const, values: [{ field: "Notes", value: { kind: "literal" as const, value: "Seen" } }], records: "paid", operation: null };
+  const draft: Automation = { id: "log", name: "Log it", enabled: true, when: { kind: "record-added", table: null }, if: null, do: [add, find, set] };
+  await f.executor.open();
+  const [pinned] = await f.executor.pinOperations("Log", [draft], []);
+  expect(pinned!.do).toEqual([{ ...add, operation: "invoices.create" }, { ...find, operation: "invoices.list" }, { ...set, operation: "invoices.edit" }]);
+  // The builder's check pins as a save does, so a new step there runs.
+  await expect(f.executor.draftCannotRun("Log", draft)).resolves.toBeNull();
+  // A step the file already holds keeps what it names.
+  expect((await f.executor.pinOperations("Log", [draft], [draft]))[0]!.do).toEqual(draft.do);
+
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: log
+    name: Log it
+    when: record-added
+    do:
+      - add-record: {Status: Logged}
+        collection: Budget
+        operation: invoices.create
+      - find: record.Paid == true
+        collection: Budget
+        as: paid
+        operation: invoices.list
+      - set: {Notes: Seen}
+        records: paid
+        operation: invoices.edit
+`);
+  f.executor.handleWatcherEvents([{ operation: "update", path: "Log/automations.yaml" }]);
+  await f.until(async () => (await f.executor.datasetFieldMarks(BUDGET, "Invoices")).length === 2);
+  const marks = await f.executor.datasetFieldMarks(BUDGET, "Invoices");
+  expect(marks.find((mark) => mark.field === "Notes")).toEqual({ field: "Notes", automations: ["Log it"] });
+  expect(marks.find((mark) => mark.field === "Status")?.automations.sort()).toEqual(["Close paid invoices", "Log it"]);
+  // Sharing Log to edit makes a new editor of the automation, who holds no grant in Budget: the warning names Budget.
+  const stops = await f.executor.shareImpact({ paths: ["Log"], versionId: null, access: "edit", recipientEmail: "ana@dohc.test" });
+  expect(stops.length).toBeGreaterThan(0);
+  expect(stops.every((stop) => stop.automationId === "collection:Log#log" && stop.target === "Budget")).toBe(true);
+  await f.executor.dispose();
+});
+
+it("lists a Collection a step names whose dataset.json is broken, with why, for the builder", async () => {
+  const f = await world({ documents: true });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: log
+    name: Log it
+    when: record-added
+    do:
+      - add-record: {Status: Logged}
+        collection: Broken
+`);
+  await mkdir(join(f.root, "Broken"), { recursive: true });
+  await writeFile(join(f.root, "Broken/dataset.json"), "{ not json");
+  await f.executor.open();
+  await f.executor.automationsIn("Log");
+  expect((await f.executor.targetsFor("Log")).find((target) => target.path === "Broken")).toEqual({
+    kind: "dataset", path: "Broken", name: "Broken", datasetId: null, operations: [],
+    stopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
+    findStopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
+    editStopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
+    actionsStopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
+  });
   await f.executor.dispose();
 });

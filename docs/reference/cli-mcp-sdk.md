@@ -27,7 +27,7 @@ Partial form creation returns `{ kind: "partial", created, failedStage, reason, 
 
 ### `dohc_dataset`
 
-Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its workspace-relative dataset.json path. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
+Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -53,7 +53,7 @@ Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, server
 
 ### `dohc_list_changes`
 
-List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the workspace root, to list only that file's changes across its renames.
+List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the MCP server folder, to list only that file's changes across its renames.
 
 - `sinceMs`: `integer`
 - `limit`: `integer`
@@ -281,7 +281,7 @@ Returns `{ ok: true, groups: { kind, id, name, slug, purpose?, threadCount, thre
 
 ### `dohc_start_group_chat`
 
-Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` are workspace-relative paths of tracked files; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.
+Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -350,7 +350,7 @@ Read one collection record by id: current field values plus per-field history wi
 - `historyLimit`: `integer`
 - `beforeHistoryId`: `integer`
 
-Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs }[] } | { ok: false, reason }`.
+Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, automationRun }[] } | { ok: false, reason }`.
 
 ### `dohc_set_record_fields`
 
@@ -636,7 +636,7 @@ dohc dataset <verb> '<JSON>'
 
 Create, change, and use transactional Collections.
 
-Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root. datasetPath is the workspace-relative dataset.json path. List and describe return it alongside the internal datasetId. After moving the file, update commands and app manifests. An old path reports a broken reference. These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity.
+Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root. datasetPath is the caller-relative dataset.json path. List and describe return it alongside the internal datasetId. After moving the file, update commands and app manifests. An old path reports a broken reference. These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity.
 
 #### `dohc dataset list`
 
@@ -845,7 +845,7 @@ Returns `{ kind: "attempt-cancelled", cancelled: true }`.
 
 Save a private recovery archive of a Collection.
 
-savePath is an absolute path ending in .dohc-recovery. Set overwrite to true to replace a file. Recovery archives contain private records, uploaded files, history, and retry credentials. Store them privately.
+savePath is an absolute path outside the workspace ending in .dohc-recovery. Set overwrite to true to replace a file. Recovery archives contain private records, uploaded files, history, and retry credentials. Store them privately.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
@@ -859,7 +859,7 @@ Returns `{ kind: "exported", savedPath }`.
 
 Check a recovery archive before restoring it.
 
-sourcePath is an absolute path ending in .dohc-recovery. Review the result before claimRecovery.
+sourcePath ends in .dohc-recovery. A relative sourcePath is read only and resolves from the caller folder. Review the result before claimRecovery.
 
 - `workspaceId`: `string`. Required.
 - `sourcePath`: `string`. Required.

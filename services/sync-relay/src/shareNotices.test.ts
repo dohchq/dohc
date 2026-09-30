@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  NOTICE_LIST_ROW_LIMIT,
   type RelayNotice,
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
@@ -23,6 +22,7 @@ import {
   request,
   resetOpSeq,
   seedDependentGrant,
+  seedFullNoticeList,
   seedLinkGrant,
   sha256,
   testHandler,
@@ -170,13 +170,10 @@ describe("a notice when a share reaches a person", () => {
 
   it("still makes the share when the person's list has no room", async () => {
     const { h, storage } = await relay();
-    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) {
-      storage.postNotice({
-        noticeId: `own-${index}`, recipientUserId: "ana", reach: { workspaceId: "ana-work" }, kind: "mention",
-        title: "Mentioned", body: "", target: {}, originInstallId: "install-a",
-        senderUserId: "ana", senderLabel: "Ana", nowMs: CLOCK,
-      });
-    }
+    seedFullNoticeList(storage, {
+      workspaceId: "ana-work", recipientUserId: "ana", idPrefix: "own-", nowMs: CLOCK,
+      senderLabel: "Ana", timeStepMs: 0,
+    });
     const response = await h(request("owner", `/sync/${WORKSPACE}/shares`, jsonBody({
       paths: ["trip"], access: "view", recipientUserId: "ana",
     })));

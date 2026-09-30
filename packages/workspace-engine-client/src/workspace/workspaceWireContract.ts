@@ -957,6 +957,12 @@ const CollectionGetRecordResultSchema = mutableStruct({
         onBehalfOf: NullableString,
         depth: Schema.NullOr(Schema.Int),
         recordedAtMs: Schema.Int,
+        automationRun: Schema.NullOr(
+          mutableStruct({
+            claimId: Schema.String,
+            automationName: Schema.String,
+          }),
+        ),
       }),
     ),
   ),

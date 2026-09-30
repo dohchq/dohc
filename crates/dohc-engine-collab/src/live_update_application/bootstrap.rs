@@ -289,7 +289,20 @@ mod tests {
         ApplicationHandle,
     ) {
         let dir = ScratchDir::new_named("live-bootstrap").unwrap();
-        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        registered_fixture(vector, dir, store)
+    }
+    fn registered_fixture(
+        vector: &Vector,
+        dir: ScratchDir,
+        mut store: EngineStore,
+    ) -> (
+        ScratchDir,
+        EngineStore,
+        WriterDocCache,
+        ApplicationOwner,
+        ApplicationHandle,
+    ) {
         dohc_engine_domain::VersionedTextStore::new(&mut store)
             .ensure_main_version("workspace", "main", 0, &NoFaults)
             .unwrap();
@@ -1150,11 +1163,29 @@ mod tests {
     }
     #[test]
     fn admitted_baselines_commit_atomically_and_replay_after_reopen() {
-        for vector in vectors()
+        let empty_schema = {
+            let dir = ScratchDir::new_named("live-bootstrap-schema").unwrap();
+            let path = dir.join("engine.db");
+            drop(EngineStore::open(&path, 0).unwrap());
+            assert!(!dir.join("engine.db-wal").exists());
+            std::fs::read(path).unwrap()
+        };
+        for (index, vector) in vectors()
             .into_iter()
             .filter(|vector| vector.registration_accepted && !vector.projection_refused)
+            .enumerate()
         {
-            let (dir, mut store, mut cache, owner, handle) = fixture(&vector);
+            let (dir, mut store, mut cache, owner, handle) = if index == 0 {
+                fixture(&vector)
+            } else {
+                // Registration and bootstrap need empty domain state, not a
+                // fresh schema. Every vector retains its own owner and file.
+                let dir = ScratchDir::new_named("live-bootstrap").unwrap();
+                let path = dir.join("engine.db");
+                std::fs::write(&path, &empty_schema).unwrap();
+                let store = EngineStore::open(&path, 0).unwrap();
+                registered_fixture(&vector, dir, store)
+            };
             assert_eq!(
                 run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
                 BootstrapResult::Bootstrapped(LiveApplicationBootstrapAck::new(

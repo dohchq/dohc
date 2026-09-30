@@ -1281,63 +1281,82 @@ describe("buildSite", () => {
     },
   );
 
-  // The wrapper stays alive for WRAPPER_LIFETIME_MS after echoing the
-  // descendant's pid, and buildSite takes a real Win32_Process snapshot
-  // every CAPTURE_INTERVAL_MS — WRAPPER_LIFETIME_MS / CAPTURE_INTERVAL_MS
-  // real attempts to observe the descendant Start-Process just created,
-  // instead of racing the wrapper's own spawn with a single shot.
-  //
-  // PROCESS_DEATH_TIMEOUT_MS is not padding a slow wait: stopChild awaits the
-  // taskkill subprocess before buildSite returns, so the descendant is gone by
-  // then. Under combined desktop and mcp load it was absent on the first check
-  // in every measured run (N=29, max 1 ms). The short bound keeps the claim
-  // that buildSite returns only after taskkill finished.
-  const CAPTURE_INTERVAL_MS = 100;
-  const WRAPPER_LIFETIME_MS = 2_000;
   const PROCESS_DEATH_TIMEOUT_MS = 500;
-  // This test needs a successful wrapper exit before it can inspect descendant
-  // cleanup. A shorter build timeout changed the scenario under machine load.
-  // Keep buildSite's production timeout as the deadlock guard, and give Vitest
-  // enough time to report buildSite's own result plus teardown.
   const WIN32_DESCENDANT_TEST_TIMEOUT_MS = 150_000;
 
   it.runIf(process.platform === "win32")(
     "stops a descendant a successful build wrapper backgrounds and leaves behind (win32)",
     async () => {
-      // Windows has no POSIX fork/reparent-to-init: a process Start-Process
-      // launches independently of any job object keeps running, untouched,
-      // once its own creator (the powershell.exe wrapper `child` here) has
-      // already exited — taskkill /PID <dead wrapper> /T then has nothing
-      // live to walk from, exactly the gap stopChild's win32 branch closes
-      // by reaching each periodically-captured descendant pid directly.
       await mkdir(join(root, "site"), { recursive: true });
+      const pidFile = join(root, "site", "descendant.pid");
+      const capturedFile = join(root, "site", "descendant.captured");
+      // Exit the real wrapper only after a real CIM snapshot finds its child.
+      // A 100 ms poll with a fixed wrapper lifetime launched overlapping
+      // PowerShell scans while waiting for startup, consuming the gate's CPU.
       const script = [
         "$psExe = Join-Path $PSHOME 'powershell.exe'",
         "$proc = Start-Process -FilePath $psExe -ArgumentList " +
-          "'-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60' " +
+          "'-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 180' " +
           "-PassThru -WindowStyle Hidden",
+        "[System.IO.File]::WriteAllText($env:DOHC_TEST_DESCENDANT_PID_FILE, [string]$proc.Id)",
         "Write-Output ('CHILD:' + $proc.Id)",
-        `Start-Sleep -Milliseconds ${WRAPPER_LIFETIME_MS}`,
+        "$deadline = [DateTime]::UtcNow.AddSeconds(120)",
+        "while (-not (Test-Path -LiteralPath $env:DOHC_TEST_DESCENDANT_CAPTURED_FILE)) { " +
+          "if ([DateTime]::UtcNow -ge $deadline) { exit 1 }; Start-Sleep -Milliseconds 20 }",
       ].join("; ");
-      const result = await buildSite({
-        workspaceRoot: root,
-        siteRoot: "site",
-        command: "powershell.exe",
-        args: ["-NoProfile", "-NonInteractive", "-Command", script],
-        descendantCaptureIntervalMs: CAPTURE_INTERVAL_MS,
-      });
-      expect(result.exitCode).toBe(0);
-      const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));
-      const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
-      expect(descendantPid).toBeGreaterThan(0);
-
+      const controller = new AbortController();
+      let descendantPid = 0;
+      let captureError: unknown;
+      let capture: Promise<number[]> | undefined;
+      const realProcessDescendants = posixSpawn.processDescendants;
+      const captureDescendants: typeof realProcessDescendants = async (pid, reader) => {
+        try {
+          descendantPid = await vi.waitFor(async () => {
+            const value = Number(await readFile(pidFile, "utf8"));
+            expect(Number.isSafeInteger(value) && value > 0).toBe(true);
+            return value;
+          }, { timeout: BUILD_TIMEOUT_MS });
+          const descendants = await realProcessDescendants(pid, reader);
+          expect(descendants).toContain(descendantPid);
+          await writeFile(capturedFile, "captured");
+          return descendants;
+        } catch (error) {
+          captureError = error;
+          controller.abort();
+          return [];
+        }
+      };
+      // Keep the production reader selection and tree walk. One real snapshot
+      // proves this topology even if startup spans the default polling interval.
+      const descendantsSpy = vi.spyOn(posixSpawn, "processDescendants")
+        .mockImplementation((pid, reader) => capture ??= captureDescendants(pid, reader));
       try {
+        const result = await buildSite({
+          workspaceRoot: root,
+          siteRoot: "site",
+          command: "powershell.exe",
+          args: ["-NoProfile", "-NonInteractive", "-Command", script],
+          env: {
+            DOHC_TEST_DESCENDANT_PID_FILE: pidFile,
+            DOHC_TEST_DESCENDANT_CAPTURED_FILE: capturedFile,
+          },
+          signal: controller.signal,
+        });
+        expect(captureError).toBeUndefined();
+        expect(result.exitCode).toBe(0);
+        const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));
+        expect(Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1])).toBe(descendantPid);
         expect(await waitForProcessDeath(descendantPid)).toBe(true);
       } finally {
-        try {
-          process.kill(descendantPid, "SIGKILL");
-        } catch {
-          // The fixed teardown already removed it.
+        controller.abort();
+        descendantsSpy.mockRestore();
+        const cleanupPid = descendantPid || Number(await readFile(pidFile, "utf8").catch(() => "0"));
+        if (Number.isSafeInteger(cleanupPid) && cleanupPid > 0) {
+          try {
+            process.kill(cleanupPid, "SIGKILL");
+          } catch {
+            // The real orphan teardown already removed it.
+          }
         }
       }
     },

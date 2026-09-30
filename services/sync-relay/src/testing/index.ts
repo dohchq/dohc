@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
+import { NOTICE_LIST_ROW_LIMIT, NOTICE_UNREAD_RETENTION_MS } from "@dohc/workspace-contracts/relay";
 import { expect } from "vitest";
 import {
   createSyncRelayHandler,
@@ -516,6 +517,46 @@ export function sequenced(ops: ChatOp[], firstSeq = 0, recordedAtBase = 1000): L
 }
 
 // --- storage-level seeds -----------------------------------------------------
+
+/** Fills a new list at its configured limit without posting each fixture row. */
+export function seedFullNoticeList(
+  storage: SyncRelayStorage,
+  input: {
+    workspaceId: string;
+    recipientUserId: string;
+    idPrefix: string;
+    nowMs: number;
+    senderLabel?: string;
+    originInstallId?: string;
+    timeStepMs?: 0 | 1;
+  },
+): void {
+  const db = inspectDatabase(storagePath(storage));
+  try {
+    db.exec("BEGIN");
+    db.prepare(
+      `INSERT INTO sync_relay_notice_lists (recipient_user_id, change_seq, floor_seq, reach_token)
+       VALUES (?, ?, 0, NULL)`,
+    ).run(input.recipientUserId, NOTICE_LIST_ROW_LIMIT);
+    const insert = db.prepare(
+      `INSERT INTO sync_relay_notices (
+         recipient_user_id, notice_id, change_seq, workspace_id, recipient_share_id,
+         kind, sender_kind, sender_user_id, sender_label, title, body, target_json,
+         origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms
+       ) VALUES (?, ?, ?, ?, NULL, 'mention', 'person', ?, ?, 'Mentioned', '', '{}',
+                 ?, ?, NULL, NULL, ?, NULL)`,
+    );
+    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) {
+      const at = input.nowMs + index * (input.timeStepMs ?? 1);
+      insert.run(input.recipientUserId, `${input.idPrefix}${index}`, index + 1, input.workspaceId,
+        input.recipientUserId, input.senderLabel ?? "Self", input.originInstallId ?? "install-a",
+        at, at + NOTICE_UNREAD_RETENTION_MS);
+    }
+    db.exec("COMMIT");
+  } finally {
+    db.close();
+  }
+}
 
 /** Inserts an active link grant with one current credential. */
 export function seedLinkGrant(

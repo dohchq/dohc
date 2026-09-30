@@ -1,7 +1,16 @@
 import type { Actor } from "@dohc/workspace-contracts";
-import { actorFromSession, type WorkspaceAuth } from "./betterAuth";
+import type { WorkspaceAuth } from "./betterAuth";
 
 export type ResolveActor = (request: Request, workspaceId: string) => Actor | Promise<Actor>;
+
+// The caller supplies a validated session. Identity comes from its user,
+// and the downstream authorization check enforces workspace membership.
+export function actorFromSession(
+  session: { user: { id: string } },
+  workspaceId: string,
+): Actor {
+  return { userId: session.user.id, workspaceId };
+}
 
 // Thrown shape the API layer maps to a 401 — statusForError keys on `code`.
 export class UnauthorizedError extends Error {

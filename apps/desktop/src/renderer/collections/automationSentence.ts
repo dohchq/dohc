@@ -104,7 +104,7 @@ export function stepParts(step: AutomationStep): SentencePart[] {
         code(step.condition),
       ];
     case "invoke":
-      return [text(`run ${step.operation}`)];
+      return [text(step.collection === null ? `run ${step.operation}` : `run ${step.operation} in ${collectionName(step.collection)}`)];
     case "if":
       return [
         text("if "),

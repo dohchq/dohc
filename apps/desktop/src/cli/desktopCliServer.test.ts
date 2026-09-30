@@ -648,6 +648,15 @@ describe("raw fileWrite socket requests", () => {
     expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
   });
 
+  it.skipIf(process.platform !== "win32")("refuses trailing dots and spaces through raw fileWrite requests", async () => {
+    const f = await setup();
+    for (const path of ["file.", "file ", "folder./file.txt", "folder /file.txt"]) {
+      expect(await f.invoke([{ path, contentBase64: "bmV3" }]))
+        .toMatchObject({ ok: false, written: [], reason: expect.stringContaining("Windows removes trailing dots and spaces") });
+    }
+    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+
   it("returns currentSha256 through the raw request on a stale write", async () => {
     const f = await setup();
     await writeFile(join(f.workspace.rootPath, "plain.txt"), "original");

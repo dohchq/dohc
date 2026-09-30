@@ -65,6 +65,7 @@ const results = {
         onBehalfOf: "local",
         depth: 0,
         recordedAtMs: 20,
+        automationRun: null,
       },
     ],
   },
@@ -437,12 +438,12 @@ describe("desktop CLI button proxy", () => {
       const pressed = { ok: true, run: "atc_1", outcome: null, error: null, waiting: null } satisfies CliResultByVerb["automationPress"];
       const request = vi.fn(async (_request: CliRequestWithoutToken) => pressed);
       const ctx: ToolContext = { ...base, request };
-      await expect(pressButton(ctx, { collectionPath: "Billing", button: "Send", recordId: "12", confirm: ["sendInvoice"], requestId: "press-1" }))
+      await expect(pressButton(ctx, { collectionPath: "Billing", button: "Send", recordId: "12", confirm: ["destination-dataset/sendInvoice"], requestId: "press-1" }))
         .resolves.toEqual(pressed);
       expect(request).toHaveBeenCalledWith(expect.objectContaining({
         verb: "automationPress",
         args: {
-          cwd: base.root, actor: "agent", collectionPath: "Billing", field: "Send", record: "12", confirm: ["sendInvoice"], requestId: "press-1",
+          cwd: base.root, actor: "agent", collectionPath: "Billing", field: "Send", record: "12", confirm: ["destination-dataset/sendInvoice"], requestId: "press-1",
         },
       }));
       await expect(pressButton(ctx, { collectionPath: "shared-with-me/trip", button: "Send", recordId: "12" }))
