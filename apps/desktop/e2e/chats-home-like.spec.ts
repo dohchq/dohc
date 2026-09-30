@@ -80,10 +80,17 @@ test("Home Like works by keyboard and pointer and persists across reopen in both
     await expect(pill).toHaveAttribute("aria-pressed", "true");
     await expect(like).not.toHaveAttribute("aria-disabled", "true");
 
-    // The like is the server's, not only the paint: it is there when Home reopens.
-    await page.getByTestId("chats-channel").click();
-    await expect(view.getByTestId("chats-channel-view")).toBeVisible();
+    // The like is the server's, not only the paint. Close the Home tab, so
+    // the next open mounts a fresh Home and reads it again, then reopen it
+    // from the Chats sidebar. The close button is scoped to the tab; the
+    // Open editors list carries a second one.
+    const homeTab = view.getByRole("tab", { name: "Home Close Home", exact: true });
+    await homeTab.getByRole("button", { name: "Close Home" }).click();
+    await expect(homeTab).toHaveCount(0);
+    await expect(page.getByTestId("chats-personal-feed")).toHaveCount(0);
     await page.getByTestId("chats-feed-link").click();
+    await expect(homeTab).toBeVisible();
+    await expect(card).toBeVisible();
     await expect(pill).toHaveAttribute("aria-pressed", "true");
     await expect(pill).toContainText("1");
   } finally {
