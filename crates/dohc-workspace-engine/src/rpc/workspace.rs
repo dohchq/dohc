@@ -54,6 +54,9 @@ pub(crate) struct OpenWorkspace {
     /// loop), spawned only after the root binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
     pub(super) capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
+    /// The workspace opened without capture and asked to keep its Collections
+    /// current itself, as a server's automation replica does.
+    reconciles_collections: bool,
     automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
     /// Held by every capture reconcile+apply and by versions.setActive across
     /// its forced full scan plus switch transaction. This drains an in-flight
@@ -102,6 +105,7 @@ impl OpenWorkspace {
             handle_kind: WorkspaceHandleKind::ReadOnlyAttach { owner },
             relay: self.relay.clone(),
             capture: Arc::clone(&self.capture),
+            reconciles_collections: self.reconciles_collections,
             automation_recovery: Arc::clone(&self.automation_recovery),
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
             session_ops: Arc::clone(&self.session_ops),
@@ -286,6 +290,10 @@ struct WorkspaceOpenParams {
     skip_startup_maintenance: bool,
     #[serde(default)]
     capture_mode: Option<WorkspaceCaptureMode>,
+    /// With captureMode none: reconcile the workspace's Collections after
+    /// the changes a capture pass would reconcile after.
+    #[serde(default)]
+    reconcile_collections: bool,
     #[serde(default)]
     relay: Option<RelayOpenParams>,
 }
@@ -397,6 +405,68 @@ async fn report_while<T>(
 const BINDING_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 impl EngineService {
+    /// Whether this service keeps a workspace's Collections current itself:
+    /// its owner opened it without capture and asked to, as a server's
+    /// automation replica does, so no capture pass reconciles them.
+    pub(super) fn reconciles_collections_itself(&self, open: &OpenWorkspace) -> bool {
+        open.reconciles_collections && open.is_local_owner()
+    }
+
+    /// A change that can move the workspace's Collections committed. A
+    /// workspace with capture asks its driver, whose next pass reconciles
+    /// after it applies what it scanned. One that keeps its Collections itself
+    /// reconciles now, under the gate a capture pass holds, and wakes the
+    /// executors for the claims an adoption made. It fails when the
+    /// reconcile fails, so the caller's retry reconciles again.
+    pub(super) async fn collections_changed(
+        &self,
+        ctx: &RequestContext,
+        open: &OpenWorkspace,
+    ) -> Result<(), WireError> {
+        if !self.reconciles_collections_itself(open) {
+            open.request_collection_reconcile();
+            return Ok(());
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let _apply = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("collection reconcile")),
+            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+        };
+        let version_id = match open
+            .actor
+            .active_version_id(open.workspace_id.clone())
+            .await
+        {
+            Ok(version_id) => version_id,
+            // A workspace with no version yet has no Collections.
+            Err(dohc_engine_runtime::RuntimeError::Domain(
+                dohc_engine_domain::DomainError::WorkspaceNotFound,
+            )) => return Ok(()),
+            Err(error) => return Err(map_runtime(error)),
+        };
+        let reconciliation = open
+            .actor
+            .reconcile_collections(
+                open.workspace_id.clone(),
+                version_id,
+                open.root.clone(),
+                self.leases.scoped(&open.root),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        crate::events::emit_automation_claimed(
+            &self.events,
+            &open.workspace_id,
+            &reconciliation.automation_claims,
+        );
+        Ok(())
+    }
+
     /// Tear down every open workspace's capture driver (watcher joined,
     /// files actor closed). Called at daemon shutdown after the transport's
     /// workspace close hook: store actors are already gone by then, so any
@@ -447,6 +517,12 @@ impl EngineService {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "captureAuthor is unavailable when captureMode is none",
+            ));
+        }
+        if capture_enabled && params.reconcile_collections {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "reconcileCollections needs captureMode none",
             ));
         }
         let cancellation = OperationCancellation::new(ctx);
@@ -516,7 +592,9 @@ impl EngineService {
                         "workspace root is already open in a different mode",
                     ));
                 }
-                if lock(&open.capture).is_some() != capture_enabled {
+                if lock(&open.capture).is_some() != capture_enabled
+                    || open.reconciles_collections != params.reconcile_collections
+                {
                     return Err(WireError::new(
                         ErrorCode::InvalidParams,
                         "workspace capture configuration mismatch",
@@ -906,6 +984,7 @@ impl EngineService {
                     .relay
                     .map(|configuration| configuration.configuration()),
                 capture: Arc::new(Mutex::new(capture)),
+                reconciles_collections: params.reconcile_collections,
                 automation_recovery: Arc::new(Mutex::new(automation_recovery)),
                 capture_apply_gate,
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
@@ -2503,6 +2582,7 @@ mod tests {
                 workspace_id: "evicted-cursor-cleanup".to_owned(),
                 materialization_paths: Vec::new(),
                 materialized: false,
+                reconcile_collections: false,
                 cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
                     bootstrap_complete: true,
                     cursor: 7,
