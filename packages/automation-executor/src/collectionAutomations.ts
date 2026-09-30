@@ -371,6 +371,13 @@ export interface CollectionAutomationsOptions {
   groupList?(): Promise<Array<{ name: string; slug: string }> | null>;
   /** The name a formula's `person` shows for the person who pressed a button. */
   personName(userId: string): string;
+  /**
+   * Why this host cannot wake a person's agent, as a server cannot: their
+   * agent runs on their own computer. An automation with a wake step then
+   * does not run here, and the panel says why before anything runs. Absent
+   * where the host can wake one.
+   */
+  wakeUnavailable?: string;
   /** Whether this computer's person may run a failed press again: the person who pressed it, or the workspace's owner. */
   mayRetryPress(pressedBy: string | null): Promise<boolean>;
   /** The engine took a press's settle. */
@@ -3203,6 +3210,7 @@ export class CollectionAutomations {
   private cannotRun(collectionPath: string, automation: Automation): string | null {
     const unsupported = this.unsupportedIn(collectionPath, automation);
     if (unsupported !== null) return unsupported;
+    if (this.options.wakeUnavailable !== undefined && wakesAgent(automation)) return this.options.wakeUnavailable;
     for (const { collection, field } of fieldsNamedBy(automation, collectionPath)) {
       const fields = this.schemaFields.get(collection);
       if (typeof fields === "string") return fields;

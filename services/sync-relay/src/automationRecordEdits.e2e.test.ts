@@ -11,6 +11,8 @@ import { createEngineClient } from "@dohc/workspace-engine-client/daemon";
 import { createCollectionRecord, setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
+import { ChatsLiveAdapter } from "@dohc/workspace-engine-client";
+import { replicaAutomationChat, replicaChatStore } from "./automationChatWrites";
 import { replicaRecordEditContext, replicaRecordEngine } from "./automationRecordEdits";
 import {
   AUTOMATION_REPLICA_BEARER_PREFIX,
@@ -22,10 +24,11 @@ import { createServiceHostReplication } from "./serviceHostReplication";
 import { ServiceOrdinaryReplication, type ServiceOrdinaryReplicationConfig } from "./serviceOrdinaryReplication";
 import { closeTestStorages, tempRoot, testStorage } from "./testing";
 
-// A server's automation writes records in its own replica of the owner's
-// workspace, through the real engine: a plain daemon, a workspace opened
-// without capture, the relay route, and a join as the owner. The owner's
-// computer then receives each change with the automation as its author.
+// A server's automation writes records and posts in its own replica of the
+// owner's workspace, through the real engine: a plain daemon, a workspace
+// opened without capture, the relay route, and a join as the owner. The
+// owner's computer then receives each change with the automation as its
+// author.
 
 const engine = requireEngineBinaryOrSkip();
 const WORKSPACE = "workspace-trip";
@@ -97,7 +100,7 @@ async function computer(input: {
   };
 }
 
-it.skipIf(engine.missing)("writes an automation's records on the server's replica, and the owner's computer receives them", async () => {
+it.skipIf(engine.missing)("writes an automation's records and posts on the server's replica, and the owner's computer receives them", async () => {
   const root = await tempRoot("automation-record-e2e");
   const storage = await testStorage();
   const key = new Uint8Array(32).fill(7), namespace = "automation-record-e2e";
@@ -131,6 +134,8 @@ it.skipIf(engine.missing)("writes an automation's records on the server's replic
   ] as const) {
     await owner.request("versionedText.write", { versionId: main.id, path, text, origin: "api", publish: true, createOnly: true }, owner.workspace);
   }
+  const ownerChats = new ChatsLiveAdapter(owner.client, owner.workspace, { workspaceId: WORKSPACE });
+  const planning = await ownerChats.createChannel({ workspaceId: WORKSPACE, name: "Planning", type: "posts" });
   await owner.sync();
 
   // The server joins the workspace as its owner and pulls it.
@@ -153,6 +158,15 @@ it.skipIf(engine.missing)("writes an automation's records on the server's replic
   await expect(setCollectionRecordFields(context, {
     recordPath: "Tasks/one.md", fields: { Status: "Done" }, author: AUTOMATION, idempotencyKeyPrefix: "claim-1/1/1",
   })).resolves.toEqual({ path: "Tasks/one.md", replaced: { Status: "Doing" }, kept: {} });
+  // It posts in the Group, found by its name, as the automation.
+  const chat = replicaAutomationChat({ replica: { ...replica, ownerUserId: "owner" }, store: replicaChatStore(replica), ownerName: async () => "Owner" });
+  const directory = await chat.directory({ kind: "owner", ownerUserId: "owner", grants: [] }, { groups: new Set(["Planning"]), people: new Set() });
+  const group = directory?.group("Planning");
+  if (!group || "problem" in group) throw new Error("The server did not find the Group.");
+  await chat.write(new AbortController().signal, {
+    target: { kind: "group", channelId: group.channelId, lane: group.lane }, effectId: "claim-1/1/2", messageId: "message-auto-e2e",
+    threadId: "thread-auto-e2e", automation: { automationId: AUTOMATION.automationId, name: "Stamp", depth: 1 }, body: "Two is open.",
+  });
   await server.sync();
 
   // The owner's computer receives both, with the automation as their author.
@@ -167,4 +181,14 @@ it.skipIf(engine.missing)("writes an automation's records on the server's replic
   // A record added as a whole file carries no field history to other
   // computers, whoever adds it; the server's copy names the automation.
   expect((await server.record(TWO)).history[0]).toMatchObject({ field: "Status", next: { value: "Open" }, ...byAutomation });
+  const [post] = await ownerChats.listMessages({ workspaceId: WORKSPACE, threadId: "thread-auto-e2e" });
+  expect(post).toMatchObject({
+    id: "message-auto-e2e", body: "Two is open.", author: { kind: "automation", displayName: "Stamp" },
+    authorOwnerDisplayName: "Owner", authorUserId: "owner",
+  });
+  // Which automation wrote it stays on the computer that ran it, as on a desktop.
+  expect(await replicaChatStore(replica).getMessage({ workspaceId: WORKSPACE, messageId: "message-auto-e2e" }))
+    .toMatchObject({ automation: { automationId: AUTOMATION.automationId } });
+  expect((await ownerChats.listChannelThreads({ workspaceId: WORKSPACE, channelId: planning.channelId })).map((row) => row.thread.id))
+    .toContain("thread-auto-e2e");
 });
