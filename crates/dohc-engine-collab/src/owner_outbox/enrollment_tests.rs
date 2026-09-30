@@ -1,5 +1,5 @@
 use super::*;
-use crate::{owner_outbox::draft::open_draft_in, DocKey};
+use crate::{DocKey, owner_outbox::draft::open_draft_in};
 use dohc_engine_domain::{VersionedTextStore, WriteText};
 use dohc_test_scratch::ScratchDir;
 
