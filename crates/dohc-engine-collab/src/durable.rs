@@ -2551,7 +2551,7 @@ pub fn close_session(
         tx.execute(
             "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, \
              last_settled_sha = NULL, settled_update_seq = NULL, seed_source_sha256 = NULL, \
-             pending_authors_json='[]', settle_prior_update_seq=NULL, seed_generation=seed_generation+1, \
+             pending_authors_json='[]', settle_prior_update_seq=NULL, \
              updated_at_ms = ?4 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],

@@ -1364,55 +1364,22 @@ fn seed_scene_from_artifact_on_store(
         },
     )?;
     let seed_update = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])?;
-    let generation: i64 = store.read_with(|conn| {
-        conn.query_row(
-            "SELECT seed_generation FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
-        ).optional().map(|value| value.unwrap_or(0)).map_err(StorageError::persist_public)
-    })?;
-    let request_id = format!(
+    // Groups the asset moments in history. Not an idempotency key: archive
+    // deletes the lineage, but a request ledger row would outlive it.
+    let correlation_id = format!(
         "ydoc-scene-seed-{}",
         hex_sha256(
             format!(
-                "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+                "{}\0{}\0{}\0{}\0{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
-                path,
                 artifact_moment_id,
-                hex_sha256(artifact.as_bytes()),
-                generation
+                hex_sha256(artifact.as_bytes())
             )
             .as_bytes()
         )
     );
-    let completed: bool = store.read_with(|conn| {
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1 AND kind='ydoc')",
-            [&request_id],
-            |row| row.get(0),
-        )
-        .map_err(StorageError::persist_public)
-    })?;
-    if completed {
-        // A lost acknowledgement reuses the committed seed, including its asset jobs.
-        return store.read_with(|conn| {
-            let mut jobs = Vec::new();
-            for asset in &assets {
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE job_id=?1)",
-                        [&asset.moment_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(StorageError::persist_public)?;
-                if exists && !jobs.contains(&asset.moment_id) {
-                    jobs.push(asset.moment_id.clone());
-                }
-            }
-            Ok::<_, RuntimeError>(jobs)
-        });
-    }
     // Only the moment ids whose head writes were actually enqueued: a planned
     // asset whose content-addressed path already holds matching content takes
     // the `continue` below and creates no moment, and counting it as a
@@ -1434,7 +1401,6 @@ fn seed_scene_from_artifact_on_store(
             ensure_parent_row: true,
             require_empty_lineage: true,
             is_seed: true,
-            request_id: Some(&request_id),
             ..Default::default()
         },
         faults,
@@ -1496,7 +1462,7 @@ fn seed_scene_from_artifact_on_store(
                         moment_id: asset.moment_id.clone(),
                         metadata_origin: "ydoc".to_owned(),
                         metadata_summary: Some("Imported drawing asset".to_owned()),
-                        metadata_correlation_id: Some(request_id.clone()),
+                        metadata_correlation_id: Some(correlation_id.clone()),
                         author_json: None,
                         materialize: version_is_active.then_some(Preimage::Absent),
                         now_ms,
@@ -3598,8 +3564,83 @@ mod scene_seed_transaction_tests {
             .expect("inspect rolled-back transaction");
     }
 
+    fn open_scene(
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        now_ms: i64,
+    ) -> YdocOpenState {
+        ydoc_open_state_on_store(
+            store,
+            cache,
+            "workspace",
+            now_ms,
+            true,
+            None,
+            "main",
+            "drawing.excalidraw",
+            Some(ContentKind::Scene),
+            true,
+            &CancellationToken::new(),
+        )
+        .expect("open scene")
+    }
+
+    /// The open returns durable scene state for the unchanged artifact head.
+    fn assert_opened_artifact(store: &EngineStore, state: &YdocOpenState, artifact: &str) {
+        assert!(state.lineage_existing, "the open returns durable state");
+        assert_eq!(state.content_kind, ContentKind::Scene);
+        assert_eq!(state.key.object_id, "drawing-object");
+        assert_eq!(
+            state.head_blob_sha256,
+            Some(hex_sha256(artifact.as_bytes()))
+        );
+        assert_eq!(
+            state
+                .owner_seed_source
+                .as_ref()
+                .map(|source| source.moment_id.as_str()),
+            Some("artifact-moment")
+        );
+        let head_moment: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT s.latest_moment_id FROM path_aliases a JOIN snapshots s \
+                     ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
+                     AND s.object_id=a.object_id \
+                     WHERE a.workspace_id='workspace' AND a.version_id='main' \
+                     AND a.path='drawing.excalidraw'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("artifact head");
+        assert_eq!(
+            head_moment, "artifact-moment",
+            "the artifact head is unchanged"
+        );
+        let persisted = dohc_engine_collab::load_persisted(store, &state.key)
+            .expect("load")
+            .expect("durable lineage");
+        assert!(ydoc_marker_has_durable_state(&persisted.marker));
+        assert_eq!(state.initial_update, persisted.doc.encode_full_state());
+        let doc = Ydoc::wire();
+        doc.apply(&state.initial_update)
+            .expect("scene state applies");
+        let folded = doc.fold_scene();
+        assert!(
+            folded
+                .elements
+                .iter()
+                .any(
+                    |element| element.get("id").and_then(serde_json::Value::as_str) == Some("rect")
+                ),
+            "the open returns the artifact's drawing"
+        );
+    }
+
     #[test]
-    fn scene_seed_retry_reuses_commit_and_prune_allows_reseed() {
+    fn scene_open_after_retire_or_prune_reseeds_the_same_artifact_moment() {
         let scratch = ScratchDir::new().expect("scratch");
         let mut store = EngineStore::open(
             &dohc_engine_testkit::engine_db_path(&scratch).expect("database"),
@@ -3610,7 +3651,28 @@ mod scene_seed_transaction_tests {
             .expect("version");
         let key = DocKey::new("workspace", "main", "drawing-object").expect("key");
         let artifact = r#"{"type":"excalidraw","version":2,"elements":[{"id":"rect","type":"rectangle","version":1,"versionNonce":1,"isDeleted":false,"index":"a0"}],"appState":{},"files":{}}"#;
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "workspace".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: key.object_id.clone(),
+                    path: "drawing.excalidraw".to_owned(),
+                    text: artifact.to_owned(),
+                    moment_id: "artifact-moment".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("artifact head");
         let mut cache = WriterDocCache::new();
+        // A lost acknowledgement leaves durable state, so the next open resumes
+        // the committed seed instead of seeding again.
         let crash = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
         let first = seed_scene_from_artifact_on_store(
             &mut store,
@@ -3625,26 +3687,47 @@ mod scene_seed_transaction_tests {
         assert!(matches!(first, Err(RuntimeError::OperationCrashed)));
         let before = dohc_engine_collab::load_persisted(&store, &key)
             .expect("load")
-            .expect("seed")
+            .expect("committed seed")
             .doc
             .encode_full_state();
-        seed_scene_from_artifact_on_store(
-            &mut store,
-            &mut cache,
-            &key,
-            "drawing.excalidraw",
-            artifact,
-            "artifact-moment",
-            3,
-            &NoFaults,
-        )
-        .expect("retry");
-        let after = dohc_engine_collab::load_persisted(&store, &key)
-            .expect("load")
-            .expect("seed")
-            .doc
-            .encode_full_state();
-        assert_eq!(before, after, "retry must retain the original CRDT bytes");
+        let resumed = open_scene(&mut store, &mut cache, 3);
+        assert_opened_artifact(&store, &resumed, artifact);
+        assert_eq!(
+            resumed.initial_update, before,
+            "the open resumes the committed seed"
+        );
+        cache.remove(&key);
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                    dohc_engine_sync::ResultingHead::Text {
+                        path: "drawing.excalidraw",
+                        text: "outside scene edit",
+                    },
+                    None,
+                    None,
+                    3,
+                )
+            })
+            .expect("retire scene lineage");
+        assert!(
+            dohc_engine_collab::read_marker(&store, &key)
+                .expect("marker")
+                .is_none(),
+            "retire deletes the lineage row"
+        );
+        let reopened = open_scene(&mut store, &mut cache, 4);
+        assert_opened_artifact(&store, &reopened, artifact);
+        assert!(
+            !reopened.unsettled,
+            "this open seeded the lineage from its file"
+        );
+        let reseeded = reopened.initial_update;
+        assert_ne!(before, reseeded, "retire permits a fresh seed");
         let sha = hex_sha256(artifact.as_bytes());
         store
             .write_with(&NoFaults, |tx| {
@@ -3662,35 +3745,24 @@ mod scene_seed_transaction_tests {
                 materialized_seed_source_sha256: None,
             }),
             &NoFaults,
-            4,
+            5,
         )
         .expect("close");
         assert!(matches!(
             closed,
             TxnOutcome::Committed(CloseOutcome::Pruned { .. })
         ));
-        seed_scene_from_artifact_on_store(
-            &mut store,
-            &mut cache,
-            &key,
-            "drawing.excalidraw",
-            artifact,
-            "artifact-moment",
-            5,
-            &NoFaults,
-        )
-        .expect("reseed same artifact moment");
-        let reseeded = dohc_engine_collab::load_persisted(&store, &key)
-            .expect("load")
-            .expect("reseed")
-            .doc
-            .encode_full_state();
-        assert_ne!(before, reseeded, "prune permits new CRDT bytes");
-        store.read_with(|conn| {
-            let requests:i64=conn.query_row("SELECT COUNT(*) FROM engine_requests WHERE request_id LIKE 'ydoc-scene-seed-%'",[],|row|row.get(0)).map_err(StorageError::persist_public)?;
-            assert_eq!(requests,2);
-            Ok::<_,StorageError>(())
-        }).expect("generation keys");
+        cache.remove(&key);
+        let reopened = open_scene(&mut store, &mut cache, 6);
+        assert_opened_artifact(&store, &reopened, artifact);
+        assert!(
+            !reopened.unsettled,
+            "this open seeded the lineage from its file"
+        );
+        assert_ne!(
+            reseeded, reopened.initial_update,
+            "prune permits a fresh seed"
+        );
     }
 
     #[test]

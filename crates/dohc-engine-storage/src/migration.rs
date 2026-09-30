@@ -2674,8 +2674,6 @@ ALTER TABLE collection_field_history ADD COLUMN automation_name TEXT
 /// and NULL when no settle is unresolved.
 const V2_YDOC_LIVE_EDIT_AUTHORS_DDL: &str = "\
 ALTER TABLE ydoc_docs DROP COLUMN creator_author_json;
-ALTER TABLE ydoc_docs ADD COLUMN seed_generation INTEGER NOT NULL DEFAULT 0
-    CHECK (seed_generation >= 0);
 ALTER TABLE ydoc_updates ADD COLUMN is_seed INTEGER NOT NULL DEFAULT 0
     CHECK (is_seed IN (0, 1));
 UPDATE ydoc_updates SET is_seed=1 WHERE seq=1 AND EXISTS(
@@ -3299,7 +3297,7 @@ mod tests {
             ),
             (
                 "v2-ydoc-live-edit-authors",
-                "7edf284cc7d549523104e99148b2438442025c2792eb5041ab29314ee71dc984",
+                "3334298ffb9285bdcc5278632fa8f7ea94cc5e152b59032cae4ba306394e106c",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3559,15 +3557,14 @@ mod tests {
             .unwrap();
         let list = format!("[{agent}]");
         assert_eq!(authors, vec![Some(list.clone()), None]);
-        let doc: (String, Option<i64>, i64) = conn
+        let doc: (String, Option<i64>) = conn
             .query_row(
-                "SELECT pending_authors_json, settle_prior_update_seq, seed_generation \
-                 FROM ydoc_docs",
+                "SELECT pending_authors_json, settle_prior_update_seq FROM ydoc_docs",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(doc, ("[]".to_owned(), None, 0));
+        assert_eq!(doc, ("[]".to_owned(), None));
         let creator_columns: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('ydoc_docs') WHERE name='creator_author_json'",
             [], |row| row.get(0),
