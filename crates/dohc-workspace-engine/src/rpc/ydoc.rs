@@ -1029,7 +1029,7 @@ impl EngineService {
         idempotency_key: Option<String>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: YdocRecordUpdateParams = parse(params)?;
+        let mut params: YdocRecordUpdateParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
         let open = self.open(handle.as_ref())?;
         // An owned guard: it moves INTO the spawned task below, so a dropped
@@ -1063,6 +1063,10 @@ impl EngineService {
                 ErrorCode::InvalidParams,
                 "seed-not-first-update",
             ));
+        }
+        if params.seed {
+            params.actor_origin_id = None;
+            params.attribution = None;
         }
         let seed_source = params
             .seed
@@ -1187,6 +1191,18 @@ impl EngineService {
                         let Some((key, path, kind, lineage, head, restore)) = pending else {
                             return;
                         };
+                        let settle_now = match now_ms() {
+                            Ok(now) => now,
+                            Err(error) => {
+                                eprintln!(
+                                    "engine: queued author coverage settlement clock failed: {error}"
+                                );
+                                if let Some(session) = lock(&sessions).get_mut(&session_id) {
+                                    session.author_settlement_queued = false;
+                                }
+                                return;
+                            }
+                        };
                         match settle_open
                             .actor
                             .ydoc_settle_queued(
@@ -1198,7 +1214,7 @@ impl EngineService {
                                 head,
                                 session_id.clone(),
                                 settle_writes,
-                                now,
+                                settle_now,
                                 Arc::new(NoFaults),
                                 CancellationToken::new(),
                                 restore,
