@@ -16,6 +16,7 @@ import {
   type ChatMessageListHandle,
   chatAuthorLabel,
   runReactionToggle,
+  type PendingReactionCell,
 } from "./chatMessages";
 
 // Linked Chats surface (PR 0M-5) — the Chats panel's "This file" tab. Per-file Chats
@@ -108,9 +109,9 @@ export function LinkedChatsPanel(props: {
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
   const liveToken = useRef(0);
-  // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
-  // in order (see runReactionToggle).
-  const reactionSeq = useRef(new Map<string, number>());
+  // The viewer's reaction writes in flight, one entry per (message, emoji)
+  // cell (see runReactionToggle).
+  const pendingReactions = useRef(new Map<string, PendingReactionCell>());
   const listRef = useRef<ChatMessageListHandle | null>(null);
 
   const refreshThreads = useCallback(async () => {
@@ -311,7 +312,7 @@ export function LinkedChatsPanel(props: {
           threadId: thread.id,
           viewerAuthorId,
           liveToken,
-          reactionSeq,
+          pendingReactions,
           setReactions,
           setViewerAuthorId,
           onError: props.onError,

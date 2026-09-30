@@ -90,6 +90,7 @@ import {
   chatAuthorLabel,
   runReactionToggle,
   type ChatReactionControls,
+  type PendingReactionCell,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
 import { AddAgentForm } from "./AddAgentForm";
@@ -687,9 +688,9 @@ export function ChatsView(props: {
     threadId: string;
     revision: number;
   } | null>(null);
-  // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
-  // in order (see runReactionToggle).
-  const reactionSeq = useRef(new Map<string, number>());
+  // The viewer's reaction writes in flight, one entry per (message, emoji)
+  // cell (see runReactionToggle).
+  const pendingReactions = useRef(new Map<string, PendingReactionCell>());
   // Each Home item's Add reaction trigger, by message id: where focus goes
   // when the activated pill was the viewer's only row and unmounts.
   const homeLikeTriggers = useRef(new Map<string, HTMLButtonElement>());
@@ -2229,7 +2230,7 @@ export function ChatsView(props: {
           threadId,
           viewerAuthorId,
           liveToken,
-          reactionSeq,
+          pendingReactions,
           setReactions,
           setViewerAuthorId,
           onError: props.onError,
@@ -2273,7 +2274,7 @@ export function ChatsView(props: {
           threadId,
           viewerAuthorId: post.viewerAuthorId,
           liveToken,
-          reactionSeq,
+          pendingReactions,
           setReactions: (next) =>
             setFeedPosts((current) => {
               const entry = current[threadId];
@@ -4551,6 +4552,7 @@ export function ChatsView(props: {
             onError={props.onError}
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
+            pendingReactions={pendingReactions}
           />
         ) : (
         <PostFeedList

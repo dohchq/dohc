@@ -1,5 +1,5 @@
 import { ArrowDown } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import type {
   ChatChannelRecord,
   ChatDecisionRecord,
@@ -11,7 +11,7 @@ import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { extractChatFileReferences } from "./chatFileMentions";
-import { ChatMessageList, runReactionToggle, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
+import { ChatMessageList, runReactionToggle, type ChatMessageListHandle, type ChatReactionControls, type PendingReactionCell } from "./chatMessages";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { DecisionStatus } from "./ChatPosts";
 import { ComposerNotice } from "./ChatsControls";
@@ -43,6 +43,9 @@ export function ChatLane(props: {
   onThreadRead?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
+  // The host's reaction writes in flight. It outlives this lane, so a write
+  // chosen before leaving the group still goes before one chosen after.
+  pendingReactions: MutableRefObject<Map<string, PendingReactionCell>>;
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
@@ -61,10 +64,9 @@ export function ChatLane(props: {
   const loadSequence = useRef(0);
   const onThreadRead = useRef(props.onThreadRead);
   onThreadRead.current = props.onThreadRead;
-  const reactionSeq = useRef(new Map<string, number>());
   const listRef = useRef<ChatMessageListHandle | null>(null);
   const paintedRevision = useRef<PaintedLane | null>(null);
-  const { workspaceId, onError } = props;
+  const { workspaceId, onError, pendingReactions } = props;
   const channelId = props.channel.id;
 
   const markRead = useCallback((painted: PaintedLane) => {
@@ -151,7 +153,6 @@ export function ChatLane(props: {
     setViewerAuthorId("");
     setFirstUnreadMessageId(null);
     setAtEnd(true);
-    reactionSeq.current.clear();
     paintedRevision.current = null;
     setLoading(true);
     return () => { token.current += 1; };
@@ -277,7 +278,7 @@ export function ChatLane(props: {
               threadId,
               viewerAuthorId,
               liveToken: token,
-              reactionSeq,
+              pendingReactions,
               setReactions,
               setViewerAuthorId,
               onError,
@@ -285,7 +286,7 @@ export function ChatLane(props: {
             input,
           ),
       }
-    : undefined, [threadId, reactions, viewerAuthorId, props.locked, workspaceId, onError]);
+    : undefined, [threadId, reactions, viewerAuthorId, props.locked, workspaceId, onError, pendingReactions]);
 
   const decisionsByMessage = useMemo(() => new Map(decisions.map(decision => [decision.messageId, decision])), [decisions]);
   const renderMessageFooter = useCallback((message: ChatMessageRecord) => {

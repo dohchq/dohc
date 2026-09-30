@@ -15,7 +15,8 @@ const onError = vi.fn();
 const onThreadRead = vi.fn();
 function lane(id = "channel-1", workspaceId = "workspace-a") {
   return <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat" })}
-    locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0} />;
+    locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0}
+    pendingReactions={{ current: new Map() }} />;
 }
 function send(body: string) {
   const composer = screen.getByTestId("chats-lane-composer");
