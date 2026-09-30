@@ -29,6 +29,8 @@ export interface SyncRelayLinkBoundary {
 
 export async function spawnSyncRelay(input: {
   dbPath: string;
+  // A suite may reuse freshly built code while keeping each process and store separate.
+  compiledMain?: string;
   // Restarts (the offline-rejoin spec) must come back on the same port the
   // desktop app already has in its credential file.
   port?: number;
@@ -52,12 +54,14 @@ export async function spawnSyncRelay(input: {
   const child: ChildProcess = spawn(
     process.execPath,
     [
-      "--import", process.platform === "win32" ? "tsx" : "tsx/esm",
+      ...(input.compiledMain === undefined
+        ? ["--import", process.platform === "win32" ? "tsx" : "tsx/esm"]
+        : []),
       "--input-type=module", "--eval",
       `process.on("message", (message) => {
         if (message === "SIGTERM") process.emit("SIGTERM");
       });
-      await import(${JSON.stringify(pathToFileURL(join(relayRoot, "src/main.ts")).href)});`,
+      await import(${JSON.stringify(pathToFileURL(input.compiledMain ?? join(relayRoot, "src/main.ts")).href)});`,
     ],
     {
       cwd: relayRoot,
