@@ -100,6 +100,7 @@ export async function startAutomationReplicas(options: {
   let retryingWorkspaces = false;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   let retryMs = RETRY_FIRST_MS;
+  let reconciled = false;
   // The workspaces whose part of the last pass failed, with why.
   const failedSyncs = new Map<string, unknown>();
 
@@ -186,6 +187,7 @@ export async function startAutomationReplicas(options: {
           pullMore = (await replication.pull(callerSignal, (page) => options.onPulled?.(row.workspaceId, page.changedPaths))).hasMore;
         }
         if (pushMore || pullMore) return false;
+        failedSyncs.delete(row.workspaceId);
         replica.pulledHead = Math.max(replica.pulledHead, head);
         return true;
       });
@@ -195,7 +197,12 @@ export async function startAutomationReplicas(options: {
         running -= 1;
         if (running === 0 && !closed.signal.aborted && logHead(row.workspaceId) > replica.pulledHead) schedule();
       }, () => { running -= 1; });
-      chain = run.catch(() => undefined);
+      chain = run.catch((error: unknown) => {
+        if (!replicaSignal.aborted) {
+          failedSyncs.set(row.workspaceId, error);
+          schedule(RETRY_FIRST_MS);
+        }
+      });
       return run;
     };
     const replica = {
@@ -214,6 +221,7 @@ export async function startAutomationReplicas(options: {
       async close(): Promise<void> {
         if (replicas.get(row.workspaceId) !== replica) return;
         replicas.delete(row.workspaceId);
+        failedSyncs.delete(row.workspaceId);
         closed.abort();
         await chain;
         await release();
@@ -261,6 +269,7 @@ export async function startAutomationReplicas(options: {
     requested = false;
     let ok = true;
     let passFailure: unknown = null;
+    await engine();
     const wanted = new Set(options.wanted());
     for (const workspaceId of wanted) {
       ok = await each(workspaceId, async () => {
@@ -268,6 +277,10 @@ export async function startAutomationReplicas(options: {
         const open_ = replicas.get(workspaceId);
         if (open_ && (row === null || open_.incarnation !== row.incarnation)) await open_.close();
         if (row !== null && !replicas.has(workspaceId)) await open(row);
+        else if (row !== null && failedSyncs.has(workspaceId)) {
+          const retry = replicas.get(workspaceId)!;
+          if (!retry.busy() && !(await retry.step())) requested = true;
+        }
       }) && ok;
     }
     for (const row of storage.listAutomationWorkspaces()) {
@@ -342,6 +355,7 @@ export async function startAutomationReplicas(options: {
       timer = undefined;
       let retry: number | null = null, workspacesFailed = false;
       active = reconcile().then((ok) => {
+        reconciled = true;
         options.onReconciled?.();
         if (ok) { retryMs = RETRY_FIRST_MS; return; }
         // A workspace that failed tries again, as a failed pass does.
@@ -349,6 +363,7 @@ export async function startAutomationReplicas(options: {
         retry = retryMs;
         retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
       }, error => {
+        reconciled = false;
         if (signal.aborted) return;
         options.onError?.(error);
         retry = retryMs;
@@ -385,6 +400,10 @@ export async function startAutomationReplicas(options: {
   const stopWatching = observeRelayWrites(storage, () => schedule());
   schedule(0);
   return {
+    /** The daemon is running and a pass completed, even if individual workspaces failed. */
+    get unavailable(): boolean {
+      return signal.aborted || !reconciled || !client || client.exited.signal.aborted;
+    },
     /** The open replica of this workspace, or undefined. */
     replica(workspaceId: string): AutomationReplica | undefined { return replicas.get(workspaceId); },
     /** Ask for a pass now, as after a change the relay's write observer does not see. */

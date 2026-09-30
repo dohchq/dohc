@@ -24,6 +24,7 @@ import { closeTestStorages, jsonBody, tempRoot, testStorage } from "./testing";
 // the real engine in the server's copy of the workspace, the real executor
 // and scheduler on a clock the test sets, the relay route, and a join as the
 // owner. The owner's computer then receives the record the schedule added.
+// The replica supervisor is stubbed; this does not exercise the self-host bundle.
 
 const engine = requireEngineBinaryOrSkip();
 const WORKSPACE = "workspace-trip";
@@ -72,14 +73,18 @@ async function computer(input: {
     { client, workspace, workspaceId: WORKSPACE, nextRequestId, deadlineMs: DEADLINE_MS, signal: lifetime.signal, assertCurrent: () => undefined },
     { relay: { baseUrl: "https://relay.example.test", bearerToken: input.bearerToken }, identity: input.identity, maxPagesPerPull: 8 },
   );
-  cleanup.push(async () => {
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
     lifetime.abort();
     await request("workspace.close", {}, workspace).catch(() => undefined);
     client.close();
     await client.waitForExit();
-  });
+  };
+  cleanup.push(close);
   return {
-    client, workspace, lifetime: lifetime.signal, request, nextRequestId,
+    close, client, workspace, lifetime: lifetime.signal, request, nextRequestId,
     async sync(): Promise<string[]> {
       const pulled: string[] = [];
       for (let more = true; more;) more = (await replication.push()).hasMore;
@@ -93,7 +98,7 @@ async function computer(input: {
   };
 }
 
-it.skipIf(engine.missing)("runs a schedule in the server's copy of the workspace, and the owner's computer receives its record", async () => {
+it.skipIf(engine.missing)("the server runs a schedule with the owner daemon stopped, then syncs its record when the owner returns", async () => {
   const root = await tempRoot("automation-server-e2e");
   const storage = await testStorage();
   const key = new Uint8Array(32).fill(7), namespace = "automation-server-e2e";
@@ -136,6 +141,8 @@ it.skipIf(engine.missing)("runs a schedule in the server's copy of the workspace
   }));
   expect(((await checkIn.json()) as { host: { installId: string } }).host.installId).toBe("server");
 
+  await owner.close();
+
   // The server joins as the owner and opens its copy.
   const row = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: Date.now() });
   if (row === null) throw new Error("The relay did not let the server join the workspace.");
@@ -173,7 +180,7 @@ it.skipIf(engine.missing)("runs a schedule in the server's copy of the workspace
     startReplicas: async (options) => {
       hooks = options;
       const stop = copy.client.onEvent((event) => options.onEngineEvent?.(event));
-      return { replica: () => replica, reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => stop() };
+      return { unavailable: false, replica: () => replica, reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => stop() };
     },
   });
   cleanup.push(() => running.close());
@@ -184,9 +191,20 @@ it.skipIf(engine.missing)("runs a schedule in the server's copy of the workspace
   // An hour and a half later on the server's clock, its due time runs.
   clock += 90 * 60_000;
   timers.splice(0).forEach((wake) => wake());
-  const adapter = new VersionedLiveAdapter(owner.client, owner.workspace, { workspaceId: WORKSPACE });
+  const serverAdapter = new VersionedLiveAdapter(copy.client, copy.workspace, { workspaceId: WORKSPACE });
   await vi.waitFor(async () => {
-    await owner.sync();
+    const files = await serverAdapter.listTextFileMetadata({ workspaceId: WORKSPACE, versionId: main.id as string });
+    const added = files.filter((file) => file.path.startsWith("Tasks/") && !["Tasks/collection.yaml", "Tasks/automations.yaml"].includes(file.path));
+    expect(added).toHaveLength(1);
+    const read = await serverAdapter.readTextFile({ workspaceId: WORKSPACE, versionId: main.id as string, path: added[0]!.path });
+    expect(read?.text).toContain("Status: Swept");
+  }, { timeout: DEADLINE_MS, interval: 200 });
+
+  // No owner daemon existed while the schedule ran. Reopen it only after the server wrote the record.
+  const returned = await computer({ root: join(root, "owner"), relayUrl, bearerToken: "test:owner", identity: { kind: "claim" } });
+  const adapter = new VersionedLiveAdapter(returned.client, returned.workspace, { workspaceId: WORKSPACE });
+  await vi.waitFor(async () => {
+    await returned.sync();
     const files = await adapter.listTextFileMetadata({ workspaceId: WORKSPACE, versionId: main.id as string });
     const added = files.filter((file) => file.path.startsWith("Tasks/") && !["Tasks/collection.yaml", "Tasks/automations.yaml"].includes(file.path));
     expect(added).toHaveLength(1);
@@ -194,4 +212,4 @@ it.skipIf(engine.missing)("runs a schedule in the server's copy of the workspace
     expect(read?.text).toContain("Status: Swept");
   }, { timeout: DEADLINE_MS, interval: 200 });
   expect(errors).toEqual([]);
-});
+}, 120_000);

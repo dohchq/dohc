@@ -99,7 +99,7 @@ async function spawnRelay(
 async function spawnRunningRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
-  bootstrap: { rejectPoolEnd?: boolean } = {},
+  bootstrap: { rejectPoolEnd?: boolean; engineHandshake?: boolean } = {},
 ): Promise<RunningRelay> {
   const mainUrl = new URL("./main.ts", import.meta.url);
   const childArguments = [
@@ -131,6 +131,36 @@ async function spawnRunningRelay(
         writeSync(2, "SYNC_RELAY_TEST_POOL_END_REJECTED\\n");
         throw new Error("injected pool shutdown failure");
       };
+    }
+    if (${bootstrap.engineHandshake === true}) {
+      const { default: childProcess } = await import("node:child_process");
+      const { syncBuiltinESMExports } = await import("node:module");
+      const spawn = childProcess.spawn;
+      childProcess.spawn = (command, args, options) => {
+        if (command === process.execPath && args?.length === 0 && options?.env?.DOHC_ENGINE_AUTH_TOKEN) {
+          args = ["--import", ${JSON.stringify(process.platform === "win32" ? "tsx" : "tsx/esm")},
+            "--input-type=module", "--eval", ${JSON.stringify(`
+              import { FrameDecoder, encodeFrame } from "@dohc/workspace-engine-client/daemon";
+              const decoder = new FrameDecoder(1024 * 1024);
+              process.stdin.on("data", bytes => {
+                for (const frame of decoder.push(bytes)) {
+                  if (frame.kind !== "control") throw new Error("Unexpected engine frame");
+                  const message = JSON.parse(frame.payload.toString("utf8"));
+                  if (message.type !== "hello" || message.authToken !== process.env.DOHC_ENGINE_AUTH_TOKEN) {
+                    throw new Error("Expected authenticated engine hello");
+                  }
+                  process.stdout.write(encodeFrame(1, 0, Buffer.from(JSON.stringify({
+                    type: "helloAck", protocolVersion: 2, sessionGeneration: 1, capabilities: ["core", "blobs"],
+                    limits: { maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 64 * 1024,
+                      maxStringBytes: 64 * 1024, maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32 }
+                  })), 1024 * 1024));
+                }
+              });
+            `)}];
+        }
+        return spawn(command, args, options);
+      };
+      syncBuiltinESMExports();
     }
     await import(${JSON.stringify(mainUrl.href)});`,
   ];
@@ -957,9 +987,8 @@ describe("sync relay startup guards", () => {
       DOHC_RELAY_DEPLOYMENT_CONFIG: configPath, DOHC_RELAY_SERVICE_HOST_ROOT: root,
       DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
       DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
-      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
-    // An empty deployment reconciles before the relay listens, so a relay still
-    // unready after 10 s is stuck; its stderr says why.
+      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)}, {engineHandshake: true});
+    // The empty deployment must complete its engine handshake and first pass.
     await vi.waitFor(async () => {
       const response = await fetch(`${relay.baseUrl}/ready`);
       expect(response.status, `relay stayed unready\nstderr:\n${relay.stderr()}`).toBe(200);

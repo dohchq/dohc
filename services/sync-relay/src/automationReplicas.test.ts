@@ -141,6 +141,7 @@ describe("the automation replicas", () => {
   // An engine daemon that opens each workspace and answers ordinary replication.
   function fakeEngine() {
     const sent: Sent[] = [];
+    let failPush = false;
     const engines: Array<{ exit(): void }> = [];
     spawn.mockImplementation(async (spawned: { env?: Record<string, string>; onExit?: () => void }) => {
       expect(spawned.env?.DOHC_ENGINE_LIVE_HOST_CONFIG, "a plain engine, not the live host's").toBeUndefined();
@@ -148,6 +149,7 @@ describe("the automation replicas", () => {
       const engine = {
         sendRequest: vi.fn(async (request: Sent) => {
           sent.push(request);
+          if (request.method === "sync.push" && failPush) throw new Error("replica cannot push");
           switch (request.method) {
             case "workspace.open": return { result: { workspace: `handle-${++handles}` } };
             case "workspace.close": return { result: {} };
@@ -167,7 +169,7 @@ describe("the automation replicas", () => {
       engines.push({ exit: () => spawned.onExit?.() });
       return engine;
     });
-    return { sent, engines, methods: () => sent.map((request) => request.method) };
+    return { sent, engines, failPush: (value: boolean) => { failPush = value; }, methods: () => sent.map((request) => request.method) };
   }
 
   async function replicas(
@@ -184,6 +186,53 @@ describe("the automation replicas", () => {
     await started.settled();
     return { replicas: started, root };
   }
+
+  it("checks the daemon even without workspaces, and reports its exit until it restarts", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    const { replicas: running } = await replicas(storage, () => [], { ms: 0 });
+    expect(engine.engines).toHaveLength(1);
+    expect(running.unavailable).toBe(false);
+    engine.engines[0]!.exit();
+    expect(running.unavailable).toBe(true);
+    await running.settled();
+    expect(engine.engines).toHaveLength(2);
+    expect(running.unavailable).toBe(false);
+    await running.close();
+    expect(running.unavailable).toBe(true);
+  });
+
+  it("reports an engine startup failure and recovers after a successful start", async () => {
+    const { storage } = await relay();
+    const errors: unknown[] = [];
+    fakeEngine();
+    spawn.mockRejectedValueOnce(new Error("engine failed to start"));
+    const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
+    const running = await startAutomationReplicas({storage, root, engineExecutable: process.execPath,
+      relayOrigin: "https://relay.example", key, namespace, wanted: () => [], onError: error => errors.push(error)});
+    cleanup.push(async () => { await running.close(); await rm(root, {recursive: true, force: true}); });
+    expect(running.unavailable).toBe(true);
+    await vi.waitFor(() => expect(errors).toHaveLength(1), {timeout: 30_000});
+    expect(running.unavailable).toBe(true);
+    await running.settled();
+    expect(running.unavailable).toBe(false);
+  });
+
+  it("reports a failed push without taking the server down and retries without a new relay write", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    const { replicas: running } = await replicas(storage, () => [WORKSPACE], { ms: 0 });
+    expect(running.unavailable).toBe(false);
+    engine.failPush(true);
+    await expect(running.replica(WORKSPACE)!.sync()).rejects.toThrow("replica cannot push");
+    expect(running.failedSyncs().get(WORKSPACE)).toEqual(new Error("replica cannot push"));
+    expect(running.unavailable).toBe(false);
+    engine.failPush(false);
+    await running.settled();
+    expect(running.unavailable).toBe(false);
+    expect(running.failedSyncs().size).toBe(0);
+    expect(engine.methods().filter(method => method === "sync.push")).toHaveLength(3);
+  });
 
   it("opens a replica for each wanted workspace, joins its identity, and pulls when its log moves", async () => {
     const { storage, log } = await relay();
@@ -356,6 +405,7 @@ describe("the automation replicas", () => {
     expect(running.replica(WORKSPACE), "the workspace after the broken one opens").toBeDefined();
     expect(running.replica("broken")).toBeUndefined();
     expect([...running.failedSyncs().keys()]).toEqual(["broken"]);
+    expect(running.unavailable, "a completed pass keeps the server on").toBe(false);
     expect(errors.map(([, workspaceId]) => workspaceId)).toEqual(["broken"]);
     expect(storage.listAutomationWorkspaces().find((row) => row.workspaceId === "leaving")?.leftAtMs, "an unwanted copy still leaves on time")
       .toBe(AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
@@ -426,6 +476,7 @@ describe("the automation replicas", () => {
   });
 
   it("waits longer after each failed pass", async () => {
+    fakeEngine();
     vi.useFakeTimers();
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
@@ -443,6 +494,7 @@ describe("the automation replicas", () => {
   });
 
   it("wakes by itself to let a replica leave a day after it stopped being wanted", async () => {
+    fakeEngine();
     vi.useFakeTimers();
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();

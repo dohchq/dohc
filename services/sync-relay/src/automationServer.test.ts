@@ -180,7 +180,7 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
     clock: { now: () => clock, monotonic: () => clock, setTimer: () => null, clearTimer: () => undefined },
     startReplicas: async (options) => {
       hooks = options;
-      return { replica: (id) => open.get(id), reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
+      return { unavailable: false, replica: (id) => open.get(id), reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
     },
     ...(input.live ? { live: input.live } : {}),
     createExecutor: (options) => {

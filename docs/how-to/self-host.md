@@ -119,6 +119,49 @@ The deployment initializes fresh storage, applies authentication migrations, and
 Keep the deployment secrets and volumes across restarts.
 Do not rerun fresh initialization against an existing deployment.
 
+## Run automations on the server
+
+The self-host bundle enables server automations with `DOHC_RELAY_AUTOMATIONS=1`.
+Schedules, Group messages, and button presses trigger automations while the desktop app is closed.
+The workspace must have synced, and the server must be its automation host.
+In the desktop app, choose **This server** under **Settings > Advanced > Schedules run on**.
+Automatically placed hosts move to the server at their next check-in, if the server has room.
+A computer the owner chose as host keeps that role until the owner changes it.
+Hosts recorded before automatic placement was introduced also stay where they are.
+Due times missed while no computer or server runs schedules do not run later.
+
+Reserve additional disk space for each hosted workspace, about the size of that workspace again.
+The default workspace storage quota is 2 GiB.
+Server copies, engine databases, and run history contain unencrypted workspace content.
+Protect the `dohc_self_host_host_data` volume like the relay database.
+After a host move, an unused copy closes after one day and remains for 30 more days for run history.
+
+The server hosts at most 64 workspaces and runs at most 4 automations concurrently, one per workspace.
+Each workspace can start a burst of 120 runs, then one run every 10 seconds, or 360 an hour.
+Excess runs wait. The owner receives a notice at most once a day when the workspace reaches its run limit.
+At the workspace limit, newly assigned schedules run on the owner's computer.
+
+To turn server automations off, set `DOHC_RELAY_AUTOMATIONS=0` in `.env.self-host`.
+Stop and start the deployment to apply the setting:
+
+```sh
+node tools/self-host/bootstrap.mjs stop
+node tools/self-host/bootstrap.mjs start
+```
+
+Turning automations off deletes all server automation copies and their local claims and run history at startup.
+Save a private deployment archive first if you need to preserve that history.
+The bundle cannot restore or view archived run history.
+The synced workspace files remain in the relay.
+At the owner's next desktop check-in, schedules move back to that computer.
+Set `DOHC_RELAY_AUTOMATIONS=1` and restart to enable server automations again.
+
+Check a running deployment with `node scripts/check-self-host.mjs --running`.
+The automation check reports whether the engine daemon is up and a replica pass has completed.
+Individual workspace failures appear in the sync-relay logs with their workspace IDs and do not take the server offline.
+An unavailable automation host fails this check even when sync and sharing remain available.
+If it fails, inspect the sync-relay logs and verify disk space and the relay's public HTTPS route.
+
 ## Connect the desktop app
 
 1. Open **Settings → Sync and sharing**.
