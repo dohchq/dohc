@@ -98,12 +98,12 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
             crate::journal_moment_append_in_tx(tx, "ws", "limit-moment")
         })
         .expect("maximum author moment journals");
-    let bytes: u64 = store.read_with(|conn| conn.query_row(
+    let bytes: i64 = store.read_with(|conn| conn.query_row(
         "SELECT length(CAST(payload_json AS BLOB)) FROM replication_log WHERE op_kind='moment.append'",
         [], |row| row.get(0),
     ).map_err(dohc_engine_storage::StorageError::persist_public)).expect("payload bytes");
-    assert!(bytes < crate::MAX_PAYLOAD_JSON_BYTES as u64);
-    assert!(crate::MAX_PAYLOAD_JSON_BYTES as u64 - bytes > 128 * 1024);
+    assert!(bytes < crate::MAX_PAYLOAD_JSON_BYTES as i64);
+    assert!(crate::MAX_PAYLOAD_JSON_BYTES as i64 - bytes > 128 * 1024);
 }
 
 #[test]
