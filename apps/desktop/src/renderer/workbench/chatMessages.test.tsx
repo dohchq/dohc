@@ -4,7 +4,7 @@ import { formatChatDay, formatChatTime } from "../time";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createRef, useState, type Dispatch, type SetStateAction } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import {
   ChatComposer,
@@ -16,6 +16,7 @@ import {
   type ReactionToggleContext,
 } from "./chatMessages";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import { deferred, type Deferred } from "../../testing/deferred";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { AgentSettingsProvider } from "./AgentBadge";
 import { identityHue } from "./ChatAvatar";
@@ -715,8 +716,9 @@ describe("message reactions (WS-MU-C2)", () => {
   });
 });
 
-// WS-MU-C2 fix 4: the shared reaction toggle must roll back on failure and keep
-// overlapping toggles on the same cell from racing into a wrong final state.
+// The shared reaction toggle (WS-MU-C2) paints the viewer's intent at once,
+// rolls back only a rejected write, and lets overlapping toggles settle in
+// any order without racing to a wrong or borrowed final state.
 describe("runReactionToggle (rollback + per-cell ordering)", () => {
   const bridgeMock = {
     setChatReaction: vi.fn(),
@@ -733,25 +735,56 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
     vi.unstubAllGlobals();
   });
 
+  const you = (overrides: Partial<ChatReactionRecord> = {}): ChatReactionRecord => ({
+    reactionId: "r-you",
+    messageId: "m1",
+    threadId: "thread-1",
+    emoji: "👍",
+    authorId: "you@x",
+    authorKind: "human",
+    authorDisplayName: "You",
+    ...overrides,
+  });
+  const peer = you({ reactionId: "r-peer", authorId: "peer@x", authorDisplayName: "Peer" });
+  const listing = (reactions: ChatReactionRecord[]) => ({ reactions, viewerAuthorId: "you@x" });
+  type Listing = ReturnType<typeof listing>;
+  // One controlled promise per call of the bridge method, in call order.
+  function controlled<T>(method: Mock) {
+    const calls: Deferred<T>[] = [];
+    method.mockImplementation(() => {
+      const next = deferred<T>();
+      calls.push(next);
+      return next.promise;
+    });
+    return calls;
+  }
+
   // A live mirror of the reactions state plus a real functional setter, so the
   // helper's optimistic update / rollback are observable exactly as a component
-  // would apply them.
-  function harness() {
-    let reactions: ChatReactionRecord[] = [];
+  // would apply them. With `deferSetters`, updaters queue until `flush()`, the
+  // way React runs a functional setter after the call that queued it.
+  function harness(initial: ChatReactionRecord[] = [], options: { deferSetters?: boolean } = {}) {
+    let reactions = initial;
     let viewerAuthorId = "you@x";
+    const queued: Array<() => void> = [];
     const setReactions: Dispatch<SetStateAction<ChatReactionRecord[]>> = (update) => {
-      reactions = typeof update === "function" ? update(reactions) : update;
+      const apply = () => {
+        reactions = typeof update === "function" ? update(reactions) : update;
+      };
+      if (options.deferSetters) queued.push(apply);
+      else apply();
     };
     const setViewerAuthorId: Dispatch<SetStateAction<string>> = (update) => {
       viewerAuthorId = typeof update === "function" ? update(viewerAuthorId) : update;
     };
     const onError = vi.fn();
+    const liveToken = { current: 0 };
     const ctx: ReactionToggleContext = {
       workspaceId: "ws",
       threadId: "thread-1",
       viewerAuthorId: "you@x",
-      liveToken: { current: 0 },
-      reactionSeq: { current: new Map<string, number>() },
+      liveToken,
+      pendingReactions: { current: new Map() },
       setReactions,
       setViewerAuthorId,
       onError,
@@ -759,67 +792,234 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
     return {
       ctx,
       onError,
+      liveToken,
+      flush() {
+        for (const apply of queued.splice(0)) apply();
+      },
       get reactions() {
         return reactions;
       },
-      mineOn(emoji: string) {
-        return reactions.some((r) => r.emoji === emoji && r.authorId === "you@x");
+      get viewerAuthorId() {
+        return viewerAuthorId;
+      },
+      mineOn(emoji: string, messageId = "m1") {
+        return reactions.some(
+          (r) => r.messageId === messageId && r.emoji === emoji && r.authorId === "you@x",
+        );
       },
     };
   }
 
-  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const toggle = (
+    h: ReturnType<typeof harness>,
+    nextState: "added" | "removed",
+    cell: { messageId: string; emoji: string } = { messageId: "m1", emoji: "👍" },
+  ) => runReactionToggle(h.ctx, { ...cell, nextState });
 
-  it("rolls the optimistic reaction back when the server write fails", async () => {
-    const h = harness();
-    bridgeMock.setChatReaction.mockRejectedValue(new Error("offline"));
-    runReactionToggle(h.ctx, { messageId: "m1", emoji: "👍", nextState: "added" });
+  it("rolls a rejected write back to the prior cell state and keeps peers", async () => {
+    const h = harness([peer]);
+    bridgeMock.setChatReaction.mockRejectedValue(new TypeError("offline"));
+    toggle(h, "added");
     // Optimistically shown immediately.
     expect(h.mineOn("👍")).toBe(true);
-    await tick();
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    expect(h.onError).toHaveBeenCalledWith("Could not update that reaction.", expect.any(Error));
     // The failed write reverts the cell to its pre-toggle (absent) state.
-    expect(h.mineOn("👍")).toBe(false);
-    expect(h.reactions).toEqual([]);
-    expect(h.onError).toHaveBeenCalledOnce();
+    expect(h.reactions).toEqual([peer]);
     // The reconcile list is never fetched when the write itself failed.
     expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
   });
 
-  it("converges two rapid toggles on the same cell to the latest intent despite out-of-order responses", async () => {
+  it("keeps an acknowledged write and reports only the reload failure when the listing fails", async () => {
     const h = harness();
     bridgeMock.setChatReaction.mockResolvedValue(undefined);
-    // Controlled reconcile responses so we can resolve them out of order.
-    const resolvers: Array<(value: unknown) => void> = [];
-    bridgeMock.listChatReactions.mockImplementation(
-      () => new Promise((resolve) => resolvers.push(resolve)),
+    bridgeMock.listChatReactions.mockRejectedValue(new TypeError("wire"));
+    toggle(h, "added");
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    expect(h.onError).toHaveBeenCalledWith(
+      "Your reaction was saved, but dohc could not reload reactions.",
+      expect.any(Error),
     );
+    // The server accepted the write, so the painted reaction stays.
+    expect(h.mineOn("👍")).toBe(true);
+  });
 
-    // Toggle add then remove — the user's latest intent is "removed".
-    runReactionToggle(h.ctx, { messageId: "m1", emoji: "👍", nextState: "added" });
-    runReactionToggle(h.ctx, { messageId: "m1", emoji: "👍", nextState: "removed" });
-    // Optimistic latest intent: removed.
+  it("restores the confirmed rows, not the inverse of the last toggle, when repeated toggles fail", async () => {
+    const h = harness([peer, you()]);
+    bridgeMock.setChatReaction.mockRejectedValue(new TypeError("offline"));
+    toggle(h, "removed");
+    toggle(h, "added");
+    expect(h.mineOn("👍")).toBe(true);
+    await waitFor(() => expect(h.onError).toHaveBeenCalledTimes(2));
+    // Neither write landed: the original row comes back where it was, not a
+    // rebuilt one and not the "removed" a naive inverse of the last add gives.
+    expect(h.reactions).toEqual([peer, you()]);
+  });
+
+  it("rolls a rejected write back to the newest acknowledged intent", async () => {
+    const h = harness();
+    const reload = deferred<never>();
+    bridgeMock.setChatReaction
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new TypeError("offline"));
+    bridgeMock.listChatReactions.mockReturnValue(reload.promise);
+    toggle(h, "added");
+    toggle(h, "removed");
+    expect(h.mineOn("👍")).toBe(false);
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    // The add reached the server and the remove did not, so the cell shows
+    // the add, even though its own listing never answered.
+    expect(h.mineOn("👍")).toBe(true);
+  });
+
+  it("shows an earlier accepted write, from the listing, when the write after it is rejected", async () => {
+    const h = harness();
+    const firstWrite = deferred<undefined>();
+    bridgeMock.setChatReaction
+      .mockReturnValueOnce(firstWrite.promise)
+      .mockRejectedValueOnce(new TypeError("offline"));
+    bridgeMock.listChatReactions.mockResolvedValue(listing([you()]));
+    toggle(h, "added");
+    toggle(h, "removed");
+    // The remove waits for the add, so the server cannot settle them out of
+    // order. Once the add lands and the remove is rejected, the cell shows
+    // the add as the canonical listing names it.
+    firstWrite.resolve(undefined);
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    await waitFor(() => expect(h.reactions).toEqual([you()]));
+  });
+
+  it("captures a new confirmed state when returning to a thread before an old write settles", async () => {
+    const h = harness([you()]);
+    const oldWrite = deferred<undefined>();
+    bridgeMock.setChatReaction
+      .mockReturnValueOnce(oldWrite.promise)
+      .mockRejectedValueOnce(new TypeError("offline"));
+    toggle(h, "removed");
+    h.liveToken.current += 1;
+    const reopened = you({ reactionId: "r-reopened" });
+    h.ctx.setReactions([reopened]);
+    toggle(h, "removed");
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    expect(h.reactions).toEqual([reopened]);
+  });
+
+  it("suppresses an optimistic setter queued before the thread changes", () => {
+    const h = harness([peer], { deferSetters: true });
+    bridgeMock.setChatReaction.mockReturnValue(deferred<undefined>().promise);
+    toggle(h, "added");
+    h.liveToken.current += 1;
+    h.flush();
+    expect(h.reactions).toEqual([peer]);
+  });
+
+  it("adopts only its own cell from the listing, so another cell's pending write survives", async () => {
+    const h = harness();
+    bridgeMock.setChatReaction.mockResolvedValue(undefined);
+    const listings = controlled<Listing>(bridgeMock.listChatReactions);
+    toggle(h, "added", { messageId: "m1", emoji: "👍" });
+    toggle(h, "added", { messageId: "m2", emoji: "🎉" });
+    await waitFor(() => expect(listings).toHaveLength(2));
+
+    // The second cell's listing was read before the first cell's write
+    // landed, so it does not carry that write.
+    const party = you({ reactionId: "r-party", messageId: "m2", emoji: "🎉" });
+    listings[1]!.resolve(listing([party]));
+    await waitFor(() => expect(h.reactions).toContainEqual(party));
+    expect(h.mineOn("👍", "m1")).toBe(true);
+
+    const thumbs = you({ reactionId: "r-thumbs" });
+    listings[0]!.resolve(listing([thumbs, party]));
+    await waitFor(() => expect(h.reactions).toContainEqual(thumbs));
+    expect(h.reactions).toEqual([thumbs, party]);
+    expect(h.onError).not.toHaveBeenCalled();
+  });
+
+  it("sends overlapping toggles on one cell in order and reconciles once", async () => {
+    const h = harness();
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    bridgeMock.listChatReactions.mockResolvedValue(listing([peer]));
+
+    // Toggle add then remove: the user's latest intent is "removed".
+    toggle(h, "added");
+    toggle(h, "removed");
     expect(h.mineOn("👍")).toBe(false);
 
-    // Both toggles reach their reconcile fetch.
-    await waitFor(() => expect(resolvers).toHaveLength(2));
-    const addRecord: ChatReactionRecord = {
-      reactionId: "r1",
-      messageId: "m1",
-      threadId: "thread-1",
-      emoji: "👍",
-      authorId: "you@x",
-      authorKind: "human",
-      authorDisplayName: "you@x",
-    };
-    // The stale (first, add) reconcile lands last — the ordering guard must drop
-    // it so it can't revive the reaction the newer remove already cleared.
-    resolvers[1]?.({ reactions: [], viewerAuthorId: "you@x" });
-    resolvers[0]?.({ reactions: [addRecord], viewerAuthorId: "you@x" });
-    await tick();
+    // The remove waits for the add, so the server settles them in this order.
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledOnce();
+    writes[0]!.resolve(undefined);
+    await waitFor(() => expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.setChatReaction).toHaveBeenLastCalledWith(
+      expect.objectContaining({ state: "removed" }),
+    );
+    expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
 
-    // Final state reflects the latest toggle (removed), not the late add reconcile.
-    expect(h.mineOn("👍")).toBe(false);
+    writes[1]!.resolve(undefined);
+    await waitFor(() => expect(h.reactions).toEqual([peer]));
+    expect(bridgeMock.listChatReactions).toHaveBeenCalledOnce();
+    expect(h.onError).not.toHaveBeenCalled();
+  });
+
+  it("drops a listing answered after a newer toggle on its cell", async () => {
+    const h = harness();
+    bridgeMock.setChatReaction.mockResolvedValue(undefined);
+    const listings = controlled<Listing>(bridgeMock.listChatReactions);
+    toggle(h, "added");
+    await waitFor(() => expect(listings).toHaveLength(1));
+    // No write is in flight, so the remove goes out at once.
+    toggle(h, "removed");
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(listings).toHaveLength(2));
+    // The add's listing lands after the remove: it must not revive the row.
+    listings[0]!.resolve(listing([you()]));
+    await listings[0]!.promise;
+    expect(h.reactions).toEqual([]);
+    listings[1]!.resolve(listing([]));
+    await listings[1]!.promise;
     expect(h.reactions).toEqual([]);
     expect(h.onError).not.toHaveBeenCalled();
+  });
+
+  it("names the viewer from the canonical listing, never from the write result", async () => {
+    const h = harness();
+    bridgeMock.setChatReaction.mockResolvedValue({
+      reaction: { ...you({ authorId: "legacy-alias" }), state: "added" },
+      viewerAuthorId: "legacy-alias",
+    });
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [you({ authorId: "you@normalized" })],
+      viewerAuthorId: "you@normalized",
+    });
+    toggle(h, "added");
+    await waitFor(() => expect(h.viewerAuthorId).toBe("you@normalized"));
+    expect(h.reactions).toEqual([you({ authorId: "you@normalized" })]);
+  });
+
+  it("suppresses a stale rejection's repaint and error after the thread changes", async () => {
+    const h = harness();
+    const write = deferred<never>();
+    bridgeMock.setChatReaction.mockReturnValue(write.promise);
+    toggle(h, "added");
+    h.liveToken.current += 1;
+    write.reject(new TypeError("offline"));
+    await write.promise.catch(() => undefined);
+    // The helper's own rejection handler ran before ours. Nothing repainted,
+    // nothing reported: the caller that changed the thread owns the state now.
+    expect(h.mineOn("👍")).toBe(true);
+    expect(h.onError).not.toHaveBeenCalled();
+  });
+
+  it("leaves state alone when the thread changes before a queued rollback runs", async () => {
+    const h = harness([], { deferSetters: true });
+    bridgeMock.setChatReaction.mockRejectedValue(new TypeError("offline"));
+    toggle(h, "added");
+    h.flush();
+    expect(h.mineOn("👍")).toBe(true);
+    // The rejection arrives while the thread is live, so the rollback setter
+    // is queued. The thread then changes before React runs it.
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    h.liveToken.current += 1;
+    h.flush();
+    expect(h.mineOn("👍")).toBe(true);
   });
 });

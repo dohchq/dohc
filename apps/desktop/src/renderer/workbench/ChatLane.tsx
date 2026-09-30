@@ -11,7 +11,7 @@ import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { extractChatFileReferences } from "./chatFileMentions";
-import { ChatMessageList, runReactionToggle, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
+import { ChatMessageList, runReactionToggle, type ChatMessageListHandle, type ChatReactionControls, type PendingReactionCell } from "./chatMessages";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { DecisionStatus } from "./ChatPosts";
 import { ComposerNotice } from "./ChatsControls";
@@ -61,7 +61,7 @@ export function ChatLane(props: {
   const loadSequence = useRef(0);
   const onThreadRead = useRef(props.onThreadRead);
   onThreadRead.current = props.onThreadRead;
-  const reactionSeq = useRef(new Map<string, number>());
+  const pendingReactions = useRef(new Map<string, PendingReactionCell>());
   const listRef = useRef<ChatMessageListHandle | null>(null);
   const paintedRevision = useRef<PaintedLane | null>(null);
   const { workspaceId, onError } = props;
@@ -151,7 +151,7 @@ export function ChatLane(props: {
     setViewerAuthorId("");
     setFirstUnreadMessageId(null);
     setAtEnd(true);
-    reactionSeq.current.clear();
+    pendingReactions.current.clear();
     paintedRevision.current = null;
     setLoading(true);
     return () => { token.current += 1; };
@@ -277,7 +277,7 @@ export function ChatLane(props: {
               threadId,
               viewerAuthorId,
               liveToken: token,
-              reactionSeq,
+              pendingReactions,
               setReactions,
               setViewerAuthorId,
               onError,
