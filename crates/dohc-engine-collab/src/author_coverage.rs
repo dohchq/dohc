@@ -7,9 +7,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const MAX_INTERVAL_AUTHORS: usize = 64;
-pub const SETTLE_AUTHOR_THRESHOLD: usize = 60;
-pub const MAX_AUTHOR_ENTRY_BYTES: usize = 1_024;
+pub use dohc_engine_domain::MAX_AUTHOR_ENTRY_BYTES;
+
+/// A settlement moment names every author of its interval.
+pub const MAX_INTERVAL_AUTHORS: usize = dohc_engine_domain::MAX_MOMENT_AUTHORS;
+pub const SETTLE_AUTHOR_THRESHOLD: usize = MAX_INTERVAL_AUTHORS - 4;
 
 fn sql(error: rusqlite::Error) -> CollabError {
     StorageError::persist_public(error).into()
@@ -96,11 +98,15 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
         .map_err(sql)?;
     let mut authors = Authors::default();
     authors.union_json(&pending)?;
+    // Admission caps distinct identities, so this returns at most
+    // MAX_INTERVAL_AUTHORS rows from the retained rows above the boundary.
     let mut stmt = conn
-        .prepare(
-            "SELECT actor_origin_id, actor_kind, on_behalf_of, chain_depth FROM ydoc_updates \
+        .prepare_cached(
+            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth) FROM ydoc_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
-         AND seq>COALESCE(?4,-1) AND seq<=?5 AND is_seed=0 ORDER BY seq",
+         AND seq>COALESCE(?4,-1) AND seq<=?5 AND is_seed=0 \
+         AND actor_kind IN ('agent','automation') AND actor_origin_id IS NOT NULL \
+         GROUP BY actor_kind, on_behalf_of, actor_origin_id",
         )
         .map_err(sql)?;
     let rows = stmt
@@ -124,9 +130,6 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
         .map_err(sql)?;
     for row in rows {
         let (actor, kind, on_behalf_of, depth) = row.map_err(sql)?;
-        if kind.as_deref() == Some("human") {
-            continue;
-        }
         let attribution = kind
             .as_deref()
             .and_then(ChangeActorKind::parse)
@@ -205,30 +208,25 @@ pub fn check_admission_in(
         .keys()
         .next()
         .ok_or_else(|| corrupt("attribution has no identity"))?;
-    let (known, count, unresolved): (bool, i64, bool) = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ydoc_author_identities a WHERE a.workspace_id=?1 \
-         AND a.version_id=?2 AND a.object_id=?3 AND a.identity=?4), \
-         (SELECT COUNT(*) FROM ydoc_author_identities a WHERE a.workspace_id=?1 \
-         AND a.version_id=?2 AND a.object_id=?3), settle_prior_update_seq IS NOT NULL \
-         FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            params![key.workspace_id, key.version_id, key.object_id, identity],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(sql)?;
-    if !known && count >= MAX_INTERVAL_AUTHORS as i64 {
+    let covered = reserved_in(conn, key)?;
+    let known = covered.0.contains_key(identity);
+    if !known && covered.len() >= MAX_INTERVAL_AUTHORS {
         return Err(CollabError::AuthorCapacity);
     }
-    Ok(!unresolved && count + i64::from(!known) >= SETTLE_AUTHOR_THRESHOLD as i64)
+    Ok(
+        covered.len() + usize::from(!known) >= SETTLE_AUTHOR_THRESHOLD
+            && !unresolved_in(conn, key)?,
+    )
 }
 
-/// Rebuild identities after retained raw rows have been removed.
-pub fn refresh_identities_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
-    conn.execute("DELETE FROM ydoc_author_identities WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id,key.version_id,key.object_id]).map_err(sql)?;
-    conn.execute("INSERT OR IGNORE INTO ydoc_author_identities SELECT * FROM ydoc_covered_identities WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id,key.version_id,key.object_id]).map_err(sql)?;
-    Ok(())
+fn unresolved_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabError> {
+    conn.query_row(
+        "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .map_err(sql)
 }
 
 /// Consume the current interval with its boundary, reserving a materialization attempt if needed.
@@ -237,11 +235,7 @@ pub fn advance_in(
     key: &DocKey,
     reserve_attempt: bool,
 ) -> Result<(), CollabError> {
-    let unresolved: bool = conn.query_row(
-        "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
-    ).map_err(sql)?;
-    if unresolved {
+    if unresolved_in(conn, key)? {
         return Err(CollabError::UnsettledClose);
     }
     conn.execute(

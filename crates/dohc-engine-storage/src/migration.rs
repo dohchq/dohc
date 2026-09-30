@@ -2691,89 +2691,6 @@ ALTER TABLE ydoc_docs ADD COLUMN settle_prior_update_seq INTEGER
 UPDATE moments SET author_json = json_array(json(author_json))
     WHERE author_json IS NOT NULL AND json_valid(author_json)
       AND json_type(author_json) = 'object';
-CREATE TABLE ydoc_author_identities (
-    workspace_id TEXT NOT NULL,
-    version_id TEXT NOT NULL,
-    object_id TEXT NOT NULL,
-    identity TEXT NOT NULL,
-    PRIMARY KEY (workspace_id, version_id, object_id, identity),
-    FOREIGN KEY (workspace_id, version_id, object_id)
-        REFERENCES ydoc_docs(workspace_id, version_id, object_id) ON DELETE CASCADE
-) STRICT;
-CREATE INDEX ydoc_updates_author_identity ON ydoc_updates
-    (workspace_id, version_id, object_id, actor_kind, on_behalf_of, actor_origin_id, seq)
-    WHERE is_seed=0;
-CREATE VIEW ydoc_covered_identities AS
-    SELECT d.workspace_id,d.version_id,d.object_id,
-        json_array(json_extract(a.value,'$.kind'),json_extract(a.value,'$.onBehalfOf'),
-            COALESCE(json_extract(a.value,'$.agentId'),json_extract(a.value,'$.automationId'),
-                     json_extract(a.value,'$.humanId'))) AS identity
-    FROM ydoc_docs d,json_each(d.pending_authors_json) a
-    UNION
-    SELECT d.workspace_id,d.version_id,d.object_id,
-        json_array(u.actor_kind,u.on_behalf_of,u.actor_origin_id)
-    FROM ydoc_docs d JOIN ydoc_updates u USING(workspace_id,version_id,object_id)
-    WHERE u.seq>COALESCE(d.settled_update_seq,-1) AND u.is_seed=0
-        AND u.actor_kind IN ('agent','automation') AND u.actor_origin_id IS NOT NULL
-    UNION
-    SELECT d.workspace_id,d.version_id,d.object_id,
-        json_array(json_extract(a.value,'$.kind'),json_extract(a.value,'$.onBehalfOf'),
-            COALESCE(json_extract(a.value,'$.agentId'),json_extract(a.value,'$.automationId'),
-                     json_extract(a.value,'$.humanId')))
-    FROM ydoc_docs d JOIN moments m ON m.workspace_id=d.workspace_id
-        AND m.version_id=d.version_id AND m.object_id=d.object_id AND m.moment_order=d.settle_seq,
-        json_each(m.author_json) a
-    WHERE d.settle_prior_update_seq IS NOT NULL;
-INSERT INTO ydoc_author_identities SELECT * FROM ydoc_covered_identities;
-CREATE TRIGGER ydoc_author_doc_insert AFTER INSERT ON ydoc_docs
-BEGIN
-    INSERT OR IGNORE INTO ydoc_author_identities SELECT * FROM ydoc_covered_identities
-        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
-END;
-CREATE TRIGGER ydoc_author_doc_update AFTER UPDATE OF pending_authors_json,settled_update_seq,
-    settle_prior_update_seq,settle_seq ON ydoc_docs
-WHEN OLD.pending_authors_json IS NOT NEW.pending_authors_json
-    OR OLD.settled_update_seq IS NOT NEW.settled_update_seq
-    OR OLD.settle_prior_update_seq IS NOT NEW.settle_prior_update_seq
-    OR OLD.settle_seq IS NOT NEW.settle_seq
-BEGIN
-    DELETE FROM ydoc_author_identities WHERE workspace_id=NEW.workspace_id
-        AND version_id=NEW.version_id AND object_id=NEW.object_id;
-    INSERT OR IGNORE INTO ydoc_author_identities SELECT * FROM ydoc_covered_identities
-        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
-END;
-CREATE TRIGGER ydoc_author_update_insert AFTER INSERT ON ydoc_updates
-WHEN NEW.is_seed=0 AND NEW.actor_kind IN ('agent','automation') AND NEW.actor_origin_id IS NOT NULL
-BEGIN
-    INSERT OR IGNORE INTO ydoc_author_identities SELECT NEW.workspace_id,NEW.version_id,NEW.object_id,
-        json_array(NEW.actor_kind,NEW.on_behalf_of,NEW.actor_origin_id)
-    FROM ydoc_docs d WHERE d.workspace_id=NEW.workspace_id AND d.version_id=NEW.version_id
-        AND d.object_id=NEW.object_id AND NEW.seq>COALESCE(d.settled_update_seq,-1);
-END;
-CREATE TRIGGER ydoc_author_seed_update AFTER UPDATE OF is_seed ON ydoc_updates
-WHEN OLD.is_seed<>NEW.is_seed
-BEGIN
-    DELETE FROM ydoc_author_identities WHERE workspace_id=NEW.workspace_id
-        AND version_id=NEW.version_id AND object_id=NEW.object_id;
-    INSERT OR IGNORE INTO ydoc_author_identities SELECT * FROM ydoc_covered_identities
-        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
-END;
-CREATE TRIGGER ydoc_author_update_delete AFTER DELETE ON ydoc_updates
-WHEN OLD.is_seed=0 AND OLD.actor_kind IN ('agent','automation') AND OLD.actor_origin_id IS NOT NULL
-    AND EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=OLD.workspace_id
-        AND d.version_id=OLD.version_id AND d.object_id=OLD.object_id
-        AND d.pending_authors_json='[]' AND d.settle_prior_update_seq IS NULL)
-BEGIN
-    DELETE FROM ydoc_author_identities WHERE workspace_id=OLD.workspace_id
-        AND version_id=OLD.version_id AND object_id=OLD.object_id
-        AND identity=json_array(OLD.actor_kind,OLD.on_behalf_of,OLD.actor_origin_id)
-        AND NOT EXISTS(SELECT 1 FROM ydoc_updates u JOIN ydoc_docs d
-            USING(workspace_id,version_id,object_id)
-            WHERE u.workspace_id=OLD.workspace_id AND u.version_id=OLD.version_id AND u.object_id=OLD.object_id
-                AND u.actor_kind=OLD.actor_kind AND u.on_behalf_of IS OLD.on_behalf_of
-                AND u.actor_origin_id=OLD.actor_origin_id AND u.is_seed=0
-                AND u.seq>COALESCE(d.settled_update_seq,-1));
-END;
 ";
 
 /// The frozen, ordered list of migrations this build knows. No build may
@@ -3297,7 +3214,7 @@ mod tests {
             ),
             (
                 "v2-ydoc-live-edit-authors",
-                "3334298ffb9285bdcc5278632fa8f7ea94cc5e152b59032cae4ba306394e106c",
+                "33ec61e3e1f37d0908e6e5eac829e9e5a749e2834e4ce42729716fc32fe5d938",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

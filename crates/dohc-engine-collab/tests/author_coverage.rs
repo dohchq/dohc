@@ -18,18 +18,18 @@ fn author(scope: &str) -> ChangeAttribution {
     }
 }
 
-fn indexed_count(
+fn covered_count(
     store: &dohc_engine_storage::EngineStore,
     key: &dohc_engine_collab::DocKey,
-) -> i64 {
-    store.read_with(|conn| conn.query_row(
-        "SELECT COUNT(*) FROM ydoc_author_identities WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        rusqlite::params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
-    ).map_err(dohc_engine_storage::StorageError::persist_public)).expect("indexed identities")
+) -> usize {
+    store
+        .read_with(|conn| author_coverage::reserved_in(conn, key))
+        .expect("covered identities")
+        .len()
 }
 
 #[test]
-fn declared_seed_is_not_an_author_and_index_tracks_fold_reset_and_consumption() {
+fn declared_seed_is_not_an_author_and_coverage_tracks_fold_reset_and_consumption() {
     let mut ts = fresh_store("seed-author-index");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1);
@@ -55,7 +55,7 @@ fn declared_seed_is_not_an_author_and_index_tracks_fold_reset_and_consumption() 
         |_, _, _| Ok(()),
     )
     .expect("declared seed");
-    assert_eq!(indexed_count(&ts.store, &key), 0);
+    assert_eq!(covered_count(&ts.store, &key), 0);
     assert!(ts
         .store
         .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
@@ -70,9 +70,9 @@ fn declared_seed_is_not_an_author_and_index_tracks_fold_reset_and_consumption() 
         "person",
     )
     .expect("edit");
-    assert_eq!(indexed_count(&ts.store, &key), 1);
+    assert_eq!(covered_count(&ts.store, &key), 1);
     maybe_compact(&mut ts.store, &key, 0, &NoFaults, 2).expect("fold");
-    assert_eq!(indexed_count(&ts.store, &key), 1);
+    assert_eq!(covered_count(&ts.store, &key), 1);
     let authors = ts
         .store
         .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
@@ -83,7 +83,7 @@ fn declared_seed_is_not_an_author_and_index_tracks_fold_reset_and_consumption() 
     ts.store
         .write_with(&NoFaults, |tx| author_coverage::advance_in(tx, &key, false))
         .expect("consume");
-    assert_eq!(indexed_count(&ts.store, &key), 0);
+    assert_eq!(covered_count(&ts.store, &key), 0);
     record(
         &mut ts.store,
         &mut ts.cache,
@@ -93,7 +93,7 @@ fn declared_seed_is_not_an_author_and_index_tracks_fold_reset_and_consumption() 
         "person",
     )
     .expect("next interval");
-    assert_eq!(indexed_count(&ts.store, &key), 1);
+    assert_eq!(covered_count(&ts.store, &key), 1);
     ts.store
         .write_with(&NoFaults, |tx| {
             author_coverage::reset_in(tx, &key, false)?;
@@ -105,7 +105,7 @@ fn declared_seed_is_not_an_author_and_index_tracks_fold_reset_and_consumption() 
             Ok::<_, CollabError>(())
         })
         .expect("discard lineage");
-    assert_eq!(indexed_count(&ts.store, &key), 0);
+    assert_eq!(covered_count(&ts.store, &key), 0);
 }
 
 fn record(
@@ -463,16 +463,16 @@ fn already_admitted_remote_authors_never_wedge_coverage_readers() {
 }
 
 #[test]
-fn remote_admission_enforces_size_capacity_and_scoped_identity_encoding() {
+fn remote_admission_enforces_capacity_and_scoped_identity_encoding() {
     let mut ts = fresh_store("remote-author-admission");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1);
-    let doc = Ydoc::wire();
+    let peer = Ydoc::wire();
     record_local_update(
         &mut ts.store,
         &mut ts.cache,
         &key,
-        &doc.plaintext_insert(0, "s"),
+        &peer.plaintext_insert(0, "s"),
         LocalAppend {
             marker: Some(MarkerCreation {
                 path: Some("authors.txt"),
@@ -486,26 +486,6 @@ fn remote_admission_enforces_size_capacity_and_scoped_identity_encoding() {
         |_, _, _| Ok(()),
     )
     .expect("marker");
-    let oversized = author(&"\u{0001}".repeat(512));
-    let refused = dohc_engine_collab::apply_remote_update(
-        &mut ts.store,
-        &mut ts.cache,
-        &key,
-        &dohc_engine_collab::RemoteUpdate {
-            origin_id: "peer".into(),
-            origin_seq: 1,
-            bytes: doc.plaintext_insert(1, "x"),
-        },
-        Some("agent"),
-        Some(&oversized),
-        &NoFaults,
-        2,
-    );
-    assert!(matches!(refused, Err(CollabError::AuthorEntryTooLarge)));
-    let peer = dohc_engine_collab::load_persisted(&ts.store, &key)
-        .expect("load")
-        .expect("doc")
-        .doc;
     let scope = "scope-雪-\u{0001}";
     let limit = author_coverage::MAX_INTERVAL_AUTHORS as u32;
     for index in 0..limit {
@@ -568,7 +548,85 @@ fn remote_admission_enforces_size_capacity_and_scoped_identity_encoding() {
 }
 
 #[test]
-fn retained_rebase_refresh_discards_identities_from_covered_raw_rows() {
+fn every_author_field_at_its_maximum_fits_one_entry() {
+    let mut ts = fresh_store("maximum-author-fields");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(0, "s"),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some("authors.txt"),
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::Replicated,
+            }),
+            ..Default::default()
+        },
+        &NoFaults,
+        1,
+        |_, _, _| Ok(()),
+    )
+    .expect("marker");
+    // A remote actor id and every onBehalfOf may hold control characters,
+    // the longest escape JSON writes.
+    let longest = "\u{0001}".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES);
+    let kinds = [
+        ChangeActorKind::Agent,
+        ChangeActorKind::Automation,
+        ChangeActorKind::Human,
+    ];
+    for (index, actor_kind) in kinds.into_iter().enumerate() {
+        let attribution = ChangeAttribution {
+            actor_kind,
+            on_behalf_of: Some(longest.clone()),
+            depth: if actor_kind == ChangeActorKind::Human {
+                0
+            } else {
+                dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH
+            },
+            run: None,
+        };
+        dohc_engine_collab::apply_remote_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &dohc_engine_collab::RemoteUpdate {
+                origin_id: "peer".into(),
+                origin_seq: index as i64 + 2,
+                bytes: doc.plaintext_insert(index as u32 + 1, "x"),
+            },
+            Some(&longest),
+            Some(&attribution),
+            &NoFaults,
+            2,
+        )
+        .expect("maximum author admitted");
+        let entry = dohc_engine_domain::moment_author_json(Some(&longest), Some(&attribution))
+            .expect("entry");
+        author_coverage::Authors::default()
+            .union_json(&entry)
+            .expect("maximum entry fits");
+    }
+    let authors = ts
+        .store
+        .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+        .expect("coverage");
+    assert_eq!(authors.len(), 2, "human edits are not settlement authors");
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_str(&authors.json()).expect("author list");
+    assert_eq!(
+        entries.iter().map(|entry| entry.to_string().len()).max(),
+        Some(author_coverage::MAX_AUTHOR_ENTRY_BYTES),
+        "the automation entry is the derived worst case"
+    );
+}
+
+#[test]
+fn retained_rebase_keeps_only_uncovered_identities() {
     let mut ts = fresh_store("retained-rebase-identities");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1);
@@ -602,14 +660,14 @@ fn retained_rebase_refresh_discards_identities_from_covered_raw_rows() {
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id],
             )
             .map_err(dohc_engine_storage::StorageError::persist_public)?;
-            author_coverage::refresh_identities_in(tx, &key)
+            Ok::<_, CollabError>(())
         })
         .expect("retained rebase");
-    ts.store.read_with(|conn| {
-        let count:i64=conn.query_row("SELECT COUNT(*) FROM ydoc_author_identities WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            rusqlite::params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(dohc_engine_storage::StorageError::persist_public)?;
-        assert_eq!(count,author_coverage::reserved_in(conn,&key)?.len() as i64);
-        assert_eq!(count,1);
-        Ok::<_,CollabError>(())
-    }).expect("index matches retained interval");
+    let covered = ts
+        .store
+        .read_with(|conn| author_coverage::reserved_in(conn, &key))
+        .expect("covered identities");
+    assert_eq!(covered.len(), 1);
+    assert!(covered.json().contains("bob"));
+    assert!(!covered.json().contains("alice"));
 }

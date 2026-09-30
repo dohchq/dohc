@@ -20,7 +20,8 @@ pub enum CollabError {
     #[error("configured Y.Doc byte budget exceeded")]
     ConfiguredByteBudgetExceeded,
 
-    #[error("dohc could not save this edit because too many authors have unsaved edits.")]
+    /// The RPC sends only the code; the desktop names the file in its own sentence.
+    #[error("Y.Doc author capacity reached")]
     AuthorCapacity,
 
     #[error("This edit's author details exceed the supported size. Shorten the author details and try again.")]

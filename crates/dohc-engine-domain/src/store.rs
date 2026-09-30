@@ -69,10 +69,21 @@ use sha2::{Digest, Sha256};
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
-// 64 entries of 1 KiB plus array punctuation use 65,601 bytes. Even when
-// author_json is escaped as a JSON string, 131,204 bytes leave 130,940 bytes
-// for the other moment.append fields inside its 256 KiB payload cap.
-pub const MAX_AUTHOR_JSON_BYTES: usize = 64 * 1_024 + 65;
+// The longest live author entry is an automation whose automationId and
+// onBehalfOf each hold 512 control characters, which JSON writes as `\u00XX`
+// (6 bytes each), at a two-digit depth: the 66-byte skeleton below plus
+// 2 * 6 * 512 = 6,210 bytes.
+pub const MAX_AUTHOR_ENTRY_BYTES: usize =
+    r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len()
+        + 2 * 6 * MAX_AUTHOR_FIELD_BYTES;
+const _: () = assert!(crate::MAX_CHANGE_ATTRIBUTION_DEPTH < 100);
+// 16 entries plus array punctuation use 16 * 6,211 + 1 = 99,377 bytes.
+// moment.append carries `authors` as a JSON value, so it is not escaped
+// again, and 162,767 bytes of its 256 KiB payload cap remain for other fields.
+// Even a second string encoding is at most 2 * 99,377 + 2 = 198,756 bytes,
+// leaving 63,388 bytes below that cap.
+pub const MAX_MOMENT_AUTHORS: usize = 16;
+pub const MAX_AUTHOR_JSON_BYTES: usize = MAX_MOMENT_AUTHORS * (MAX_AUTHOR_ENTRY_BYTES + 1) + 1;
 
 /// The in-band content cap every capped read binds into its SQL and every
 /// RPC references — one definition, so the query guard and the wire

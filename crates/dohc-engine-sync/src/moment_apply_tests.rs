@@ -54,23 +54,29 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
     crate::adopt_join_identity(&mut store, "ws", "source", "epoch", "stream", 1, &NoFaults)
         .expect("identity");
     let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+    let field = dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
     for index in 0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS {
-        let mut entry = json!({"kind":"agent","agentId":format!("author-{index}"),"name":""});
-        let padding =
-            dohc_engine_collab::author_coverage::MAX_AUTHOR_ENTRY_BYTES - entry.to_string().len();
-        // Escaped quotes exercise the full encoded entry budget.
-        entry["name"] = Value::from(format!(
-            "{}{}",
-            "\"".repeat(padding / 2),
-            "x".repeat(padding % 2)
-        ));
-        assert_eq!(
-            entry.to_string().len(),
-            dohc_engine_collab::author_coverage::MAX_AUTHOR_ENTRY_BYTES
+        // Distinct control-character ids at full length take the longest escape.
+        let id = format!(
+            "{}\u{2}{}",
+            "\u{1}".repeat(index),
+            "\u{1}".repeat(field - index - 1)
         );
-        authors
-            .union_json(&json!([entry]).to_string())
-            .expect("bounded entry");
+        let entry = dohc_engine_domain::moment_author_json(
+            Some(&id),
+            Some(&dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Automation,
+                on_behalf_of: Some("\u{1}".repeat(field)),
+                depth: dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH,
+                run: None,
+            }),
+        )
+        .expect("entry");
+        assert_eq!(
+            entry.len(),
+            dohc_engine_collab::author_coverage::MAX_AUTHOR_ENTRY_BYTES + 2
+        );
+        authors.union_json(&entry).expect("bounded entry");
     }
     let author_json = authors.json();
     assert_eq!(author_json.len(), dohc_engine_domain::MAX_AUTHOR_JSON_BYTES);
