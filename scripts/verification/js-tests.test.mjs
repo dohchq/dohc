@@ -14,6 +14,10 @@ test("desktop scripts need an explicit boolean selection", async () => {
   await assert.rejects(testWorkspace({desktopScripts: "false"}), /Desktop script selection must be a boolean/);
 });
 
+test("proof selection cannot silently omit a malformed continuation", async () => {
+  await assert.rejects(testWorkspace({runProofs: true}), /Proof selection must provide a function/);
+});
+
 function deferred() {
   let resolve, reject;
   const promise = new Promise((pass, fail) => { resolve = pass; reject = fail; });
@@ -83,6 +87,119 @@ test("file selection reaches Vitest and refuses unsupported or empty scopes", ()
   assert.throws(() => testPlan(packages, {missing: files}), /No selected test package/);
   assert.throws(() => testPlan([{name: "fixture", manifest: {scripts: {test: "node tests.js"}}}], {fixture: files}), /Invalid test file selection/);
 });
+
+for (const scenario of ["success", "proof-failure", "package-failure", "repository-failure", "cancel"]) {
+  test(`proofs reuse the repository lane and settle every reader: ${scenario}`, () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-proof-lane-"));
+    const put = (path, value) => {
+      mkdirSync(dirname(join(root, path)), {recursive: true});
+      writeFileSync(join(root, path), value);
+    };
+    try {
+      put("package.json", '{"type":"module"}');
+      for (const name of ["desktop", "share-web", "workspace-api", "new-package", "tail"]) {
+        put(`packages/${name}/package.json`, JSON.stringify({name: `@dohc/${name}`, scripts: {
+          test: "vitest run", ...(name === "desktop" ? {"test:unit": "vitest run"} : {}),
+        }}));
+      }
+      for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs"]) {
+        put(`scripts/verification/${file}`, readFileSync(new URL(file, import.meta.url)));
+      }
+      put("scripts/verification/process.mjs", `
+        import assert from 'node:assert/strict';
+        import {resolve} from 'node:path';
+        export const repoRoot=resolve(import.meta.dirname,'../..');
+        export const pnpm=args=>['pnpm',args];
+        const controls=new Map(), arrivals=new Map();
+        function control(map,name){if(!map.has(name))map.set(name,Promise.withResolvers());return map.get(name);}
+        export const when=name=>control(arrivals,name).promise;
+        export const release=(name,error)=>error?control(controls,name).reject(error):control(controls,name).resolve();
+        export const started=new Set(), active=new Set();
+        export let peak=0, packagePeak=0, databasePeak=0;
+        const database=new Set(['@dohc/share-web','@dohc/workspace-api']);
+        export async function run(_command,args){
+          if(args.includes('list'))return {stdout:JSON.stringify(['desktop','share-web','workspace-api','new-package','tail']
+            .map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
+          const name=args[0]==='proof'?args[1]:args[0]==='run'?'repository':args[3].startsWith('test:scripts:')?args[3]:args[1];
+          assert.ok(!started.has(name),'command ran twice: '+name);
+          started.add(name);active.add(name);
+          peak=Math.max(peak,active.size);
+          const packages=[...active].filter(name=>name.startsWith('@dohc/'));
+          packagePeak=Math.max(packagePeak,packages.length);
+          const databases=[...active].filter(name=>database.has(name));
+          databasePeak=Math.max(databasePeak,databases.length);
+          assert.ok(active.size<=3);assert.ok(packages.length<=2);assert.ok(databases.length<=1);
+          if(name.startsWith('proof-'))assert.equal(databases.length,0,'proof raced a package database consumer');
+          if(databases.length)assert.ok(![...active].some(name=>name.startsWith('proof-')));
+          control(arrivals,name).resolve();
+          try{await control(controls,name).promise;return {stdout:''};}
+          finally{active.delete(name);}
+        }
+      `);
+      put("driver.mjs", `
+        import assert from 'node:assert/strict';
+        import {readFileSync} from 'node:fs';
+        import {setImmediate} from 'node:timers/promises';
+        import {testWorkspace} from './scripts/verification/js-tests.mjs';
+        import {run,when,release,started,active,peak,packagePeak,databasePeak} from './scripts/verification/process.mjs';
+        const scenario=${JSON.stringify(scenario)}, rust=Promise.withResolvers(), barrier=Promise.withResolvers();
+        const proofs=['proof-native','proof-browser','proof-accounts','proof-desktop'];
+        let barrierEntered=false, settled=false;
+        const work=testWorkspace({prepared:true,output:'evidence',beforeDesktopScripts:async()=>{barrierEntered=true;barrier.resolve();await rust.promise;},
+          runProofs:async checkpoint=>{for(const name of proofs){await checkpoint();await run('fixture',['proof',name]);}}});
+        const outcome=work.then(()=>{settled=true;return null;},error=>{settled=true;return error;});
+        const drain=async()=>{for(let i=0;i<6;i++)await setImmediate();};
+        await when('@dohc/desktop');await when('@dohc/share-web');await when('repository');
+        if(scenario==='repository-failure'){
+          release('repository',Error('repository blocker'));await drain();
+          assert.equal(settled,false);assert.equal(started.has('test:scripts:isolated'),false);
+          release('@dohc/desktop');release('@dohc/share-web');
+          assert.match((await outcome).message,/repository blocker/);
+          assert.equal(started.has('@dohc/workspace-api'),false);
+        }else{
+          release('repository');await when('test:scripts:isolated');release('test:scripts:isolated');await drain();
+          assert.equal(started.has('proof-native'),false,'proof started before all database packages');
+          release('@dohc/share-web');await when('@dohc/workspace-api');await drain();
+          assert.equal(started.has('proof-native'),false);
+          release('@dohc/workspace-api');await when('proof-native');await when('@dohc/new-package');
+          assert.ok(active.has('@dohc/desktop')&&active.has('@dohc/new-package'));
+          assert.equal(peak,3);assert.equal(packagePeak,2);assert.equal(databasePeak,1);
+          if(scenario==='success'){
+            release('@dohc/new-package');await when('@dohc/tail');release('@dohc/tail');release('@dohc/desktop');await drain();
+            assert.equal(barrierEntered,false,'packaging barrier started with a proof reader active');
+            for(const name of proofs){await when(name);release(name);}
+            await barrier.promise;assert.equal(started.has('test:scripts:runtime'),false);
+            rust.resolve();await when('test:scripts:runtime');release('test:scripts:runtime');
+            assert.equal(await outcome,null);
+            assert.ok(proofs.every(name=>started.has(name)));
+          }else{
+            if(scenario==='package-failure'){
+              release('@dohc/new-package',Error('package blocker'));await drain();
+              assert.equal(settled,false,'active proof was not settled');release('proof-native');
+            }else{
+              if(scenario==='cancel')process.emit('SIGTERM');
+              release('proof-native',scenario==='proof-failure'?Error('proof blocker'):undefined);await drain();
+              assert.equal(settled,false,'active package readers were not settled');release('@dohc/new-package');
+            }
+            release('@dohc/desktop');const error=await outcome;
+            assert.match(error.message,scenario==='package-failure'?/package blocker/:scenario==='proof-failure'?/proof blocker/:/interrupted/);
+            assert.equal(started.has('@dohc/tail'),false,'queued package started after failure');
+            assert.equal(started.has('proof-browser'),false,'proof command admitted after failure');
+            assert.equal(barrierEntered,false);
+          }
+        }
+        assert.equal(active.size,0);
+        const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
+        assert.equal(report.verdict,scenario==='success'?'PASS':'FAIL');
+        assert.equal(report.concurrency,2);assert.equal(report.proofs,true);
+        assert.equal(started.has('test:scripts:runtime'),scenario==='success');
+      `);
+      const result = spawnSync(process.execPath, ["driver.mjs"], {cwd: root, encoding: "utf8", timeout: 20_000});
+      assert.equal(result.error, undefined, result.stderr);
+      assert.equal(result.status, scenario === "cancel" ? 143 : 0, result.stderr);
+    } finally { rmSync(root, {recursive: true, force: true}); }
+  });
+}
 
 for (const {name, cancel = false, selectedPackages, testFiles, repository = "full", desktopScripts = true, missingFile = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false, scriptOverlap = false, scriptFail = false, scriptCancel = false} of [
   {name:"isolated scripts reuse the repository lane while packages continue, before runtime packaging",overlap:true,scriptOverlap:true},

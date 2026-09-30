@@ -64,6 +64,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ["pr", null, "rust"], ["pr", null, "rust-and-js"], ["pr", "rust", "rust"], ["pr", "js", "js"], ["pr", null, "js"],
     ["pr", null, "rust-source"], ["pr", null, "rust-cancel"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"],
+    ["pr", "js", "native-skipped"], ["pr", "js", "accounts-cancelled"], ["pr", "js", "desktop-cancelled"],
     ["pr", null, null, "packages/fixture/src/index.ts"],
     ["pr", null, null, "packages/mcp/src/index.ts"],
     ["pr", null, null, "services/workspace-api/src/index.ts"],
@@ -271,7 +272,8 @@ test("verification selects packages and proofs and prepares before parallel jobs
             assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
             const output=options.env.DOHC_SERVICE_HOST_PROOF_OUTPUT;
             mkdirSync(join(output,'self-host-live-fixture'),{recursive:true});
-            writeFileSync(join(output,'vitest.json'),JSON.stringify({success:true,numTotalTests:1,numPassedTests:1,numFailedTests:0,numPendingTests:0,numTodoTests:0}));
+            const skipped=process.env.FIXTURE_FAULT==='native-skipped';
+            writeFileSync(join(output,'vitest.json'),JSON.stringify({success:true,numTotalTests:1,numPassedTests:skipped?0:1,numFailedTests:0,numPendingTests:skipped?1:0,numTodoTests:0}));
             writeFileSync(join(output,'self-host-live-fixture/result.json'),JSON.stringify({verdict:'PASS',executable:stagedEnginePath,sha256:hashFile(stagedEnginePath),results:{ownerDelivery:{restartPreservedDraft:true,concurrentOwnerAndNamedEditsMerged:true,idleOwnerPulledRecipientEdit:true},settledAndPublished:{ordinaryOwnerReadMatched:true}}}));
             return {stdout:''};
           }
@@ -289,7 +291,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
             if(args.includes('services/workspace-api/playwright.config.ts')) {
               assert.ok(${accounts},'Unselected account proof');
               assert.ok(pr);
-              writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:2,unexpected:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='accounts-skipped'?1:0}}));
+              writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:2,unexpected:process.env.FIXTURE_FAULT==='accounts-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='accounts-skipped'?1:0}}));
               return {stdout:''};
             }
             assert.ok(${desktop},'Unselected desktop proof');
@@ -297,7 +299,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
             const titles=['@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[])];
             writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
-              stats:{expected:pr?2:1,unexpected:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'?1:0},
+              stats:{expected:pr?2:1,unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'?1:0},
               suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:'passed'}]}]}))}]}],
             }));
             return {stdout:''};
@@ -363,6 +365,9 @@ test("verification selects packages and proofs and prepares before parallel jobs
           "rust-verdict": /fixture Rust verdict rejected/,
           "cargo-version": /Install cargo-deny .* to match the workflow/,
           "accounts-skipped": /Account browser verification did not complete without failures or skips/,
+          "native-skipped": /self-host native proof did not complete its mandatory test/,
+          "accounts-cancelled": /Account browser verification did not complete without failures or skips/,
+          "desktop-cancelled": /Desktop verification did not complete a passing test run/,
           "desktop-skipped": /A mandatory desktop smoke test was skipped/,
           "onboarding-missing": /did not pass both persistence and self-host onboarding proofs/,
         };
@@ -415,6 +420,8 @@ test("verification selects packages and proofs and prepares before parallel jobs
           assert.equal(report.javascript.desktopScripts, desktopScripts);
           assert.deepEqual(report.javascript.testFiles, siteOnly ? {"@dohc/desktop": siteFiles} : {});
           const tests=JSON.parse(readFileSync(report.jsTests,"utf8"));
+          assert.equal(tests.proofs, nativeProof || browser);
+          assert.equal(tests.steps.filter(step => step.name === "proofs").length, nativeProof || browser ? 1 : 0);
           assert.equal(tests.desktopScripts, desktopScripts);
           assert.deepEqual(tests.selectedPackages,selected);
           assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),selected);
