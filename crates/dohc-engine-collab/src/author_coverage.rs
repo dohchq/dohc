@@ -3,7 +3,7 @@
 use crate::{CollabError, DocKey};
 use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
 use dohc_engine_storage::StorageError;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -204,15 +204,17 @@ pub fn check_admission_in(
         .keys()
         .next()
         .ok_or_else(|| corrupt("attribution has no identity"))?;
-    let (known, count, unresolved): (bool, usize, bool) = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ydoc_author_identities a WHERE a.workspace_id=?1 \
+    let (known, count, unresolved): (bool, usize, bool) = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_author_identities a WHERE a.workspace_id=?1 \
          AND a.version_id=?2 AND a.object_id=?3 AND a.identity=?4), \
          (SELECT COUNT(*) FROM ydoc_author_identities a WHERE a.workspace_id=?1 \
          AND a.version_id=?2 AND a.object_id=?3), settle_prior_update_seq IS NOT NULL \
          FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id, key.version_id, key.object_id, identity],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).map_err(sql)?;
+            params![key.workspace_id, key.version_id, key.object_id, identity],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(sql)?;
     if !known && count >= MAX_INTERVAL_AUTHORS {
         return Err(CollabError::AuthorCapacity);
     }
@@ -220,14 +222,40 @@ pub fn check_admission_in(
 }
 
 /// Consume the current interval with its boundary, reserving a materialization attempt if needed.
-pub fn advance_in(conn: &Connection, key: &DocKey, reserve_attempt: bool) -> Result<(), CollabError> {
+pub fn advance_in(
+    conn: &Connection,
+    key: &DocKey,
+    reserve_attempt: bool,
+) -> Result<(), CollabError> {
     conn.execute(
         "UPDATE ydoc_docs SET settled_update_seq=head_update_seq,pending_authors_json='[]', \
          settle_prior_update_seq=CASE WHEN ?4 THEN COALESCE(settled_update_seq,-1) ELSE NULL END \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id, key.version_id, key.object_id, reserve_attempt],
-    ).map_err(sql)?;
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            reserve_attempt
+        ],
+    )
+    .map_err(sql)?;
     Ok(())
+}
+
+/// Reserve coverage only when this moment has a disk materialization job.
+pub fn advance_moment_in(
+    conn: &Connection,
+    key: &DocKey,
+    moment_id: &str,
+) -> Result<(), CollabError> {
+    let pending: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE job_id='ydoc-mat_'||?1)",
+            [moment_id],
+            |row| row.get(0),
+        )
+        .map_err(sql)?;
+    advance_in(conn, key, pending)
 }
 
 /// Restore coverage once. The moment stays in history, even when its file write failed.

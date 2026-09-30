@@ -700,3 +700,68 @@ async fn file_rewrite_discards_pending_authors_of_replaced_content() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_version_projection_without_a_job_remains_resolved() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("actor").actor;
+    let state = open(&actor).await;
+    let doc = Ydoc::wire();
+    append(&actor, &state.key, doc.plaintext_insert(0, "a"), "alice").await;
+    supervisor.close(&db).expect("stop");
+    drop(actor);
+    let mut store = EngineStore::open(&db, 2).expect("store");
+    store.write_with(&NoFaults,|tx| {
+        tx.execute("INSERT INTO versions(workspace_id,version_id,name,kind,created_at_ms) VALUES (?1,'other','Other','named',1)",[WS]).map_err(StorageError::persist_public)?;
+        tx.execute("INSERT INTO active_versions(workspace_id,version_id) VALUES (?1,'other') ON CONFLICT(workspace_id) DO UPDATE SET version_id='other'",[WS]).map_err(StorageError::persist_public)?;
+        Ok::<_,StorageError>(())
+    }).expect("deactivate main");
+    store
+        .write_with(&NoFaults, |tx| {
+            project_and_write_in_tx(
+                tx,
+                &state.key,
+                FILE,
+                &doc,
+                ContentKind::Plaintext,
+                "remote",
+                1,
+                3,
+                None,
+            )
+        })
+        .expect("inactive projection");
+    assert_eq!(
+        coverage(&store, &state.key).3,
+        None,
+        "no disk job means no unresolved attempt"
+    );
+    store
+        .write_with(&NoFaults, |tx| {
+            project_and_write_in_tx(
+                tx,
+                &state.key,
+                FILE,
+                &doc,
+                ContentKind::Plaintext,
+                "remote",
+                1,
+                4,
+                None,
+            )
+        })
+        .expect("inactive retry");
+    store
+        .read_with(|conn| {
+            let jobs: i64 = conn
+                .query_row("SELECT COUNT(*) FROM materialization_jobs", [], |row| {
+                    row.get(0)
+                })
+                .map_err(StorageError::persist_public)?;
+            assert_eq!(jobs, 0);
+            Ok::<_, StorageError>(())
+        })
+        .expect("no disk materialization");
+}

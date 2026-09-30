@@ -2870,7 +2870,7 @@ pub(super) fn ydoc_settle_on_store(
         // Coverage and the unresolved attempt commit with the moment and job.
         // The projection was taken from the doc at the current head, and this
         // actor is the store's only writer, so the head has not moved since.
-        dohc_engine_collab::author_coverage::advance_in(tx, key, true)
+        dohc_engine_collab::author_coverage::advance_moment_in(tx, key, &result.moment.moment_id)
             .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
         tx.execute(
             "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
