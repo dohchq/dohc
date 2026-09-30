@@ -192,7 +192,7 @@ Changes the workspace, so a shared view does not offer it.
 - `overwrite`: `boolean`
 - `summary`: `string`
 
-Returns `{ ok: true, fromPath, toPath, withoutHistory? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists the files the move left with no History row, because they are over the size History keeps. On failure: `{ ok: false, reason, path?, deleted? }`. `deleted` lists files History records as deleted after the failed move: replaced destination files it could not restore, and moved files it could not put at either path. They stay in the workspace's .dohc/trash.
+Returns `{ ok: true, fromPath, toPath, withoutHistory? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists the files the move left with no History row, because they are over the size History keeps. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory? }`. `withoutHistory` also names oversized files after rollback; the reason says where retained files stay. `deleted` lists files History records as deleted after the failed move: replaced destination files it could not restore, and moved files it could not put at either path. They stay in the workspace's .dohc/trash.
 
 ### `dohc_delete_path`
 

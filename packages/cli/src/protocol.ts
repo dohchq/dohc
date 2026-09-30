@@ -1128,6 +1128,7 @@ const fileMoveResultSchema = z.discriminatedUnion("ok", [
   }).strict(),
   z.object({
     ok: z.literal(false), reason: z.string(), path: z.string().optional(), deleted: z.array(z.string()).optional(),
+    withoutHistory: z.array(z.string()).optional(),
   }).strict(),
 ]);
 

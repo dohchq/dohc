@@ -296,10 +296,14 @@ export async function moveWorkspacePathAs<Workspace extends PathChangeWorkspace,
             const undone = await undoMove(rootPath, engine, change, from.relative, fromFiles, recorded, rebase, source, target,
               join(rootPath, destBase), caseOnly, input);
             gone = [...undone.destDeleted, ...undone.sourceDeleted];
+            const rowless = [...new Set([
+              ...undone.rowlessSource.map(({ path, atTarget }) => atTarget ? shownTo(rebase(path)) : from.path + path.slice(from.relative.length)),
+              ...(change.staged === undefined ? [] : destFiles.filter(file => !destRecorded.has(file)).map(file => to.path + file.slice(destBase.length))),
+            ])];
             const deleted = [...undone.destDeleted.map(path => to.path + path.slice(destBase.length)),
               ...undone.sourceDeleted.map(path => from.path + path.slice(from.relative.length))];
             return { failed: { ok: false as const, path: input.fromPath, reason: `${reason(error, failed)}${undone.notes}`,
-              ...(deleted.length ? { deleted } : {}) } };
+              ...(deleted.length ? { deleted } : {}), ...(rowless.length ? { withoutHistory: rowless } : {}) } };
           }
           gone = [from.relative, ...(dest ? [destBase] : [])];
           return { done: { fromPath: from.path, toPath: to.path, withoutHistory }, ...(change.staged !== undefined ? { trash: change.staged } : {}) };
@@ -337,7 +341,7 @@ interface MoveProgress {
 async function undoMove(rootPath: string, engine: AuthoredPathChanges, change: MoveProgress, fromBase: string,
   fromFiles: readonly string[], recorded: ReadonlySet<string>, rebase: (path: string) => string, source: string,
   target: string, destPlace: string, caseOnly: boolean, input: { fromPath: string; toPath: string },
-): Promise<{ notes: string; destDeleted: string[]; sourceDeleted: string[] }> {
+): Promise<{ notes: string; destDeleted: string[]; sourceDeleted: string[]; rowlessSource: { path: string; atTarget: boolean }[] }> {
   const notes: string[] = [];
   const sourceDeleted: string[] = [];
   const recordOrNote = (work: Promise<unknown>, note: string) => work.then(() => true, () => { notes.push(note); return false; });
@@ -390,7 +394,10 @@ async function undoMove(rootPath: string, engine: AuthoredPathChanges, change: M
         `History still shows ${path} as deleted. The file is back at ${path}, and capture records it again without an author.`);
     }
   }
-  return { notes: notes.length ? ` ${notes.join(" ")}` : " dohc put everything back.", destDeleted, sourceDeleted };
+  const rowlessSource = change.moved || change.sourceStaged !== undefined
+    ? fromFiles.filter(file => !recorded.has(file)).map(path => ({ path, atTarget: where(path) === "target" }))
+    : [];
+  return { notes: notes.length ? ` ${notes.join(" ")}` : " dohc put everything back.", destDeleted, sourceDeleted, rowlessSource };
 }
 
 export async function deleteWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(

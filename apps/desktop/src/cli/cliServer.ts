@@ -2661,7 +2661,7 @@ async function dispatchWorkspace(
         if (request.verb === "fileMove") {
           const result = await context.movePath({ fromPath: request.args.fromPath, toPath: request.args.toPath,
             ...(request.args.overwrite !== undefined ? { overwrite: request.args.overwrite } : {}) }, origin, request.args.requestId);
-          if (result.ok || result.deleted?.length) await notifyWrite(options, context);
+          if (result.ok || result.deleted?.length || result.withoutHistory?.length) await notifyWrite(options, context);
           return result;
         }
         const result = await context.deletePath(request.args.path, origin, request.args.requestId);

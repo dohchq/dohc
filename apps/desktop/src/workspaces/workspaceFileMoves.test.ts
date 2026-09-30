@@ -502,6 +502,24 @@ describe("agent moves and deletes", () => {
     await f.engine().stop();
   });
 
+  it.each([false, true])("reports oversized files after move rollback with an occupied source: %s", async occupied => {
+    const f = await fixture({ beforeRequest: async request => {
+      if (request.method === VERSIONED_METHOD.textRename && JSON.stringify(request.params).includes('"dir/a.txt"')) {
+        if (occupied) await write(f.rootPath, "dir/large.png", "new content");
+        throw new Error("History refused the rename.");
+      }
+    } });
+    await write(f.rootPath, "dir/a.txt", "a");
+    await write(f.rootPath, "dir/large.png", new Uint8Array(6 * 1024 * 1024));
+    await f.start();
+    const result = await f.move("dir", "moved");
+    const retained = (occupied ? "moved" : "dir") + "/large.png";
+    expect(result).toMatchObject({ ok: false, withoutHistory: [retained] });
+    expect((await readFile(join(f.rootPath, retained))).byteLength).toBe(6 * 1024 * 1024);
+    if (occupied) expect(await readFile(join(f.rootPath, "dir/large.png"), "utf8")).toBe("new content");
+    await f.engine().stop();
+  });
+
   it("reports rowless files already removed when a folder delete stops", async () => {
     const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textDelete, "dir/1.txt") });
     await write(f.rootPath, "dir/0.png", new Uint8Array(6 * 1024 * 1024));
