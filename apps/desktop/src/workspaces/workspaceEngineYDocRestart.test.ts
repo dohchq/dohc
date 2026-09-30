@@ -1,10 +1,13 @@
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import * as nodeFs from "node:fs";
+import { Readable } from "node:stream";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import {
   DaemonRefusalError,
+  openEngineYdocProviderSession,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   YdocReleasedWithSettleFailureError,
@@ -35,6 +38,11 @@ import {
   noteSettleOutcome,
   noteSettleStart,
 } from "./engineYDocSaveSeq";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, createReadStream: vi.fn(actual.createReadStream) };
+});
 
 // The close-retry ladders run at test speed: a rung is 20 ms and the cap
 // 100 ms. A test that prices the production ladder passes its own
@@ -3115,6 +3123,168 @@ it("an explicit settle against a down daemon fails fast instead of blocking", as
   // is a transport failure, which is not what this test is about.
   await capture.stop().catch(() => undefined);
 });
+
+it.each(["failure", "success"] as const)(
+  "pairs an old generation's delayed %s with its own save sequence",
+  async (oldOutcome) => {
+    const rootPath = await createTestScratch("dohc-ydoc-settle-identity-");
+    const workspace = "ydoc-settle-identity";
+    const versioned = new VersionedLoopbackEngine();
+    versioned.seedTextFile({ workspace, path: "note.md", text: "" });
+    await writeFile(join(rootPath, "note.md"), "", "utf8");
+    const engines = [new YdocLoopbackEngine(), new YdocLoopbackEngine()];
+    for (const engine of engines) {
+      engine.seedFile({
+        workspace,
+        versionId: "main",
+        path: "note.md",
+        content: "",
+        contentKind: "plaintext",
+      });
+    }
+    const oldResponse = Promise.withResolvers<void>();
+    const oldReached = Promise.withResolvers<void>();
+    const newResponse = Promise.withResolvers<void>();
+    const newReached = Promise.withResolvers<void>();
+    let restarted = false;
+    const transportError = () =>
+      Object.assign(new Error("daemon restarted"), { code: "transport-error" });
+    let currentClient: EngineDaemonClient & EngineTransport;
+    const clients = engines.map((engine, index): EngineDaemonClient & EngineTransport => ({
+      close: () => undefined,
+      helloAck: engine.helloAck,
+      onBlob: (handler) => engine.onBlob(handler),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === "workspace.open") return { id: request.id, result: { workspace } };
+        if (request.method === "workspace.close") return { id: request.id, result: { closed: true } };
+        if (!request.method.startsWith("ydoc.")) {
+          return daemonCaptureLifecycleAnswer(request) ?? await versioned.sendRequest(request);
+        }
+        if (index === 0 && restarted) {
+          currentClient = clients[1]!;
+          throw transportError();
+        }
+        if (request.method === "ydoc.settle" && index === 1) {
+          newReached.resolve();
+          await newResponse.promise;
+        }
+        const response = await engine.sendRequest(request);
+        if (request.method === "ydoc.settle") {
+          const result = response.result as { content: string };
+          await writeFile(join(rootPath, "note.md"), result.content, "utf8");
+        }
+        return response;
+      },
+    }));
+    currentClient = clients[0]!;
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => currentClient },
+      { sleep: async () => undefined },
+    );
+    const timers: Array<{
+      generation: number;
+      fire: () => void;
+      cancelled: boolean;
+    }> = [];
+    let generation = 0;
+    const saveSeq = createEngineYDocSaveSeqState();
+    const reported: Array<{ state: string; seq: number }> = [];
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: workspace,
+      rootPath,
+      rustEngineSessions: sessions,
+      openRustYDocProviderSession: (options) => {
+        const opened = ++generation;
+        return openEngineYdocProviderSession({
+          ...options,
+          scheduleSettle: (fire) => {
+            const timer = { generation: opened, fire, cancelled: false };
+            timers.push(timer);
+            return () => { timer.cancelled = true; };
+          },
+        });
+      },
+      onError: () => undefined,
+    });
+    const session = await capture.openYDocSession({
+      path: "note.md",
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state, token) => {
+        const seq = state === "settling"
+          ? noteSettleStart(saveSeq, token)
+          : noteSettleOutcome(saveSeq, token);
+        reported.push({ state, seq });
+      },
+    });
+    const rendererDoc = new Y.Doc();
+    Y.applyUpdate(rendererDoc, session.initialUpdate);
+    let rendererSeq = 0;
+    const type = (text: string) => {
+      const before = Y.encodeStateVector(rendererDoc);
+      const body = rendererDoc.getText("plainText");
+      body.insert(body.length, text);
+      const seq = ++rendererSeq;
+      session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before), () =>
+        noteLocalEdit(saveSeq, seq),
+      );
+    };
+    const { createReadStream } = await vi.importActual<typeof import("node:fs")>("node:fs");
+    let oldReadHeld = false;
+    const readSpy = vi.mocked(nodeFs.createReadStream).mockImplementation((path, options) => {
+      if (String(path) !== join(rootPath, "note.md") || oldReadHeld) {
+        return createReadStream(path, options);
+      }
+      oldReadHeld = true;
+      // The old settle RPC succeeds before the daemon restarts. Its capture
+      // callback is still awaiting the file check, which can be slow or fail.
+      return Readable.from((async function* () {
+        oldReached.resolve();
+        await oldResponse.promise;
+        if (oldOutcome === "failure") {
+          throw Object.assign(new Error("file check refused"), { code: "EACCES" });
+        }
+        yield* createReadStream(path, options);
+      })()) as ReturnType<typeof createReadStream>;
+    });
+    try {
+      type("old edit");
+      await expect.poll(() => timers.find((timer) => timer.generation === 1 && !timer.cancelled)).toBeDefined();
+      timers.find((timer) => timer.generation === 1 && !timer.cancelled)!.fire();
+      await oldReached.promise;
+      expect(reported).toEqual([{ state: "settling", seq: 1 }]);
+
+      restarted = true;
+      type(" plus new edit");
+      await expect.poll(() => timers.find((timer) => timer.generation === 2 && !timer.cancelled)).toBeDefined();
+      timers.find((timer) => timer.generation === 2 && !timer.cancelled)!.fire();
+      await newReached.promise;
+      expect(reported.at(-1)).toEqual({ state: "settling", seq: 2 });
+
+      oldResponse.resolve();
+      await expect.poll(() => reported.filter((entry) => entry.state !== "settling").length).toBe(1);
+      expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit");
+      expect.soft(reported.at(-1)).toEqual({
+        state: oldOutcome === "success" ? "saved" : "error",
+        seq: 1,
+      });
+
+      newResponse.resolve();
+      await expect.poll(() => reported.filter((entry) => entry.state !== "settling").length).toBe(2);
+      expect(reported.at(-1)).toEqual({ state: "saved", seq: rendererSeq });
+      expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit plus new edit");
+      expect(saveSeq.inFlight.size).toBe(0);
+    } finally {
+      oldResponse.resolve();
+      newResponse.resolve();
+      readSpy.mockImplementation(createReadStream);
+      await session.close({ settle: false });
+      await capture.stop();
+      rendererDoc.destroy();
+    }
+  },
+);
 
 // The revive path's ordering. An edit typed after the daemon
 // died is replayed into the replacement generation, and that replay arms a
