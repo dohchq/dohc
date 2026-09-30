@@ -4,9 +4,15 @@ import { join } from "node:path";
 // taskkill /T walks the tree and a forced exit still has to reach the parent.
 // Beside other work both took over 2 s, so this bound only stops a hang.
 const FORCED_CLEANUP_TIMEOUT_MS = 10_000;
+export const PROCESS_EXIT_ALLOWANCE_MS = 1_000;
 
 function isRunning(child) {
   return child.exitCode === null && child.signalCode === null;
+}
+
+function assertCleanExit(child) {
+  if (child.exitCode !== null && child.exitCode !== 0) throw new Error(`Electron exited with status ${child.exitCode}.`);
+  if (child.signalCode !== null) throw new Error(`Electron exited with signal ${child.signalCode}.`);
 }
 
 async function waitForExit(child, timeoutMs) {
@@ -50,7 +56,10 @@ async function terminateOwnedProcess(child) {
  * @param {import("node:child_process").ChildProcess} child
  */
 export async function closeElectronApplication(app, child, graceMs = 5000) {
-  if (!isRunning(child)) return;
+  if (!isRunning(child)) {
+    assertCleanExit(child);
+    return;
+  }
   let timer;
   let closeFailure;
   try {
@@ -64,10 +73,17 @@ export async function closeElectronApplication(app, child, graceMs = 5000) {
     closeFailure = error;
   } finally {
     clearTimeout(timer);
-    if (!closeFailure) await waitForExit(child, 1000);
-    await terminateOwnedProcess(child);
+    if (!closeFailure && !(await waitForExit(child, PROCESS_EXIT_ALLOWANCE_MS))) {
+      closeFailure = new Error(`Electron close completed while process ${child.pid} was still running; forced cleanup was required.`);
+    }
+    try { await terminateOwnedProcess(child); }
+    catch (error) {
+      if (closeFailure) console.error("Electron forced cleanup failed:", error);
+      else closeFailure = error;
+    }
   }
   if (closeFailure) throw closeFailure;
+  assertCleanExit(child);
 }
 
 async function captureBeforeClose(action, timeoutMs) {

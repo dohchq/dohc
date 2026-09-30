@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronLaunchArgs } from "../../src/testing/electronLaunchArgs";
 import { closeElectronApplication } from "../../../../scripts/verification/close-electron.mjs";
+import { DESKTOP_CLOSE_GRACE_MS } from "../../../../scripts/verification/desktop-close-policy.mjs";
 import type { TempWorkspace } from "./workspace";
 
 export interface DesktopLogEntry {
@@ -172,7 +173,7 @@ export async function launchDesktopApp(input: {
           }
         } finally {
           try {
-            await closeElectronApplication(launchedApp, launchedProcess);
+            await closeElectronApplication(launchedApp, launchedProcess, DESKTOP_CLOSE_GRACE_MS);
           } finally {
             launchedProcess.stdout?.off("data", onStdoutData);
             launchedProcess.stderr?.off("data", onStderrData);
@@ -187,7 +188,7 @@ export async function launchDesktopApp(input: {
       await writeFile(join(artifacts, "launch-error.txt"), String(error)).catch(() => undefined);
     } finally {
       try {
-        if (app && processHandle) await closeElectronApplication(app, processHandle);
+        if (app && processHandle) await closeElectronApplication(app, processHandle, DESKTOP_CLOSE_GRACE_MS);
       } catch (cleanupError) {
         console.error("Failed-launch cleanup:", cleanupError);
       } finally {

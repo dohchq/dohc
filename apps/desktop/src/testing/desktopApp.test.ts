@@ -12,7 +12,10 @@ vi.mock("@playwright/test", () => ({ test: { info: () => ({
 }) } }));
 vi.mock("playwright", () => ({ _electron: { launch: fixture.launch } }));
 vi.mock("../../../../scripts/verification/build.mjs", () => ({ assertPrepared: () => ({ version: 1 }) }));
-vi.mock("../../../../scripts/verification/close-electron.mjs", () => ({ closeElectronApplication: fixture.close }));
+vi.mock("../../../../scripts/verification/close-electron.mjs", async (original) => ({
+  ...await original<typeof import("../../../../scripts/verification/close-electron.mjs")>(),
+  closeElectronApplication: fixture.close,
+}));
 vi.mock("node:fs", async (original) => ({
   ...await original<typeof import("node:fs")>(),
   existsSync: () => true,
@@ -31,7 +34,8 @@ test("desktop evidence decodes split UTF-8 independently on stdout and stderr", 
   const stderr = new PassThrough();
   const child = { pid: 42, stdout, stderr };
   const page = { on: vi.fn(), isClosed: () => true };
-  fixture.launch.mockResolvedValue({ process: () => child, firstWindow: async () => page, evaluate: async () => 43 });
+  const app = { process: () => child, firstWindow: async () => page, evaluate: async () => 43 };
+  fixture.launch.mockResolvedValue(app);
   fixture.close.mockImplementation(async () => {
     stdout.end(); stderr.end();
     await Promise.all([finished(stdout), finished(stderr)]);
@@ -46,10 +50,24 @@ test("desktop evidence decodes split UTF-8 independently on stdout and stderr", 
   // A truncated final code point must also flush at stream end.
   stderr.write(Buffer.from([0xe2]));
   await desktop.close();
+  expect(fixture.close).toHaveBeenCalledExactlyOnceWith(app, child, 10_000);
   const persisted = readFileSync(join(fixture.launch.mock.calls[0][0].artifactsDir, "desktop.jsonl"), "utf8")
     .trim().split("\n").map((line) => JSON.parse(line));
   for (const entries of [desktop.logs, persisted]) {
     expect(entries.filter((entry) => entry.level === "stdout").map((entry) => entry.text).join("")).toBe(output);
     expect(entries.filter((entry) => entry.level === "stderr").map((entry) => entry.text).join("")).toBe(error + "\ufffd");
   }
+});
+
+test("failed desktop launch gives cleanup the renderer and teardown budget", async () => {
+  fixture.output = mkdtempSync(join(tmpdir(), "dohc-desktop-launch-failure-"));
+  const child = { pid: 42 };
+  const failure = new Error("first window failed");
+  const app = { process: () => child, firstWindow: async () => { throw failure; } };
+  fixture.launch.mockResolvedValue(app);
+  fixture.close.mockResolvedValue(undefined);
+  await expect(launchDesktopApp({ workspace: {
+    baseDir: fixture.output, homeDir: fixture.output, rootPath: fixture.output,
+  } })).rejects.toBe(failure);
+  expect(fixture.close).toHaveBeenCalledExactlyOnceWith(app, child, 10_000);
 });

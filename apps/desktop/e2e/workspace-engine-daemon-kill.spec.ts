@@ -326,7 +326,7 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await desktop.page.keyboard.insertText(` ${crashed}`);
     await expect.poll(() => ydocUpdateCount(temp.rootPath)).toBeGreaterThan(journaled);
     await hardKillAppTree(appPid);
-    await desktop.close();
+    await expect(desktop.close()).rejects.toThrow(/Electron exited with (status|signal)/);
     desktop = null;
     expect(await diskText()).not.toContain(crashed);
     // Reopen the document by hand after relaunch, so its marks can be watched

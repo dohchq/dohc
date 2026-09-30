@@ -12,8 +12,8 @@ import * as orphanedDraftsModule from "./orphanedDrafts";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { getSharedLocalDocument } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
+import { lineSpanInText } from "./FileInspector.text-fixture";
 import {
-  lineSpanInText,
   textEditorContent,
   codeEditorView,
   codeEditorText,

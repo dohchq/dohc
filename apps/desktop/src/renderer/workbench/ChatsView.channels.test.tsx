@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatChannelRecord } from "../../ipc/bridgeContract";
@@ -7,13 +7,44 @@ import {
   ChatsView,
   channel,
   bridgeMock,
+  message,
+  thread,
   shareListing,
   emitCloudSessionChanged,
   renderView,
   navigatorView,
 } from "./ChatsView.testHarness";
+import { deferred } from "../../testing/deferred";
 
 describe("ChatsView channels", () => {
+  it("keeps reaction writes ordered when switching away from and remounting a chat lane", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ type: "both" })], fileThreads: [] });
+    bridgeMock.listChannelThreads.mockImplementation(async (input) => ({ threads: input.lane === "chat" ? [thread()] : [] }));
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    const writes: ReturnType<typeof deferred<void>>[] = [];
+    bridgeMock.setChatReaction.mockImplementation(() => {
+      const write = deferred<void>();
+      writes.push(write);
+      return write.promise;
+    });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-channel"));
+    fireEvent.click(await screen.findByTestId("chats-group-lane-chat"));
+    const quick = (await screen.findAllByTestId("chats-lane-quick-reaction"))[0]!;
+    fireEvent.click(quick);
+    fireEvent.click(quick);
+    expect(writes).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("chats-group-lane-posts"));
+    expect(screen.queryByTestId("chats-lane-quick-reaction")).toBeNull();
+    fireEvent.click(screen.getByTestId("chats-group-lane-chat"));
+    fireEvent.click((await screen.findAllByTestId("chats-lane-quick-reaction"))[0]!);
+    expect(writes).toHaveLength(1);
+    await act(async () => writes[0]!.resolve());
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(bridgeMock.setChatReaction.mock.lastCall?.[0].state).toBe("added");
+    await act(async () => writes[1]!.resolve());
+  });
+
   it("lists channels with unread badges and thread counts", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [

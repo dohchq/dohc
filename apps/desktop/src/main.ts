@@ -409,9 +409,7 @@ import {
 } from "./agents/liveAgentDispatchStore";
 import { createOwnedSiteCatalog } from "./workspaces/ownedSiteCatalog";
 import { createAppPreviewExecution } from "./workspaces/appPreviewExecution";
-import {
-  WILL_QUIT_BUDGET_MS,
-} from "./workspaces/siteRunner";
+import { resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
 import type { SitePreviewResultBody } from "./ipc/sitePreviewIpc";
 
@@ -4955,6 +4953,10 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   beforeQuit: (event) => { quitGuard.beforeQuit(event); },
   shutdown: {
     budgetMs: WILL_QUIT_BUDGET_MS,
+    deadlineExitCode: resolveShutdownDeadlineExitCode({
+      desktopTest: process.env.DOHC_DESKTOP_TEST,
+      isPackaged: app.isPackaged,
+    }),
     beginEngineShutdown: () => {
       automationScheduler.dispose();
       desktopEngine.sessions?.beginShutdown();

@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { prepare, assertPrepared } from "./build.mjs";
 import { git, repoRoot } from "./process.mjs";
 import { closeDebugApplication } from "./close-electron.mjs";
+import { DESKTOP_CLOSE_GRACE_MS } from "./desktop-close-policy.mjs";
 
 async function evaluateDebugger(url, expression) {
   const socket = new WebSocket(url);
@@ -99,7 +100,7 @@ try {
 finally {
   stop?.();
   try {
-    if (app && processHandle) await closeDebugApplication(app, processHandle, directory);
+    if (app && processHandle) await closeDebugApplication(app, processHandle, directory, { closeTimeoutMs: DESKTOP_CLOSE_GRACE_MS });
   } catch (error) {
     console.error(error.message);
     logs.push({ source: "cleanup", text: String(error) });

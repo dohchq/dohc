@@ -10,8 +10,8 @@ const children: ChildProcess[] = [];
 const descendantPids: number[] = [];
 
 async function liveProcess(): Promise<ChildProcess> {
-  const child = spawn(process.execPath, ["-e", "console.log('ready');setInterval(() => {}, 1000)"], {
-    detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+  const child = spawn(process.execPath, ["-e", "process.on('message', () => process.exit(0));console.log('ready');setInterval(() => {}, 1000)"], {
+    detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
   children.push(child);
   await once(child.stdout!, "data");
@@ -62,7 +62,7 @@ test.skipIf(process.platform !== "win32")("failed close stops Windows launcher d
 
 test("a completed close waits for process exit without reporting a failure", async () => {
   const child = await liveProcess();
-  await closeElectronApplication({ close: async () => { child.kill(); await once(child, "exit"); } }, child);
+  await closeElectronApplication({ close: async () => { child.send("close"); await once(child, "exit"); } }, child);
   expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
   await closeElectronApplication({ close: async () => { throw new Error("already closed"); } }, child);
 });
@@ -86,7 +86,7 @@ test("debug shutdown still closes its process when window enumeration fails", as
   const failure = new Error("window enumeration failed");
   const app = {
     windows: () => { throw failure; },
-    close: async () => { child.kill(); await once(child, "exit"); },
+    close: async () => { child.send("close"); await once(child, "exit"); },
   };
   await expect(closeDebugApplication(app, child, "unused-output")).rejects.toBe(failure);
   expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
@@ -108,7 +108,7 @@ test.each([
         },
       })),
       context: () => ({ tracing: { stop: async () => {} } }),
-      close: async () => { child.kill(); await once(child, "exit"); },
+      close: async () => { child.send("close"); await once(child, "exit"); },
     };
     await closeDebugApplication(app, child, directory);
     expect(paths).toEqual(names.map((name) => join(directory, name)));
