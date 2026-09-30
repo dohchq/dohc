@@ -9,6 +9,9 @@ import { DatasetMigrationPreparation, DatasetRequest, DatasetResult } from "@doh
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
+import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+
+const compileFixture = createDatasetFixtureCompiler();
 
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -27,7 +30,7 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-migration-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, ...extra });
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...extra });
   hosts.push(host); return { host, workspaceRoot };
 }
 function fixture() {

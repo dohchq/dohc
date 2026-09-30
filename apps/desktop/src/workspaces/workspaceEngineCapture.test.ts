@@ -1556,6 +1556,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const root = await createTestScratch("dohc-engine-capture-");
     await write(root, "note.md", EDITOR_TEXT);
     const states: Array<{ state: string; token: number; authorCapacity?: boolean }> = [];
+    const events: string[] = [];
     const engine = capture(root, {
       openRustYDocProviderSession: async (options: EngineYdocProviderSessionOptions) =>
         ({
@@ -1579,7 +1580,10 @@ describe("workspaceEngineCapture batch capture", () => {
     const session = await engine.openYDocSession({
       path: "note.md",
       onRemoteUpdate: () => undefined,
-      onSaveState: (state, token, authorCapacity) => states.push({ state, token, authorCapacity }),
+      onSaveState: (state, token, event, authorCapacity) => {
+        states.push({ state, token, authorCapacity });
+        events.push(event);
+      },
     });
     await vi.waitFor(() => expect(states.some(({ state }) => state === "error")).toBe(true));
     await session.close({ settle: false });
@@ -1589,6 +1593,7 @@ describe("workspaceEngineCapture batch capture", () => {
       { state: "settling", token: 1, authorCapacity: undefined },
       { state: "error", token: 1, authorCapacity },
     ]);
+    expect(events).toEqual(["status", "start", "outcome"]);
   });
 
   it("keeps an edit made outside dohc when the open document's session closes", async () => {

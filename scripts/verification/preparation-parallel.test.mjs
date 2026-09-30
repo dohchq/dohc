@@ -10,7 +10,7 @@ for (const scenario of ["success", "engine-failure", "desktop-failure", "late-so
   test(`parallel preparation settles both builds before releasing ownership: ${scenario}`, () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-parallel-"));
     try {
-      createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+      createPrepareFixture(root, new URL("./build.mjs", import.meta.url), { commit: false });
       mkdirSync(join(root, "crates"));
       writeFileSync(join(root, "crates/engine.rs"), "original engine input");
       const adapter = join(root, "scripts/verification/process.mjs");

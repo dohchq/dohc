@@ -368,6 +368,8 @@ export type EngineYDocSaveState =
   | "file-locked"
   | "changed-on-disk";
 
+export type EngineYDocSaveEvent = "start" | "outcome" | "status";
+
 export interface WorkspaceEngineYDocCloseOptions {
   settle?: boolean;
   summary?: string;
@@ -553,8 +555,10 @@ export interface WorkspaceEngineCapture {
     // disk is therefore behind the editor. A failed settle used to reach
     // nothing at all — the doc kept reading "Saved" over a stale (or empty)
     // file, which is silent data loss.
-    // Tokens identify settles across daemon generations. Token 0 is the open.
-    onSaveState?: (state: EngineYDocSaveState, token: number, authorCapacity?: boolean) => void;
+    // Tokens identify settles across daemon generations. Lifecycle events are
+    // separate from visible state: a busy outcome still reports "settling".
+    // Opening and corrective status reports claim no edits.
+    onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
@@ -3754,10 +3758,11 @@ export function createWorkspaceEngineCapture(
         const reportSaveState = (
           state: EngineYDocSaveState,
           token: number,
+          event: EngineYDocSaveEvent,
           authorCapacity?: boolean,
         ): void => {
           try {
-            input.onSaveState?.(state, token, authorCapacity);
+            input.onSaveState?.(state, token, event, authorCapacity);
           } catch {
             // Observer boundary: a renderer-facing status hook must never
             // re-enter the session or wedge the settle chain.
@@ -3850,7 +3855,7 @@ export function createWorkspaceEngineCapture(
                 "the engine committed the settle but could not write the file (blocked target); the write is pending a retry",
               ),
             );
-            reportSaveState("error", takeSaveToken(token, generation));
+            reportSaveState("error", takeSaveToken(token, generation), "outcome");
             return;
           }
           // The engine just wrote this path's settled content to disk — the
@@ -3939,7 +3944,7 @@ export function createWorkspaceEngineCapture(
                 `the engine settled the document but dohc could not check the file: ${digest.reason}`,
               ),
             );
-            reportSaveState("error", takeSaveToken(token, generation));
+            reportSaveState("error", takeSaveToken(token, generation), "outcome");
             return;
           }
           if (digest.kind === "changed" || digest.sha256 !== result.sha256) {
@@ -3948,10 +3953,10 @@ export function createWorkspaceEngineCapture(
             // changed — it is an intent, and recreating the file would be the
             // same overwrite in reverse. The text stays in the CRDT and in
             // History either way.
-            reportSaveState("changed-on-disk", takeSaveToken(token, generation));
+            reportSaveState("changed-on-disk", takeSaveToken(token, generation), "outcome");
             return;
           }
-          reportSaveState("saved", takeSaveToken(token, generation));
+          reportSaveState("saved", takeSaveToken(token, generation), "outcome");
         };
         // Claim exactly what this settle can carry. The daemon serves one
         // session's commands in order, so an update already sent is in the
@@ -3962,7 +3967,7 @@ export function createWorkspaceEngineCapture(
           settleStartedAtMs.set(settleId(token, generation), now());
           const saveToken = ++saveStateTokens;
           settleSaveStateTokens.set(settleId(token, generation), saveToken);
-          reportSaveState("settling", saveToken);
+          reportSaveState("settling", saveToken, "start");
         };
         // The one place a background settle failure is observable. Log it with
         // the path and the wire error, and tell the editor the file on disk is
@@ -4003,6 +4008,7 @@ export function createWorkspaceEngineCapture(
           reportSaveState(
             settleFailureSaveState(error),
             saveToken,
+            "outcome",
             hasRefusalInCauseChain(error, isYdocAuthorCapacityRefusal),
           );
         };
@@ -4787,7 +4793,7 @@ export function createWorkspaceEngineCapture(
                 lastSettledSha !== null &&
                 (await fileDriftedFromSettled(lastSettledSha))
               ) {
-                reportSaveState("changed-on-disk", failedToken);
+                reportSaveState("changed-on-disk", failedToken, "status");
                 return;
               }
               throw error;
@@ -4970,7 +4976,7 @@ export function createWorkspaceEngineCapture(
         // before this open returns, so the editor reads Saving… from its
         // first frame until the file has the text.
         const settleOnOpen = (): void => {
-          reportSaveState("settling", 0);
+          reportSaveState("settling", 0, "status");
           const startsBefore = settleStarts;
           void (async () => {
             await options.openSettleGate?.();
@@ -4980,7 +4986,7 @@ export function createWorkspaceEngineCapture(
             // before it started (a removal under way, a closed session, a
             // failed revive) reports nothing, so close the "settling" above.
             if (settleStarts === startsBefore) {
-              reportSaveState(settleFailureSaveState(error), 0);
+              reportSaveState(settleFailureSaveState(error), 0, "status");
             }
           });
         };
@@ -5004,7 +5010,7 @@ export function createWorkspaceEngineCapture(
               // The retained Y.Doc text is not a History moment yet, so the
               // existing error state is the honest recovery surface. It carries
               // no settle token because this report did not come from a settle.
-              reportSaveState("error", 0);
+              reportSaveState("error", 0, "status");
             }
           } else if (unsettled) {
             settleOnOpen();
@@ -5017,7 +5023,7 @@ export function createWorkspaceEngineCapture(
           if (absentHeadDisk === "empty") {
             if (unsettled) settleOnOpen();
           } else {
-            reportSaveState("error", 0);
+            reportSaveState("error", 0, "status");
           }
         }
         return {

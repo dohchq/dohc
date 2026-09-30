@@ -199,7 +199,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
     await h.ipc.open(sender, openPayload);
-    h.capturedOpen()?.onSaveState?.("error", 1, true);
+    h.capturedOpen()?.onSaveState?.("error", 1, "outcome", true);
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
       payload: {sessionId: openPayload.sessionId, state: "error", seq: 0, authorCapacity: true},
@@ -406,12 +406,67 @@ describe("engine Y.Doc IPC adapter", () => {
         seq: 4,
       }),
     ).toEqual({ accepted: true });
-    h.capturedOpen()?.onSaveState?.("settling", 9);
-    h.capturedOpen()?.onSaveState?.("saved", 9);
+    h.capturedOpen()?.onSaveState?.("settling", 9, "start");
+    h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
     expect(sender.sent.slice(-2).map(({ payload }) => payload)).toEqual([
       { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
       { sessionId: openPayload.sessionId, state: "saved", seq: 4 },
     ]);
+  });
+
+  it("retires a busy outcome while keeping its original edit sequence", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.open(sender, openPayload);
+    const edit = (seq: number) => h.ipc.applyUpdate(sender, {
+      sessionId: openPayload.sessionId,
+      update: new Uint8Array([seq]),
+      lineageGeneration: 1,
+      seq,
+    });
+    edit(4);
+    h.capturedOpen()?.onSaveState?.("settling", 9, "start");
+    edit(5);
+    h.capturedOpen()?.onSaveState?.("settling", 9, "outcome");
+    // An already completed token claims nothing, even if reported again.
+    h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
+    h.capturedOpen()?.onSaveState?.("settling", 10, "start");
+    h.capturedOpen()?.onSaveState?.("saved", 10, "outcome");
+    expect(sender.sent.slice(-5).map(({ payload }) => payload)).toEqual([
+      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
+      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
+      { sessionId: openPayload.sessionId, state: "saved", seq: 0 },
+      { sessionId: openPayload.sessionId, state: "settling", seq: 5 },
+      { sessionId: openPayload.sessionId, state: "saved", seq: 5 },
+    ]);
+    await h.ipc.shutdown();
+  });
+
+  it("keeps opening and corrective status reports outside the edit ledger", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.open(sender, openPayload);
+    h.capturedOpen()?.onSaveState?.("settling", 0, "status");
+    h.ipc.applyUpdate(sender, {
+      sessionId: openPayload.sessionId,
+      update: new Uint8Array([1]),
+      lineageGeneration: 1,
+      seq: 4,
+    });
+    h.capturedOpen()?.onSaveState?.("settling", 9, "start");
+    h.capturedOpen()?.onSaveState?.("error", 9, "outcome");
+    h.capturedOpen()?.onSaveState?.("changed-on-disk", 9, "status");
+    h.capturedOpen()?.onSaveState?.("settling", 0, "status");
+    h.capturedOpen()?.onSaveState?.("error", 0, "status");
+    expect(sender.sent.slice(-6).map(({ payload }) => payload)).toEqual([
+      { sessionId: openPayload.sessionId, state: "settling", seq: 0 },
+      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
+      { sessionId: openPayload.sessionId, state: "error", seq: 4 },
+      { sessionId: openPayload.sessionId, state: "changed-on-disk", seq: 0 },
+      { sessionId: openPayload.sessionId, state: "settling", seq: 0 },
+      { sessionId: openPayload.sessionId, state: "error", seq: 0 },
+    ]);
+    await h.ipc.shutdown();
   });
 
   it("refuses an open outside the renderer session's workspace", async () => {

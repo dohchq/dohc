@@ -52,9 +52,9 @@ it("reports only host acknowledgement as saved and never settles a local file", 
   const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn(), onSaveState});
   const edit = new Y.Doc(); edit.getText("body").insert(0, "pending");
   provider.applyLocalUpdate(Y.encodeStateAsUpdate(edit)); edit.destroy();
-  expect(onSaveState).toHaveBeenLastCalledWith("settling", 1);
+  expect(onSaveState).toHaveBeenLastCalledWith("settling", 1, "start");
   f.ack();
-  expect(onSaveState).toHaveBeenLastCalledWith("saved", 1);
+  expect(onSaveState).toHaveBeenLastCalledWith("saved", 1, "outcome");
   await provider.close();
   expect(f.preserveDraft).not.toHaveBeenCalled();
 });

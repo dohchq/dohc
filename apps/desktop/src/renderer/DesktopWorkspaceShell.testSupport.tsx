@@ -1,10 +1,9 @@
 import "../testing/legendListMock";
 import { vi } from "vitest";
-import "./CollectionPage";
 import "./workbench/ChatsView";
 
 // Collection dependencies read these observers during module evaluation.
-// Preload them before tests so an unfinished import cannot clean up a later test's globals.
+// Collection suites preload their view after installing these observer stubs.
 const { ObserverStub } = vi.hoisted(() => {
   class ObserverStub {
     observe() {}

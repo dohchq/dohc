@@ -3147,6 +3147,7 @@ it.each(["failure", "success"] as const)(
     const newResponse = Promise.withResolvers<void>();
     const newReached = Promise.withResolvers<void>();
     let restarted = false;
+    let replacementBusy = true;
     const transportError = () =>
       Object.assign(new Error("daemon restarted"), { code: "transport-error" });
     let currentClient: EngineDaemonClient & EngineTransport;
@@ -3168,6 +3169,7 @@ it.each(["failure", "success"] as const)(
         if (request.method === "ydoc.settle" && index === 1) {
           newReached.resolve();
           await newResponse.promise;
+          if (replacementBusy) throw busyRefusal();
         }
         const response = await engine.sendRequest(request);
         if (request.method === "ydoc.settle") {
@@ -3211,10 +3213,10 @@ it.each(["failure", "success"] as const)(
       path: "note.md",
       contentKind: "plaintext",
       onRemoteUpdate: () => undefined,
-      onSaveState: (state, token) => {
-        const seq = state === "settling"
+      onSaveState: (state, token, event) => {
+        const seq = event === "start"
           ? noteSettleStart(saveSeq, token)
-          : noteSettleOutcome(saveSeq, token);
+          : event === "outcome" ? noteSettleOutcome(saveSeq, token) : 0;
         reported.push({ state, seq });
       },
     });
@@ -3261,6 +3263,7 @@ it.each(["failure", "success"] as const)(
       timers.find((timer) => timer.generation === 2 && !timer.cancelled)!.fire();
       await newReached.promise;
       expect(reported.at(-1)).toEqual({ state: "settling", seq: 2 });
+      expect([...saveSeq.inFlight.values()]).toEqual([1, 2]);
 
       oldResponse.resolve();
       await expect.poll(() => reported.filter((entry) => entry.state !== "settling").length).toBe(1);
@@ -3269,8 +3272,16 @@ it.each(["failure", "success"] as const)(
         state: oldOutcome === "success" ? "saved" : "error",
         seq: 1,
       });
+      expect([...saveSeq.inFlight.values()]).toEqual([2]);
 
       newResponse.resolve();
+      await expect.poll(() => reported.length).toBe(4);
+      expect(reported.at(-1)).toEqual({ state: "settling", seq: rendererSeq });
+      expect(saveSeq.inFlight.size).toBe(0);
+      expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit");
+
+      replacementBusy = false;
+      await session.settleNow();
       await expect.poll(() => reported.filter((entry) => entry.state !== "settling").length).toBe(2);
       expect(reported.at(-1)).toEqual({ state: "saved", seq: rendererSeq });
       expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit plus new edit");
@@ -3378,11 +3389,11 @@ it("counts a revived edit against the settle its own replay armed", async () => 
   const session = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
-    onSaveState: (saveState, token) => {
+    onSaveState: (saveState, token, event) => {
       const seq =
-        saveState === "settling"
+        event === "start"
           ? noteSettleStart(saveSeq, token)
-          : noteSettleOutcome(saveSeq, token);
+          : event === "outcome" ? noteSettleOutcome(saveSeq, token) : 0;
       reported.push({ state: saveState, seq });
     },
   });
@@ -3542,11 +3553,11 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
   const session = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
-    onSaveState: (saveState, token) => {
+    onSaveState: (saveState, token, event) => {
       const seq =
-        saveState === "settling"
+        event === "start"
           ? noteSettleStart(saveSeq, token)
-          : noteSettleOutcome(saveSeq, token);
+          : event === "outcome" ? noteSettleOutcome(saveSeq, token) : 0;
       reported.push({ state: saveState, seq });
     },
   });
@@ -6185,8 +6196,7 @@ it("refused renames never stack more than one retry ladder", async () => {
   // attempt an independent ladder, each opening and settling its own
   // temporary session once it hit the cap — engine load proportional to how
   // often someone tried to rename. One debt, one timer.
-  // Priced against the production ladder: the window below counts wakes of
-  // a 1 s / 2 s / 4 s doubling delay.
+  // Keep the production ladder's delays while advancing only this loopback's clock.
   const { capture, state, rootPath } = await lockedRebindCapture(
     "dohc-ydoc-one-timer-",
     { teardownRetryMs: { initial: 1_000, cap: 10_000 } },
@@ -6194,42 +6204,50 @@ it("refused renames never stack more than one retry ladder", async () => {
   await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
   const { session } = await openWithOneEdit(capture, "one ladder only");
 
-  state.locked = true;
-  state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
-
-  // Four refused renames while the lock holds: each pays, fails, and arms.
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
-      /Another program still has note\.md open/,
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const advanceAndDrain = async (durationMs: number) => {
+    for (let elapsed = 0; elapsed < durationMs; elapsed += 1_000) {
+      await vi.advanceTimersByTimeAsync(Math.min(1_000, durationMs - elapsed));
+      // Timer callbacks enqueue capture work that can await real filesystem I/O.
+      await capture.flush();
+    }
+  };
+  try {
+    state.locked = true;
+    state.replicated = true;
+    await expect(session.close()).rejects.toThrow(
+      /released, but its pre-close settle failed/,
     );
+
+    // Four refused renames while the lock holds: each pays, fails, and arms.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
+        /Another program still has note\.md open/,
+      );
+    }
+    const settlesAfterRenames = state.settleCalls.length;
+
+    // Stacked ladders wake at 1 s, 2 s, and 4 s. One replacement timer
+    // waits beyond this window, so the original generous count bound still applies.
+    await advanceAndDrain(4_000);
+    const attemptsWhileLocked = state.settleCalls.length - settlesAfterRenames;
+    expect(attemptsWhileLocked).toBeLessThanOrEqual(1);
+
+    // Keep the original recovery budget, then observe two more seconds for duplicates.
+    state.locked = false;
+    for (let elapsed = 0; elapsed < 15_000 && state.settledContents.length === 0; elapsed += 1_000) {
+      await advanceAndDrain(1_000);
+    }
+    expect(state.settledContents).toEqual(["one ladder only"]);
+    await advanceAndDrain(2_000);
+    expect(state.settledContents).toEqual(["one ladder only"]);
+  } finally {
+    try {
+      await capture.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   }
-  const settlesAfterRenames = state.settleCalls.length;
-
-  // The measurement, taken while the lock still holds: this is where
-  // stacked ladders cost. Each one wakes on its own schedule and opens and
-  // settles its own temporary session, so N ladders do N times the engine
-  // work every cycle. One ladder on a doubling delay (1s, 2s, 4s...) can
-  // fit at most three attempts in this window; four stacked ladders fit
-  // far more. The bound is deliberately generous — it fails on the
-  // multiple, not on exact timing.
-  await new Promise((resolve) => setTimeout(resolve, 4_000));
-  const attemptsWhileLocked = state.settleCalls.length - settlesAfterRenames;
-  // Correct: the one surviving timer sits at the doubled delay (8s by now),
-  // so nothing fires in this window. Stacked: the 1s, 2s and 4s ladders all
-  // wake inside it.
-  expect(attemptsWhileLocked).toBeLessThanOrEqual(1);
-
-  // And the single ladder still pays the debt once the lock releases.
-  state.locked = false;
-  await expect
-    .poll(() => state.settledContents, { timeout: 15_000 })
-    .toEqual(["one ladder only"]);
-  await new Promise((resolve) => setTimeout(resolve, 2_000));
-  expect(state.settledContents).toEqual(["one ladder only"]);
-  await capture.stop();
 }, 30_000);
 
 it("a failing active-version read re-arms instead of stranding the debt", async () => {

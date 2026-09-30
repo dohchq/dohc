@@ -223,7 +223,6 @@ async function expectTwoDaemonFileSync(input: {
   // root to its database on first open.
   const rootA = await createTestScratch("dohc-two-daemon-a-");
   const rootB = await createTestScratch("dohc-two-daemon-b-");
-  const rootC = await createTestScratch("dohc-two-daemon-c-");
   const relayRoot = await createTestScratch("dohc-two-daemon-relay-");
   const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
   let daemonA: LiveDaemonCapture | null = null;
@@ -318,6 +317,7 @@ async function expectTwoDaemonFileSync(input: {
     }
 
     if (input.rejoin) {
+      const rootC = await createTestScratch("dohc-two-daemon-c-");
       daemonC = await openJoinedDaemonCapture({
         workspaceId: input.workspaceId,
         rootPath: rootC,
@@ -335,9 +335,7 @@ async function expectTwoDaemonFileSync(input: {
       );
     }
   } finally {
-    await daemonC?.close().catch(() => undefined);
-    await daemonB?.close().catch(() => undefined);
-    await daemonA?.close().catch(() => undefined);
+    await Promise.allSettled([daemonC?.close(), daemonB?.close(), daemonA?.close()]);
     await relay.stop();
   }
 }
@@ -514,9 +512,7 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
       expect(await daemonC.capture.countOpenConflicts()).toBe(0);
       expect(await readdir(join(rootC, "notes"))).toEqual(["shared.txt"]);
     } finally {
-      await daemonC?.close().catch(() => undefined);
-      await daemonB?.close().catch(() => undefined);
-      await daemonA?.close().catch(() => undefined);
+      await Promise.allSettled([daemonC?.close(), daemonB?.close(), daemonA?.close()]);
       await relay.stop();
     }
   },
@@ -685,9 +681,8 @@ it.skipIf(engine.missing)(
         });
       }
     } finally {
-      for (const editor of editors) await editor.session.close().catch(() => undefined);
-      await daemonB?.close().catch(() => undefined);
-      await daemonA?.close().catch(() => undefined);
+      await Promise.allSettled(editors.map((editor) => editor.session.close()));
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
       await relay.stop();
     }
   },
@@ -762,8 +757,7 @@ it.skipIf(engine.missing)(
       expect(await readFile(join(rootB, path), "utf8")).toBe("edit from B\n");
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
     } finally {
-      await daemonB?.close().catch(() => undefined);
-      await daemonA?.close().catch(() => undefined);
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
       await relay.stop();
     }
   },
@@ -883,8 +877,7 @@ it.skipIf(engine.missing)(
         "relay is ahead of the backup\n",
       );
     } finally {
-      await daemonB?.close().catch(() => undefined);
-      await daemonA?.close().catch(() => undefined);
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
       await relay.stop();
     }
   },
@@ -1009,10 +1002,9 @@ it.skipIf(engine.missing)(
         expect(await readFile(join(rootB, path), "utf8")).toBe(merged);
       }, arrival);
     } finally {
-      for (const sync of engines) await sync.stop().catch(() => undefined);
-      for (const editor of editors) await editor.session.close().catch(() => undefined);
-      await daemonB?.close().catch(() => undefined);
-      await daemonA?.close().catch(() => undefined);
+      await Promise.allSettled(engines.map((sync) => sync.stop()));
+      await Promise.allSettled(editors.map((editor) => editor.session.close()));
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
       await relay.stop();
     }
   },

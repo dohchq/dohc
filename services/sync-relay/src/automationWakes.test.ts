@@ -3,7 +3,7 @@ import type { StorageContext } from "./storage/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUTOMATION_WAKE_PREFIX, NOTICE_READ_RETENTION_MS, NOTICE_LIST_ROW_LIMIT, NOTICE_UNREAD_RETENTION_MS } from "@dohc/workspace-contracts/relay";
 import { closeTestStorages, inspectDatabase, jsonBody, request, storagePath, testHandler, testStorage } from "./testing";
-import { AUTOMATION_WAKE_RETRY_MS, NOTICE_DISMISSAL_RECEIPTS } from "./storage/notices";
+import { AUTOMATION_WAKE_RETRY_MS, NOTICE_DISMISSAL_RECEIPTS, noticeIdFrom, type PostNoticeInput } from "./storage/notices";
 
 afterEach(closeTestStorages);
 
@@ -27,6 +27,31 @@ async function world() {
     return (await response.json() as { dismissed: string[] }).dismissed;
   };
   return { storage, handler, post, list, dismiss, advance: (by: number) => { clock += by; } };
+}
+
+function seedOrdinaryNotices(storage: Awaited<ReturnType<typeof world>>["storage"], input: PostNoticeInput, count: number, timeStepMs: 0 | 1): void {
+  storage.postNotice(input);
+  const storedId = (id: string) => input.senderUserId === input.recipientUserId ? id : noticeIdFrom(input.senderUserId, id);
+  const context = storage as StorageContext;
+  context.tx(() => {
+    const head = Number(context.db.prepare("SELECT change_seq FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
+      .get(input.recipientUserId)!.change_seq);
+    const insert = context.db.prepare(`INSERT INTO sync_relay_notices (
+      recipient_user_id, notice_id, change_seq, workspace_id, recipient_share_id,
+      kind, sender_kind, sender_user_id, sender_label, title, body, target_json,
+      origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms
+    ) SELECT recipient_user_id, ?, ?, workspace_id, recipient_share_id,
+      kind, sender_kind, sender_user_id, sender_label, title, body, target_json,
+      origin_install_id, created_at_ms + ?, read_at_ms, dismissed_at_ms, expires_at_ms + ?, removed_at_ms
+      FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?`);
+    for (let i = 1; i < count; i++) {
+      const elapsed = i * timeStepMs;
+      expect(Number(insert.run(storedId(`${input.noticeId}-${i}`), head + i, elapsed, elapsed,
+        input.recipientUserId, storedId(input.noticeId)).changes)).toBe(1);
+    }
+    context.db.prepare("UPDATE sync_relay_notice_lists SET change_seq = ? WHERE recipient_user_id = ?")
+      .run(head + count - 1, input.recipientUserId);
+  });
 }
 
 describe("relay-only agent wake notices", () => {
@@ -174,11 +199,19 @@ describe("relay-only agent wake notices", () => {
     const id = w.post();
     w.storage.markNotices({ recipientUserId: "owner", marks: [{ noticeId: id, mark: "read" }], nowMs: 10_001 });
     w.advance(NOTICE_UNREAD_RETENTION_MS + NOTICE_READ_RETENTION_MS);
-    for (let i = 0; i < NOTICE_LIST_ROW_LIMIT + 1; i++) w.storage.postNotice({
-      noticeId: "ordinary-" + i, recipientUserId: "owner", senderUserId: "owner", senderLabel: "Ice",
+    const ordinary: PostNoticeInput = {
+      noticeId: "ordinary-seed", recipientUserId: "owner", senderUserId: "owner", senderLabel: "Ice",
       reach: { workspaceId }, kind: "mention", title: "Ordinary", body: "", target: {}, originInstallId: "laptop",
       nowMs: 10_000 + NOTICE_UNREAD_RETENTION_MS + NOTICE_READ_RETENTION_MS,
-    });
+    };
+    seedOrdinaryNotices(w.storage, ordinary, NOTICE_LIST_ROW_LIMIT - 1, 0);
+    const db = (w.storage as StorageContext).db;
+    const liveCount = () => Number(db.prepare("SELECT count(*) AS n FROM sync_relay_notices WHERE recipient_user_id = 'owner' AND removed_at_ms IS NULL").get()!.n);
+    expect(liveCount()).toBe(NOTICE_LIST_ROW_LIMIT);
+    for (let i = NOTICE_LIST_ROW_LIMIT - 1; i < NOTICE_LIST_ROW_LIMIT + 1; i++) {
+      w.storage.postNotice({ ...ordinary, noticeId: "ordinary-" + i });
+      expect(liveCount()).toBe(NOTICE_LIST_ROW_LIMIT);
+    }
     expect(w.list().find((notice) => notice.noticeId === id)?.wake).toEqual(wake);
     expect(await w.dismiss(id, "owner", "laptop")).toEqual([id]);
   }, 60_000);
@@ -195,10 +228,18 @@ describe("relay-only agent wake notices", () => {
       share: { shareId: "sender-share", workspaceId: "sender-workspace", granterUserId: "sender", selectorJson: JSON.stringify({ paths: ["Tasks"], versionId: null }), createdAtMs: 1 },
       grant: { grantId: "sender-grant", shareId: "sender-share", principalKind: "user", principalUserId: "owner", principalEmail: null, access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
     });
-    for (let i = 0; i <= NOTICE_ROWS_PER_SENDER; i++) w.storage.postNotice({
-      noticeId: "sender-" + i, recipientUserId: "owner", senderUserId: "sender", senderLabel: "Sender",
-      reach: { workspaceId: "sender-workspace" }, kind: "automation-notify", title: "Ordinary", body: "", target: { path: "Tasks/one.md" }, originInstallId: "laptop", nowMs: 10_000 + i,
-    });
+    const ordinary: PostNoticeInput = {
+      noticeId: "sender-seed", recipientUserId: "owner", senderUserId: "sender", senderLabel: "Sender",
+      reach: { workspaceId: "sender-workspace" }, kind: "automation-notify", title: "Ordinary", body: "", target: { path: "Tasks/one.md" }, originInstallId: "laptop", nowMs: 10_000,
+    };
+    seedOrdinaryNotices(w.storage, ordinary, NOTICE_ROWS_PER_SENDER - 1, 1);
+    const raw = (w.storage as StorageContext).db;
+    const senderCount = () => Number(raw.prepare("SELECT count(*) AS n FROM sync_relay_notices WHERE recipient_user_id = 'owner' AND sender_user_id = 'sender' AND removed_at_ms IS NULL").get()!.n);
+    expect(senderCount()).toBe(NOTICE_ROWS_PER_SENDER);
+    for (let i = NOTICE_ROWS_PER_SENDER - 1; i <= NOTICE_ROWS_PER_SENDER; i++) {
+      w.storage.postNotice({ ...ordinary, noticeId: "sender-" + i, nowMs: 10_000 + i });
+      expect(senderCount()).toBe(NOTICE_ROWS_PER_SENDER);
+    }
     expect(w.list().find((row) => row.noticeId === id)?.wake).toEqual(wake);
   });
 
