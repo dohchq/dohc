@@ -16,7 +16,9 @@
 // carries the editor's own (non-ENGINE) origin and IS shipped.
 
 import * as Y from "yjs";
+import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
+import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 
 // Applied to the mirror doc for every update that originated in the engine
@@ -132,6 +134,19 @@ export class EngineYDocDeliveryRefusedError extends Error {
   }
 }
 
+export class EngineYDocPendingLimitError extends Error {
+  constructor(
+    readonly observedBytes: number,
+    readonly observedRecords: number,
+  ) {
+    super(
+      "dohc could not save this edit while earlier edits await delivery. " +
+        "Copy the set-aside edit below.",
+    );
+    this.name = "EngineYDocPendingLimitError";
+  }
+}
+
 function isPermanentDeliveryError(error: unknown): boolean {
   return (
     error instanceof EngineYDocUpdateTooLargeError ||
@@ -163,9 +178,8 @@ interface EngineYDocBindOptions {
   onLineageReplacementFailure?: (error: unknown, retired: Y.Doc) => void;
 }
 
-// Originals are no longer merged. Schedule delivery on the next turn instead
-// of holding typing for the old merge window.
-const LOCAL_UPDATE_FLUSH_DELAY_MS = 0;
+// Text ships on the next turn. Drawing updates share a 32 ms batching window.
+const SCENE_UPDATE_FLUSH_DELAY_MS = 32;
 // Local IPC normally answers in one turn. A quarter-second retry avoids a hot
 // loop during an outage while recovering a brief renderer/main handoff quickly.
 const LOCAL_UPDATE_RETRY_MS = 250;
@@ -310,10 +324,11 @@ export async function bindEngineYDoc(
   let pendingLocalUpdates: Array<{
     update: Uint8Array;
     sequence: number;
-    requestId: string;
   }> = [];
   let sendChain = Promise.resolve();
   let unacknowledgedBatches = 0;
+  let retainedBytes = 0;
+  let retainedRecords = 0;
   let deliveryPending = false;
   let localUpdatesRefused = false;
   let replacementInProgress = false;
@@ -334,10 +349,22 @@ export async function bindEngineYDoc(
     }
   };
 
+  const discardPendingUpdates = (): void => {
+    for (const { update } of pendingLocalUpdates) {
+      retainedBytes -= update.byteLength;
+      retainedRecords -= 1;
+    }
+    pendingLocalUpdates = [];
+  };
+
   const refuseLocalUpdates = (error: unknown): void => {
     if (localUpdatesRefused) return;
     localUpdatesRefused = true;
-    pendingLocalUpdates = [];
+    if (scheduledFlush !== null) {
+      batchScheduler.cancel(scheduledFlush);
+      scheduledFlush = null;
+    }
+    discardPendingUpdates();
     const refusedDoc = doc;
     try {
       // The full state, not the failed delta: it also covers every edit made
@@ -369,6 +396,8 @@ export async function bindEngineYDoc(
     try {
       await deliverBatchUntilAcknowledged(batch, batchGeneration);
     } finally {
+      retainedBytes -= batch.update.byteLength;
+      retainedRecords -= 1;
       unacknowledgedBatches -= 1;
       finishDeliveryIfSafe();
     }
@@ -387,6 +416,7 @@ export async function bindEngineYDoc(
       return;
     }
     for (;;) {
+      if (localUpdatesRefused) return;
       if (replacementInProgress || batchGeneration !== lineageGeneration) return;
       try {
         await transport.applyLocalUpdate(
@@ -440,17 +470,28 @@ export async function bindEngineYDoc(
     }
     const updates = pendingLocalUpdates;
     pendingLocalUpdates = [];
+    // These edits belong to the same renderer owner. Assign an immutable
+    // delivery identity only after merging; retries retain its bytes and id.
+    const batch = {
+      update: updates.length === 1
+        ? updates[0]!.update
+        : Y.mergeUpdates(updates.map(({ update }) => update)),
+      sequence: updates.at(-1)!.sequence,
+      requestId: crypto.randomUUID(),
+    };
+    retainedBytes += batch.update.byteLength - updates.reduce(
+      (total, { update }) => total + update.byteLength, 0,
+    );
+    retainedRecords += 1 - updates.length;
     const batchGeneration = lineageGeneration;
     // Preserve batch order even when the transport is asynchronous. A failed
     // head stays ahead of every later batch until main acknowledges it. The
     // chain remains pending during retries, so teardown cannot settle and
     // close a session that still has renderer-only edits.
-    for (const batch of updates) {
-      unacknowledgedBatches += 1;
-      sendChain = sendChain.then(() =>
-        applyLocalUpdateUntilAcknowledged(batch, batchGeneration),
-      );
-    }
+    unacknowledgedBatches += 1;
+    sendChain = sendChain.then(() =>
+      applyLocalUpdateUntilAcknowledged(batch, batchGeneration),
+    );
     return sendChain;
   };
 
@@ -459,7 +500,9 @@ export async function bindEngineYDoc(
     scheduledFlush = batchScheduler.schedule(() => {
       scheduledFlush = null;
       void flushPendingLocalUpdates();
-    }, LOCAL_UPDATE_FLUSH_DELAY_MS);
+    }, doc.share.has(EXCALIDRAW_SCENE_ROOTS.revisions)
+      ? SCENE_UPDATE_FLUSH_DELAY_MS
+      : 0);
   };
 
   // Retain each original editor update before scheduling transport. An
@@ -469,10 +512,18 @@ export async function bindEngineYDoc(
     if (destroyed) return;
     if (origin === ENGINE_SOURCED_ORIGIN) return;
     if (localUpdatesRefused) return;
+    const nextBytes = retainedBytes + update.byteLength;
+    const nextRecords = retainedRecords + 1;
+    if (nextBytes > YDOC_PENDING_MAX_BYTES || nextRecords > YDOC_PENDING_MAX_RECORDS) {
+      refuseLocalUpdates(new EngineYDocPendingLimitError(nextBytes, nextRecords));
+      return;
+    }
     const sequence = transport.stageLocalUpdate();
     if (sequence === null) return;
     setDeliveryPending(true);
-    pendingLocalUpdates.push({ update: new Uint8Array(update), sequence, requestId: crypto.randomUUID() });
+    retainedBytes = nextBytes;
+    retainedRecords = nextRecords;
+    pendingLocalUpdates.push({ update: new Uint8Array(update), sequence });
     scheduleLocalUpdateFlush();
   };
   doc.on("update", onUpdate);
@@ -506,7 +557,7 @@ export async function bindEngineYDoc(
         batchScheduler.cancel(scheduledFlush);
         scheduledFlush = null;
       }
-      pendingLocalUpdates = [];
+      discardPendingUpdates();
       // Wait out any delivery already in flight before preserving and
       // acknowledging: the winner must not install while the loser's last
       // batch is still being answered. In-queue batches abandon themselves
