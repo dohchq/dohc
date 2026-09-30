@@ -610,11 +610,16 @@ it("stays on settling for a busy engine store, because the retry is coming", asy
 });
 
 it("retires capture settle bookkeeping after repeated busy-store failures", async () => {
-  const reports: Array<{ state: string; token: number }> = [];
+  const reports: Array<{ state: string; token: number; event: string }> = [];
+  const saveSeq = createEngineYDocSaveSeqState();
   const session = await capture.openYDocSession({
     path: PATH,
     onRemoteUpdate: () => undefined,
-    onSaveState: (state, token) => reports.push({ state, token }),
+    onSaveState: (state, token, event) => {
+      reports.push({ state, token, event });
+      if (event === "start") noteSettleStart(saveSeq, token);
+      else if (event === "outcome") noteSettleOutcome(saveSeq, token);
+    },
   });
   const ledgers = new Set<Map<unknown, unknown>>();
   const mapSet = Map.prototype.set;
@@ -630,11 +635,12 @@ it("retires capture settle bookkeeping after repeated busy-store failures", asyn
     settleRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await expect(session.settleNow()).rejects.toThrow("engine-store-busy");
+      expect.soft([...saveSeq.inFlight.keys()]).toEqual([]);
     }
     expect(reports).toEqual([
-      { state: "settling", token: 1 }, { state: "settling", token: 1 },
-      { state: "settling", token: 2 }, { state: "settling", token: 2 },
-      { state: "settling", token: 3 }, { state: "settling", token: 3 },
+      { state: "settling", token: 1, event: "start" }, { state: "settling", token: 1, event: "outcome" },
+      { state: "settling", token: 2, event: "start" }, { state: "settling", token: 2, event: "outcome" },
+      { state: "settling", token: 3, event: "start" }, { state: "settling", token: 3, event: "outcome" },
     ]);
     expect(ledgers.size).toBeGreaterThan(0);
     expect([...ledgers].map((ledger) => ledger.size)).toEqual(
@@ -814,12 +820,12 @@ it("never reports a save seq the settled file does not back", async () => {
     path: PATH,
     contentKind: "richdoc",
     onRemoteUpdate: () => undefined,
-    onSaveState: (state, token) => {
-      if (state === "settling") {
+    onSaveState: (state, token, event) => {
+      if (event === "start") {
         noteSettleStart(saveSeq, token);
         return;
       }
-      const seq = noteSettleOutcome(saveSeq, token);
+      const seq = event === "outcome" ? noteSettleOutcome(saveSeq, token) : 0;
       if (state === "saved") {
         vouched.push({ seq, markdown: readFileSync(join(root, PATH), "utf8") });
       }
@@ -981,14 +987,19 @@ async function retainLineage(
 
 async function openRecordingStates(path = PATH) {
   const states: string[] = [];
+  const saveSeq = createEngineYDocSaveSeqState();
+  const events: Array<{ state: string; token: number; event: string }> = [];
   let reportSaved!: () => void;
   const saved = new Promise<void>((resolve) => { reportSaved = resolve; });
   const opened = await capture.openYDocSession({path, onRemoteUpdate: () => undefined,
-    onSaveState: (state) => {
+    onSaveState: (state, token, event) => {
       states.push(state);
+      events.push({ state, token, event });
+      if (event === "start") noteSettleStart(saveSeq, token);
+      else if (event === "outcome") noteSettleOutcome(saveSeq, token);
       if (state === "saved") reportSaved();
     }});
-  return {opened, states, saved};
+  return {opened, states, saved, saveSeq, events};
 }
 
 // A release that writes nothing, queued behind anything the open armed on the
@@ -1054,12 +1065,18 @@ it("settles nothing when a reopened document holds only its seed", async () => {
 it("writes a retained edit when its document reopens, and says Saving… before the open returns", async () => {
   await retainLineage("Typed before the crash.");
   expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
-  const {states, saved} = await openRecordingStates();
+  const {states, saved, saveSeq, events} = await openRecordingStates();
   // Reported on the open's own task, so main queues it ahead of the open's
   // answer and the editor never shows Saved first.
   expect(states[0]).toBe("settling");
   expect(states).not.toContain("saved");
   await saved;
+  expect(events).toEqual([
+    { state: "settling", token: 0, event: "status" },
+    { state: "settling", token: 1, event: "start" },
+    { state: "saved", token: 1, event: "outcome" },
+  ]);
+  expect([...saveSeq.inFlight.keys()]).toEqual([]);
   expect(states.filter((state) => state !== "settling")).toEqual(["saved"]);
   expect(await readFile(join(root, PATH), "utf8")).toContain("Typed before the crash.");
 });

@@ -3147,6 +3147,7 @@ it.each(["failure", "success"] as const)(
     const newResponse = Promise.withResolvers<void>();
     const newReached = Promise.withResolvers<void>();
     let restarted = false;
+    let replacementBusy = true;
     const transportError = () =>
       Object.assign(new Error("daemon restarted"), { code: "transport-error" });
     let currentClient: EngineDaemonClient & EngineTransport;
@@ -3168,6 +3169,7 @@ it.each(["failure", "success"] as const)(
         if (request.method === "ydoc.settle" && index === 1) {
           newReached.resolve();
           await newResponse.promise;
+          if (replacementBusy) throw busyRefusal();
         }
         const response = await engine.sendRequest(request);
         if (request.method === "ydoc.settle") {
@@ -3211,10 +3213,10 @@ it.each(["failure", "success"] as const)(
       path: "note.md",
       contentKind: "plaintext",
       onRemoteUpdate: () => undefined,
-      onSaveState: (state, token) => {
-        const seq = state === "settling"
+      onSaveState: (state, token, event) => {
+        const seq = event === "start"
           ? noteSettleStart(saveSeq, token)
-          : noteSettleOutcome(saveSeq, token);
+          : event === "outcome" ? noteSettleOutcome(saveSeq, token) : 0;
         reported.push({ state, seq });
       },
     });
@@ -3261,6 +3263,7 @@ it.each(["failure", "success"] as const)(
       timers.find((timer) => timer.generation === 2 && !timer.cancelled)!.fire();
       await newReached.promise;
       expect(reported.at(-1)).toEqual({ state: "settling", seq: 2 });
+      expect([...saveSeq.inFlight.values()]).toEqual([1, 2]);
 
       oldResponse.resolve();
       await expect.poll(() => reported.filter((entry) => entry.state !== "settling").length).toBe(1);
@@ -3269,8 +3272,16 @@ it.each(["failure", "success"] as const)(
         state: oldOutcome === "success" ? "saved" : "error",
         seq: 1,
       });
+      expect([...saveSeq.inFlight.values()]).toEqual([2]);
 
       newResponse.resolve();
+      await expect.poll(() => reported.length).toBe(4);
+      expect(reported.at(-1)).toEqual({ state: "settling", seq: rendererSeq });
+      expect(saveSeq.inFlight.size).toBe(0);
+      expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit");
+
+      replacementBusy = false;
+      await session.settleNow();
       await expect.poll(() => reported.filter((entry) => entry.state !== "settling").length).toBe(2);
       expect(reported.at(-1)).toEqual({ state: "saved", seq: rendererSeq });
       expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit plus new edit");
@@ -3378,11 +3389,11 @@ it("counts a revived edit against the settle its own replay armed", async () => 
   const session = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
-    onSaveState: (saveState, token) => {
+    onSaveState: (saveState, token, event) => {
       const seq =
-        saveState === "settling"
+        event === "start"
           ? noteSettleStart(saveSeq, token)
-          : noteSettleOutcome(saveSeq, token);
+          : event === "outcome" ? noteSettleOutcome(saveSeq, token) : 0;
       reported.push({ state: saveState, seq });
     },
   });
@@ -3542,11 +3553,11 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
   const session = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
-    onSaveState: (saveState, token) => {
+    onSaveState: (saveState, token, event) => {
       const seq =
-        saveState === "settling"
+        event === "start"
           ? noteSettleStart(saveSeq, token)
-          : noteSettleOutcome(saveSeq, token);
+          : event === "outcome" ? noteSettleOutcome(saveSeq, token) : 0;
       reported.push({ state: saveState, seq });
     },
   });
