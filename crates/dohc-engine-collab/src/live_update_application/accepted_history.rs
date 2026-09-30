@@ -584,6 +584,7 @@ pub(super) fn read_inner(
             (max_events.min(CHECKPOINT_EVENTS as usize) + 1) as i64
         ])
         .map_err(read_sql)?;
+    let mut metadata_query: Option<rusqlite::Statement<'_>> = None;
     let mut suffix = Vec::new();
     let mut count = c.event_count;
     let mut terminal = c.terminal.clone();
@@ -604,13 +605,17 @@ pub(super) fn read_inner(
             return Err(ApplicationError::Corrupt);
         }
         budget.charge(usize::try_from(metadata_len).map_err(|_| ApplicationError::Corrupt)?)?;
-        let sql = format!(
-            "SELECT metadata_json FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"
-        );
-        let json: String = conn
-            .query_row(&sql, params![p[0], p[1], p[2], p[3], p[4], ordinal], |r| {
-                r.get(0)
-            })
+        let statement = match &mut metadata_query {
+            Some(statement) => statement,
+            empty => empty.insert(
+                conn.prepare(&format!(
+                    "SELECT metadata_json FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"
+                ))
+                .map_err(read_sql)?,
+            ),
+        };
+        let json: String = statement
+            .query_row(params![p[0], p[1], p[2], p[3], p[4], ordinal], |r| r.get(0))
             .map_err(read_sql)?;
         let metadata: AdmittedLiveUpdateMetadata =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
