@@ -30,26 +30,29 @@ impl<'a> VersionedTextStore<'a> {
         input: &RollbackTextFileMutation,
         faults: &dyn FaultInjector,
     ) -> Result<bool, DomainError> {
-        self.rollback_text_file_mutation_with(input, faults, |_, _, _, _, _| Ok(()))
+        self.rollback_text_file_mutation_with(input, faults, |_, _| Ok(()), |_, _, _, _, _| Ok(()))
     }
 
-    /// Roll back with a callback in the same transaction. The callback receives
+    /// Roll back with callbacks in the same transaction. Before removal, the
+    /// first callback receives the original moment. The second receives
     /// the mutated object id, the restored text head, if present, the
     /// compensating moment id, and its recorded time.
     ///
-    /// Matching request replay skips the callback. Fresh rollback invokes it
-    /// after restoring state and inserting the compensating moment, before
-    /// recording the request and committing. A callback error aborts the
+    /// Matching request replay skips both callbacks. Fresh rollback invokes the
+    /// second after restoring state and inserting the compensating moment,
+    /// before recording the request and committing. A callback error aborts the
     /// transaction; callback effects outside the database cannot be rolled back.
     /// The runtime composes Y.Doc/FTS reconciliation and outbound journaling here.
     /// See [`Self::rollback_text_file_mutation`] for the boolean return value.
-    pub fn rollback_text_file_mutation_with<F>(
+    pub fn rollback_text_file_mutation_with<B, F>(
         &mut self,
         input: &RollbackTextFileMutation,
         faults: &dyn FaultInjector,
+        before_remove: B,
         after: F,
     ) -> Result<bool, DomainError>
     where
+        B: FnOnce(&Transaction<'_>, &MomentRecord) -> Result<(), DomainError>,
         F: FnOnce(
             &Transaction<'_>,
             &str,
@@ -150,6 +153,7 @@ impl<'a> VersionedTextStore<'a> {
             // that moment's historical generation lets any later completed job for the same
             // path supersede the compensator before it can restore disk.
             let restore_generation = next_moment_order(tx)?;
+            before_remove(tx, &prep.moment)?;
             tx.execute(
                 "DELETE FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
                 params![ws, input.mutation_moment_id],

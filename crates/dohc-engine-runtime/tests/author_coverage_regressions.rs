@@ -1,5 +1,5 @@
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, author_coverage};
-use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, RollbackTextFileMutation};
 use dohc_engine_runtime::{ActorHandle, CancellationToken, WorkspaceSupervisor, YdocOpenState};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, NoFaults, StorageError, TxnOutcome,
@@ -87,6 +87,153 @@ async fn settle(
             None,
         )
         .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_pending_settlement_compensates_before_removing_its_moment() {
+    for crash in [
+        None,
+        Some(FaultPoint::StorageBeforePersist),
+        Some(FaultPoint::StorageAfterCommitBeforeAck),
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("database");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("actor").actor;
+        let state = open(&actor).await;
+        let doc = Ydoc::wire();
+        append(&actor, &state.key, doc.plaintext_insert(0, "a"), "alice").await;
+        settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
+            .await
+            .expect("first settlement");
+        append(&actor, &state.key, doc.plaintext_insert(1, "b"), "bob").await;
+        assert!(
+            settle(
+                &actor,
+                scratch.path(),
+                &state,
+                ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+            )
+            .await
+            .is_err()
+        );
+        let store = EngineStore::open(&db, 4).expect("inspect pending moment");
+        let moment_id: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT latest_moment_id FROM snapshots WHERE workspace_id=?1 AND object_id=?2",
+                    rusqlite::params![WS, state.key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("pending moment");
+        let before = coverage(&store, &state.key);
+        drop(store);
+        let input = RollbackTextFileMutation {
+            workspace_id: WS.into(),
+            version_id: "main".into(),
+            path: FILE.into(),
+            mutation_moment_id: moment_id.clone(),
+            request_id: Some("rollback-pending-settlement".into()),
+            metadata_origin: "coverage-regression".into(),
+            author_json: None,
+        };
+        let faults: Arc<dyn FaultInjector> = crash.map(ScriptedFaults::crash_at).map_or_else(
+            || Arc::new(NoFaults) as Arc<dyn FaultInjector>,
+            |faults| faults,
+        );
+        let result = actor
+            .versioned_text_rollback(
+                input.clone(),
+                scratch.path().into(),
+                Arc::new(()),
+                faults,
+                CancellationToken::new(),
+            )
+            .await;
+        if crash.is_some() {
+            assert!(result.is_err(), "fault must reach the rollback transaction");
+        } else {
+            result.expect("rollback pending settlement");
+        }
+        supervisor.close(&db).expect("stop");
+        drop(actor);
+        let store = EngineStore::open(&db, 5).expect("restart inspection");
+        if crash == Some(FaultPoint::StorageBeforePersist) {
+            assert_eq!(coverage(&store, &state.key), before, "rollback is atomic");
+        } else {
+            let restored = coverage(&store, &state.key);
+            assert_eq!(restored.3, None);
+            assert!(
+                restored.2.contains("bob"),
+                "reserved author survives moment removal"
+            );
+        }
+        drop(store);
+        let actor = supervisor.open(&db, 6).expect("restart").actor;
+        actor
+            .versioned_text_rollback(
+                input,
+                scratch.path().into(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("retry rollback");
+        actor
+            .materialize_replay_pending(scratch.path().into(), WS.into(), 7)
+            .await
+            .expect("cancelled settlement cannot replay");
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(FILE)).expect("disk"),
+            "a"
+        );
+        let reopened = open(&actor).await;
+        let store = EngineStore::open(&db, 8).expect("inspect restored lineage");
+        let restored = coverage(&store, &state.key);
+        assert_eq!(restored.3, None);
+        assert!(restored.2.contains("bob"));
+        let job_status: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT status FROM materialization_jobs WHERE job_id=?1",
+                    [format!("ydoc-mat_{moment_id}")],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("cancelled job");
+        assert_eq!(job_status, "cancelled");
+        let doc = dohc_engine_collab::load_persisted(&store, &state.key)
+            .expect("load")
+            .expect("restored lineage")
+            .doc;
+        drop(store);
+        append(&actor, &state.key, doc.plaintext_insert(1, "c"), "carol").await;
+        settle(&actor, scratch.path(), &reopened, Arc::new(NoFaults))
+            .await
+            .expect("settle after rollback");
+        supervisor.close(&db).expect("stop");
+        drop(actor);
+        let store = EngineStore::open(&db, 9).expect("inspect later authors");
+        let authors: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT m.author_json FROM snapshots s JOIN moments m ON m.moment_id=s.latest_moment_id \
+                     AND m.workspace_id=s.workspace_id WHERE s.workspace_id=?1 AND s.object_id=?2",
+                    rusqlite::params![WS, state.key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("settlement authors");
+        assert!(authors.contains("bob"));
+        assert!(authors.contains("carol"));
+        assert!(!authors.contains("alice"));
+        assert_eq!(coverage(&store, &state.key).2, "[]");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
