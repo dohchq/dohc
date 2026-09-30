@@ -277,6 +277,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
   writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
+  movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
+  deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies of its own.
   keptCopies?: CliKeptCopiesPort;
   automations?: CliAutomationsPort;
@@ -2445,6 +2447,51 @@ async function dispatch(
       } catch (error) { return mcpFailure(error, "dohc could not write the files. Check that the files are writable."); }
     }
 
+    // Paths arrive relative to the caller's folder, like fileWrite's, and
+    // results name them the same way.
+    case "fileMove":
+    case "fileDelete": {
+      const change = request.verb === "fileMove" ? "move" : "delete";
+      if (request.args.actor !== "agent") return { ok: false, reason: `A file ${change} through the CLI socket is recorded as an agent's; send actor "agent".` };
+      if (!context.movePath || !context.deletePath) return { ok: false, reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
+      try {
+        const root = await realpath(context.rootPath);
+        const folder = await realpath(request.args.cwd);
+        const workspacePath = (path: string) => {
+          const checked = validateUserMaterializePath(path, { platform: process.platform });
+          if (!checked.ok) throw new CliCommandError(cliPathRejected(checked.reason, path).reason);
+          return relative(root, resolve(folder, checked.normalized)).split(sep).join("/");
+        };
+        const callerPath = (path: string) => relative(folder, join(root, path)).split(sep).join("/");
+        // Every workspace path a reason names reads as the caller spells it, longest first.
+        const callerFailure = <Failure extends { reason: string; path?: string; deleted?: string[] }>(failure: Failure, named: string[]) => ({
+          ...failure,
+          reason: [...new Set([...named, ...(failure.path !== undefined ? [failure.path] : []), ...(failure.deleted ?? [])])]
+            .sort((a, b) => b.length - a.length)
+            .reduce((text, path) => text.replaceAll(path, callerPath(path)), failure.reason),
+          ...(failure.path !== undefined ? { path: callerPath(failure.path) } : {}),
+          ...(failure.deleted !== undefined ? { deleted: failure.deleted.map(callerPath) } : {}),
+        });
+        const origin = documentEditOrigin(request.args.agent, context, options);
+        if (request.verb === "fileMove") {
+          const fromPath = workspacePath(request.args.fromPath);
+          const toPath = workspacePath(request.args.toPath);
+          const result = await context.movePath({ fromPath, toPath,
+            ...(request.args.overwrite !== undefined ? { overwrite: request.args.overwrite } : {}) }, origin, request.args.requestId);
+          if (result.ok || result.deleted?.length) await notifyWrite(options, context);
+          if (!result.ok) return callerFailure(result, [fromPath, toPath]);
+          return { ...result, fromPath: callerPath(result.fromPath), toPath: callerPath(result.toPath) };
+        }
+        const path = workspacePath(request.args.path);
+        const result = await context.deletePath(path, origin, request.args.requestId);
+        if (result.ok || result.deleted?.length) await notifyWrite(options, context);
+        if (result.ok) return { ...result, path: callerPath(result.path) };
+        return callerFailure(result, [path]);
+      } catch (error) {
+        return mcpFailure(error, `dohc could not ${change} the file. Check that it is not open in another program.`);
+      }
+    }
+
     // A shared view's press is checked and relayed as the app's is.
     case "automationPress": {
       const buttons = context.buttons;
@@ -3076,8 +3123,9 @@ async function workspaceContextForRequest(
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
+  const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete";
   const documentWriteRequest =
-    request.verb === "documentEdit" || request.verb === "documentCreate" || request.verb === "fileWrite";
+    request.verb === "documentEdit" || request.verb === "documentCreate" || fileRequest;
   const writeRequest =
     collectionWriteRequest ||
     documentWriteRequest ||
@@ -3089,7 +3137,7 @@ async function workspaceContextForRequest(
     (request.verb === "show" && !request.args.peek);
   if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
-      request.verb === "fileWrite"
+      fileRequest
         ? "This workspace is read-only. Write in the owning workspace."
         : collectionWriteRequest
         ? "collection writes are not available in a read-only shared view"

@@ -308,6 +308,22 @@ export type WorkspaceGeneratedTextIdentityValidator = (text: string) => boolean;
 // the disk move succeeded, ok=false to roll the engine rename back.
 export type WorkspaceEngineRenameFinisher = (ok: boolean) => Promise<void>;
 
+// What an authored move or delete records while capture is held. Every path
+// is workspace-relative.
+export interface AuthoredPathChanges {
+  // Records what the disk holds for `files`, the whole list of files at or
+  // under `path`, as capture would and without an author: a new or changed
+  // file is written and one gone from disk is deleted. A file capture had not
+  // seen yet lands as its own row. Afterward History holds exactly `files`
+  // there, with their bytes. Refuses a file History cannot hold.
+  recordDisk(path: string, files: readonly string[]): Promise<void>;
+  rename(fromPath: string, toPath: string): Promise<void>;
+  // Records a delete of a file already gone from disk. Answers its row's id.
+  delete(path: string): Promise<string>;
+  // Puts back a file `delete` recorded, after the file is back on disk.
+  undoDelete(path: string, momentId: string): Promise<void>;
+}
+
 export type WorkspaceVersionConflictResolution =
   | { kind: "keep-current" }
   | { kind: "apply-incoming" }
@@ -657,6 +673,20 @@ export interface WorkspaceEngineCapture {
   // observations. All other shapes (folders, binary, untracked) return a
   // no-op finisher and are captured as delete+write by the normal path.
   beginFileRename(fromPath: string, toPath: string): Promise<WorkspaceEngineRenameFinisher>;
+  // Runs an author's move or delete of `paths` while capture records nothing,
+  // so the rows `work` records are the only rows the change leaves. Live
+  // documents at or under the paths settle and close first. A move first
+  // lands pending document writes on its source, as beginFileRename does.
+  // `work` admits the paths, records the disk with recordDisk, changes the
+  // disk, and then records the change; it undoes the disk change when a
+  // record fails. `removed` names the paths the result left, so pending
+  // document writes there are cancelled and the rest are restored.
+  changePathsAs<Result>(
+    paths: readonly string[],
+    authored: { operation: "move" | "delete"; author: MomentWriteAuthor; correlationId: string },
+    work: (engine: AuthoredPathChanges) => Promise<Result>,
+    removed: (result: Result) => readonly string[],
+  ): Promise<Result>;
   // Relay sync runs on the same capture chain as local batch capture and
   // version operations. The task owns engine push/pull; returned
   // active-version paths are materialized with expected-event suppression so
@@ -1905,6 +1935,63 @@ export function createWorkspaceEngineCapture(
     return () => {
       removalWindows.delete(window);
     };
+  }
+  // A release may be sent again. It is sent until the engine confirms the
+  // hold ended, waiting longer between tries while the engine is busy, so the
+  // change does not finish while capture is still held. Only the engine can
+  // confirm it: by answering the release, or by answering that the
+  // workspace's handle is gone, since a hold ends with its handle. This
+  // capture stopping confirms nothing, because stopping flushes capture
+  // through the same gate before it closes the handle. A hold that ended
+  // early refused every record under it, and the change restored the disk.
+  async function endCaptureHold(release: (holdId: string) => Promise<boolean>, holdId: string): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        if (!(await release(holdId))) onError("capture release", new Error("The capture hold ended before the change finished."));
+        return;
+      } catch (error) {
+        if (error instanceof DaemonRefusalError && error.wireCode === "WORKSPACE_UNAVAILABLE") return;
+        onError("capture release", error);
+        await new Promise(resolve => setTimeout(resolve, Math.min(50 * 2 ** attempt, 5_000)));
+      }
+    }
+  }
+
+  // Lands every pending document write at either end of a move, on the
+  // capture chain. A write on the source side that did not land refuses the
+  // move, so it never carries a stale file away from newer edits.
+  async function payDebtsBeforeMove(
+    fromPath: string,
+    endpointMatch: (path: string) => boolean,
+    isSourceSide: (path: string) => boolean,
+  ): Promise<void> {
+    for (const endpoint of [...detachedLockedDebts.keys()]) {
+      if (!endpointMatch(endpoint)) continue;
+      const debt = detachedLockedDebts.get(endpoint);
+      if (!debt) continue;
+      await debt.pay();
+      const after = detachedLockedDebts.get(endpoint);
+      if (!after) continue;
+      if (after.stoodDown) {
+        // Destination-side: leave it. See beginFileRename.
+        if (!isSourceSide(endpoint)) continue;
+        // Explorer renders this verbatim (the dohc-interface skill): what
+        // happened, why, then one instruction per sentence.
+        throw new Error(
+          `dohc could not rename ${fromPath}. dohc gave up on writing ${endpoint} earlier, so its last edits never reached disk. The edits stay in the document's history. Open ${endpoint} to write them again. Then rename ${fromPath} again.`,
+        );
+      }
+      // Why the payment did not land decides what the user is told. A
+      // removal window over the endpoint holds every payment for it, so
+      // the lock may be long gone and "close that program" would send
+      // the user after nothing.
+      const removal = removalWindowFor(endpoint);
+      throw new Error(
+        removal
+          ? `dohc could not rename ${fromPath}. ${removal.inProgress} Wait for that to finish. Then rename again.`
+          : `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
+      );
+    }
   }
   function removalWindowFor(path: string): RemovalWindow | null {
     for (const window of removalWindows) {
@@ -4992,6 +5079,97 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    changePathsAs(paths, authored, work, removed) {
+      const match = (candidate: string) => paths.some(path => pathIsAtOrUnder(candidate, path));
+      return enqueueResult("authored path change", async () => {
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        const ensureAllowed = async () => {
+          for (const path of paths) {
+            try {
+              await engine.checkMove({ workspaceId, versionId, path });
+            } catch (error) {
+              throw liveDocumentMutationRefusal(error, path, authored.operation) ?? error;
+            }
+          }
+        };
+        await ensureAllowed();
+        await settleAndCloseLiveYDocSessions(match, "Saved latest edits before moving or deleting the file");
+        const source = paths[0];
+        if (authored.operation === "move" && source !== undefined) {
+          await payDebtsBeforeMove(source, match, candidate => pathIsAtOrUnder(candidate, source));
+        }
+        const suspended = suspendDetachedDebts(match);
+        const closeRemovalWindow = openRemovalWindow({
+          match,
+          operation: authored.operation,
+          inProgress: `dohc is still changing ${paths.join(", ")}.`,
+        });
+        let result: { value: Awaited<ReturnType<typeof work>> } | undefined;
+        try {
+          await ensureAllowed();
+          const { holdCapture, releaseCapture } = engine;
+          if (!holdCapture || !releaseCapture) {
+            throw new Error("This engine cannot record the change under its author. Restart dohc to try again.");
+          }
+          // Changes capture has seen land as their own rows first. Changes it
+          // has not seen yet are recorded by recordDisk under the hold.
+          await engine.flushCapture?.();
+          const holdId = await holdCapture.call(engine);
+          try {
+            const authoredMetadata = (summary: string): ActorNeutralWriteMetadata =>
+              ({ origin: "api", summary, correlationId: authored.correlationId });
+            const policy = await readPolicyForTask();
+            result = { value: await work({
+              recordDisk: async (path, files) => {
+                const recordable = async (file: string) => {
+                  assertEngineWritablePath(file, policy);
+                  const disk = await readDiskTextState(rootPath, file);
+                  if (disk.kind === "absent") throw new Error(`${file} changed while dohc prepared the change. Try again.`);
+                  if (disk.kind === "unreadable") throw new Error(`dohc could not read ${file}. Close any program using it, then try again.`);
+                  if (disk.kind !== "text" && disk.kind !== "binary") {
+                    throw new Error(`History cannot keep ${file}: it is ${disk.reason.startsWith("oversized") ? "over the size History keeps" : "not a regular file"}. Move or delete it yourself.`);
+                  }
+                  return disk;
+                };
+                // Every file is checked before any is recorded, and only one
+                // file's bytes are held at a time.
+                for (const file of files) await recordable(file);
+                for (const file of files) {
+                  await writeIfChanged(engine, versionId, file, await recordable(file), { origin: "local-file", summary: "Saved latest edits" });
+                }
+                const onDisk = new Set(files);
+                for (const head of await listTextFileMetadata(engine, versionId)) {
+                  if (!pathIsAtOrUnder(head.path, path) || onDisk.has(head.path)) continue;
+                  await deleteIfTracked(engine, versionId, head.path,
+                    { origin: "local-file", summary: `Deleted ${pathBasename(head.path)}` }, undefined, true);
+                }
+              },
+              rename: async (fromPath, toPath) => {
+                assertEngineWritablePath(toPath, policy);
+                await engine.renameTextFile({ workspaceId, versionId, fromPath, toPath, captureHoldId: holdId,
+                  metadata: authoredMetadata(`Renamed ${fromPath} to ${toPath}`), author: authored.author });
+              },
+              delete: async (path) => (await engine.deleteTextFile({ workspaceId, versionId, path, onlyIfAbsentOnDisk: true,
+                captureHoldId: holdId, metadata: authoredMetadata(`Deleted ${pathBasename(path)}`), author: authored.author })).moment.id,
+              undoDelete: (path, momentId) => engine.rollbackTextFileMutation({
+                workspaceId, versionId, path, mutationMomentId: momentId, origin: "api", author: authored.author }),
+            }) };
+            return result.value;
+          } finally {
+            await endCaptureHold(holdId => releaseCapture.call(engine, holdId), holdId);
+          }
+        } finally {
+          const gone = result === undefined ? [] : removed(result.value);
+          const isGone = (path: string) => gone.some(removedPath => pathIsAtOrUnder(path, removedPath));
+          cancelSuspendedDebts([...suspended.filter(([path]) => isGone(path)), ...suspendDetachedDebts(isGone)],
+            `a change of ${paths.join(", ")}`);
+          restoreSuspendedDebts(suspended.filter(([path]) => !isGone(path)));
+          closeRemovalWindow();
+        }
+      });
+    },
+
     settleAndCloseAllLiveSessions() {
       return enqueueResult("close live sessions for workspace close", () =>
         settleAndCloseLiveYDocSessions(
@@ -6306,36 +6484,7 @@ export function createWorkspaceEngineCapture(
         // covering are handled elsewhere: an externally removed destination
         // clears through the watcher's own delete-cancel, and an existing
         // one is `movePath`'s refusal, not this one's.
-        for (const endpoint of [...detachedLockedDebts.keys()]) {
-          if (!endpointMatch(endpoint)) continue;
-          const debt = detachedLockedDebts.get(endpoint);
-          if (!debt) continue;
-          await debt.pay();
-          const after = detachedLockedDebts.get(endpoint);
-          if (!after) continue;
-          if (after.stoodDown) {
-            // Destination-side: leave it. See the comment above.
-            if (!isSourceSide(endpoint)) continue;
-            // Explorer renders this verbatim (the dohc-interface skill): what
-            // happened, why, then one instruction per sentence.
-            throw new Error(
-              `dohc could not rename ${fromPath}. dohc gave up on writing ${endpoint} earlier, so its last edits never reached disk. The edits stay in the document's history. Open ${endpoint} to write them again. Then rename ${fromPath} again.`,
-            );
-          }
-          // Why the payment did not land decides what the user is told. A
-          // removal window over the endpoint holds every payment for it, so
-          // the lock may be long gone and "close that program" would send
-          // the user after nothing.
-          const removal = removalWindowFor(endpoint);
-          throw new Error(
-            // Explorer renders this verbatim, so it follows
-            // the dohc-interface skill: what happened, why, then one instruction
-            // per sentence.
-            removal
-              ? `dohc could not rename ${fromPath}. ${removal.inProgress} Wait for that to finish. Then rename again.`
-              : `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
-          );
-        }
+        await payDebtsBeforeMove(fromPath, endpointMatch, isSourceSide);
         // The drain above sees only the debts that exist NOW. The filesystem
         // move runs off this chain, after the finisher is handed back, so an
         // open of the source can land on the chain inside that window, meet

@@ -158,6 +158,20 @@ const fileWriteArgsSchema = z.object({
   agent: documentAgentNameSchema.optional(),
   requestId: requestIdSchema,
 }).strict();
+const fileMoveArgsSchema = z.object({
+  ...argsBase,
+  fromPath: documentPathArg,
+  toPath: documentPathArg,
+  overwrite: z.boolean().optional(),
+  agent: documentAgentNameSchema.optional(),
+  requestId: requestIdSchema,
+}).strict();
+const fileDeleteArgsSchema = z.object({
+  ...argsBase,
+  path: documentPathArg,
+  agent: documentAgentNameSchema.optional(),
+  requestId: requestIdSchema,
+}).strict();
 
 const keptCopiesArgsSchema = z.object(argsBase).strict();
 const saveKeptCopyArgsSchema = z
@@ -399,6 +413,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     args: collectionCreateRecordArgsSchema,
   }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileWrite"), args: fileWriteArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
@@ -1096,6 +1112,25 @@ const fileWriteResultSchema = z.discriminatedUnion("ok", [
   }).strict(),
 ]);
 
+// A move is whole or put back. After a failed move, `deleted` names the files
+// History records as deleted: replaced destination files that could not be
+// restored, and moved files that could not go to either path. Each stays in
+// the workspace trash.
+const fileMoveResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), fromPath: z.string(), toPath: z.string() }).strict(),
+  z.object({
+    ok: z.literal(false), reason: z.string(), path: z.string().optional(), deleted: z.array(z.string()).optional(),
+  }).strict(),
+]);
+
+// A folder delete that stops at `path` names the files it already deleted.
+const fileDeleteResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string(), trashed: z.literal(true) }).strict(),
+  z.object({
+    ok: z.literal(false), reason: z.string(), deleted: z.array(z.string()).optional(), path: z.string().optional(),
+  }).strict(),
+]);
+
 const automationPressResultSchema = z.union([
   // The run the press started. `outcome` is set when a press sent again
   // finds its run already ended; `waiting` says why the run waits, if it does.
@@ -1124,6 +1159,8 @@ const automationPressResultSchema = z.union([
 
 export const cliResultSchemas = {
   fileWrite: fileWriteResultSchema,
+  fileMove: fileMoveResultSchema,
+  fileDelete: fileDeleteResultSchema,
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,

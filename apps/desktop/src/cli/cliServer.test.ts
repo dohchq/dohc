@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
-import { createApp, importData, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, moveWorkspacePath, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
@@ -561,6 +561,48 @@ describe("CLI socket server", () => {
     expect(await invoke("fileWrite", { cwd, actor: "agent", requestId: "traversal", files: [{ path: "../index.html", contentBase64: "" }] }))
       .toMatchObject({ ok: false, written: [], reason: expect.stringContaining("traversal") });
     expect(writeFiles).not.toHaveBeenCalled();
+  });
+
+  it("keeps MCP moves and deletes relative to a subfolder cwd under the agent's name", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>(async input => ({ ok: true, fromPath: input.fromPath, toPath: input.toPath }));
+    const deletePath = vi.fn<NonNullable<CliWorkspaceContext["deletePath"]>>(async path => ({
+      ok: false, deleted: [`${path}/a.txt`], path: `${path}/b.txt`, reason: `History could not record the delete of ${path}/b.txt.`,
+    }));
+    context.movePath = movePath;
+    context.deletePath = deletePath;
+    const ctx: ToolContext = { root: cwd, home: stateDir, request: request => invoke(request.verb, request.args) };
+    expect(await moveWorkspacePath(ctx, { fromPath: "a.txt", toPath: "b.txt" }, "Client")).toEqual({ ok: true, fromPath: "a.txt", toPath: "b.txt" });
+    expect(await deleteWorkspacePath(ctx, { path: "notes" })).toEqual({
+      ok: false, deleted: ["notes/a.txt"], path: "notes/b.txt", reason: "History could not record the delete of notes/b.txt.",
+    });
+    expect(movePath.mock.calls[0]?.slice(0, 2)).toEqual([{ fromPath: "app/a.txt", toPath: "app/b.txt" }, expect.objectContaining({ actorOriginId: "Client" })]);
+    expect(deletePath.mock.calls[0]?.slice(0, 2)).toEqual(["app/notes", expect.objectContaining({ actorOriginId: "dohc-mcp" })]);
+    // Every path a failure names reads as the caller spells it.
+    movePath.mockResolvedValueOnce({ ok: false, path: "app/a.txt", deleted: ["app/dest/1.txt"],
+      reason: "dohc could not move app/a.txt. It stays at app/dest, because something new is at app/a.txt." });
+    expect(await moveWorkspacePath(ctx, { fromPath: "a.txt", toPath: "dest", overwrite: true })).toEqual({
+      ok: false, path: "a.txt", deleted: ["dest/1.txt"],
+      reason: "dohc could not move a.txt. It stays at dest, because something new is at a.txt.",
+    });
+  });
+
+  it("refuses a raw move or delete from a person, through traversal, or in a read-only view", async () => {
+    const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>();
+    const deletePath = vi.fn<NonNullable<CliWorkspaceContext["deletePath"]>>();
+    context.movePath = movePath;
+    context.deletePath = deletePath;
+    const base = { cwd: workspaceRoot, requestId: "raw" };
+    expect(await invoke("fileMove", { ...base, actor: "human", fromPath: "a.txt", toPath: "b.txt" })).toMatchObject({ ok: false, reason: expect.stringContaining('send actor "agent"') });
+    expect(await invoke("fileDelete", { ...base, actor: "human", path: "a.txt" })).toMatchObject({ ok: false, reason: expect.stringContaining('send actor "agent"') });
+    expect(await invoke("fileMove", { ...base, actor: "agent", fromPath: "a.txt", toPath: "../b.txt" })).toMatchObject({ ok: false, reason: expect.stringContaining("traversal") });
+    expect(await invoke("fileDelete", { ...base, actor: "agent", path: "../a.txt" })).toMatchObject({ ok: false, reason: expect.stringContaining("traversal") });
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+    await expect(invoke("fileDelete", { ...base, actor: "agent", path: "a.txt" })).rejects.toThrow("read-only");
+    expect(movePath).not.toHaveBeenCalled();
+    expect(deletePath).not.toHaveBeenCalled();
   });
 
   it("refuses a fileWrite envelope larger than 14 MiB before opening the workspace", async () => {

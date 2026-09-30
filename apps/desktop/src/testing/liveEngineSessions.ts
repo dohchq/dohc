@@ -47,6 +47,10 @@ export function daemonCaptureLifecycleAnswer(
       return { id: request.id, result: captureFlushResult() };
     case "capture.setAuthor":
       return { id: request.id, result: { updated: true } };
+    case "capture.hold":
+      return { id: request.id, result: { holdId: `hold-${request.id}` } };
+    case "capture.release":
+      return { id: request.id, result: { released: true } };
     case "watcher.status":
       return { id: request.id, result: READY_WATCHER_STATUS };
     case "collections.listPendingAdoptions":

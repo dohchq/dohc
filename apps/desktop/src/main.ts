@@ -4226,6 +4226,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
     readDocument: (input) => engineYDocSessionIpc.readDocument(input),
     editDocument: (input) => engineYDocSessionIpc.editDocument(input),
   },
+  trashItem: (path) => shell.trashItem(path),
+  markDeletedUnderPath: (attachmentId, path) => engineYDocSessionIpc.fileMutationPort().markDeletedUnderPath(attachmentId, path),
   documentProjection: createDocumentProjectionWorker(),
   chatWrites,
   startCliServer,
