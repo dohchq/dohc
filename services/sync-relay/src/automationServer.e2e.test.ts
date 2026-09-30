@@ -157,7 +157,7 @@ it.skipIf(engine.missing)("the server runs a schedule with the owner daemon stop
   await mkdir(metadataDir, { recursive: true });
 
   // The scheduler's clock starts two hours back, so its due times are past for the engine too.
-  let clock = Date.now() - 2 * HOUR;
+  let clock = Math.floor(Date.now() / HOUR) * HOUR - 2 * HOUR;
   const timers: Array<() => void> = [];
   let hooks: Parameters<typeof startAutomationReplicas>[0] | undefined;
   const errors: string[] = [];
