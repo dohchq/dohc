@@ -245,6 +245,7 @@ describe("collection result schemas", () => {
             onBehalfOf: "user:ice",
             depth: 0,
             recordedAtMs: 12,
+            automationRun: null,
           },
         ],
       }),

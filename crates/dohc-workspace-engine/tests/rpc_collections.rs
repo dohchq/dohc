@@ -13,6 +13,7 @@ use dohc_engine_domain::{
     subscribe_automation_in_tx,
 };
 use dohc_engine_protocol::{
+    error::ErrorCode,
     limits::WireLimits,
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
@@ -855,6 +856,218 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
     assert_eq!(status_edit["actorKind"], json!("agent"));
     assert_eq!(status_edit["onBehalfOf"], json!("user:ice"));
     assert_eq!(status_edit["depth"], json!(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_automation_write_names_its_run_in_record_history() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    seed_schema(
+        &scratch,
+        "name: Tasks\nfields:\n  status:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
+    let db = engine_db_path(&scratch).expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+    seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                "main",
+                "tasks/alpha.md",
+                RECORD_ID,
+                "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    drop(store);
+    std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let session = call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "tasks/alpha.md",
+            "contentKind": "richdoc",
+        }),
+    )
+    .await;
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+        .expect("seed rich document");
+    call(
+        &transport,
+        &handle,
+        11,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session["sessionId"],
+            "updateBase64": base64::engine::general_purpose::STANDARD
+                .encode(doc.encode_full_state()),
+            "seed": true,
+        }),
+    )
+    .await;
+    let automation_id = "collection:tasks-id#stamp";
+    let run = json!({ "claimId": "atc_stamp_1", "automationName": "Stamp the finish date" });
+    let record_update = |id: u64, field: &str, value: &str, attribution: Value| {
+        let update = doc
+            .frontmatter_set(field, value)
+            .expect("frontmatter update");
+        let transport = &transport;
+        let handle = &handle;
+        let session_id = session["sessionId"].clone();
+        async move {
+            call(
+                transport,
+                handle,
+                id,
+                "ydoc.recordUpdate",
+                json!({
+                    "sessionId": session_id,
+                    "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+                    "actorOriginId": automation_id,
+                    "attribution": attribution,
+                }),
+            )
+            .await
+        }
+    };
+    record_update(
+        12,
+        "status",
+        "done",
+        json!({ "actorKind": "automation", "onBehalfOf": "local", "depth": 1, "run": run }),
+    )
+    .await;
+    // An automation write recorded without its run names none.
+    record_update(
+        13,
+        "owner",
+        "ice",
+        json!({ "actorKind": "automation", "onBehalfOf": "local", "depth": 1 }),
+    )
+    .await;
+    // Only an automation's write names a run, and an unbounded one refuses.
+    for (id, attribution) in [
+        (
+            14,
+            json!({ "actorKind": "agent", "onBehalfOf": "local", "depth": 0, "run": run }),
+        ),
+        (
+            15,
+            json!({ "actorKind": "automation", "depth": 1, "run": { "claimId": "", "automationName": "Stamp" } }),
+        ),
+        (
+            16,
+            json!({ "actorKind": "automation", "depth": 1, "run": { "claimId": "atc", "automationName": " " } }),
+        ),
+        (
+            17,
+            json!({ "actorKind": "automation", "depth": 1, "run": { "claimId": "atc", "automationName": "Stamp", "extra": true } }),
+        ),
+    ] {
+        let update = doc
+            .frontmatter_set("note", "refused")
+            .expect("frontmatter update");
+        let refused = call_error(
+            &transport,
+            &handle,
+            id,
+            "ydoc.recordUpdate",
+            json!({
+                "sessionId": session["sessionId"],
+                "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+                "actorOriginId": automation_id,
+                "attribution": attribution,
+            }),
+        )
+        .await;
+        assert_eq!(refused.code, ErrorCode::InvalidParams, "{refused:?}");
+    }
+    // Settling writes the record file; its capture keeps the run on the change.
+    call(
+        &transport,
+        &handle,
+        18,
+        "ydoc.close",
+        json!({ "sessionId": session["sessionId"] }),
+    )
+    .await;
+    reconcile_capture(&transport, &handle, 19).await;
+    let settled =
+        std::fs::read_to_string(scratch.path().join("tasks/alpha.md")).expect("settled record");
+    assert!(
+        settled.contains("status: done"),
+        "settled artifact: {settled}"
+    );
+
+    let record = call(
+        &transport,
+        &handle,
+        20,
+        "collections.getRecord",
+        json!({
+            "collectionPath": "tasks",
+            "recordId": RECORD_ID,
+            "historyLimit": 20,
+        }),
+    )
+    .await;
+    let history = record["history"].as_array().expect("history");
+    let stamped = history
+        .iter()
+        .find(|entry| entry["field"] == json!("status") && entry["next"]["value"] == json!("done"))
+        .expect("the automation's status write");
+    assert_eq!(stamped["authorOriginId"], json!(automation_id));
+    assert_eq!(stamped["actorKind"], json!("automation"));
+    assert_eq!(stamped["depth"], json!(1));
+    assert_eq!(stamped["automationRun"], run);
+    assert_eq!(
+        history
+            .iter()
+            .filter(|entry| {
+                entry["field"] == json!("status") && entry["next"]["value"] == json!("done")
+            })
+            .count(),
+        1,
+        "the settled file's capture records the change once: {history:?}"
+    );
+    let unnamed = history
+        .iter()
+        .find(|entry| entry["field"] == json!("owner"))
+        .expect("the write without its run");
+    assert_eq!(unnamed["actorKind"], json!("automation"));
+    assert_eq!(unnamed["automationRun"], Value::Null);
+    assert!(
+        history.iter().all(|entry| entry["field"] != json!("note")),
+        "a refused attribution writes no history: {history:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

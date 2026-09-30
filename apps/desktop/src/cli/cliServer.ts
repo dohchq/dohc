@@ -2276,6 +2276,7 @@ async function dispatch(
             onBehalfOf: entry.onBehalfOf,
             depth: entry.depth,
             recordedAtMs: entry.recordedAtMs,
+            automationRun: entry.automationRun,
           })),
         };
       } catch (error) {

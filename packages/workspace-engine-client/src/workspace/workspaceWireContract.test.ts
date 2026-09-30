@@ -345,6 +345,7 @@ describe("workspace wire schemas", () => {
             onBehalfOf: "user:ice",
             depth: 0,
             recordedAtMs: 1,
+            automationRun: { claimId: "atc_1", automationName: "Stamp the finish date" },
           },
         ],
         nextBeforeHistoryId: null,

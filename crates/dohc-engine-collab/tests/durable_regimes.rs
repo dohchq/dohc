@@ -4147,6 +4147,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         actor_kind: ChangeActorKind::Agent,
         on_behalf_of: Some("automation:triage".to_owned()),
         depth: 2,
+        run: None,
     };
     let expected_row = (
         Some("agent".to_owned()),
@@ -4255,6 +4256,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         actor_kind: ChangeActorKind::Automation,
         on_behalf_of: Some(String::new()),
         depth: 0,
+        run: None,
     };
     record_local_update(
         &mut a.store,

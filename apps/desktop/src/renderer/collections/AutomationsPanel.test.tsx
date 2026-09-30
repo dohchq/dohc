@@ -182,7 +182,7 @@ function Panel(props: {
   table?: AutomationTable;
   onRunUndone?: () => void;
   fields?: FieldDefinition[];
-  focus?: { automationId: string; run: string | null; seq: number } | null;
+  focus?: { automationId: string; run: string | null; name?: string | null; seq: number } | null;
   onNotice?: (message: string, undo?: () => void) => void;
   onError?: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onOpenFile?: (path: string) => void;
@@ -2460,6 +2460,23 @@ describe("an automation's runs", () => {
     await waitFor(() => expect(calls()).toBe(shown + 2));
     expect(bridge.listCollectionAutomationRuns).toHaveBeenLastCalledWith({ workspaceId: "ws-1", automationId: "collection:Tasks#stamp" });
     expect(screen.getByTestId("automation-run-atc_older")).toBeDefined();
+  });
+
+  it("names an automation it opens by the name the asker gave until the file says otherwise", async () => {
+    // A file that no longer holds the automation, as after it was removed.
+    makeBridge(read([]), [run({ claimId: "atc_new" })]);
+    render(<Panel focus={{ automationId: "collection:Tasks#gone", run: null, name: "Stamp the finish date", seq: 1 }} />);
+    expect(await screen.findByText("Stamp the finish date")).toBeTruthy();
+    await screen.findByTestId("automation-run-atc_new");
+    expect(screen.queryByText("gone", { exact: true })).toBeNull();
+  });
+
+  it("names the automation whose run it opened before its file was read", async () => {
+    makeBridge(read([summary(stamp)]), [run({ claimId: "atc_new" })]);
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    await screen.findByTestId("automation-run-atc_new");
+    expect(await screen.findByText("Stamp the finish date")).toBeTruthy();
+    expect(screen.queryByText("stamp", { exact: true })).toBeNull();
   });
 
   it("says so when the run a notice names is no longer in run history", async () => {

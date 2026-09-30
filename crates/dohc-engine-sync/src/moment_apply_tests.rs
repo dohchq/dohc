@@ -75,6 +75,7 @@ fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history(
                     } else {
                         0
                     },
+                    run: None,
                 }),
             )
             .expect("declared creator");

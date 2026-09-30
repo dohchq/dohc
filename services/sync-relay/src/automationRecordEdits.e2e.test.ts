@@ -32,7 +32,8 @@ import { closeTestStorages, tempRoot, testStorage } from "./testing";
 
 const engine = requireEngineBinaryOrSkip();
 const WORKSPACE = "workspace-trip";
-const AUTOMATION = { kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "owner", depth: 1 } as const;
+const AUTOMATION = { kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "owner", depth: 1,
+  run: { claimId: "claim-1", automationName: "Stamp the finish date" } } as const;
 const ONE = derivedRecordId("seeded-one");
 const TWO = derivedRecordId("claim-1/0");
 const DEADLINE_MS = 30_000;
@@ -171,7 +172,7 @@ it.skipIf(engine.missing)("writes an automation's records and posts on the serve
 
   // The owner's computer receives both, with the automation as their author.
   await owner.sync();
-  const byAutomation = { authorOriginId: AUTOMATION.automationId, actorKind: "automation", onBehalfOf: "owner", depth: 1 };
+  const byAutomation = { authorOriginId: AUTOMATION.automationId, actorKind: "automation", onBehalfOf: "owner", depth: 1, automationRun: AUTOMATION.run };
   const one = await owner.record(ONE);
   expect(one.record.values).toContainEqual(expect.objectContaining({ field: "Status", value: "Done" }));
   expect(one.history[0]).toMatchObject({ field: "Status", next: { value: "Done" }, ...byAutomation });

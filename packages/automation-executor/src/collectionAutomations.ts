@@ -2350,6 +2350,14 @@ export class CollectionAutomations {
     return found === "missing" ? null : await this.runRow(automationId, found.history, this.currentHash(automationId));
   }
 
+  /** Whether this computer keeps the run, so record history can open it. */
+  async hasRun(automationId: string, claimId: string): Promise<boolean> {
+    await this.indexAutomation(automationId);
+    const found = await this.findClaim(automationId, claimId, false);
+    if (found === null) throw new Error("The workspace engine is not running.");
+    return found !== "missing";
+  }
+
   private async runRow(automationId: string, claim: HistoryClaim, hash: string | null): Promise<CollectionAutomationRun> {
     const { stored, run } = await this.runOf(automationId, claim, hash);
     return { ...run, writes: stepWritesOf(stored).map(({ write }) => write) };
