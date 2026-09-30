@@ -772,7 +772,11 @@ fn control_character_author_fields_are_refused_before_admission() {
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1);
     let doc = Ydoc::wire();
-    for (id, scope) in [("agent\n", "person"), ("agent", "person\u{0085}")] {
+    for (id, scope) in [
+        ("agent\n", "person"),
+        ("agent\u{0085}", "person"),
+        ("agent", "person\u{0085}"),
+    ] {
         assert!(matches!(
             record(
                 &mut ts.store,
