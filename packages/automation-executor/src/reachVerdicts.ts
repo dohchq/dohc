@@ -43,7 +43,7 @@ export interface StoredReachVerdict {
    * own the first time a run names it. `id` is the person's user id or the
    * Collection's path.
    */
-  recipient?: { id: string; name: string; action: "post" | "notify" | "change" };
+  recipient?: { id: string; name: string; action: "post" | "notify" | "change" | "find" };
   verdict: ReachVerdict;
   /** The editor whose reach stopped the step, kept while it is held. */
   stoppedFor: string | null;
@@ -63,7 +63,7 @@ export const StoredReachVerdictSchema = z.object({
   narrowed: z.literal(true).optional(),
   accountedLinks: z.array(z.string().min(1)).optional(),
   seq: z.number().int().nonnegative(),
-  recipient: z.object({ id: z.string(), name: z.string(), action: z.enum(["post", "notify", "change"]) }).optional(),
+  recipient: z.object({ id: z.string(), name: z.string(), action: z.enum(["post", "notify", "change", "find"]) }).optional(),
 });
 
 /**

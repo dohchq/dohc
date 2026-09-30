@@ -375,6 +375,7 @@ export interface CollectionAutomationsOptions {
   groupList?(): Promise<Array<{ name: string; slug: string }> | null>;
   /** The name a formula's `person` shows for the person who pressed a button. */
   personName(userId: string): string;
+  localPersonId?(): string;
   /** Whether this computer's person may run a failed press again: the person who pressed it, or the workspace's owner. */
   mayRetryPress(pressedBy: string | null): Promise<boolean>;
   /** The engine took a press's settle. */
@@ -1651,8 +1652,9 @@ export class CollectionAutomations {
       return { ...summary, reach: { kind: "checked", steps } };
     });
     const dataset = unapproved || roster.kind === "unknown" ? undefined : this.datasets.get(collectionPath);
+    const codeFiles = indexed.file.entries.flatMap((entry) => entry.status === "valid" ? codeFilesOf(entry.automation, collectionPath) : []);
     const addsStay = dataset === undefined ? [] : dataset.definition.tables
-      .filter((table) => datasetUndoDeletes(roster, collection, dataset.definition, table.tableId, dataset.grants).length === 0)
+      .filter((table) => datasetUndoDeletes(roster, collection, dataset.definition, table.tableId, dataset.grants, codeFiles).length === 0)
       .map((table) => table.name);
     return { status: "read", contentHash: indexed.contentHash, automations, addsStay, ...you };
   }
@@ -2887,7 +2889,9 @@ export class CollectionAutomations {
       }
       const needsReverseReach = datasetUndoDeletesRecorded(runs) || runs.some((run) => run.applied.some((entry) =>
         entry.writes.some((write) => write.kind === "dataset-action" && write.reverseOperationId !== undefined)));
-      const source = needsReverseReach ? { roster: await this.options.roster(), collection: collectionNamed(parsed.collectionPath) } : null;
+      const definition = this.definitionFor(input.automationId);
+      const codeFiles = definition === null ? [] : codeFilesOf(definition, parsed.collectionPath);
+      const source = needsReverseReach ? { roster: await this.options.roster(), collection: collectionNamed(parsed.collectionPath), codeFiles } : null;
       for (const run of runs) {
         if (rebaseRun(run, (id) => this.collectionPathOf(id)).lost) return { status: "refused", reason: LOST_COLLECTION_ERROR };
       }
@@ -2900,7 +2904,7 @@ export class CollectionAutomations {
       }
       catch (error) { return { status: "refused", reason: errorText(error) }; }
       const denied = source && checkAutomationReach(source.roster, {
-        id: parsed.id, collection: collectionNamed(parsed.collectionPath), codeFiles: [], steps: reverseReach,
+        id: parsed.id, collection: collectionNamed(parsed.collectionPath), codeFiles, steps: reverseReach,
       }).find((verdict) => !verdict.allowed);
       if (denied && !denied.allowed) return { status: "refused", reason: denied.reason };
       // Every run of the claim changed records, one a person started over
@@ -2948,7 +2952,7 @@ export class CollectionAutomations {
       }, input.claimId, runs, async (request) => {
         await this.options.store.recordUndoRequest(newest(), request);
         newest().undoRequests.push(request);
-      }, this.runAbort.signal);
+      }, this.runAbort.signal, codeFiles);
       const undone = hasDatasets ? await this.withLiveHost(reverse, true) : await reverse(null);
       if (undone === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
       const { undone: result, keptFields } = undone;
@@ -3015,7 +3019,8 @@ export class CollectionAutomations {
       const lost = datasetUndoLostRun(host, claimRuns);
       if (lost !== null) return { status: "refused", reason: lost };
       if (unplanned.length === 0) return { collection, covers: [], calls: [] };
-      const planned = await planDatasetUndo(host, { roster, collection }, input.claimId, runs, unplanned, this.runAbort.signal);
+      const codeFiles = runs.flatMap((run) => { const definition = this.definitionFor(run.automationId); return definition === null ? [] : codeFilesOf(definition, collection.path); });
+      const planned = await planDatasetUndo(host, { roster, collection, codeFiles }, input.claimId, runs, unplanned, this.runAbort.signal);
       const confirmed = !added ? { token: planned.preview.token, chosen: [] } : input.deletes;
       const calls = confirmed?.token === planned.preview.token ? planned.send(confirmed.chosen) : null;
       return calls === null ? { status: "confirm", preview: planned.preview } : { collection, covers: unplanned, calls };
@@ -4702,6 +4707,7 @@ export class CollectionAutomations {
         return read === null ? null : { text: read.text, truncated: read.truncated };
       },
       personName: this.options.personName,
+      localPersonId: this.options.localPersonId,
       evaluator: this.options.evaluator,
       store: this.options.store,
       nowMs: this.nowMs,

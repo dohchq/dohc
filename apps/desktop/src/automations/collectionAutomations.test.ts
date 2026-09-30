@@ -1616,7 +1616,7 @@ describe("Collection automations", () => {
     await reopened.dispose();
   });
 
-  it.each([false, true])("refuses an approved dataset through the document write path (code: %s)", async (code) => {
+  it.each([false, true])("uses approved dataset operations for code and refuses document writes (code: %s)", async (code) => {
     const w = await world({ automations: { Tasks: [
       "  - id: donate",
       "    name: Donate",
@@ -1646,12 +1646,16 @@ describe("Collection automations", () => {
       const claim = w.claim("collection:Tasks#donate", task);
       await executor.open();
       await w.settledClaim(claim);
-      expect(claim).toMatchObject({
-        state: "failed",
-        error: code
-          ? "The code in step 1 changes records in Donations. Automations cannot use Donations yet, because its records change only through its Collection actions."
-          : "Name the approved operation step 1 uses, such as donations.create.",
-      });
+      if (code) {
+        expect(claim.state).toBe("done");
+        expect(host.history({ datasetId: id(1) }).entries).toMatchObject([{
+          operation: "donations.create",
+          automation: { automationId: "collection:Tasks#donate", depth: 1 },
+        }]);
+      } else {
+        expect(claim).toMatchObject({ state: "failed", error: "Name the approved operation step 1 uses, such as donations.create." });
+        expect(host.history({ datasetId: id(1) }).entries).toEqual([]);
+      }
       expect(w.authored).toEqual([]);
     } finally {
       await executor.dispose();
@@ -5706,7 +5710,7 @@ describe("code steps", () => {
     w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Tasks"])] });
     await w.makeExecutor().open();
     await w.settledClaim(claim);
-    expect(claim).toMatchObject({ state: "failed", error: "The code in step 1 changes records in Log. ana@dohc.test cannot edit Log." });
+    expect(claim).toMatchObject({ state: "failed", error: "The code in step 1 changes records. This automation cannot use the requested Collection or fields." });
     expect([...w.records.values()].filter((record) => record.collection === "Log")).toEqual([]);
   });
 
@@ -5734,7 +5738,7 @@ describe("code steps", () => {
     const claim = w.claim(CODE, task);
     await w.executor.open();
     await w.settledClaim(claim);
-    expect(claim).toMatchObject({ state: "failed", error: "The code in step 1 changes records in Budget. ana@dohc.test cannot edit Budget." });
+    expect(claim).toMatchObject({ state: "failed", error: "The code in step 1 changes records. This automation cannot use the requested Collection or fields." });
     expect(w.fieldsOf(task)).toEqual({ Status: "Done" });
     expect(w.journaled).toEqual([]);
 

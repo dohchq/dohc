@@ -369,6 +369,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     };
   const makeExecutor = () => executor = new CollectionAutomations({
     personName: (userId) => `Person ${userId}`,
+    localPersonId: () => "user-ana",
     mayRetryPress: async () => options.mayRetryPress ?? false,
     onPressSettled: (event) => { settled.push(event); wake(); },
     onPressWaiting: (event) => { waiting.push(event); wake(); },
@@ -2813,8 +2814,8 @@ describe("code steps on a dataset", () => {
     ["a field no approved edit changes", "return { set: { 'Finished on': '2026-09-27' } };",
       "The code in step 1 changes records in Invoices. Budget has no approved edit that changes Finished on."],
     ["a field the table lacks", "return { set: { Nope: 1 } };", "The code in step 1 sets Nope, which is not a field in Invoices."],
-    ["another Collection", "return { records: [{ action: 'add', collection: 'Tasks', fields: {} }] };",
-      "The code in step 1 changes records in Tasks. Automations on Budget can use only its own records for now."],
+    ["a missing Collection", "return { records: [{ action: 'add', collection: 'Tasks', fields: {} }] };",
+      "The code in step 1 changes records in Tasks. dohc cannot find the Collection Tasks."],
     ["a record the table does not have", "return { records: [{ action: 'change', collection: 'Budget', id: 'gone', fields: { Notes: 'x' } }] };",
       "The code in step 1 changes record gone, which is not in Budget."],
   ])("fails a run whose code changes %s, before anything is written", async (_problem, code, error) => {
@@ -2902,6 +2903,43 @@ describe("code steps on a dataset", () => {
     expect(runs).toBe(1);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Closed");
     expect((await f.records()).filter((row) => row.values[NOTES] === "log")).toHaveLength(1);
+    await f.executor.dispose();
+  });
+
+  it("resumes saved code changes after a field rename and compatible re-approval", async () => {
+    const f = await world();
+    await f.writeAutomations(coded("return { set: { Status: 'Closed' }, records: [{ action: 'add', collection: 'Budget', fields: { Status: 'Added' } }] };"));
+    await f.executor.open();
+    let closed: Promise<void> | undefined;
+    f.afterNextSave(() => { closed = f.executor.close(); });
+    const invoice = await f.create({});
+    await f.edit(invoice.id, { [PAID]: true });
+    await f.until(() => closed !== undefined);
+    await closed;
+    const renamed = structuredClone(definition);
+    renamed.tables[0]!.fields.find((field) => field.fieldId === STATUS)!.name = "State";
+    await writeFile(join(f.root, "Budget/dataset.json"), JSON.stringify(renamed));
+    await writeFile(join(f.root, "Budget/rename.sql"), "SELECT 1;");
+    const prepared = await f.host.prepareMigration({ datasetId: BUDGET, descriptorPath: "Budget/dataset.json", migrationPath: "Budget/rename.sql", adapter: f.adapter });
+    await f.host.approveMigration({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256, approvalDigest: prepared.approvalDigest });
+    expect(f.host.automations.resolves(f.rules)).toBe(true);
+    await f.executor.open();
+    await f.until(() => ["done", "failed"].includes(f.claims()[0]?.state ?? ""));
+    expect(f.claims()[0]).toMatchObject({ state: "done" });
+    expect((await f.record(invoice.id))?.values[STATUS]).toBe("Closed");
+    expect((await f.records()).map((row) => row.values[STATUS])).toContain("Added");
+    await f.executor.dispose();
+  });
+
+  it("shows additions stay when a code-file editor cannot delete them", async () => {
+    const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [
+      { grantId: "code", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Budget/run.js"], access: "edit", versionId: null }, channel: null },
+      { grantId: "view", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Budget"], access: "view", versionId: null }, channel: null },
+    ] } });
+    await f.writeAutomations(closePaid("      - run-file: run.js\n"));
+    await writeFile(join(f.root, "Budget/run.js"), "return {};\n");
+    await f.executor.open();
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ addsStay: ["Invoices"] });
     await f.executor.dispose();
   });
 
@@ -3034,7 +3072,7 @@ it("lists and confirms a held cross-Collection step after its editor leaves", as
   await f.executor.dispose();
 });
 
-it("runs a document source's code and dataset writes through the real host", async () => {
+it("runs a document source's cross-Collection code changes through the real host", async () => {
   const f = await world({ documents: true });
   await mkdir(join(f.root, "Log"), { recursive: true });
   await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
@@ -3044,11 +3082,10 @@ automations:
     name: Copy
     when: record-added
     do:
-      - run: "return { output: ctx.record.Status };"
-        as: priorStatus
-      - add-record: {Status: '=priorStatus'}
+      - run: "return { records: [{ action: 'add', collection: 'Budget', table: 'Invoices', fields: { Status: ctx.record.Status } }, { action: 'add', collection: 'Budget', fields: { Status: 'Second' } }] };"
+      - find: record.Status == "Original"
         collection: Budget
-        operation: invoices.create
+        operation: invoices.list
         as: added
       - set: {Status: From document}
         records: added
@@ -3064,10 +3101,45 @@ automations:
   f.executor.notifyClaimed();
   await f.until(() => claim.state === "done" || claim.state === "failed");
   expect(claim.state).toBe("done");
-  expect(await f.records()).toMatchObject([{ values: { [STATUS]: "From document" } }]);
+  expect((await f.records()).map((row) => row.values[STATUS]).sort()).toEqual(["From document", "Second"]);
   expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({
     automation: { automationId: "collection:Log#copy", depth: 1 },
   });
+  await f.executor.dispose();
+});
+
+it("shows a computed dataset operation hold and resumes only after confirmation", async () => {
+  const editor = { grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com",
+    files: { paths: ["Log"], versionId: null, access: "edit" as const }, channel: null };
+  const f = await world({ documents: true, roster: { kind: "owner", ownerUserId: "user-owner", grants: [editor] }, mayRetryPress: true });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: copy
+    name: Copy
+    when: record-added
+    do:
+      - run: "return { records: [{ action: 'add', collection: ['Bud', 'get'].join(''), fields: { Status: 'Copied' } }] };"
+`);
+  f.documents.set("document", { id: "document", path: "Log/document.md", status: "Original" });
+  await f.executor.open();
+  const claim: AutomationClaim = { ...engineClaim("code-hold", "pending", Date.now(), "collection:Log#copy"),
+    collectionPath: "Log", recordId: "document", trigger: { historyId: 1 },
+    change: { kind: "added", authorOriginId: null, actorKind: "human", onBehalfOf: "user-owner", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 } };
+  f.engineClaims.push(claim);
+  f.executor.notifyClaimed();
+  await f.until(() => claim.state === "failed");
+  expect(await f.records()).toEqual([]);
+  f.setRoster(OWNER);
+  f.executor.rosterChanged();
+  expect(await f.executor.retry({ automationId: claim.automationId, claimId: claim.claimId, startOver: false })).toMatchObject({ status: "queued" });
+  await f.until(() => f.executor.holds().some((hold) => hold.recipient === JSON.stringify(["operation", BUDGET, CREATE])));
+  expect(await f.records()).toEqual([]);
+  for (const hold of f.executor.holds()) expect(await f.executor.confirmReach(hold)).toBe("confirmed");
+  await f.until(() => claim.state === "done" || claim.state === "failed");
+  expect(claim.state).toBe("done");
+  expect(await f.records()).toMatchObject([{ values: { [STATUS]: "Copied" } }]);
   await f.executor.dispose();
 });
 

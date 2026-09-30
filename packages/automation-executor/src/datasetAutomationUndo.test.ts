@@ -418,6 +418,22 @@ describe("undo of a dataset run", () => {
     expect(datasetUndoDeletes(unknown.roster, collection, definition, TABLE, anaMayDelete)).toEqual([]);
   });
 
+  it("checks code-file editors at preview and before sending a saved delete", async () => {
+    const records = { b: { version: 1, values: {} } };
+    const { host, sent } = recordsHost(records);
+    const runs = [runOf("h-1", 1, [created("b")])];
+    await confirm(host, runs);
+    const reach: DatasetUndoReach = { collection, codeFiles: ["Budget/run.js"], roster: { ...OWNER, grants: [
+      { ...ANA, files: { paths: ["Budget/run.js"], versionId: null, access: "edit" } },
+      { ...ANA, grantId: "view", files: { paths: ["Budget"], versionId: null, access: "view" } },
+    ] } };
+    expect(await preview(host, runs, reach)).toMatchObject({ deletes: 0, kept: 1 });
+    expect(await undoDatasetAutomationRuns(host, collection, async () => reach.roster, "claim", runs, async () => {},
+      new AbortController().signal, undefined, undefined, reach.codeFiles)).toMatchObject({ undone: { deleted: 0, kept: 1 } });
+    expect(sent).toEqual([]);
+    expect(records.b).toBeDefined();
+  });
+
   it("asks the person to choose where several deletes qualify, and sends only the one they chose", async () => {
     const records = { b: { version: 1, values: {} }, c: { version: 1, values: {} } };
     const { host, sent } = recordsHost(records, { rules: twoDeletes });
