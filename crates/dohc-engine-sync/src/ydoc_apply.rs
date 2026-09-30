@@ -2821,6 +2821,18 @@ fn apply_inactive_batch_in_tx(
                 ],
             )
             .map_err(SyncError::persist)?;
+        } else if pending_authors != "[]" {
+            tx.execute(
+                "UPDATE ydoc_inactive_lineages SET pending_authors_json='[]' \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+                params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    payload.lineage_claim_id
+                ],
+            )
+            .map_err(SyncError::persist)?;
         }
         Ok::<_, SyncError>(())
     })();
