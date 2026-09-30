@@ -89,6 +89,8 @@ import {
 } from "./workspaceEnginePolicyFile";
 import {
   EngineDaemonUnavailableError,
+  EngineClientError,
+  EngineRequestDeadlineError,
   EngineWorkspaceSessionsClosedError,
   EngineWorkspaceShuttingDownError,
   isEngineSessionReconnectError,
@@ -190,6 +192,7 @@ export async function probeEngineStoreRefusal(
 // caller so the UI can surface the failure.
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
+export const YDOC_UNCERTAIN_FAILURE_BACKOFF_MS = TRANSPORT_REBIND_MAX_BACKOFF_MS;
 
 // How long one document-open TASK may keep retrying transport errors
 // while it holds the capture chain. The task is more than the provider open —
@@ -837,6 +840,32 @@ function isFileLockedCause(error: unknown): boolean {
 // file lock leaves a durably pending write for the detached debt registry.
 function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
+}
+
+function isUpdateBackoffCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, candidate => {
+    if (candidate instanceof EngineRequestDeadlineError) return true;
+    if (candidate instanceof EngineClientError && candidate.code === "connect-timeout") return true;
+    const wire = candidate instanceof DaemonRefusalError
+      ? { code: candidate.wireCode, retry: candidate.retry }
+      : (candidate as { wireError?: { code?: string; retry?: string } } | null)?.wireError;
+    return wire?.retry === "afterBackoff" || wire?.code === "DEADLINE_EXCEEDED" || wire?.code === "OVERLOADED";
+  });
+}
+
+// A provider's live doc can contain unrecorded edits. Only its fresh open
+// snapshot proves admission, including deletions that a state vector omits.
+function durableUpdateCovers(durable: Uint8Array, update: Uint8Array): boolean {
+  if (Y.decodeUpdate(Y.diffUpdate(update, Y.encodeStateVectorFromUpdate(durable))).structs.length > 0) return false;
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, durable);
+    const before = Y.snapshot(doc);
+    Y.applyUpdate(doc, update);
+    return Y.equalSnapshots(before, Y.snapshot(doc));
+  } finally {
+    doc.destroy();
+  }
 }
 
 function isLineageChangedCause(error: unknown): boolean {
@@ -2089,6 +2118,8 @@ export function createWorkspaceEngineCapture(
       acknowledged: boolean;
       sent: boolean;
       uncertainFailures: number;
+      lastUncertainFailureAt: number | null;
+      unanswered: { error: unknown } | null;
       refusal: { error: unknown } | null;
     };
     const pendingRecords = new Set<PendingRecord>();
@@ -2112,7 +2143,7 @@ export function createWorkspaceEngineCapture(
     // Main owns originals across provider generations; the adapter needs wire
     // strings for its standalone retry ladder. Sharing ownership would couple
     // these lifetimes. Both queues are bounded independently.
-    const refuseRecord = (record: PendingRecord, error: unknown): void => {
+    const refuseRecord = (record: PendingRecord, error: unknown, unanswered = false): void => {
       if (record.refusal !== null) return;
       record.refusal = { error };
       const refusedUpdates = [record.update];
@@ -2134,24 +2165,34 @@ export function createWorkspaceEngineCapture(
           ? "The edit does not match this file's format."
           : reason.includes("share-read-only")
             ? "This file is read-only."
-            : "dohc refused this edit.";
+            : unanswered
+              ? "dohc got no answer after three attempts to save this edit."
+              : "dohc refused this edit.";
       const what = refusedUpdates.length > 1 ? "edits" : "an edit";
       const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices. Use Save copy on this file's recovery row.`;
       onError(`Y.Doc local update of ${input.path}`, new Error(message, { cause: error }));
       input.onEditRefused?.(record.options.idempotencyKey ?? "", message);
     };
     const recordUpdateFailure = (record: PendingRecord, error: unknown): boolean => {
-      if (hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) return true;
-      if (isTransientEngineCause(error)) {
+      if (isTransientEngineCause(error) || isUpdateBackoffCause(error)) {
         record.uncertainFailures = 0;
+        record.lastUncertainFailureAt = null;
         return false;
       }
+      if (hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) return true;
       if (isLineageChangedCause(error) ||
           hasRefusalInCauseChain(error, isEngineSessionReconnectError)) return false;
       // Keep the count with the original, so replacing its provider cannot
       // let one unanswered write block all later independent work forever.
-      record.uncertainFailures += 1;
-      return record.uncertainFailures >= 3;
+      const now = performance.now();
+      if (record.lastUncertainFailureAt === null ||
+          now - record.lastUncertainFailureAt >= YDOC_UNCERTAIN_FAILURE_BACKOFF_MS) {
+        record.uncertainFailures += 1;
+        record.lastUncertainFailureAt = now;
+      }
+      if (record.uncertainFailures < 3) return false;
+      record.unanswered = { error };
+      return true;
     };
     // Set when a reopen found another object at this path. Terminal: the
     // session stops reopening, since every reopen would meet the same
@@ -2471,6 +2512,25 @@ export function createWorkspaceEngineCapture(
         // Replay only unacknowledged originals. State-vector diffs include the
         // full delete set and cannot preserve each operation's author.
         for (const record of [...pendingRecords]) {
+          if (!pendingRecords.has(record)) continue;
+          if (record.unanswered !== null) {
+            if (durableUpdateCovers(replacement.initialUpdate, record.update)) {
+              record.acknowledged = true;
+              removePendingRecord(record);
+              Y.applyUpdate(doc, record.update);
+              Y.applyUpdate(recordedDoc, record.update);
+            } else {
+              refuseRecord(record, record.unanswered.error, true);
+              const restored = new Y.Doc();
+              Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
+              for (const pending of pendingRecords) Y.applyUpdate(restored, pending.update);
+              canonicalDoc = restored;
+              announceReplacement(Y.encodeStateAsUpdate(restored), []);
+              doc.destroy();
+              doc = restored;
+            }
+            continue;
+          }
           replayArmed = !settleForgiven;
           try {
             record.sent = true;
@@ -2483,16 +2543,18 @@ export function createWorkspaceEngineCapture(
             await journaled;
           } catch (error) {
             if (!recordUpdateFailure(record, error)) throw error;
-            refuseRecord(record, error);
-            const restored = new Y.Doc();
-            Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
-            for (const pending of pendingRecords) Y.applyUpdate(restored, pending.update);
-            canonicalDoc = restored;
-            announceReplacement(Y.encodeStateAsUpdate(restored), []);
-            doc.destroy();
-            doc = restored;
-            // This provider applied the refused bytes before admission. Reopen
-            // from durable state before replaying the remaining originals.
+            if (record.unanswered === null) {
+              refuseRecord(record, error);
+              const restored = new Y.Doc();
+              Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
+              for (const pending of pendingRecords) Y.applyUpdate(restored, pending.update);
+              canonicalDoc = restored;
+              announceReplacement(Y.encodeStateAsUpdate(restored), []);
+              doc.destroy();
+              doc = restored;
+            }
+            // Reopen from durable state before deciding an unanswered write
+            // or replaying work after a definitive refusal.
             openingRemoteUpdates.delete(replacement);
             await replacement.evict();
             handedOff = true;
@@ -2706,7 +2768,7 @@ export function createWorkspaceEngineCapture(
           // something replaces the generation.
           if (isLineageChangedCause(error)) throw error;
           const refused = recordUpdateFailure(record, error);
-          if (refused) {
+          if (refused && record.unanswered === null) {
             refuseRecord(record, error);
             if (canonicalDoc !== doc && generation.doc === canonicalDoc) throw error;
             if (canonicalDoc !== null) announceReplacement(Y.encodeStateAsUpdate(canonicalDoc), []);
@@ -2860,7 +2922,8 @@ export function createWorkspaceEngineCapture(
         const update = confirmRecording ? new Uint8Array(decidedUpdate) : decidedUpdate;
         const record: PendingRecord = {
           update, options: capturedOptions,
-          acknowledged: false, sent: false, uncertainFailures: 0, refusal: null,
+          acknowledged: false, sent: false, uncertainFailures: 0,
+          lastUncertainFailureAt: null, unanswered: null, refusal: null,
         };
         if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
             pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
@@ -2916,7 +2979,7 @@ export function createWorkspaceEngineCapture(
             canonicalLineageClaimId = generation.lineageClaimId;
           }
         } catch (error) {
-          if (recordUpdateFailure(record, error)) {
+          if (recordUpdateFailure(record, error) && record.unanswered === null) {
             refuseRecord(record, error);
             // Production providers already restore admitted state and announce
             // its replacement. Injected providers may need a clean reopen.
@@ -3023,7 +3086,8 @@ export function createWorkspaceEngineCapture(
           const record: PendingRecord = {
             update, options: { ...structuredClone(applyOptions ?? {}),
               idempotencyKey: applyOptions?.idempotencyKey ?? createId() },
-            acknowledged: false, sent: false, uncertainFailures: 0, refusal: null,
+            acknowledged: false, sent: false, uncertainFailures: 0,
+            lastUncertainFailureAt: null, unanswered: null, refusal: null,
           };
           refuseRecord(record, new Error("pending-edits-limit"));
           // Wait for already admitted calls so the replacement contains them.

@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as nodeFs from "node:fs";
 import { Readable } from "node:stream";
 import { join } from "node:path";
-import { expect, it, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import {
   DaemonRefusalError,
   YDOC_PENDING_MAX_RECORDS,
@@ -22,12 +22,14 @@ import {
 } from "@dohc/workspace-engine-client/testing";
 import {
   EngineDaemonUnavailableError,
+  EngineRequestDeadlineError,
   EngineWorkspaceSessions,
   type EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
 import {
   createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture,
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+  YDOC_UNCERTAIN_FAILURE_BACKOFF_MS,
   type WorkspaceEngineCapture,
   type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
@@ -49,6 +51,13 @@ vi.mock("node:fs", async (importOriginal) => {
 // 100 ms. A test that prices the production ladder passes its own
 // `teardownRetryMs`.
 const TEST_TEARDOWN_RETRY_MS = { initial: 20, cap: 100 };
+
+function uncertainFailureClock(): () => void {
+  let now = 0;
+  const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+  onTestFinished(() => clock.mockRestore());
+  return () => { now += YDOC_UNCERTAIN_FAILURE_BACKOFF_MS; };
+}
 
 // The capture exposes no retry hook, so a test that asserts a retry did NOT
 // fire waits past every rung the ladder could have scheduled (initial, then
@@ -2023,6 +2032,7 @@ it("a settle whose materialization was blocked reports an error, never Saved", a
 });
 
 it("retires a persistent local failure and releases every failed lease", async () => {
+  const advanceBackoff = uncertainFailureClock();
   const rootPath = await createTestScratch("dohc-ydoc-loud-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
@@ -2106,6 +2116,10 @@ it("retires a persistent local failure and releases every failed lease", async (
   rendererDoc.getText("plainText").insert(4, " refused");
 
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  advanceBackoff();
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  advanceBackoff();
   expect((await session.settleNow()).content).toBe("seed");
   expect(onError).toHaveBeenCalledWith(
     "Y.Doc local update of note.md",
@@ -2113,7 +2127,7 @@ it("retires a persistent local failure and releases every failed lease", async (
   );
   // The third uncertain answer retires the edit. A clean generation can
   // settle admitted content, and each failed generation releases its lease.
-  expect(closedGenerations).toEqual([1, 2, 3]);
+  expect(closedGenerations).toEqual([1, 2, 3, 4, 5]);
   expect(leaseActive).toBe(true);
   await expect(session.close({ settle: false })).resolves.toBeUndefined();
   expect(leaseActive).toBe(false);
@@ -2121,7 +2135,7 @@ it("retires a persistent local failure and releases every failed lease", async (
     path: "note.md",
     onRemoteUpdate: () => undefined,
   });
-  expect(generation).toBe(5);
+  expect(generation).toBe(7);
   await reopened.close({ settle: false });
   await capture.stop();
 });
@@ -2558,7 +2572,140 @@ it.each([false, true])("keeps a write after one Internal answer when confirmed i
   await session.close({ settle: false }); await capture.stop();
 });
 
+it.each(["deadline", "overloaded", "backoff", "client-timeout", "internal"] as const)("keeps a burst of three %s answers without a recovery notice", async kind => {
+  uncertainFailureClock();
+  const fixture = await daemonDeathCapture("dohc-ydoc-fast-failures-", "ydoc-fast-failures");
+  const notices = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-fast-failures", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: () => undefined, onEditRefused: notices,
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    fixture.state.applyRefusals.push(kind === "client-timeout"
+      ? new EngineRequestDeadlineError(attempt, "ydoc.apply", 100)
+      : new DaemonRefusalError({
+        code: kind === "deadline" ? "DEADLINE_EXCEEDED" : kind === "overloaded" ? "OVERLOADED" : "INTERNAL",
+        message: "temporary failure", retry: kind === "backoff" ? "afterBackoff" : "no",
+      }, undefined));
+  }
+  const update = keyedUpdate(session.doc, "Saved after the burst");
+  session.applyLocalUpdate(update, undefined, { idempotencyKey: "burst" });
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect(fixture.state.applyRefusals).toHaveLength(0);
+  expect(notices).not.toHaveBeenCalled();
+  expect((await session.settleNow()).content).toBe("Saved after the burst");
+  expect(fixture.state.journalKeys).toEqual(["burst"]);
+  await session.close({ settle: false }); await capture.stop();
+});
+
+it.each(["insert", "delete"] as const)("acknowledges a durable %s after its third spaced answer is lost", async kind => {
+  const advanceBackoff = uncertainFailureClock();
+  const fixture = await daemonDeathCapture("dohc-ydoc-third-commit-", "ydoc-third-commit");
+  const notices = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-third-commit", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: () => undefined, onEditRefused: notices,
+  });
+  await session.applyDecidedLocalUpdate(() => keyedUpdate(session.doc, "Base"));
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, Y.encodeStateAsUpdate(session.doc));
+  const before = Y.encodeStateVector(mirror);
+  if (kind === "delete") mirror.getText("plainText").delete(0, 4);
+  else mirror.getText("plainText").insert(4, " saved once");
+  const original = Y.encodeStateAsUpdate(mirror, before);
+  const fail = () => fixture.state.applyRefusals.push(new DaemonRefusalError({
+    code: "INTERNAL", message: "answer lost", retry: "no",
+  }, undefined));
+  fail(); fail(); fail();
+  session.applyLocalUpdate(original, undefined, { idempotencyKey: "third-commit" });
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  advanceBackoff(); fail();
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  advanceBackoff();
+  fixture.state.applyFaults.push("commit-then-internal");
+  expect((await session.settleNow()).content).toBe(kind === "delete" ? "" : "Base saved once");
+  expect(fixture.state.journalKeys.filter(key => key === "third-commit")).toHaveLength(1);
+  expect(notices).not.toHaveBeenCalled();
+  mirror.destroy(); await session.close({ settle: false }); await capture.stop();
+});
+
+it.each(["deadline", "overloaded", "backoff", "client-timeout"] as const)("does not count spaced %s answers as uncertain strikes", async kind => {
+  const advanceBackoff = uncertainFailureClock();
+  const fixture = await daemonDeathCapture("dohc-ydoc-transient-spaced-", "ydoc-transient-spaced");
+  const notices = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-transient-spaced", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: () => undefined, onEditRefused: notices,
+  });
+  fixture.state.daemonAlive = false;
+  session.applyLocalUpdate(keyedUpdate(session.doc, "Still waiting"));
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  fixture.state.daemonAlive = true;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    advanceBackoff();
+    fixture.state.applyRefusals.push(kind === "client-timeout"
+      ? new EngineRequestDeadlineError(attempt, "ydoc.apply", 100)
+      : new DaemonRefusalError({
+        code: kind === "deadline" ? "DEADLINE_EXCEEDED" : kind === "overloaded" ? "OVERLOADED" : "INTERNAL",
+        message: "temporary failure", retry: kind === "backoff" ? "afterBackoff" : "no",
+      }, undefined));
+    await expect(session.settleNow()).rejects.toThrow(/closed/i);
+    expect(notices).not.toHaveBeenCalled();
+  }
+  expect((await session.settleNow()).content).toBe("Still waiting");
+  await session.close({ settle: false }); await capture.stop();
+});
+
+it("retires an unanswered deletion whose clocks are durable but whose delete set is missing", async () => {
+  const advanceBackoff = uncertainFailureClock();
+  const fixture = await daemonDeathCapture("dohc-ydoc-unrecorded-delete-", "ydoc-unrecorded-delete");
+  const notices = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-unrecorded-delete", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: () => undefined, onEditRefused: notices,
+  });
+  await session.applyDecidedLocalUpdate(() => keyedUpdate(session.doc, "Keep me"));
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, Y.encodeStateAsUpdate(session.doc));
+  const before = Y.encodeStateVector(mirror);
+  mirror.getText("plainText").delete(0, 7);
+  const deletion = Y.encodeStateAsUpdate(mirror, before);
+  expect(Y.encodeStateVector(mirror)).toEqual(before);
+  fixture.state.daemonAlive = false;
+  session.applyLocalUpdate(deletion);
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  fixture.state.daemonAlive = true;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    advanceBackoff();
+    fixture.state.applyRefusals.push(new DaemonRefusalError({
+      code: "INTERNAL", message: "unanswered deletion", retry: "no",
+    }, undefined));
+    if (attempt < 2) await expect(session.settleNow()).rejects.toThrow(/closed/i);
+    else expect((await session.settleNow()).content).toBe("Keep me");
+  }
+  expect(notices).toHaveBeenCalledTimes(1);
+  expect(notices.mock.calls[0]?.[1]).toContain("dohc got no answer after three attempts");
+  mirror.destroy(); await session.close({ settle: false }); await capture.stop();
+});
+
 it.each([false, true])("retires three Internal answers and saves a later independent write when confirmed is %s", async confirmed => {
+  const advanceBackoff = uncertainFailureClock();
   const fixture = await daemonDeathCapture("dohc-ydoc-internal-limit-", "ydoc-internal-limit");
   const notices = vi.fn();
   const replacements = vi.fn();
@@ -2581,16 +2728,27 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
   if (confirmed) {
     await expect(session.applyDecidedLocalUpdate(() => refused, undefined, { idempotencyKey: "refused" }))
       .rejects.toThrow("may have been recorded");
-    await session.applyDecidedLocalUpdate(() => independent, undefined, { idempotencyKey: "independent" });
   } else {
     session.applyLocalUpdate(refused, undefined, { idempotencyKey: "refused" });
-    session.applyLocalUpdate(independent, undefined, { idempotencyKey: "independent" });
   }
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    advanceBackoff();
+    fixture.state.applyRefusals.push(new DaemonRefusalError({
+      code: "INTERNAL", message: "persistent uncertain answer", retry: "no",
+    }, undefined));
+    if (attempt === 0) await expect(session.settleNow()).rejects.toThrow(/closed/i);
+    else await session.settleNow();
+  }
+  if (confirmed) await session.applyDecidedLocalUpdate(() => independent, undefined, { idempotencyKey: "independent" });
+  else session.applyLocalUpdate(independent, undefined, { idempotencyKey: "independent" });
   expect((await session.settleNow()).content).toBe("Saved independent");
   expect(fixture.state.applyRefusals).toHaveLength(0);
   expect(fixture.state.journalKeys).toEqual(["independent"]);
   expect(notices).toHaveBeenCalledTimes(1);
   expect(notices.mock.calls[0]?.[0]).toBe("refused");
+  expect(notices.mock.calls[0]?.[1]).toContain("dohc got no answer after three attempts to save this edit.");
+  expect(notices.mock.calls[0]?.[1]).not.toContain("dohc refused");
   expect(replacements).toHaveBeenCalled();
   await session.settleNow();
   expect(notices).toHaveBeenCalledTimes(1);
@@ -2598,6 +2756,7 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
 });
 
 it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s replay refusal batch and preserves an independent client", async kind => {
+  const advanceBackoff = uncertainFailureClock();
   const fixture = await daemonDeathCapture("dohc-ydoc-causal-refusal-", "ydoc-causal-refusal");
   const notices: string[] = [];
   const capture = createWorkspaceEngineCapture({
@@ -2636,11 +2795,13 @@ it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s rep
   for (let attempt = 0; attempt < attempts - 1; attempt += 1) {
     await expect(session.settleNow()).rejects.toThrow(/closed/i);
     expect(notices).toHaveLength(0);
+    advanceBackoff();
   }
   expect((await session.settleNow()).content).toBe("Saved independent");
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain('could not save edits to "note.md"');
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
+  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit." : "dohc got no answer after three attempts");
   expect(fixture.state.journalKeys).toContain("other-client");
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
 });
