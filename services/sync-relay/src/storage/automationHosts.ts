@@ -41,10 +41,23 @@ export function initializeAutomationHostPlacementSchema(db: SqliteDb): void {
   `);
 }
 
+// The reach verdicts the relay's last release carried, beside its Group
+// handover, as the JSON text they arrived as. Null after a take over, or when
+// the computer releasing could not read its own.
+export function initializeAutomationReachHandoverSchema(db: SqliteDb): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_relay_automation_reach_handovers (
+      workspace_id TEXT NOT NULL PRIMARY KEY
+        REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      reach_json TEXT CHECK (reach_json IS NULL OR (json_valid(reach_json) AND length(reach_json) <= 1048576))
+    ) STRICT;
+  `);
+}
+
 function keepGroupHandover(
   storage: StorageContext,
   workspaceId: string,
-  row: { generation: number; forInstallId: string; tookOver: boolean; groups: string },
+  row: { generation: number; forInstallId: string; tookOver: boolean; groups: string; reach: string | null },
 ): void {
   storage.db.prepare(
     `INSERT INTO sync_relay_automation_group_handovers
@@ -54,6 +67,17 @@ function keepGroupHandover(
        generation = excluded.generation, for_install_id = excluded.for_install_id,
        took_over = excluded.took_over, groups_json = excluded.groups_json`,
   ).run(workspaceId, row.generation, row.forInstallId, row.tookOver ? 1 : 0, row.groups);
+  storage.db.prepare(
+    `INSERT INTO sync_relay_automation_reach_handovers (workspace_id, reach_json) VALUES (?, ?)
+     ON CONFLICT(workspace_id) DO UPDATE SET reach_json = excluded.reach_json`,
+  ).run(workspaceId, row.reach);
+}
+
+function heldReach(storage: StorageContext, workspaceId: string): string | null {
+  const row = storage.db.prepare(
+    "SELECT reach_json FROM sync_relay_automation_reach_handovers WHERE workspace_id = ?",
+  ).get(workspaceId);
+  return row?.reach_json === undefined || row.reach_json === null ? null : String(row.reach_json);
 }
 
 // Every input names the owner the route authenticated. Each call checks
@@ -92,6 +116,8 @@ export interface AutomationHostReleaseInput extends AutomationHostReadInput {
   releasedThroughMs: number;
   /** The Group handover, as JSON text. */
   groups: string;
+  /** The releasing computer's reach verdicts, as JSON text, or null. */
+  reach: string | null;
   /** The host generation the releasing computer last watched its Group subscriptions at. */
   groupsWatched: number;
 }
@@ -186,7 +212,7 @@ function startWithoutHandover(
     installId, handoverFrom: null, releasedThroughMs: laterProgress(host.releasedThroughMs, nowMs),
   }, host);
   keepGroupHandover(storage, workspaceId, {
-    generation: host.generation + 1, forInstallId: installId, tookOver: true, groups: "{}",
+    generation: host.generation + 1, forInstallId: installId, tookOver: true, groups: "{}", reach: null,
   });
 }
 
@@ -381,6 +407,7 @@ export function releaseAutomationHost(
       forInstallId: host.installId,
       tookOver: stale && held.took_over === 1,
       groups: stale ? String(held.groups_json) : input.groups,
+      reach: stale ? heldReach(storage, input.workspaceId) : input.reach,
     });
     return readState(storage, input);
   });
@@ -393,21 +420,34 @@ export function releaseAutomationHost(
 export function readAutomationGroupHandover(
   storage: StorageContext,
   input: AutomationGroupHandoverInput,
-): { generation: number | null; groups: Record<string, unknown> | null } {
+): AutomationGroupHandover {
   return storage.readTx(() => {
     requireOwner(storage, input);
     const host = readHost(storage, input.workspaceId);
     if (!host || host.generation !== input.generation) throw relayError("conflict");
+    const everShared = storage.db.prepare(
+      "SELECT 1 FROM sync_relay_shares WHERE workspace_id = ? LIMIT 1",
+    ).get(input.workspaceId) !== undefined;
     const row = storage.db.prepare(
       "SELECT generation, for_install_id, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
     ).get(input.workspaceId);
-    if (!row) return { generation: null, groups: null };
+    if (!row) return { generation: null, groups: null, reach: null, everShared };
     const mine = row.took_over === 0 && row.for_install_id === host.installId;
+    const reach = mine ? heldReach(storage, input.workspaceId) : null;
     return {
       generation: Number(row.generation),
       groups: mine ? JSON.parse(String(row.groups_json)) as Record<string, unknown> : null,
+      reach: reach === null ? null : JSON.parse(reach) as Record<string, unknown>,
+      everShared,
     };
   });
+}
+
+export interface AutomationGroupHandover {
+  generation: number | null;
+  groups: Record<string, unknown> | null;
+  reach: Record<string, unknown> | null;
+  everShared: boolean;
 }
 
 // The owner ends a handover without the old computer's release. The
@@ -435,6 +475,7 @@ export function takeOverAutomationHost(
       forInstallId: host.installId,
       tookOver: true,
       groups: "{}",
+      reach: null,
     });
     place(storage, input.workspaceId, null);
     return readState(storage, input);

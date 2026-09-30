@@ -654,18 +654,29 @@ export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
 // take over after that, that computer ran nothing since, so its handover is
 // stale: the relay carries a handover it holds on to the next computer, and
 // after a take over, the next computer starts from now.
+//
+// A release also carries, as `reach`, the releasing computer's reach
+// verdicts, so a step it stopped stays stopped on the next host until a
+// current editor allows it (ADR 0012). It is a JSON object of at most
+// AUTOMATION_HOST_REACH_MAX_BYTES, or null when that computer could not
+// read its verdicts; the relay keeps it the way it keeps `groups`.
 export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 4 * 1024 * 1024;
+export const AUTOMATION_HOST_REACH_MAX_BYTES = 1024 * 1024;
 
 // GET /sync/<workspaceId>/automation-host/groups?generation=<generation>,
 // for the current host's generation; another is refused with `conflict`.
 // `generation` is the host generation the relay's last release or take over
-// started, null for none. `groups` is that release's Group handover when it
-// names the current host, and null after a take over or for another
-// computer.
+// started, null for none. `groups` and `reach` are that release's Group
+// handover and reach verdicts when it names the current host, and null
+// after a take over or for another computer. `everShared` says whether the
+// workspace was ever shared, so a host with no verdicts to take knows
+// whether a step could have been stopped for someone.
 export interface RelayAutomationGroupHandoverResponse {
   ok: true;
   generation: number | null;
   groups: Record<string, unknown> | null;
+  reach: Record<string, unknown> | null;
+  everShared: boolean;
 }
 
 export interface RelayAutomationHost {

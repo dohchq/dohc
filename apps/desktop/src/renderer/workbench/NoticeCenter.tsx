@@ -825,7 +825,9 @@ export function NoticeCenter(props: {
         title: `Automation "${hold.automationName}" is waiting`,
         body: hold.stoppedFor
           ? `A step in ${hold.collection} can now ${reach}. It stopped before because ${hold.stoppedFor} could not. Allow it to run?`
-          : `A step in ${hold.collection} can ${reach}. Allow it to run?`,
+          : hold.fileUnread
+            ? `A step in ${hold.collection} can ${reach}. dohc cannot read ${hold.collection}'s automations file in one version of the workspace. New steps there wait for you. Allow it to run?`
+            : `A step in ${hold.collection} can ${reach}. Allow it to run?`,
         Icon: AlertTriangle,
         ...(props.onAllowAutomationHold
           ? { actions: [{ label: "Allow", onClick: () => props.onAllowAutomationHold?.(hold) }] }

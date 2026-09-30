@@ -13,6 +13,7 @@ import {
 import { COLLECTION_SCHEMA_FILENAME, collectionVersionError, type CollectionListResult } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import { AUTOMATION_HOST_REACH_MAX_BYTES } from "@dohc/workspace-contracts/relay";
 import type {
   DatasetAutomationClaim,
   DatasetAutomationFailure,
@@ -102,8 +103,17 @@ import {
   type DatasetUndoHost,
   type DatasetUndoPreview,
 } from "./datasetAutomationUndo";
-import { nextReachVerdict, reachVerdictKey, sameReachVerdict, type StoredReachVerdict } from "./reachVerdicts";
 import { createAutomationTargets } from "./automationTargets";
+import {
+  definitionKey,
+  mergedReachVerdict,
+  nextReachVerdict,
+  sameReachVerdict,
+  reachVerdictKey,
+  type ReachHandover,
+  type ReachRelayRecord,
+  type StoredReachVerdict,
+} from "./reachVerdicts";
 import { chatNeedsOf, GROUP_ENDED, GROUP_READ_ONLY, type ChatDirectory } from "./automationChat";
 import type { GroupMessagesSkipped } from "./groupMessagesNotice";
 import {
@@ -187,6 +197,11 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   /** Sets every Group subscription this computer watches, taking a new host generation's handover. */
   watchAutomationGroups(input: AutomationWatchGroupsParams): Promise<{ needsHandover: boolean }>;
   claimNextAutomation(input: { automationIdPrefix: string }): Promise<AutomationClaim | null>;
+  readonly workspaceId: string;
+  /** The workspace's versions and their files, to list every automation a take over cannot vouch for. */
+  listVersions(input: { workspaceId: string }): Promise<ReadonlyArray<{ id: string }>>;
+  listTextFileMetadata(input: { workspaceId: string; versionId: string }): Promise<ReadonlyArray<{ path: string; objectId: string }>>;
+  readTextFile(input: { workspaceId: string; versionId: string; path: string }): Promise<{ text: string | null; contentKind: string; objectId: string } | null>;
   settleAutomationClaim(input: { claimId: string; state: "done" | "failed"; error?: string }): Promise<unknown>;
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
   /** One page of an automation's run history, newest first, and the `before` of the next page, or null after the oldest. */
@@ -227,6 +242,14 @@ export interface ScheduledAutomation {
    * it was already on as the executor opened. Nothing before it runs.
    */
   enabledSince: number | null;
+}
+
+
+/** Whether the Collection an automation id names is one whose automations a take over could not list. */
+function inUnprovenFolder(folders: ReadonlySet<string>, automationId: string): boolean {
+  if (folders.size === 0) return false;
+  const folder = parseCollectionAutomationId(automationId)?.collectionId;
+  return folder === undefined || folders.has(folder);
 }
 
 /** The dataset host's automation surface, as the executor drives it. LocalDatasetHost's `automations` satisfies it. */
@@ -296,6 +319,12 @@ export interface CollectionAutomationsOptions {
    * the relay does not answer.
    */
   groupRelayRecord(generation: number): Promise<AutomationGroupRelayRecord>;
+  /**
+   * The relay's last release or take over, read at this host generation,
+   * with the reach verdicts when a release left them for this computer.
+   * Throws when the relay does not answer.
+   */
+  reachRelayRecord(generation: number): Promise<ReachRelayRecord>;
   /**
    * An enabled Group trigger asks the host module, as a schedule does, to
    * record this computer as the host when the relay names none. Resolves at
@@ -379,7 +408,10 @@ export type CollectionAutomationStepReach =
   // Allowed now, but stopped before under the same definition: it waits
   // for a current editor to confirm it with `seq`. `target` is the
   // destination the step reaches.
-  | { verdict: "held"; step: string; stoppedFor: string | null; seq: number; target: string; action: CollectionAutomationHold["action"] };
+  | {
+    verdict: "held"; step: string; stoppedFor: string | null; seq: number; target: string; action: CollectionAutomationHold["action"];
+    fileUnread: CollectionAutomationHold["fileUnread"];
+  };
 
 /** One automation as the ⚡ panel reads it. */
 export type CollectionAutomationSummary =
@@ -496,6 +528,11 @@ export interface CollectionAutomationHold {
   recipient?: string;
   /** The editor whose reach stopped the step. */
   stoppedFor: string | null;
+  /**
+   * It waits because the Collection's automations file does not read in
+   * some version, so dohc holds every step there it has not seen.
+   */
+  fileUnread: boolean;
 }
 
 /**
@@ -507,6 +544,8 @@ export interface CollectionAutomationHolds {
   stops: CollectionAutomationStop[];
   /** reach.json cannot be read, so every automation waits until someone resets the holds. */
   unreadable: boolean;
+  /** Collections whose automations wait because one version does not say which Collection their file belongs to. */
+  unprovenPaths: string[];
 }
 
 export const UNREADABLE_REACH =
@@ -909,6 +948,43 @@ export class CollectionAutomations {
   private readonly verdicts = new Map<string, StoredReachVerdict>();
   /** Orders verdicts and confirmations; it only rises. */
   private verdictSeq = 0;
+  /** The generation of the relay's last release or take over whose verdicts this computer took. */
+  private hostRecord = 0;
+  /**
+   * Definitions, by definitionKey, whose steps with no verdict yet are held:
+   * this computer became the host without the last host's verdicts.
+   */
+  private unproven = new Set<string>();
+  /**
+   * Also hold any step with no verdict yet: this computer could not prove
+   * its verdicts and may not have seen every definition. The first pull
+   * that reaches the relay after that ends it, once every definition it
+   * then has is in `unproven`.
+   */
+  private unprovenAll = false;
+  /**
+   * The Collections whose automations file, in some version, did not read
+   * or held an entry that did not when this computer listed the unproven
+   * definitions. Fixing that file can bring back a definition the last host
+   * stopped, with the same hash, so a step there with no verdict yet is
+   * held. A Collection leaves once its file reads in every version and its
+   * definitions joined `unproven`.
+   */
+  private unprovenFolders = new Set<string>();
+  /** Paths whose Collection identity was unreadable in at least one version. */
+  private unprovenPaths = new Set<string>();
+  /** Rises at each take over's mark, so a listing ends only the mark it was queued for. */
+  private markEpoch = 0;
+  /** The host generation this computer took the last host's verdicts at, saved. */
+  private reachTakenAt: number | null = null;
+  /**
+   * The host generation whose record the relay did not answer for, so this
+   * computer has not taken the last host's verdicts: the next sync pull asks
+   * again, and nothing runs meanwhile.
+   */
+  private reachPending: number | null = null;
+  /** `reachPending` as the last save wrote it, which a host claim can rely on. */
+  private savedPending: number | null = null;
   /**
    * Claims this computer holds whose release or settle the engine has not
    * taken yet. Each drain tries these first, and never runs them again.
@@ -1013,13 +1089,22 @@ export class CollectionAutomations {
     const current = () => generation === this.generation;
     this.opened ??= this.enqueue(async () => {
       const subscriptions = await this.options.store.readSubscriptions();
-      const { verdicts, unreadable } = await this.options.store.readReachVerdicts();
+      const { verdicts, hostRecord, unproven, unprovenAll, unprovenFolders, unprovenPaths, pending, taken, unreadable } =
+        await this.options.store.readReachVerdicts();
       const timeouts = await this.options.store.readTimeouts();
       if (!current()) return;
       this.subscribed = new Map(subscriptions.map((entry) => [entry.automationId, entry]));
       this.groupSubscriptionsUncertain = true;
       this.timeouts = timeouts;
       this.verdictsUnreadable = unreadable;
+      this.hostRecord = hostRecord;
+      this.unproven = new Set(unproven);
+      this.unprovenAll = unprovenAll;
+      this.unprovenFolders = new Set(unprovenFolders);
+      this.unprovenPaths = new Set(unprovenPaths);
+      this.reachTakenAt = taken;
+      this.reachPending = pending;
+      this.savedPending = pending;
       for (const verdict of verdicts) {
         this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step, verdict.recipient?.id), verdict);
         this.verdictSeq = Math.max(this.verdictSeq, verdict.seq);
@@ -1099,6 +1184,7 @@ export class CollectionAutomations {
         if (dataset === undefined) {
           this.datasets.delete(folder);
           this.files.delete(folder);
+          if (this.unprovenPaths.has(folder)) await this.proveFolder(folder, undefined);
         } else {
           this.datasets.set(folder, dataset);
           await this.readFile(folder);
@@ -1235,7 +1321,52 @@ export class CollectionAutomations {
 
   /** A sync pull reached the relay: a Group handover it could not read before is asked for again. */
   relayAnswered(): void {
-    if (this.handoverUnread) this.hostChanged();
+    if (this.handoverUnread || this.reachPending !== null) this.hostChanged();
+    // Every definition the relay had is on this computer now: hold those,
+    // in every version, whether or not this computer indexed them or they
+    // can run yet, and judge the ones current editors write from here as
+    // usual. A Collection whose file did not read keeps holding what it
+    // has not seen until it does. A definition no version names leaves the
+    // list. The listing ends only the mark it was asked for: a take over
+    // meanwhile sets a new one.
+    if (this.unprovenAll && this.opened !== null) {
+      const epoch = this.markEpoch;
+      void this.enqueue(async () => {
+        if (!this.unprovenAll || this.markEpoch !== epoch) return;
+        const found = await this.automationFiles();
+        // Without the listing, the mark stays until the next pull.
+        if (found === null) return;
+        await this.updateVerdicts(() => {
+          if (!this.unprovenAll || this.markEpoch !== epoch) return;
+          const { named, unread } = this.addListedDefinitions(found);
+          // A path whose file names its Collection in every version is identified again.
+          const unidentified = new Set(found.flatMap((file) => file.collectionId === null ? [file.folder] : []));
+          for (const file of found) if (!unidentified.has(file.folder)) this.unprovenPaths.delete(file.folder);
+          for (const key of this.unproven) {
+            const [automationId] = JSON.parse(key) as [string, string];
+            if (!named.has(automationId) && !inUnprovenFolder(unread, automationId)) this.unproven.delete(key);
+          }
+          this.unprovenFolders = unread;
+          this.unprovenAll = false;
+        }, true);
+      }).catch((error: unknown) => this.options.onError("hold the automations this computer could not vouch for", error));
+    }
+  }
+
+  /**
+   * This computer's verdicts, for the release that hands the workspace's
+   * automations to the next host. Null when it could not read them, never
+   * took the last host's, or they are too large to carry: the next host then
+   * holds what it cannot prove.
+   */
+  async reachHandover(): Promise<ReachHandover | null> {
+    await this.verdictChain;
+    if (this.verdictsUnreadable || this.reachPending !== null) return null;
+    const handover: ReachHandover = {
+      version: 2, verdicts: [...this.verdicts.values()], unproven: [...this.unproven], unprovenAll: this.unprovenAll,
+      unprovenFolders: [...this.unprovenFolders], unprovenPaths: [...this.unprovenPaths],
+    };
+    return Buffer.byteLength(JSON.stringify(handover)) <= AUTOMATION_HOST_REACH_MAX_BYTES ? handover : null;
   }
 
   /**
@@ -1345,6 +1476,7 @@ export class CollectionAutomations {
    * the notice's first. False while the engine is not answering.
    */
   async runNow(automationId: string, noticeId: string): Promise<boolean> {
+    await this.markHostClaims();
     const ran = await this.withLiveEngine((engine) => engine.runAutomationNow({ automationId, noticeId }));
     if (ran === null) return false;
     this.notifyClaimed();
@@ -1411,6 +1543,7 @@ export class CollectionAutomations {
     run: number[];
     throughMs: number;
   }): Promise<AutomationScheduleMark | null> {
+    await this.markHostClaims();
     const claimed = await this.withLiveEngine((engine) => engine.claimAutomationSchedule(input));
     if (claimed === null) return null;
     if (claimed.claims.length > 0) this.notifyClaimed();
@@ -1477,7 +1610,7 @@ export class CollectionAutomations {
         return stored?.verdict === "held" && reached
           ? {
               verdict: "held", step: stored.step, stoppedFor: stored.stoppedFor, seq: stored.seq,
-              ...reached,
+              fileUnread: this.fileUnread(stored), ...reached,
             }
           : { verdict: "allowed" };
       });
@@ -1678,7 +1811,12 @@ export class CollectionAutomations {
 
   /** Every step that waits for a current editor, and whether dohc could read what was allowed. */
   holdState(): CollectionAutomationHolds {
-    return { holds: this.holds(), stops: this.stops(), unreadable: this.verdictsUnreadable };
+    return { holds: this.holds(), stops: this.stops(), unreadable: this.verdictsUnreadable, unprovenPaths: this.heldUnprovenPaths() };
+  }
+
+  /** The unidentified paths where a Collection is indexed, so its automations wait. A stray file holds nothing. */
+  private heldUnprovenPaths(): string[] {
+    return [...this.unprovenPaths].filter((path) => this.collectionIdOf(path) !== null);
   }
 
   /**
@@ -1936,7 +2074,7 @@ export class CollectionAutomations {
         if (held === null) return;
         steps.push({
           automationId, automationName: automation.name, definitionHash: hash, step, seq: stored.seq,
-          collection: collection.name, collectionPath, ...held, stoppedFor: stored.stoppedFor,
+          collection: collection.name, collectionPath, ...held, stoppedFor: stored.stoppedFor, fileUnread: this.fileUnread(stored),
         });
       });
       for (const stored of this.verdicts.values()) {
@@ -1944,7 +2082,7 @@ export class CollectionAutomations {
         steps.push({
           automationId, automationName: automation.name, definitionHash: hash, step: stored.step, seq: stored.seq,
           collection: collection.name, collectionPath, target: stored.recipient.name, action: stored.recipient.action,
-          recipient: stored.recipient.id, stoppedFor: stored.stoppedFor,
+          recipient: stored.recipient.id, stoppedFor: stored.stoppedFor, fileUnread: this.fileUnread(stored),
         });
       }
     }
@@ -2605,6 +2743,7 @@ export class CollectionAutomations {
     // The engine's press id carries that definition, so the claim stays
     // bound to it through a restart; the run refuses any other.
     const pressId = relayedPressId(input.pressId, input.definitionHash, input.collectionPath);
+    await this.markHostClaims();
     // The relay carries a person's press; no agent presses through it.
     const pressed = await this.press({ collectionPath: id.collectionPath, field, recordId: input.recordId, pressId, pressedBy: input.pressedBy, by: { kind: "human" } }, watch);
     return { pressed, field };
@@ -3078,6 +3217,103 @@ export class CollectionAutomations {
     // the index at once, is not taken for a person's.
     if (parsed === undefined) this.files.delete(collectionPath);
     else this.files.set(collectionPath, parsed);
+    const collectionId = this.collectionIdOf(collectionPath);
+    if (collectionId !== null && this.unprovenPaths.has(collectionPath)) this.unprovenFolders.add(collectionId);
+    if (collectionId !== null && this.unprovenFolders.has(collectionId)) await this.proveFolder(collectionPath, parsed?.file);
+  }
+
+  /**
+   * A Collection whose automations a take over could not list reads again.
+   * Its definitions join `unproven`, each held once, and once its file reads
+   * in every version it leaves `unprovenFolders`, so an automation written
+   * after that runs as usual.
+   */
+  private async proveFolder(collectionPath: string, here: AutomationsFileParseResult | undefined): Promise<void> {
+    const collectionId = this.collectionIdOf(collectionPath);
+    const found = await this.automationFiles(collectionPath).catch((error: unknown) => {
+      this.options.onError("list a Collection's automations in every version", error);
+      return null;
+    });
+    await this.updateVerdicts(() => {
+      if (collectionId !== null && here?.status === "read") this.addUnprovenDefinitions(collectionId, here.entries);
+      const hereReads = here === undefined || (here.status === "read" && here.entries.every((entry) => entry.status === "valid"));
+      const listed = found === null ? null : this.addListedDefinitions(found);
+      for (const id of listed?.unread ?? []) this.unprovenFolders.add(id);
+      if (hereReads && found !== null && listed?.unread.size === 0 && !found.some((file) => file.collectionId === null)) {
+        this.unprovenPaths.delete(collectionPath);
+        if (collectionId !== null) this.unprovenFolders.delete(collectionId);
+      }
+    }, true);
+  }
+
+  /**
+   * Each automations file in each version, as the engine holds it, or only
+   * the one in `folder`, read where it would be rather than found in each
+   * version's list. A file that is not text, or text the engine did not give,
+   * is null. Null when the engine is not running.
+   */
+  private automationFiles(folder?: string): Promise<Array<{ folder: string; collectionId: string | null; text: string | null }> | null> {
+    return this.withLiveEngine(async (engine) => {
+      const { workspaceId } = engine;
+      const files: Array<{ folder: string; collectionId: string | null; text: string | null }> = [];
+      for (const version of await engine.listVersions({ workspaceId })) {
+        const datasetId = async (path: string): Promise<string | null> => {
+          const descriptor = await engine.readTextFile({ workspaceId, versionId: version.id, path: `${path}/${DATASET_FILE_NAME}` });
+          let data: unknown = null;
+          try {
+            data = descriptor?.contentKind === "text" && descriptor.text !== null ? JSON.parse(descriptor.text) : null;
+          } catch {
+            return null;
+          }
+          return typeof data === "object" && data !== null && "datasetId" in data && typeof data.datasetId === "string" ? data.datasetId : null;
+        };
+        let versionFolder = folder;
+        if (folder !== undefined) {
+          const wanted = this.collectionIdOf(folder);
+          const schema = await engine.readTextFile({ workspaceId, versionId: version.id, path: `${folder}/${COLLECTION_SCHEMA_FILENAME}` });
+          const isDataset = this.datasets.has(folder);
+          const atPath = schema?.objectId ?? await datasetId(folder);
+          if (wanted !== null && atPath !== wanted) {
+            if (this.unprovenPaths.has(folder) || atPath === null) {
+              const read = await engine.readTextFile({ workspaceId, versionId: version.id, path: `${folder}/${AUTOMATIONS_FILE_NAME}` });
+              if (read !== null) files.push({ folder, collectionId: atPath, text: read.contentKind === "text" ? read.text : null });
+            }
+            const listed = await engine.listTextFileMetadata({ workspaceId, versionId: version.id });
+            let found = listed.find((file) => file.objectId === wanted && posix.basename(file.path) === COLLECTION_SCHEMA_FILENAME);
+            if (isDataset) {
+              found = undefined;
+              for (const file of listed) {
+                if (posix.basename(file.path) === DATASET_FILE_NAME && await datasetId(posix.dirname(file.path)) === wanted) {
+                  found = file;
+                  break;
+                }
+              }
+            }
+            if (found === undefined) continue;
+            versionFolder = posix.dirname(found.path);
+          }
+        }
+        const paths = versionFolder !== undefined
+          ? [`${versionFolder}/${AUTOMATIONS_FILE_NAME}`]
+          : (await engine.listTextFileMetadata({ workspaceId, versionId: version.id }))
+            .map((file) => file.path)
+            .filter((path) => posix.basename(path) === AUTOMATIONS_FILE_NAME && posix.dirname(path) !== ".");
+        for (const path of paths) {
+          const read = await engine.readTextFile({ workspaceId, versionId: version.id, path });
+          // A version without this Collection's file has nothing to hold.
+          if (read === null && folder !== undefined) continue;
+          // The engine gives a binary file as empty text, which would read as no automations.
+          const collectionPath = posix.dirname(path);
+          const schema = await engine.readTextFile({ workspaceId, versionId: version.id, path: `${collectionPath}/${COLLECTION_SCHEMA_FILENAME}` });
+          let collectionId = schema?.objectId;
+          if (collectionId === undefined) {
+            collectionId = await datasetId(collectionPath) ?? undefined;
+          }
+          files.push({ folder: collectionPath, collectionId: collectionId ?? null, text: read?.contentKind === "text" ? read.text : null });
+        }
+      }
+      return files;
+    });
   }
 
   /**
@@ -3392,7 +3628,13 @@ export class CollectionAutomations {
           const hash = hashes.get(verdict.automationId);
           if (hash !== undefined && hash !== verdict.definitionHash) this.verdicts.delete(key);
         }
-        await this.options.store.saveReachVerdicts([...this.verdicts.values()]);
+        const pending = this.reachPending;
+        await this.options.store.saveReachVerdicts({
+          verdicts: [...this.verdicts.values()], hostRecord: this.hostRecord, unproven: [...this.unproven],
+          unprovenAll: this.unprovenAll, unprovenFolders: [...this.unprovenFolders], unprovenPaths: [...this.unprovenPaths],
+          pending, taken: this.reachTakenAt,
+        });
+        this.savedPending = pending;
         // A step that stops, waits, or runs again changes which fields its
         // automation sets.
         this.options.onAutomationsChanged();
@@ -3404,12 +3646,185 @@ export class CollectionAutomations {
     return next;
   }
 
+  /**
+   * A step with no verdict yet, in a definition this computer could not
+   * take the last host's verdicts for, waits for a current editor instead
+   * of running: the last host may have stopped it.
+   */
+  private unprovenHold(
+    automationId: string,
+    hash: string,
+    previous: StoredReachVerdict | undefined,
+    next: ReturnType<typeof nextReachVerdict>,
+  ): ReturnType<typeof nextReachVerdict> {
+    return previous === undefined && next.verdict === "allowed" && (this.unprovenAll ||
+      this.unproven.has(definitionKey(automationId, hash)) || inUnprovenFolder(this.unprovenFolders, automationId))
+      ? { verdict: "held", stoppedFor: null }
+      : next;
+  }
+
+  /**
+   * Every valid definition in these files joins `unproven`. Returns the
+   * automation ids they name, and the Collections whose file did not read
+   * or holds an entry that did not.
+   */
+  private addListedDefinitions(files: ReadonlyArray<{ folder: string; collectionId: string | null; text: string | null }>): { named: Set<string>; unread: Set<string> } {
+    const named = new Set<string>();
+    const unread = new Set<string>();
+    const paths = new Set(files.filter((file) => file.collectionId === null).map((file) => file.folder));
+    for (const { folder, collectionId, text } of files) {
+      if (collectionId === null) {
+        this.unprovenPaths.add(folder);
+        const indexed = this.collectionIdOf(folder);
+        if (indexed !== null) unread.add(indexed);
+        continue;
+      }
+      if (paths.has(folder)) unread.add(collectionId);
+      const file = text === null ? null : parseAutomationsFile(text);
+      if (file?.status !== "read") {
+        unread.add(collectionId);
+        continue;
+      }
+      this.addUnprovenDefinitions(collectionId, file.entries);
+      for (const entry of file.entries) {
+        const id = entry.status === "valid" ? entry.automation.id : entry.id;
+        if (id !== null) named.add(collectionAutomationId(collectionId, id));
+        if (entry.status !== "valid") unread.add(collectionId);
+      }
+    }
+    return { named, unread };
+  }
+
+  /** Every valid definition in a Collection's file joins `unproven`, whether it can run yet or not. */
+  private addUnprovenDefinitions(collectionId: string, entries: Extract<AutomationsFileParseResult, { status: "read" }>["entries"]): void {
+    for (const entry of entries) {
+      if (entry.status === "valid") {
+        this.unproven.add(definitionKey(collectionAutomationId(collectionId, entry.automation.id), definitionHash(entry.automation)));
+      }
+    }
+  }
+
+  /**
+   * Before this computer runs anything as the automation host at a new
+   * generation, it takes the verdicts the last host released. When it
+   * starts with none, after a take over, it cannot prove its own are
+   * current: in a workspace that was ever shared, it holds every step it
+   * would allow until a current editor confirms it. Resolves false when the
+   * relay did not answer, so nothing runs until it does.
+   */
+  private async takeHostVerdicts(generation: number | null): Promise<boolean> {
+    // The host moved on before the relay answered for a generation this
+    // computer hosted at: that record is gone, so the claims it made then,
+    // such as a handover's last schedule runs, run under the hold instead.
+    if (this.reachPending !== null && this.reachPending !== generation) {
+      await this.updateVerdicts(() => {
+        this.holdUnproven();
+        this.reachPending = null;
+      }, true);
+      this.clearWaits("roster");
+    }
+    if (generation === null || generation === 0 || generation === this.reachTakenAt) return true;
+    let record: ReachRelayRecord;
+    try {
+      await this.markHostClaims(generation);
+      record = await this.options.reachRelayRecord(generation);
+    } catch (error) {
+      this.options.onError("read the last automation host's reach verdicts", error);
+      return false;
+    }
+    await this.updateVerdicts(() => {
+      this.reachPending = null;
+      this.reachTakenAt = generation;
+      if (record.generation === this.hostRecord) return;
+      // Generations only rise at one relay. A lower one comes from a relay
+      // restored from an earlier copy, which may have lost a take over.
+      if (record.generation < this.hostRecord) {
+        this.hostRecord = record.generation;
+        if (record.everShared) this.holdUnproven();
+        return;
+      }
+      this.hostRecord = record.generation;
+      const { reach } = record;
+      if (reach !== null) {
+        const taken = new Map(reach.verdicts.map((verdict) =>
+          [reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step, verdict.recipient?.id), verdict]));
+        for (const [key, verdict] of taken) {
+          const merged = mergedReachVerdict(this.verdicts.get(key), verdict);
+          if (merged) this.verdicts.set(key, { ...merged, seq: ++this.verdictSeq });
+        }
+        // The last host could not prove these definitions either: what only
+        // this computer allowed there waits too.
+        const unproven = new Set(reach.unproven);
+        const folders = new Set(reach.unprovenFolders);
+        for (const path of reach.unprovenPaths) {
+          this.unprovenPaths.add(path);
+          const id = this.collectionIdOf(path);
+          if (id !== null) folders.add(id);
+        }
+        this.holdAllowed((key, verdict) => !taken.has(key) && (reach.unprovenAll ||
+          unproven.has(definitionKey(verdict.automationId, verdict.definitionHash)) || inUnprovenFolder(folders, verdict.automationId)));
+        for (const key of unproven) this.unproven.add(key);
+        for (const folder of folders) this.unprovenFolders.add(folder);
+        if (reach.unprovenAll) {
+          this.unprovenAll = true;
+          this.markEpoch += 1;
+        }
+      } else if (record.everShared) {
+        this.holdUnproven();
+      }
+    }, true);
+    this.clearWaits("roster", "held");
+    return true;
+  }
+
+  /**
+   * Before this computer makes a claim as the host: until it took the last
+   * host's verdicts at its generation, that generation is saved as pending
+   * first, so a claim a restart finds after the host moved on runs held.
+   */
+  private async markHostClaims(generation?: number | null): Promise<void> {
+    const at = generation === undefined ? await this.options.groupHost() : generation;
+    if (at === null || at === 0 || at === this.reachTakenAt || at === this.savedPending) return;
+    // A save that fails throws, so the claim is not made.
+    await this.updateVerdicts(() => {
+      if (at !== this.reachTakenAt) this.reachPending = at;
+    }, true);
+  }
+
+  /** Nothing proves this computer's verdicts current: hold every step it would allow until a current editor confirms it. */
+  private holdUnproven(): void {
+    this.holdAllowed(() => true);
+    for (const { automationId, automation } of this.everyAutomation()) {
+      this.unproven.add(definitionKey(automationId, definitionHash(automation)));
+    }
+    // A definition this computer has not read yet, such as one still on its
+    // way or in a dataset not indexed here, waits too, and the listing starts
+    // again: an earlier one may name a Collection that does not read now.
+    this.unprovenAll = true;
+    this.markEpoch += 1;
+  }
+
+  /** Whether a step waits only because its Collection's automations file does not read in some version. */
+  private fileUnread(verdict: StoredReachVerdict): boolean {
+    return verdict.verdict === "held" && verdict.stoppedFor === null && inUnprovenFolder(this.unprovenFolders, verdict.automationId);
+  }
+
+  /** Holds each allowed verdict `unproven` picks until a current editor confirms it. */
+  private holdAllowed(unproven: (key: string, verdict: StoredReachVerdict) => boolean): void {
+    for (const [key, verdict] of this.verdicts) {
+      if (verdict.verdict === "allowed" && unproven(key, verdict)) {
+        this.verdicts.set(key, { ...verdict, verdict: "held", stoppedFor: null, seq: ++this.verdictSeq });
+      }
+    }
+  }
+
   /** Raises the reach notices when the held or stopped steps differ from what they last showed. */
   private publishHolds(): void {
     const shown = this.verdictsUnreadable
       ? ["unreadable"]
       : [
-          ...this.holds().map((hold) => `held ${reachVerdictKey(hold.automationId, hold.definitionHash, hold.step, hold.recipient)} ${hold.seq}`),
+          ...this.heldUnprovenPaths().map((path) => `unidentified ${path}`),
+          ...this.holds().map((hold) => `held ${reachVerdictKey(hold.automationId, hold.definitionHash, hold.step, hold.recipient)} ${hold.seq} ${hold.fileUnread}`),
           ...this.stops().map((stop) => `stopped ${reachVerdictKey(stop.automationId, stop.definitionHash, stop.step)} ${stop.seq}`),
         ].sort();
     if (isDeepStrictEqual(shown, this.publishedHolds)) return;
@@ -3454,7 +3869,7 @@ export class CollectionAutomations {
           const step = reachStepId(steps[index]!, index);
           const key = reachVerdictKey(automationId, hash, step);
           const previous = this.verdicts.get(key);
-          const next = nextReachVerdict(previous, reach, automation.enabled);
+          const next = this.unprovenHold(automationId, hash, previous, nextReachVerdict(previous, reach, automation.enabled));
           if (next.verdict === "held") held = true;
           if (sameReachVerdict(previous, next)) return;
           this.verdicts.set(key, { automationId, definitionHash: hash, step, ...next, seq: ++this.verdictSeq });
@@ -3480,6 +3895,7 @@ export class CollectionAutomations {
     // Only a computer the relay names watches Groups.
     const generation = await this.options.groupHost();
     this.groupTriggersHere = generation !== null;
+    const verdictsTaken = await this.takeHostVerdicts(generation);
     const desired = this.desiredSubscriptions();
     let changed = false;
     for (const [automationId, subscription] of [...this.subscribed]) {
@@ -3504,7 +3920,11 @@ export class CollectionAutomations {
       changed = true;
     }
     if (changed) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
-    await this.reconcileGroups(generation, [...desired.values()].filter(isGroupSubscription), all);
+    // Group coverage moves with the verdicts: until this host took the last
+    // host's, its engine watches no Groups, as off the host, so a release it
+    // makes is stale and the relay keeps the last host's handover for the
+    // next computer.
+    await this.reconcileGroups(verdictsTaken ? generation : null, [...desired.values()].filter(isGroupSubscription), all);
     await this.reconcileDatasets(all);
   }
 
@@ -3880,6 +4300,8 @@ export class CollectionAutomations {
       }
       return { kind: "release", waitsFor: "roster" };
     }
+    // The host runs nothing until it took the last host's verdicts.
+    if (!(await this.takeHostVerdicts(await this.options.groupHost()))) return { kind: "release", waitsFor: "roster" };
     // The coordinator follows saved destinations before it records reach.
     if (stop.aborted) return release;
     // A relayed press runs only on the computer that still runs the
@@ -4119,7 +4541,7 @@ export class CollectionAutomations {
       if (this.verdictsUnreadable) return "held" as const;
       const key = reachVerdictKey(input.automationId, input.definitionHash, step, id);
       const previous = this.verdicts.get(key);
-      const next = nextReachVerdict(previous, reach, true);
+      const next = this.unprovenHold(input.automationId, input.definitionHash, previous, nextReachVerdict(previous, reach, true));
       if (!sameReachVerdict(previous, next)) {
         this.verdicts.set(key, {
           automationId: input.automationId, definitionHash: input.definitionHash, step,

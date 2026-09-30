@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { StepReach } from "./automationReach";
 
 // The reach check (ADR 0012) answers for the editors a Collection has now.
@@ -20,6 +21,13 @@ import type { StepReach } from "./automationReach";
 // with the link as an editor. So a step that link could not have run waits
 // once, whatever its last verdict, and the verdict remembers the link so a
 // confirmation is not asked for again.
+//
+// Verdicts follow the automation host. A computer that hands over releases
+// its verdicts with its Group handover, and the next host takes them before
+// it runs anything, so a step stopped on one host stays stopped on the next.
+// A host that starts with no verdicts to take, after a take over, cannot
+// prove its own are current: in a workspace that was ever shared, it holds
+// every step it would allow until a current editor confirms it.
 
 export type ReachVerdict = "allowed" | "stopped" | "held";
 
@@ -44,6 +52,78 @@ export interface StoredReachVerdict {
   /** The former links' evidence this step has already waited for, as "grant#generation". */
   accountedLinks?: readonly string[];
   seq: number;
+}
+
+export const StoredReachVerdictSchema = z.object({
+  automationId: z.string().min(1),
+  definitionHash: z.string().min(1),
+  step: z.string().min(1).max(512),
+  verdict: z.enum(["allowed", "stopped", "held"]),
+  stoppedFor: z.string().nullable(),
+  narrowed: z.literal(true).optional(),
+  accountedLinks: z.array(z.string().min(1)).optional(),
+  seq: z.number().int().nonnegative(),
+  recipient: z.object({ id: z.string(), name: z.string(), action: z.enum(["post", "notify", "change"]) }).optional(),
+});
+
+/**
+ * What a release carries as `reach`, and what the next host takes: the
+ * releasing computer's verdicts, the definitions whose history it could not
+ * prove, by definitionKey, so the next host holds their unseen steps too,
+ * `unprovenAll` while it could not prove any definition it had not seen,
+ * and the Collections whose automations it could not list, where any
+ * definition it had not seen waits as well.
+ */
+export interface ReachHandover {
+  version: 2;
+  verdicts: StoredReachVerdict[];
+  unproven: string[];
+  unprovenAll: boolean;
+  unprovenFolders: string[];
+  unprovenPaths: string[];
+}
+
+const ReachHandoverSchema = z.object({
+  version: z.literal(2),
+  verdicts: z.array(StoredReachVerdictSchema),
+  unproven: z.array(z.string()),
+  unprovenAll: z.boolean(),
+  unprovenFolders: z.array(z.string()),
+  unprovenPaths: z.array(z.string()),
+});
+
+/** What a release carried, or null when it carried none or nothing this computer can read. */
+export function parseReachHandover(value: unknown): ReachHandover | null {
+  const parsed = ReachHandoverSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** A definition's key among the unproven ones. */
+export function definitionKey(automationId: string, hash: string): string {
+  return JSON.stringify([automationId, hash]);
+}
+
+/**
+ * The relay's last release or take over, as the next host reads it at its
+ * generation: `generation` 0 for none, `reach` when a release left it for
+ * this computer, and whether the workspace was ever shared.
+ */
+export interface ReachRelayRecord {
+  generation: number;
+  reach: ReachHandover | null;
+  everShared: boolean;
+}
+
+/**
+ * One step's verdict after the next host took the last host's: a step
+ * stopped or held on either side stays so, and an allowed verdict counts
+ * only where this computer has none. Both are for the same definition,
+ * since the key names it.
+ */
+export function mergedReachVerdict(local: StoredReachVerdict | undefined, taken: StoredReachVerdict): StoredReachVerdict | undefined {
+  if (local === undefined) return taken;
+  if (local.verdict !== "allowed" || taken.verdict === "allowed") return undefined;
+  return taken;
 }
 
 type Verdict = Pick<StoredReachVerdict, "verdict" | "stoppedFor" | "narrowed" | "accountedLinks">;

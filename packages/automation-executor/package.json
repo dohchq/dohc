@@ -12,6 +12,7 @@
     "./automation-reach": "./src/automationReach.ts",
     "./automation-run-store": "./src/automationRunStore.ts",
     "./automation-scheduler": "./src/automationScheduler.ts",
+    "./reach-verdicts": "./src/reachVerdicts.ts",
     "./collection-automation-run": "./src/collectionAutomationRun.ts",
     "./collection-automations": "./src/collectionAutomations.ts",
     "./dataset-automation-plan": "./src/datasetAutomationPlan.ts",

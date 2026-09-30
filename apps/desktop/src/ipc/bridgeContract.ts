@@ -4759,7 +4759,7 @@ export type ConfirmCollectionAutomationStepResult = { status: "confirmed" | "cha
 
 // Steps waiting for a current editor to allow them, one notice each, and
 // steps a narrower share stopped, one notice for all of them.
-export const ListAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export const ListAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID, retryPath: z.string().optional() });
 export type ListAutomationHoldsPayload = z.infer<typeof ListAutomationHoldsPayload>;
 export type ListAutomationHoldsResult = CollectionAutomationHolds;
 

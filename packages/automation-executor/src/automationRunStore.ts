@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
 import type { PlannedEffect, StepOutput } from "./automationPlan";
-import type { StoredReachVerdict } from "./reachVerdicts";
+import { StoredReachVerdictSchema, type StoredReachVerdict } from "./reachVerdicts";
 
 // This computer's record of each Collection automation run, under
 // <workspace>/.dohc/automations. Claims are local to the computer that ran
@@ -424,19 +424,35 @@ const SubscriptionsSchema = z.object({
 });
 
 const ReachVerdictsSchema = z.object({
-  version: z.literal(2),
-  verdicts: z.array(z.object({
-    automationId: z.string().min(1),
-    definitionHash: z.string().min(1),
-    step: z.string().min(1).max(512),
-    verdict: z.enum(["allowed", "stopped", "held"]),
-    stoppedFor: z.string().nullable(),
-    narrowed: z.literal(true).optional(),
-    accountedLinks: z.array(z.string().min(1)).optional(),
-    seq: z.number().int().nonnegative(),
-    recipient: z.object({ id: z.string(), name: z.string(), action: z.enum(["post", "notify", "change"]) }).optional(),
-  })),
+  version: z.literal(3),
+  verdicts: z.array(StoredReachVerdictSchema),
+  hostRecord: z.number().int().nonnegative(),
+  unproven: z.array(z.string()),
+  unprovenAll: z.boolean(),
+  unprovenFolders: z.array(z.string()),
+  unprovenPaths: z.array(z.string()),
+  pending: z.number().int().nonnegative().nullable(),
+  taken: z.number().int().nonnegative().nullable(),
 });
+
+/**
+ * Each step's last reach verdict, the relay's last release or take over this
+ * computer took them at, the definitions whose steps it holds until a
+ * current editor confirms them because it could not take the last host's,
+ * whether that covers every definition it has not seen yet, the Collections
+ * whose automations it could not list, the host generation whose record it
+ * has not read yet, and the one it took.
+ */
+export interface StoredReach {
+  verdicts: StoredReachVerdict[];
+  hostRecord: number;
+  unproven: string[];
+  unprovenAll: boolean;
+  unprovenFolders: string[];
+  unprovenPaths: string[];
+  pending: number | null;
+  taken: number | null;
+}
 
 const TimeoutsSchema = z.object({
   version: z.literal(1),
@@ -638,11 +654,11 @@ export interface AutomationRunStore {
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   /**
-   * Each step's last reach verdict. `unreadable` is true when the file is
-   * there and cannot be read, so no step can be treated as seen before.
+   * The reach verdicts. `unreadable` is true when the file is there and
+   * cannot be read, so no step can be treated as seen before.
    */
-  readReachVerdicts(): Promise<{ verdicts: StoredReachVerdict[]; unreadable: boolean }>;
-  saveReachVerdicts(verdicts: readonly StoredReachVerdict[]): Promise<void>;
+  readReachVerdicts(): Promise<StoredReach & { unreadable: boolean }>;
+  saveReachVerdicts(reach: StoredReach): Promise<void>;
   /** Where the reach verdicts are saved, for a person to look at. */
   reachVerdictsPath(): Promise<string>;
   /** Consecutive timed-out runs per automation, for the circuit breaker. */
@@ -1094,13 +1110,20 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     },
     async readReachVerdicts() {
       const read = await readJson(join(await base(), "reach.json"));
-      if (read === undefined) return { verdicts: [], unreadable: false };
+      const none = { verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenFolders: [], unprovenPaths: [], pending: null, taken: null };
+      if (read === undefined) return { ...none, unreadable: false };
       const parsed = ReachVerdictsSchema.safeParse(read);
-      return parsed.success ? { verdicts: parsed.data.verdicts, unreadable: false } : { verdicts: [], unreadable: true };
+      return parsed.success
+        ? {
+          verdicts: parsed.data.verdicts, hostRecord: parsed.data.hostRecord, unproven: parsed.data.unproven,
+          unprovenAll: parsed.data.unprovenAll, unprovenFolders: parsed.data.unprovenFolders, unprovenPaths: parsed.data.unprovenPaths,
+          pending: parsed.data.pending, taken: parsed.data.taken, unreadable: false,
+        }
+        : { ...none, unreadable: true };
     },
-    saveReachVerdicts(verdicts) {
+    saveReachVerdicts(reach) {
       return serial(async () => {
-        await writeDurably(join(await base(), "reach.json"), `${JSON.stringify({ version: 2, verdicts })}\n`);
+        await writeDurably(join(await base(), "reach.json"), `${JSON.stringify({ version: 3, ...reach })}\n`);
       });
     },
     async reachVerdictsPath() {
