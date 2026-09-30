@@ -6060,7 +6060,7 @@ fn incomplete_local_side_credits_preservation_before_later_recovery() {
             &NoLiveLeases,
         )
         .unwrap();
-        let authors: String = engine
+        let authors: Option<String> = engine
             .read_with(|conn| {
                 conn.query_row(
             "SELECT m.author_json FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 \

@@ -70,7 +70,7 @@ pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 // 64 entries of 1 KiB plus array punctuation use 65,601 bytes. Even when
-// author_json is escaped as a JSON string, 131,202 bytes leave 130,942 bytes
+// author_json is escaped as a JSON string, 131,204 bytes leave 130,940 bytes
 // for the other moment.append fields inside its 256 KiB payload cap.
 pub const MAX_AUTHOR_JSON_BYTES: usize = 64 * 1_024 + 65;
 
