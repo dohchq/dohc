@@ -17,16 +17,16 @@
 
 use dohc_engine_domain::ChangeAttribution;
 use dohc_engine_storage::{
-    enqueue_job, put_binary_blob, put_binary_blob_with_sha, EngineStore, FaultInjector,
-    MaterializationJobSpec, Preimage, TxnOutcome,
+    EngineStore, FaultInjector, MaterializationJobSpec, Preimage, TxnOutcome, enqueue_job,
+    put_binary_blob, put_binary_blob_with_sha,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::DocKey;
 use crate::doc_cache::{GateBaseProbe, GateBaseSource, ServedGateBase, WriterDocCache};
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
 use crate::ydoc::{ContentKind, Projection, SuccessorBase, Ydoc};
-use crate::DocKey;
 
 /// Which durability regime a lineage lives under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -463,6 +463,7 @@ pub struct LocalAppend<'a> {
     pub restore_generation: Option<i64>,
     pub ensure_parent_row: bool,
     pub require_empty_lineage: bool,
+    pub is_seed: bool,
     /// Captured artifact imported by a client-declared first seed.
     /// Other first updates must leave this unset so settlement writes the file.
     pub seed_source_sha256: Option<&'a str>,
@@ -496,6 +497,7 @@ where
         restore_generation,
         ensure_parent_row,
         require_empty_lineage,
+        is_seed,
         seed_source_sha256,
         request_id,
     } = append;
@@ -691,8 +693,7 @@ where
                     // The file holds what the seed imported, so the lineage
                     // is not ahead of it until another update lands.
                     tx.execute(
-                        "UPDATE ydoc_docs SET seed_source_sha256 = ?4, \
-                         settled_update_seq = head_update_seq \
+                        "UPDATE ydoc_docs SET seed_source_sha256 = ?4 \
                          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                         rusqlite::params![
                             key.workspace_id,
@@ -702,6 +703,15 @@ where
                         ],
                     )
                     .map_err(map_sql)?;
+                }
+                if is_seed {
+                    tx.execute(
+                        "UPDATE ydoc_updates SET is_seed=1 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=?4",
+                        rusqlite::params![key.workspace_id,key.version_id,key.object_id,outcome.seq],
+                    ).map_err(map_sql)?;
+                }
+                if seed_source_sha256.is_some() && outcome.seq == 1 {
+                    crate::author_coverage::advance_in(tx, key, false)?;
                 }
                 post_append(tx, &mut outcome, &update_sha)?;
             }
@@ -2540,7 +2550,7 @@ pub fn close_session(
         tx.execute(
             "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, \
              last_settled_sha = NULL, settled_update_seq = NULL, seed_source_sha256 = NULL, \
-             pending_authors_json='[]', settle_prior_update_seq=NULL, \
+             pending_authors_json='[]', settle_prior_update_seq=NULL, seed_generation=seed_generation+1, \
              updated_at_ms = ?4 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],
@@ -3047,8 +3057,8 @@ mod successor_validation_tests {
 
     use super::*;
     use crate::{
-        encode_scene_asset_record, import_portable_scene, scene_asset_ref, SceneAsset,
-        SuccessorIdentity, SuccessorIdentityInput,
+        SceneAsset, SuccessorIdentity, SuccessorIdentityInput, encode_scene_asset_record,
+        import_portable_scene, scene_asset_ref,
     };
 
     fn canonical_image_scene(key: &DocKey) -> String {

@@ -166,8 +166,8 @@ async fn rollback_pending_settlement_compensates_before_removing_its_moment() {
             let restored = coverage(&store, &state.key);
             assert_eq!(restored.3, None);
             assert!(
-                restored.2.contains("bob"),
-                "reserved author survives moment removal"
+                restored.2 == "[]",
+                "rollback consumes authors of the removed content"
             );
         }
         drop(store);
@@ -194,7 +194,7 @@ async fn rollback_pending_settlement_compensates_before_removing_its_moment() {
         let store = EngineStore::open(&db, 8).expect("inspect restored lineage");
         let restored = coverage(&store, &state.key);
         assert_eq!(restored.3, None);
-        assert!(restored.2.contains("bob"));
+        assert_eq!(restored.2, "[]");
         let job_status: String = store
             .read_with(|conn| {
                 conn.query_row(
@@ -229,7 +229,7 @@ async fn rollback_pending_settlement_compensates_before_removing_its_moment() {
                 .map_err(StorageError::persist_public)
             })
             .expect("settlement authors");
-        assert!(authors.contains("bob"));
+        assert!(!authors.contains("bob"));
         assert!(authors.contains("carol"));
         assert!(!authors.contains("alice"));
         assert_eq!(coverage(&store, &state.key).2, "[]");
@@ -567,5 +567,136 @@ async fn terminal_status_distinguishes_success_from_supersession_including_equal
                 assert_eq!(reconciled.4, None);
             }
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_projection_credits_folded_authors_and_consumes_pending() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("actor").actor;
+    let state = open(&actor).await;
+    let doc = Ydoc::wire();
+    append(&actor, &state.key, doc.plaintext_insert(0, "a"), "alice").await;
+    settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
+        .await
+        .expect("settle");
+    append(&actor, &state.key, doc.plaintext_insert(1, "b"), "bob").await;
+    supervisor.close(&db).expect("stop");
+    drop(actor);
+    let mut store = EngineStore::open(&db, 4).expect("store");
+    dohc_engine_collab::maybe_compact(&mut store, &state.key, 0, &NoFaults, 5).expect("fold");
+    assert!(coverage(&store, &state.key).2.contains("bob"));
+    store
+        .write_with(&NoFaults, |tx| {
+            project_and_write_in_tx(
+                tx,
+                &state.key,
+                FILE,
+                &doc,
+                ContentKind::Plaintext,
+                "remote",
+                1,
+                6,
+                None,
+            )
+        })
+        .expect("projection");
+    assert_eq!(coverage(&store, &state.key).2, "[]");
+    let authors:String=store.read_with(|conn| conn.query_row(
+        "SELECT m.author_json FROM snapshots s JOIN moments m ON m.workspace_id=s.workspace_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.object_id=?2",
+        rusqlite::params![WS,state.key.object_id],|row|row.get(0)).map_err(StorageError::persist_public)).expect("authors");
+    assert!(authors.contains("bob"));
+    assert!(!authors.contains("alice"));
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE materialization_jobs SET status='complete' WHERE status='pending'",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            author_coverage::reconcile_in(tx, &state.key, 7)
+        })
+        .expect("complete");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET pending_authors_json=?1",
+                [r#"[{"kind":"agent","agentId":"carol"}]"#],
+            )
+            .map_err(StorageError::persist_public)?;
+            project_and_write_in_tx(
+                tx,
+                &state.key,
+                FILE,
+                &doc,
+                ContentKind::Plaintext,
+                "remote",
+                2,
+                8,
+                None,
+            )
+        })
+        .expect("converged projection");
+    assert_eq!(
+        coverage(&store, &state.key).2,
+        "[]",
+        "no-op consumes its interval"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_rewrite_discards_pending_authors_of_replaced_content() {
+    for origin in ["capture", "api", "conflict-resolution"] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("database");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("actor").actor;
+        let state = open(&actor).await;
+        let doc = Ydoc::wire();
+        append(&actor, &state.key, doc.plaintext_insert(0, "a"), "alice").await;
+        settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
+            .await
+            .expect("settle");
+        append(&actor, &state.key, doc.plaintext_insert(1, "b"), "bob").await;
+        supervisor.close(&db).expect("stop");
+        drop(actor);
+        let mut store = EngineStore::open(&db, 4).expect("store");
+        dohc_engine_collab::maybe_compact(&mut store, &state.key, 0, &NoFaults, 5).expect("fold");
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    WS,
+                    "main",
+                    &state.key.object_id,
+                    dohc_engine_sync::ResultingHead::Text {
+                        path: FILE,
+                        text: "replacement",
+                    },
+                    Some(origin),
+                    Some(&ChangeAttribution {
+                        actor_kind: ChangeActorKind::Agent,
+                        on_behalf_of: Some("person".into()),
+                        depth: 0,
+                    }),
+                    6,
+                )
+            })
+            .expect("rewrite");
+        let replaced = coverage(&store, &state.key);
+        assert_eq!(
+            replaced.2, "[]",
+            "{origin} must consume the replaced interval"
+        );
+        assert_eq!(replaced.3, None);
+        let authors = store
+            .read_with(|conn| author_coverage::interval_in(conn, &state.key, i64::MAX))
+            .expect("remaining authors");
+        assert!(
+            authors.is_empty(),
+            "{origin} cannot credit old edits in a later settlement"
+        );
     }
 }

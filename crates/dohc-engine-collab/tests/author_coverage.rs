@@ -17,6 +17,55 @@ fn author(scope: &str) -> ChangeAttribution {
     }
 }
 
+fn indexed_count(store: &dohc_engine_storage::EngineStore, key: &dohc_engine_collab::DocKey) -> i64 {
+    store.read_with(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM ydoc_author_identities WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
+    ).map_err(dohc_engine_storage::StorageError::persist_public)).expect("indexed identities")
+}
+
+#[test]
+fn declared_seed_is_not_an_author_and_index_tracks_fold_reset_and_consumption() {
+    let mut ts = fresh_store("seed-author-index");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    record_local_update(&mut ts.store, &mut ts.cache, &key, &doc.plaintext_insert(0, "seed"),
+        LocalAppend {
+            marker: Some(MarkerCreation { path: Some("authors.txt"), content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly }),
+            actor_origin_id: Some("opener"), attribution: Some(&author("person")), is_seed: true,
+            ..LocalAppend::default()
+        }, &NoFaults, 1, |_, _, _| Ok(())).expect("declared seed");
+    assert_eq!(indexed_count(&ts.store, &key), 0);
+    assert!(ts.store.read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+        .expect("seed coverage").is_empty());
+    record(&mut ts.store, &mut ts.cache, &key, &doc.plaintext_insert(4, " edit"), "editor", "person")
+        .expect("edit");
+    assert_eq!(indexed_count(&ts.store, &key), 1);
+    maybe_compact(&mut ts.store, &key, 0, &NoFaults, 2).expect("fold");
+    assert_eq!(indexed_count(&ts.store, &key), 1);
+    let authors = ts.store.read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+        .expect("folded coverage");
+    assert_eq!(authors.len(), 1);
+    assert!(authors.json().contains("editor"));
+    assert!(!authors.json().contains("opener"));
+    ts.store.write_with(&NoFaults, |tx| author_coverage::advance_in(tx, &key, false))
+        .expect("consume");
+    assert_eq!(indexed_count(&ts.store, &key), 0);
+    record(&mut ts.store, &mut ts.cache, &key, &doc.plaintext_insert(9, " next"), "next", "person")
+        .expect("next interval");
+    assert_eq!(indexed_count(&ts.store, &key), 1);
+    ts.store.write_with(&NoFaults, |tx| {
+        author_coverage::reset_in(tx, &key, false)?;
+        tx.execute("DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![key.workspace_id,key.version_id,key.object_id])
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+        Ok::<_, CollabError>(())
+    }).expect("discard lineage");
+    assert_eq!(indexed_count(&ts.store, &key), 0);
+}
+
 fn record(
     store: &mut dohc_engine_storage::EngineStore,
     cache: &mut WriterDocCache,
@@ -71,18 +120,20 @@ fn identities_are_scoped_bounded_and_known_authors_still_enter_at_capacity() {
     admission_us.sort_unstable();
     println!(
         "AUTHOR_MEASURE durable_admission_p95_us={} durable_admission_p99_us={}",
-        admission_us[972], admission_us[1013]
+        admission_us[(admission_us.len() - 1) * 95 / 100],
+        admission_us[(admission_us.len() - 1) * 99 / 100]
     );
     let before = ts
         .store
         .read_with(|conn| author_coverage::reserved_in(conn, &key))
         .expect("authors");
-    assert_eq!(before.len(), 1024);
+    assert_eq!(before.len(), author_coverage::MAX_INTERVAL_AUTHORS);
+    let limit = author_coverage::MAX_INTERVAL_AUTHORS as u32;
     let refused = record(
         &mut ts.store,
         &mut ts.cache,
         &key,
-        &doc.plaintext_insert(1024, "y"),
+        &doc.plaintext_insert(limit, "y"),
         "new-agent",
         "new-person",
     );
@@ -92,7 +143,7 @@ fn identities_are_scoped_bounded_and_known_authors_still_enter_at_capacity() {
             .expect("marker")
             .expect("exists")
             .head_update_seq,
-        1024
+        i64::from(limit)
     );
     // The refused update never reached the document. Use a peer of the admitted state.
     let peer = dohc_engine_collab::load_persisted(&ts.store, &key)
@@ -103,7 +154,7 @@ fn identities_are_scoped_bounded_and_known_authors_still_enter_at_capacity() {
         &mut ts.store,
         &mut ts.cache,
         &key,
-        &peer.plaintext_insert(1024, "z"),
+        &peer.plaintext_insert(limit, "z"),
         "shared-agent-name",
         "person-0",
     )
@@ -114,7 +165,7 @@ fn identities_are_scoped_bounded_and_known_authors_still_enter_at_capacity() {
         .read_with(|conn| author_coverage::reserved_in(conn, &key))
         .expect("authors");
     assert_eq!(before.json(), after.json());
-    println!("AUTHOR_MEASURE identities=1024 admit_total_ms={} metadata_before_fold_bytes={} metadata_after_fold_bytes={}",admitted.as_millis(),before.json().len(),after.json().len());
+    println!("AUTHOR_MEASURE identities={} admit_total_ms={} metadata_before_fold_bytes={} metadata_after_fold_bytes={}",before.len(),admitted.as_millis(),before.json().len(),after.json().len());
 }
 
 #[test]
@@ -184,7 +235,7 @@ fn repeated_compaction_keeps_metadata_constant_and_crash_atomic() {
 fn oversized_summary_entry_is_refused_without_truncation() {
     let mut authors = author_coverage::Authors::default();
     let json =
-        serde_json::json!([{"kind":"agent","agentId":"a","name":"n".repeat(4096)}]).to_string();
+        serde_json::json!([{"kind":"agent","agentId":"a","name":"n".repeat(author_coverage::MAX_AUTHOR_ENTRY_BYTES)}]).to_string();
     assert!(matches!(
         authors.union_json(&json),
         Err(CollabError::AuthorEntryTooLarge)
@@ -328,7 +379,8 @@ fn already_admitted_remote_authors_never_wedge_coverage_readers() {
     let mut ts = fresh_store("remote-author-summary");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1);
-    let entries: Vec<serde_json::Value> = (0..1025)
+    let remote_count = author_coverage::MAX_INTERVAL_AUTHORS + 1;
+    let entries: Vec<serde_json::Value> = (0..remote_count)
         .map(|index| serde_json::json!({"kind":"agent","agentId":format!("remote-{index}")}))
         .collect();
     ts.store.write_with(&NoFaults, |tx| {
@@ -339,7 +391,7 @@ fn already_admitted_remote_authors_never_wedge_coverage_readers() {
     let known = author("person");
     ts.store
         .read_with(|conn| {
-            assert_eq!(author_coverage::reserved_in(conn, &key)?.len(), 1025);
+            assert_eq!(author_coverage::reserved_in(conn, &key)?.len(), remote_count);
             assert!(author_coverage::check_admission_in(
                 conn,
                 &key,

@@ -69,7 +69,10 @@ use sha2::{Digest, Sha256};
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
-pub const MAX_AUTHOR_JSON_BYTES: usize = 1_024 * 4_096 + 1_025;
+// 64 entries of 1 KiB plus array punctuation use 65,601 bytes. Even when
+// author_json is escaped as a JSON string, 131,202 bytes leave 130,942 bytes
+// for the other moment.append fields inside its 256 KiB payload cap.
+pub const MAX_AUTHOR_JSON_BYTES: usize = 64 * 1_024 + 65;
 
 /// The in-band content cap every capped read binds into its SQL and every
 /// RPC references — one definition, so the query guard and the wire

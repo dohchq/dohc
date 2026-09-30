@@ -468,6 +468,12 @@ fn apply_deferred_base(
             dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id).map_err(SyncError::Storage)?;
             return Ok(result.lineage_replacement);
         }
+        let losing_authors = if losing_projection.is_some() {
+            dohc_engine_collab::author_coverage::reserved_in(tx, &key)
+                .map_err(map_collab_hard_error)?.moment_json()
+        } else {
+            None
+        };
         let unpublished_claim_id = if local_unpublished {
             let doc = losing_doc
                 .as_ref()
@@ -595,7 +601,7 @@ fn apply_deferred_base(
                 lineage_claim_id: &payload.lineage_claim_id,
                 is_base_state: payload.is_base_state,
             },
-            losing_claim_id.as_deref(), losing_projection.as_deref(), last_settled_sha.as_deref(),
+            losing_claim_id.as_deref(), losing_projection.as_deref(), losing_authors.as_deref(), last_settled_sha.as_deref(),
             &projection.content, &origin_id, origin_seq, recorded_at_ms, search_policy,
         )?;
         if let Some(opened) = conflict {
@@ -2178,11 +2184,12 @@ fn settle_ydoc_marker_to_text(
     text: &str,
     now_ms: i64,
 ) -> Result<(), SyncError> {
+    dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+        .map_err(map_collab_hard_error)?;
     // The lineage at its current head projects to `text`, the head it settles
     // to here, so it covers every update up to that head.
     tx.execute(
-        "UPDATE ydoc_docs SET path=?4, last_settled_sha=?5, updated_at_ms=?6, \
-         settled_update_seq=head_update_seq \
+        "UPDATE ydoc_docs SET path=?4, last_settled_sha=?5, updated_at_ms=?6 \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![
             key.workspace_id,
@@ -2278,6 +2285,7 @@ fn preserve_base_sides_in_tx(
     incoming: crate::ydoc_recovery::RecoveryEnvelopeBinding<'_>,
     losing_claim_id: Option<&str>,
     losing_projection: Option<&str>,
+    losing_authors: Option<&str>,
     last_settled_sha: Option<&str>,
     incoming_content: &str,
     origin_id: &str,
@@ -2295,6 +2303,7 @@ fn preserve_base_sides_in_tx(
             key,
             path,
             local,
+            losing_authors,
             last_settled_sha,
             incoming_content,
             origin_id,
@@ -2311,6 +2320,7 @@ fn preserve_base_sides_in_tx(
             incoming,
             claim,
             local,
+            losing_authors,
             origin_id,
             origin_seq,
             now_ms,
@@ -2402,6 +2412,9 @@ fn preserve_incomplete_base_in_tx(
     // Merge the durable updates as wire data: a full-state encode alone omits
     // unresolved insertions and deletions.
     let local = project_ydoc_with_store(tx, key, &doc, marker.content_kind)?.content;
+    let pending_authors = dohc_engine_collab::author_coverage::reserved_in(tx, key)
+        .map_err(map_collab_hard_error)?
+        .json();
     let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind)
         .map_err(map_collab_hard_error)?;
     let incoming = project_ydoc_with_store(tx, key, incoming_doc, kind)?.content;
@@ -2436,6 +2449,7 @@ fn preserve_incomplete_base_in_tx(
             },
             &payload.lineage_claim_id,
             &preserved,
+            None,
             origin_id,
             origin_seq,
             now_ms,
@@ -2476,6 +2490,7 @@ fn preserve_incomplete_base_in_tx(
         key,
         &payload.path,
         &local,
+        None,
         snapshot.map(|snapshot| snapshot.blob_sha256.as_str()),
         &incoming,
         origin_id,
@@ -2514,11 +2529,11 @@ fn preserve_incomplete_base_in_tx(
     tx.execute(
         "INSERT INTO ydoc_inactive_lineages (workspace_id,version_id,object_id,lineage_claim_id, \
          parent_claim_id,disposition,content_kind,path,epoch_tag,full_state_blob_sha256, \
-         state_vector_blob_sha256,last_surfaced_projection_sha256,open_conflict_id,recorded_at_ms,updated_at_ms) \
-         VALUES (?1,?2,?3,?4,?5,'rejected-base',?6,?7,?8,?9,?10,?11,?12,?13,?13)",
+         state_vector_blob_sha256,last_surfaced_projection_sha256,open_conflict_id,recorded_at_ms,updated_at_ms,pending_authors_json) \
+         VALUES (?1,?2,?3,?4,?5,'rejected-base',?6,?7,?8,?9,?10,?11,?12,?13,?13,?14)",
         params![key.workspace_id,key.version_id,key.object_id,claim,marker.lineage_parent_claim_id,
             marker.content_kind.as_str(),payload.path,marker.lineage_epoch_tag,full_sha,vector_sha,
-            local_sha,open_sync_conflict_id(tx,key)?,now_ms],
+            local_sha,open_sync_conflict_id(tx,key)?,now_ms,pending_authors],
     ).map_err(SyncError::persist)?;
     if marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed {
         dohc_engine_collab::author_coverage::reset_in(tx, key, false)
@@ -2587,6 +2602,7 @@ struct InactiveLineage {
     path: Option<String>,
     full_sha: String,
     vector_sha: String,
+    pending_authors: String,
 }
 
 #[derive(Default)]
@@ -2703,11 +2719,11 @@ fn apply_inactive_batch_in_tx(
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<InactiveDeltaOutcome, SyncError> {
     let archived: Option<InactiveLineage> = tx.query_row(
-        "SELECT b.bytes,l.content_kind,l.last_surfaced_projection_sha256,l.path,l.full_state_blob_sha256,l.state_vector_blob_sha256 FROM ydoc_inactive_lineages l \
+        "SELECT b.bytes,l.content_kind,l.last_surfaced_projection_sha256,l.path,l.full_state_blob_sha256,l.state_vector_blob_sha256,l.pending_authors_json FROM ydoc_inactive_lineages l \
          JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256 \
          WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3 AND l.lineage_claim_id=?4",
         params![key.workspace_id,key.version_id,key.object_id,payload.lineage_claim_id],
-        |row| Ok(InactiveLineage { bytes:row.get(0)?,kind:row.get(1)?,surfaced:row.get(2)?,path:row.get(3)?,full_sha:row.get(4)?,vector_sha:row.get(5)? }),
+        |row| Ok(InactiveLineage { bytes:row.get(0)?,kind:row.get(1)?,surfaced:row.get(2)?,path:row.get(3)?,full_sha:row.get(4)?,vector_sha:row.get(5)?,pending_authors:row.get(6)? }),
     ).optional().map_err(SyncError::corrupt)?;
     let Some(InactiveLineage {
         bytes: prior,
@@ -2716,6 +2732,7 @@ fn apply_inactive_batch_in_tx(
         path,
         full_sha: old_full_sha,
         vector_sha: old_vector_sha,
+        pending_authors,
     }) = archived
     else {
         return Ok(InactiveDeltaOutcome::default());
@@ -2788,11 +2805,12 @@ fn apply_inactive_batch_in_tx(
                 &content,
                 surfaced.as_deref().unwrap_or(""),
                 &full_sha,
+                (pending_authors != "[]").then_some(pending_authors.as_str()),
                 now_ms,
                 search_policy,
             )?;
             tx.execute(
-                "UPDATE ydoc_inactive_lineages SET last_surfaced_projection_sha256=?5 \
+                "UPDATE ydoc_inactive_lineages SET last_surfaced_projection_sha256=?5,pending_authors_json='[]' \
                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
                 params![
                     key.workspace_id,
@@ -2878,6 +2896,7 @@ fn conflict_replaced_lineage_in_tx(
     key: &DocKey,
     path: &str,
     local_content: &str,
+    author_json: Option<&str>,
     last_settled_sha: Option<&str>,
     incoming_content: &str,
     origin_id: &str,
@@ -2934,7 +2953,7 @@ fn conflict_replaced_lineage_in_tx(
             metadata_origin: "ydoc".to_owned(),
             metadata_summary: None,
             metadata_correlation_id: None,
-            author_json: None,
+            author_json: author_json.map(str::to_owned),
             now_ms,
             request_id: None,
         },
@@ -3333,9 +3352,10 @@ pub fn project_and_write_in_tx(
         .as_ref()
         .filter(|snapshot| snapshot.blob_sha256 == projected_sha)
     {
+        dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+            .map_err(map_collab_hard_error)?;
         tx.execute(
-            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6, \
-             settled_update_seq = head_update_seq \
+            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
                 key.workspace_id,
@@ -3359,6 +3379,9 @@ pub fn project_and_write_in_tx(
     // cursor advance redelivers the envelope, whose re-apply lands in the
     // idempotent skip above (same projection) — the id can never collide.
     let moment_id = ydoc_apply_moment_id(key, path, origin_id, origin_seq);
+    let authors = dohc_engine_collab::author_coverage::interval_in(tx, key, i64::MAX)
+        .map_err(map_collab_hard_error)?
+        .moment_json();
     let result = write_projected_text_in_tx(
         tx,
         &WriteText {
@@ -3371,7 +3394,7 @@ pub fn project_and_write_in_tx(
             metadata_origin: "ydoc".to_owned(),
             metadata_summary: None,
             metadata_correlation_id: None,
-            author_json: None,
+            author_json: authors,
             now_ms,
             request_id: None,
         },
@@ -3389,13 +3412,15 @@ pub fn project_and_write_in_tx(
         )?;
     }
     enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
+    dohc_engine_collab::author_coverage::advance_in(tx, key, true)
+        .map_err(map_collab_hard_error)?;
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the
     // old locally-settled sha behind would make the next session's settle
     // expectation trail the remote head — permanent ConflictStaleTarget.
     tx.execute(
         "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, \
-         path = ?7, settled_update_seq = head_update_seq \
+         path = ?7 \
          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
         params![
             key.workspace_id,
@@ -3889,6 +3914,13 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             } else {
                 None
             };
+            let losing_authors = if losing_projection.is_some() {
+                dohc_engine_collab::author_coverage::reserved_in(tx, &claim_key)
+                    .map_err(map_collab_hard_error)?
+                    .moment_json()
+            } else {
+                None
+            };
             let unpublished_claim_id = if local_unpublished {
                 let doc = dohc_engine_collab::load_doc_in(tx, &claim_key)
                     .map_err(map_collab_hard_error)?;
@@ -3999,6 +4031,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 incoming.clone(),
                 losing_claim_id.as_deref(),
                 losing_projection.as_deref(),
+                losing_authors.as_deref(),
                 losing_last_settled_sha.as_deref(),
                 &projection.content,
                 &op.origin_id,

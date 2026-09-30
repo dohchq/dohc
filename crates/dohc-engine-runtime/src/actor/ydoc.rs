@@ -1364,21 +1364,55 @@ fn seed_scene_from_artifact_on_store(
         },
     )?;
     let seed_update = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])?;
+    let generation: i64 = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT seed_generation FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
+        ).optional().map(|value| value.unwrap_or(0)).map_err(StorageError::persist_public)
+    })?;
     let request_id = format!(
         "ydoc-scene-seed-{}",
         hex_sha256(
             format!(
-                "{}\0{}\0{}\0{}\0{}\0{}",
+                "{}\0{}\0{}\0{}\0{}\0{}\0{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
+                path,
                 artifact_moment_id,
                 hex_sha256(artifact.as_bytes()),
-                hex_sha256(&seed_update)
+                generation
             )
             .as_bytes()
         )
     );
+    let completed: bool = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1 AND kind='ydoc')",
+            [&request_id],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::persist_public)
+    })?;
+    if completed {
+        // A lost acknowledgement reuses the committed seed, including its asset jobs.
+        return store.read_with(|conn| {
+            let mut jobs = Vec::new();
+            for asset in &assets {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE job_id=?1)",
+                        [&asset.moment_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(StorageError::persist_public)?;
+                if exists && !jobs.contains(&asset.moment_id) {
+                    jobs.push(asset.moment_id.clone());
+                }
+            }
+            Ok::<_, RuntimeError>(jobs)
+        });
+    }
     // Only the moment ids whose head writes were actually enqueued: a planned
     // asset whose content-addressed path already holds matching content takes
     // the `continue` below and creates no moment, and counting it as a
@@ -1399,6 +1433,7 @@ fn seed_scene_from_artifact_on_store(
             }),
             ensure_parent_row: true,
             require_empty_lineage: true,
+            is_seed: true,
             request_id: Some(&request_id),
             ..Default::default()
         },
@@ -1408,14 +1443,7 @@ fn seed_scene_from_artifact_on_store(
             created_moment_ids.clear();
             // The drawing's file is the artifact this seed imported, so the
             // lineage is not ahead of it until another update lands.
-            tx.execute(
-                "UPDATE ydoc_docs SET settled_update_seq = head_update_seq \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                params![key.workspace_id, key.version_id, key.object_id],
-            )
-            .map_err(|error| CollabError::Corrupt {
-                reason: format!("scene seed settle record failed: {error}"),
-            })?;
+            dohc_engine_collab::author_coverage::advance_in(tx, key, false)?;
             let version_is_active: bool = tx
                 .query_row(
                     "SELECT ?2 = COALESCE( \
@@ -1924,6 +1952,7 @@ pub(super) fn ydoc_record_update_on_store(
             ensure_parent_row: true,
             restore_generation,
             require_empty_lineage,
+            is_seed: seed_source.is_some(),
             seed_source_sha256: seed_source
                 .as_ref()
                 .map(|source| source.blob_sha256.as_str()),
@@ -2162,8 +2191,10 @@ fn record_file_holds_head(
         return Ok(());
     }
     let recorded = store.write_with(faults, |tx| {
+        dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+            .map_err(StorageError::persist_public)?;
         tx.execute(
-            "UPDATE ydoc_docs SET settled_update_seq = head_update_seq, pending_authors_json='[]', \
+            "UPDATE ydoc_docs SET \
              last_settled_sha=COALESCE(?4,last_settled_sha) \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
@@ -2839,10 +2870,10 @@ pub(super) fn ydoc_settle_on_store(
         // Coverage and the unresolved attempt commit with the moment and job.
         // The projection was taken from the doc at the current head, and this
         // actor is the store's only writer, so the head has not moved since.
+        dohc_engine_collab::author_coverage::advance_in(tx, key, true)
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
         tx.execute(
-            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, \
-             settle_prior_update_seq=COALESCE(settled_update_seq,-1), \
-             settled_update_seq = head_update_seq, pending_authors_json='[]' \
+            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
                 key.workspace_id,
@@ -3565,6 +3596,102 @@ mod scene_seed_transaction_tests {
                 Ok::<_, StorageError>(())
             })
             .expect("inspect rolled-back transaction");
+    }
+
+    #[test]
+    fn scene_seed_retry_reuses_commit_and_prune_allows_reseed() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("database"),
+            1,
+        )
+        .expect("store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("version");
+        let key = DocKey::new("workspace", "main", "drawing-object").expect("key");
+        let artifact =
+            r#"{"type":"excalidraw","version":2,"elements":[],"appState":{},"files":{}}"#;
+        let mut cache = WriterDocCache::new();
+        let crash = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+        let first = seed_scene_from_artifact_on_store(
+            &mut store,
+            &mut cache,
+            &key,
+            "drawing.excalidraw",
+            artifact,
+            "artifact-moment",
+            2,
+            crash.as_ref(),
+        );
+        assert!(matches!(first, Err(RuntimeError::OperationCrashed)));
+        let before = dohc_engine_collab::load_persisted(&store, &key)
+            .expect("load")
+            .expect("seed")
+            .doc
+            .encode_full_state();
+        seed_scene_from_artifact_on_store(
+            &mut store,
+            &mut cache,
+            &key,
+            "drawing.excalidraw",
+            artifact,
+            "artifact-moment",
+            3,
+            &NoFaults,
+        )
+        .expect("retry");
+        let after = dohc_engine_collab::load_persisted(&store, &key)
+            .expect("load")
+            .expect("seed")
+            .doc
+            .encode_full_state();
+        assert_eq!(before, after, "retry must retain the original CRDT bytes");
+        let sha = hex_sha256(artifact.as_bytes());
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET last_settled_sha=?1", [&sha])
+                    .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .expect("artifact proof");
+        let closed = dohc_engine_collab::close_session(
+            &mut store,
+            &key,
+            false,
+            Some(&dohc_engine_collab::CloseProjection {
+                sha256: sha,
+                materialized_seed_source_sha256: None,
+            }),
+            &NoFaults,
+            4,
+        )
+        .expect("close");
+        assert!(matches!(
+            closed,
+            TxnOutcome::Committed(CloseOutcome::Pruned { .. })
+        ));
+        seed_scene_from_artifact_on_store(
+            &mut store,
+            &mut cache,
+            &key,
+            "drawing.excalidraw",
+            artifact,
+            "artifact-moment",
+            5,
+            &NoFaults,
+        )
+        .expect("reseed same artifact moment");
+        let reseeded = dohc_engine_collab::load_persisted(&store, &key)
+            .expect("load")
+            .expect("reseed")
+            .doc
+            .encode_full_state();
+        assert_ne!(before, reseeded, "prune permits new CRDT bytes");
+        store.read_with(|conn| {
+            let requests:i64=conn.query_row("SELECT COUNT(*) FROM engine_requests WHERE request_id LIKE 'ydoc-scene-seed-%'",[],|row|row.get(0)).map_err(StorageError::persist_public)?;
+            assert_eq!(requests,2);
+            Ok::<_,StorageError>(())
+        }).expect("generation keys");
     }
 
     #[test]

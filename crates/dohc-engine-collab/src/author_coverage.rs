@@ -7,9 +7,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const MAX_INTERVAL_AUTHORS: usize = 1_024;
-pub const SETTLE_AUTHOR_THRESHOLD: usize = 960;
-pub const MAX_AUTHOR_ENTRY_BYTES: usize = 4_096;
+pub const MAX_INTERVAL_AUTHORS: usize = 64;
+pub const SETTLE_AUTHOR_THRESHOLD: usize = 60;
+pub const MAX_AUTHOR_ENTRY_BYTES: usize = 1_024;
 
 fn sql(error: rusqlite::Error) -> CollabError {
     StorageError::persist_public(error).into()
@@ -100,7 +100,7 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
         .prepare(
             "SELECT actor_origin_id, actor_kind, on_behalf_of, chain_depth FROM ydoc_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
-         AND seq>COALESCE(?4,-1) AND seq<=?5 ORDER BY seq",
+         AND seq>COALESCE(?4,-1) AND seq<=?5 AND is_seed=0 ORDER BY seq",
         )
         .map_err(sql)?;
     let rows = stmt
@@ -197,17 +197,37 @@ pub fn check_admission_in(
     let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
         return Ok(false);
     };
-    let mut authors = reserved_in(conn, key)?;
-    let before = authors.len();
-    authors.union_json(&json)?;
-    if authors.len() > MAX_INTERVAL_AUTHORS && authors.len() > before {
+    let mut incoming = Authors::default();
+    incoming.union_json(&json)?;
+    let identity = incoming
+        .0
+        .keys()
+        .next()
+        .ok_or_else(|| corrupt("attribution has no identity"))?;
+    let (known, count, unresolved): (bool, usize, bool) = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_author_identities a WHERE a.workspace_id=?1 \
+         AND a.version_id=?2 AND a.object_id=?3 AND a.identity=?4), \
+         (SELECT COUNT(*) FROM ydoc_author_identities a WHERE a.workspace_id=?1 \
+         AND a.version_id=?2 AND a.object_id=?3), settle_prior_update_seq IS NOT NULL \
+         FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id, identity],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(sql)?;
+    if !known && count >= MAX_INTERVAL_AUTHORS {
         return Err(CollabError::AuthorCapacity);
     }
-    let unresolved: bool = conn.query_row(
-        "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+    Ok(!unresolved && count + usize::from(!known) >= SETTLE_AUTHOR_THRESHOLD)
+}
+
+/// Consume the current interval with its boundary, reserving a materialization attempt if needed.
+pub fn advance_in(conn: &Connection, key: &DocKey, reserve_attempt: bool) -> Result<(), CollabError> {
+    conn.execute(
+        "UPDATE ydoc_docs SET settled_update_seq=head_update_seq,pending_authors_json='[]', \
+         settle_prior_update_seq=CASE WHEN ?4 THEN COALESCE(settled_update_seq,-1) ELSE NULL END \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id, reserve_attempt],
     ).map_err(sql)?;
-    Ok(!unresolved && authors.len() >= SETTLE_AUTHOR_THRESHOLD)
+    Ok(())
 }
 
 /// Restore coverage once. The moment stays in history, even when its file write failed.
