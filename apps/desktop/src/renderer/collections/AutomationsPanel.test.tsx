@@ -2504,7 +2504,10 @@ describe("an automation's runs", () => {
     expect(opened.getAttribute("aria-current")).toBe("true");
     // Its changes show without a click.
     expect(opened.textContent).toContain("Plan · Finished on: empty → 2026-09-25");
-    expect(scrolled).toHaveBeenCalled();
+    await waitFor(() => {
+      const openedCall = scrolled.mock.contexts.indexOf(opened);
+      expect(scrolled.mock.calls[openedCall]).toEqual([{ block: "nearest" }]);
+    });
     expect(screen.getByTestId("automation-run-atc_new").getAttribute("aria-current")).toBeNull();
   });
 
