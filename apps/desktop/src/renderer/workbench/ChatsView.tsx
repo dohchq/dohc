@@ -673,7 +673,8 @@ export function ChatsView(props: {
     resetForWorkspace,
     prepareOpen,
     invalidate,
-    setMessageReactions,
+    pendingReactionMessageIds,
+    toggleMessageReaction,
   } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
   // A live thread can refresh repeatedly without changing navigation. Keep a
   // request sequence separate from the workspace/navigation liveness token so
@@ -689,6 +690,9 @@ export function ChatsView(props: {
   // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
+  // Each Home item's Add reaction trigger, by message id: where focus goes
+  // when the activated pill was the viewer's only row and unmounts.
+  const homeLikeTriggers = useRef(new Map<string, HTMLButtonElement>());
   const threadComposerRef = useRef<HTMLDivElement | null>(null);
   const flatChatListRef = useRef<ChatMessageListHandle | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
@@ -2236,37 +2240,23 @@ export function ChatsView(props: {
     [nav, props.onError, viewerAuthorId, workspaceId],
   );
 
-  // Like from Home. The viewer id may still be unknown here (it arrives with
-  // the first reaction listing), so the write goes first and the listing that
-  // answers it repaints the item and names the viewer.
+  // Like from Home. The item's own viewer id (per thread, from the feed
+  // listing) paints the change at once; the feed hook owns the write. The
+  // painted row carries the name the composer shows for you, never an id.
+  const viewerLabel = collaboration?.displayName || props.agentSetup?.preferredName || "You";
   const toggleHomeReaction = useCallback(
-    (threadId: string, messageId: string, emoji: string, nextState: "added" | "removed") => {
+    (item: ChatFeedItemRecord, emoji: string, nextState: "added" | "removed") => {
       if (nav.level !== "feed") return;
-      const token = liveToken.current;
-      const cellKey = `${messageId}\u0000${emoji}`;
-      const seq = (reactionSeq.current.get(cellKey) ?? 0) + 1;
-      reactionSeq.current.set(cellKey, seq);
-      const isCurrent = () =>
-        token === liveToken.current && reactionSeq.current.get(cellKey) === seq;
-      void bridge()
-        .setChatReaction({
-          workspaceId,
-          threadId,
-          messageId,
-          emoji,
-          state: nextState,
-        })
-        .then(() => bridge().listChatReactions({ workspaceId, threadId }))
-        .then((result) => {
-          if (!isCurrent()) return;
-          setMessageReactions(messageId, result.reactions, result.viewerAuthorId);
-        })
-        .catch((error) => {
-          if (!isCurrent()) return;
-          props.onError(ipcErrorMessage(error, "Could not update that reaction."), error);
-        });
+      toggleMessageReaction({
+        threadId: item.thread.id,
+        messageId: item.message.id,
+        emoji,
+        nextState,
+        viewerAuthorId: item.viewerAuthorId,
+        viewerLabel,
+      });
     },
-    [nav.level, props.onError, setMessageReactions, workspaceId],
+    [nav.level, toggleMessageReaction, viewerLabel],
   );
 
   const toggleFeedReaction = useCallback(
@@ -3698,6 +3688,10 @@ export function ChatsView(props: {
                   byEmoji.set(reaction.emoji, (byEmoji.get(reaction.emoji) ?? 0) + 1);
                 }
                 const itemViewer = item.viewerAuthorId ?? "";
+                // One reaction write per message at a time: its controls
+                // refuse another write, but keep focus, until it settles.
+                // Other items stay live.
+                const reactionPending = pendingReactionMessageIds.has(item.message.id);
                 const where = item.channel
                   ? item.channel.kind === "dm"
                     ? feedDm?.peerLabel ?? item.channel.name
@@ -3803,13 +3797,23 @@ export function ChatsView(props: {
                           <button
                             type="button"
                             disabled={locked}
+                            aria-disabled={reactionPending || undefined}
                             aria-label={`${emoji} ${count}`}
                             aria-pressed={itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer)}
-                            onClick={() => toggleHomeReaction(item.thread.id, item.message.id, emoji, itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer) ? "removed" : "added")}
+                            onClick={(event) => {
+                              if (reactionPending) return;
+                              const mine = itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer);
+                              // Removing the only row unmounts this pill. Focus
+                              // that came with the activation stays in the post.
+                              if (mine && count === 1 && document.activeElement === event.currentTarget) {
+                                homeLikeTriggers.current.get(item.message.id)?.focus();
+                              }
+                              toggleHomeReaction(item, emoji, mine ? "removed" : "added");
+                            }}
                             key={emoji}
                             data-testid="chats-feed-reaction-pill"
                             data-emoji={emoji}
-                            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible"
+                            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible aria-disabled:opacity-50 aria-disabled:cursor-default"
                           >
                             <span aria-hidden>{emoji}</span>
                             <span className="tabular-nums">{count}</span>
@@ -3822,8 +3826,12 @@ export function ChatsView(props: {
                     <div className="flex items-center gap-2 border-t border-line py-1.5">
                       <MessageReactions testIdPrefix="chats-feed" actionTestId="chats-feed-like" pickerOnly flush
                         messageId={item.message.id} records={itemReactions}
-                        controls={{ reactions: itemReactions, viewerAuthorId: itemViewer, readOnly: locked,
-                          onToggle: ({ emoji, nextState }) => toggleHomeReaction(item.thread.id, item.message.id, emoji, nextState) }} />
+                        triggerRef={(node) => {
+                          if (node) homeLikeTriggers.current.set(item.message.id, node);
+                          else homeLikeTriggers.current.delete(item.message.id);
+                        }}
+                        controls={{ reactions: itemReactions, viewerAuthorId: itemViewer, readOnly: locked, pending: reactionPending,
+                          onToggle: ({ emoji, nextState }) => toggleHomeReaction(item, emoji, nextState) }} />
                       <ActionButton
                         label={isComment ? "Reply" : "Comment"}
                         icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}

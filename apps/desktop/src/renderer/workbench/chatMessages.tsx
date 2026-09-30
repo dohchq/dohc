@@ -353,6 +353,9 @@ export interface ChatReactionControls {
   }) => void;
   emojiChoices?: readonly string[];
   readOnly?: boolean;
+  // A write for this message is in flight. Controls stay focusable and
+  // refuse another write until it settles; readOnly is the native refusal.
+  pending?: boolean;
 }
 
 // Reaction labels use the stored human or agent name.
@@ -375,6 +378,9 @@ export function MessageReactions(props: {
   hoverToolbar?: boolean;
   actionTestId?: string;
   pickerOnly?: boolean;
+  // The add trigger's element, for a parent whose own pill is about to
+  // unmount and needs somewhere in the same message to put focus.
+  triggerRef?: (node: HTMLButtonElement | null) => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -390,8 +396,12 @@ export function MessageReactions(props: {
     ...EMOJI_DATA.map(({ emoji, shortcode }) => [emoji, shortcode] as const),
   ]), [catalog]);
   useEffect(() => {
-    if (props.controls.readOnly) setPickerOpen(false);
-  }, [props.controls.readOnly]);
+    if (!props.controls.readOnly && !props.controls.pending) return;
+    // A write began from another control on this message, so the picker's
+    // choices would do nothing. It closes; focus moves only if it was inside.
+    if (pickerRef.current?.contains(document.activeElement)) triggerRef.current?.focus();
+    setPickerOpen(false);
+  }, [props.controls.pending, props.controls.readOnly]);
   useEffect(() => {
     if (!pickerOpen) return;
     let current = true;
@@ -488,6 +498,7 @@ export function MessageReactions(props: {
   }
 
   const toggle = (emoji: string, mine: boolean) => {
+    if (props.controls.pending) return;
     props.controls.onToggle({
       messageId: props.messageId,
       emoji,
@@ -497,21 +508,25 @@ export function MessageReactions(props: {
 
   const trigger = (
     <button
-      ref={triggerRef}
+      ref={(node) => {
+        triggerRef.current = node;
+        props.triggerRef?.(node);
+      }}
       type="button"
       data-testid={props.actionTestId ?? `${props.testIdPrefix}-add-reaction`}
       aria-label="Add reaction"
       disabled={props.controls.readOnly}
+      aria-disabled={props.controls.pending || undefined}
       aria-haspopup="true"
       aria-expanded={pickerOpen}
       aria-controls={pickerOpen ? pickerId : undefined}
       title="Add reaction"
-      onClick={() => { setQuery(""); setVisibleCount(96); setPickerOpen((open) => !open); }}
-      className={
+      onClick={() => { if (props.controls.pending) return; setQuery(""); setVisibleCount(96); setPickerOpen((open) => !open); }}
+      className={`${
         props.hoverToolbar
           ? `${TOOLBAR_BUTTON} text-muted`
           : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default"
-      }
+      } aria-disabled:opacity-50 aria-disabled:cursor-default`}
     >
       <SmilePlus size={16} aria-hidden />
     </button>
@@ -591,13 +606,14 @@ export function MessageReactions(props: {
           data-mine={group.mine ? "true" : "false"}
           aria-pressed={group.mine}
           disabled={props.controls.readOnly}
+          aria-disabled={props.controls.pending || undefined}
           // The emoji glyph is aria-hidden, so without this the button announces
           // as just its count. Expose emoji + count + reactor names, e.g.
           // "👍 3 — Sam, Nova".
           aria-label={`${group.emoji} ${group.records.length} — ${reactionerNames(group.records)}`}
           title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
           onClick={() => toggle(group.emoji, group.mine)}
-          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors disabled:cursor-default ${
+          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default ${
             group.mine
               ? "border-accent/60 bg-accent/15 text-ink"
               : "border-line bg-bg text-muted hover:border-ink/40 hover:text-ink"
@@ -624,8 +640,9 @@ export function MessageReactions(props: {
                 aria-label={`React with ${emoji}`}
                 title={`React with ${emoji}`}
                 disabled={props.controls.readOnly}
+                aria-disabled={props.controls.pending || undefined}
                 onClick={() => toggle(emoji, mine)}
-                className={`${TOOLBAR_BUTTON} text-[13px] leading-none ${mine ? "bg-accent/15" : ""}`}
+                className={`${TOOLBAR_BUTTON} text-[13px] leading-none aria-disabled:opacity-50 ${mine ? "bg-accent/15" : ""}`}
               >
                 <span aria-hidden>{emoji}</span>
               </button>
