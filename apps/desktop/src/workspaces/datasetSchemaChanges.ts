@@ -72,7 +72,7 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
       if (field.type === "button") throw new Error(`${field.name} is a button. It has no type or value to change.`);
       if (!generated) {
         const actions = original.operations.filter(operation => operation.fieldIds.includes(field.fieldId)).map(operation => operation.label).join(", ");
-        throw new Error(`${field.name} uses custom rules${actions ? ` in ${actions}` : ""}. Update ${original.operationsPath}, then choose Review source change.`);
+        throw Object.assign(new Error(`${field.name} uses custom rules${actions ? ` in ${actions}` : ""}. Update ${original.operationsPath}, then choose Review source change.`), { workspacePaths: [original.operationsPath] });
       }
       if (field.sqlColumn === table.primaryKey) throw new Error("The record ID cannot change type or become optional. Choose another field.");
       const previous = structuredClone(field);

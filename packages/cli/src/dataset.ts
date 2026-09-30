@@ -6,8 +6,13 @@ import { DATASET_MAX_FIELDS, parseDatasetDefinition, parseDatasetRevision, parse
 const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const workspace = { workspaceId: z.string().min(1).max(128) };
-const datasetPath = z.string().min(1).max(1024).describe("Workspace-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference.").superRefine((value, context) => {
+const datasetPath = z.string().min(1).max(1024).describe("Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference.").superRefine((value, context) => {
   try { parseDatasetPath(value); } catch { context.addIssue({ code: "custom", message: "Use the workspace-relative dataset.json path." }); }
+});
+// Result addresses can name a sibling of the caller folder. They grant no access.
+const resultDatasetPath = z.string().min(1).max(4096).superRefine((value, context) => {
+  try { parseDatasetPath(value.replace(/^(?:\.\.\/)+/, "")); }
+  catch { context.addIssue({ code: "custom", message: "Use a caller-relative dataset.json path." }); }
 });
 const selection = { ...workspace, datasetPath, expectedDatasetId: identity.describe("The datasetId returned by describe. Refuse the request if the path now names another Collection.").optional() };
 const pinned = { ...selection, revision: z.number().int().positive(), revisionSha256: sha256 };
@@ -25,7 +30,16 @@ const definition = z.unknown().transform((value, context) => {
   catch { context.addIssue({ code: "custom", message: "Invalid Collection definition." }); return z.NEVER; }
 });
 const revision = z.unknown().transform((value, context) => {
-  try { return parseDatasetRevision(value); }
+  try {
+    // Validate immutable source metadata with caller-relative addresses.
+    const row = z.object({ definition: z.object({ schemaPath: z.string(), operationsPath: z.string() }).passthrough() }).passthrough().parse(value);
+    const { schemaPath, operationsPath } = row.definition;
+    const parsed = parseDatasetRevision({ ...row, definition: { ...row.definition,
+      schemaPath: schemaPath.replace(/^(?:\.\.\/)+/, ""),
+      operationsPath: operationsPath.replace(/^(?:\.\.\/)+/, ""),
+    } });
+    return { ...parsed, definition: { ...parsed.definition, schemaPath, operationsPath } };
+  }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection revision." }); return z.NEVER; }
 });
 export const DatasetCursor = z.object({ ...workspace, datasetId: identity, hostEpoch: z.string().min(1).max(256), approvedRevisionHash: sha256,
@@ -149,7 +163,7 @@ const description = z.unknown().transform((value, context) => {
   try {
     const { datasetPath: path, datasetAddressStatus, ...metadata } = value as Record<string, unknown>;
     const status = z.enum(["available", "missing", "ambiguous"]).optional().parse(datasetAddressStatus);
-    return { ...parseDatasetDescription(metadata), datasetPath: path === null ? null : parseDatasetPath(path), ...(status ? { datasetAddressStatus: status } : {}) };
+    return { ...parseDatasetDescription(metadata), datasetPath: path === null ? null : resultDatasetPath.parse(path), ...(status ? { datasetAddressStatus: status } : {}) };
   }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });
@@ -164,7 +178,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("attempt-reconciled"), cleared: z.literal(true) }).strict(),
   z.object({ kind: z.literal("attempt-cancelled"), cancelled: z.literal(true) }).strict(),
   z.object({ kind: z.literal("recovery-prepared"), recovery: DatasetRecoveryPreparation.nullable() }).strict(),
-  z.object({ kind: z.literal("recovery-claimed"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, targetCursor: DatasetCursor, datasetPath: datasetPath.nullable(), sourceError: z.string().max(1024).optional() }).strict(),
+  z.object({ kind: z.literal("recovery-claimed"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, targetCursor: DatasetCursor, datasetPath: resultDatasetPath.nullable(), sourceError: z.string().max(1024).optional() }).strict(),
   z.object({ kind: z.literal("recovery-discarded") }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),

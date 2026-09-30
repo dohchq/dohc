@@ -82,6 +82,7 @@ import {
 import {
   basename,
   dirname,
+  isAbsolute,
   join,
   relative,
   resolve,
@@ -1074,13 +1075,6 @@ async function workspaceRelativePath(
   return relative(root, canonical).split(sep).join("/");
 }
 
-async function documentPath(context: CliWorkspaceContext, cwd: string, path: string): Promise<string> {
-  const root = await realpath(context.rootPath);
-  const folder = await realpath(cwd);
-  // The document port checks the target's authority. Keep missing paths for create.
-  return relative(root, resolve(folder, path)).split(sep).join("/");
-}
-
 async function resolveAttachments(
   context: CliWorkspaceContext,
   cwd: string,
@@ -1984,7 +1978,158 @@ async function onceForRequestId(
   }
 }
 
+type CliPathMode = "read" | "write" | "materialize";
+
+// Validate the caller spelling before rebasing, then validate workspace authority.
+// fileWrite can use the same helper when its socket verb lands.
+async function callerPaths(context: CliWorkspaceContext, cwd: string) {
+  const root = await realpath(context.rootPath);
+  const folder = await realpath(cwd);
+  if (!isInside(root, folder)) throw new CliCommandError("not inside a dohc workspace");
+  const known = new Map<string, string>();
+  const callerPath = (path: string) => relative(folder, resolve(root, path)).split(sep).join("/") || ".";
+  const validate = (path: string, mode: CliPathMode) => mode === "write"
+    ? validateUserWritePath(path)
+    : mode === "materialize"
+      ? validateUserMaterializePath(path, { platform: process.platform })
+      : validateUserReadPath(path, { platform: process.platform });
+  return {
+    rebase(path: string, mode: CliPathMode): string {
+      const supplied = validate(path, mode);
+      if (!supplied.ok) throw new CliCommandError(cliPathRejected(supplied.reason, path).reason);
+      const rebased = relative(root, resolve(folder, supplied.normalized)).split(sep).join("/");
+      const checked = validate(rebased, mode);
+      if (!checked.ok) throw new CliCommandError(cliPathRejected(checked.reason, path).reason);
+      known.set(checked.normalized, supplied.normalized);
+      known.set(resolve(root, checked.normalized), supplied.normalized);
+      return checked.normalized;
+    },
+    recoveryPath(path: string, mode: CliPathMode): string {
+      if (isAbsolute(path)) return path;
+      const absolute = resolve(root, this.rebase(path, mode));
+      known.set(absolute, path);
+      return absolute;
+    },
+    result(value: unknown): unknown {
+      const paths = new Set(["path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "schemaPath", "operationsPath"]);
+      const lists = new Set(["paths", "created", "written"]);
+      const data = new Set(["values", "fields", "kept", "input", "result", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
+      const collect = (entry: unknown, key = ""): void => {
+        if (typeof entry === "string" && (paths.has(key) || lists.has(key))) {
+          known.set(entry, callerPath(entry));
+          known.set(resolve(root, entry), callerPath(entry));
+        }
+        else if (Array.isArray(entry)) entry.forEach(item => collect(item, key));
+        else if (entry !== null && typeof entry === "object") {
+          for (const [name, item] of Object.entries(entry)) if (!data.has(name)) collect(item, name);
+        }
+      };
+      collect(value);
+      const text = (line: string) => {
+        const names = [...known.keys()].sort((a, b) => b.length - a.length).map(path => RegExp.escape(path));
+        const prefix = relative(root, folder).split(sep).join("/") + "/";
+        // A port can mention another source file beside the requested descriptor.
+        const anchors = [...(root === folder ? [] : [prefix]), root + sep, root.split(sep).join("/") + "/"];
+        const pathsInText = anchors.map(path => RegExp.escape(path) + '[^\\s"\'<>()]+');
+        const pattern = [...names, ...pathsInText].join("|");
+        return line.replace(new RegExp(`(?<![\\p{L}\\p{N}_./\\\\-])(?:${pattern})(?![\\p{L}\\p{N}_.\\\\-])`, "gu"), path => known.get(path) ?? callerPath(path));
+      };
+      const map = (entry: unknown, key = ""): unknown => {
+        if (typeof entry === "string") {
+          if (paths.has(key) || lists.has(key)) return callerPath(entry);
+          if (["reason", "message", "warning", "instruction", "sourceError", "error", "body"].includes(key)) return text(entry);
+          return entry;
+        }
+        if (Array.isArray(entry)) return entry.map(item => map(item, key));
+        if (entry !== null && typeof entry === "object") return Object.fromEntries(
+          Object.entries(entry).map(([name, item]) => [name, data.has(name) ? item : map(item, name)]),
+        );
+        return entry;
+      };
+      return map(value);
+    },
+  };
+}
+
 async function dispatch(
+  request: CliRequest,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): Promise<unknown> {
+  const pathVerbs = new Set(["documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy"]);
+  if (!pathVerbs.has(request.verb)) return dispatchWorkspace(request, context, options);
+  const paths = await callerPaths(context, request.args.cwd);
+  let rebased: CliRequest;
+  try {
+    switch (request.verb) {
+      case "documentRead":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
+        break;
+      case "documentEdit":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "documentCreate":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "materialize") } };
+        break;
+      case "collectionSetFields":
+        rebased = { ...request, args: { ...request.args, recordPath: paths.rebase(request.args.recordPath, "write") } };
+        break;
+      case "collectionQuery":
+        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read"),
+          ...(request.args.cursor ? { cursor: { ...request.args.cursor, recordPath: paths.rebase(request.args.cursor.recordPath, "read") } } : {}) } };
+        break;
+      case "collectionRecord":
+        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        break;
+      case "collectionCreateRecord":
+        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        break;
+      case "automationRuns":
+        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        break;
+      case "automationRun":
+        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        break;
+      case "automationRetry":
+        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        break;
+      case "automationPress":
+        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        break;
+      case "dataset": {
+        const input = request.args.request;
+        const translated = { ...input };
+        if ("datasetPath" in translated) translated.datasetPath = paths.rebase(translated.datasetPath, "read");
+        if ("descriptorPath" in translated) translated.descriptorPath = paths.rebase(translated.descriptorPath, "read");
+        if ("migrationPath" in translated) translated.migrationPath = paths.rebase(translated.migrationPath, "read");
+        if ("sourcePath" in translated && translated.sourcePath !== undefined) translated.sourcePath = paths.recoveryPath(translated.sourcePath, "read");
+        if ("savePath" in translated && translated.savePath !== undefined) translated.savePath = paths.recoveryPath(translated.savePath, "materialize");
+        if ("appRoot" in translated) translated.appRoot = paths.rebase(translated.appRoot, "materialize");
+        if (translated.action === "create") translated.definition = { ...translated.definition,
+          schemaPath: paths.rebase(translated.definition.schemaPath, "read"),
+          operationsPath: paths.rebase(translated.definition.operationsPath, "read") };
+        rebased = { ...request, args: { ...request.args, request: translated } };
+        break;
+      }
+      default: rebased = request;
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "path rejected";
+    return request.verb === "dataset" ? { kind: "refused", code: "path_rejected", message: reason } : { ok: false, reason };
+  }
+  try {
+    return paths.result(parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options)));
+  } catch (error) {
+    const workspacePaths = error instanceof Error && "workspacePaths" in error && Array.isArray(error.workspacePaths)
+      ? error.workspacePaths.filter((path: unknown): path is string => typeof path === "string")
+      : [];
+    const mapped = paths.result({ error: error instanceof Error ? error.message : "request failed", paths: workspacePaths });
+    if (mapped !== null && typeof mapped === "object" && "error" in mapped && typeof mapped.error === "string") throw new CliCommandError(mapped.error);
+    throw error;
+  }
+}
+
+async function dispatchWorkspace(
   request: CliRequest,
   context: CliWorkspaceContext,
   options: CliServerOptions,
@@ -2447,7 +2592,7 @@ async function dispatch(
     case "documentRead": {
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
-      const path = await documentPath(context, request.args.cwd, request.args.path);
+      const path = request.args.path;
       const validated = validateUserReadPath(path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       try {
@@ -2489,7 +2634,7 @@ async function dispatch(
           reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
         };
       }
-      const resolvedPath = await documentPath(context, request.args.cwd, request.args.path);
+      const resolvedPath = request.args.path;
       const validated = validateUserWritePath(resolvedPath);
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       const path = validated.normalized;
@@ -2526,7 +2671,7 @@ async function dispatch(
         };
       }
       // A new file, so the stricter materialization rules apply.
-      const path = await documentPath(context, request.args.cwd, request.args.path);
+      const path = request.args.path;
       const validated = validateUserMaterializePath(path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       if (liveDocumentKindForPath(validated.normalized) !== "richdoc") {

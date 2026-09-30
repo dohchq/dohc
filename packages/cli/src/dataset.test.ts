@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parseCliArguments } from "./args";
 import { executeCli } from "./index";
 import { CLI_PROTOCOL_VERSION, cliRequestSchema, parseCliResult } from "./protocol";
-import { DatasetRequest } from "./dataset";
+import { DatasetRequest, DatasetResult } from "./dataset";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const definition = {formatVersion:1,datasetId:id(1),name:"Equipment",schemaPath:"equipment/schema.sql",operationsPath:"equipment/actions.ts",
@@ -29,6 +29,14 @@ const requests: unknown[] = [
   {action:"invoke",workspaceId:"workspace",datasetPath:"equipment/dataset.json",operationId:id(4),revision:1,revisionSha256:"a".repeat(64),input:{limit:10},idempotencyKey:"read-1"},
 ];
 describe("dataset CLI", () => {
+  it("accepts caller-relative result addresses without accepting request traversal", () => {
+    const dataset = { datasetId: id(1), name: "Equipment", revision: 1, revisionSha256: "a".repeat(64), tables: [], operations: [], datasetPath: "../equipment/dataset.json" };
+    expect(DatasetResult.parse({ kind: "description", dataset })).toEqual({ kind: "description", dataset });
+    expect(DatasetRequest.safeParse({ action: "describe", workspaceId: "workspace", datasetPath: dataset.datasetPath }).success).toBe(false);
+    expect(DatasetResult.safeParse({ kind: "description", dataset: { ...dataset, datasetPath: "../equipment/../dataset.json" } }).success).toBe(false);
+    const revision = { datasetId: id(1), revision: 1, revisionSha256: "d".repeat(64), definition: { ...definition, schemaPath: "../equipment/schema.sql", operationsPath: "../equipment/actions.ts" }, definitionSha256: "a".repeat(64), schemaSha256: "b".repeat(64), operationsSha256: "c".repeat(64) };
+    expect(DatasetResult.parse({ kind: "approved", revision })).toEqual({ kind: "approved", revision });
+  });
   it.each([false, true])("exits nonzero and preserves partial form facts (JSON: %s)", async json => {
     const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",
       retry: { mode: "resume", instruction: "Try again with the same form settings and folder." } };
