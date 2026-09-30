@@ -47,6 +47,15 @@ export function daemonCaptureLifecycleAnswer(
       return { id: request.id, result: captureFlushResult() };
     case "capture.setAuthor":
       return { id: request.id, result: { updated: true } };
+    case "capture.hold":
+      return { id: request.id, result: { holdId: `hold-${request.id}`, leaseMs: 30_000 } };
+    case "capture.renew":
+      return { id: request.id, result: { renewed: true } };
+    case "capture.release":
+      return { id: request.id, result: { released: true } };
+    // A loopback has no disk, so it has no rename that refuses to replace.
+    case "capture.moveFile":
+      return { id: request.id, result: { moved: false, reason: "no-replace-unsupported" } };
     case "watcher.status":
       return { id: request.id, result: READY_WATCHER_STATUS };
     case "collections.listPendingAdoptions":
@@ -103,6 +112,9 @@ export function mockDaemonSessions(input: {
   beforeRequest?: (request: Request) => void | Promise<void>;
   // Runs after the daemon answered a request, before the caller sees it.
   afterRequest?: (request: Request) => void | Promise<void>;
+  // Answers `capture.moveFile` with a rename on the scratch disk, as the
+  // daemon does where the filesystem has a rename that refuses to replace.
+  nativeMove?: boolean;
 }): EngineWorkspaceSessions {
   const disk = createFakeDaemonCapture(input);
   return loopbackSessions(input.loopback, {

@@ -376,6 +376,63 @@ fn rename_no_replace_atomic(incoming: &Path, target: &Path) -> std::io::Result<(
     }
 }
 
+/// Rename a visible file to an empty name in one kernel operation that
+/// refuses to replace, so bytes another program writes at either name are
+/// never lost: a writer that opens the source name after the rename makes a
+/// new file, and a file that appears at the target first stays.
+///
+/// Answers [`ErrorKind::Unsupported`] wherever no such rename exists, and the
+/// caller stages the file and places a private copy instead. Some SMB and
+/// FUSE mounts refuse the exclusive rename flag. Windows uses the safe
+/// MoveFileExW wrapper without replacement or cross-volume copying. This never
+/// claims the target through a hard link from the visible source, as
+/// [`AtomicReplacer::place`] may for a private staged name: a program writing
+/// into the source between link and unlink would write into the destination.
+pub fn move_file_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        exclusive_move_result(renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE))
+    }
+    #[cfg(windows)]
+    {
+        dohc_windows_files::move_file_no_replace(from, to)
+    }
+    #[cfg(not(any(
+        windows,
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple"
+    )))]
+    {
+        let _ = (from, to);
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "this platform has no rename that refuses to replace",
+        ))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn exclusive_move_result(result: Result<(), rustix::io::Errno>) -> std::io::Result<()> {
+    use rustix::io::Errno;
+    match result {
+        Ok(()) => Ok(()),
+        Err(err)
+            if err == Errno::INVAL
+                || err == Errno::NOSYS
+                || err == Errno::NOTSUP
+                || err == Errno::OPNOTSUPP =>
+        {
+            Err(std::io::Error::new(
+                ErrorKind::Unsupported,
+                "this filesystem has no rename that refuses to replace",
+            ))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 #[cfg(not(windows))]
 fn hard_links_unsupported(err: &std::io::Error) -> bool {
     use rustix::io::Errno;
@@ -4758,6 +4815,101 @@ mod tests {
         rename_no_replace(&incoming, &target).expect("empty target");
         assert_eq!(std::fs::read(&target).expect("target"), b"incoming");
         assert!(!incoming.exists(), "the incoming name is gone");
+    }
+
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple"
+    ))]
+    #[test]
+    fn visible_file_move_refuses_an_occupied_destination_and_renames_an_empty_one() {
+        let scratch = Scratch::new("visible-file-move");
+        let source = scratch.root.join("source.bin");
+        let target = scratch.root.join("target.bin");
+        std::fs::write(&source, vec![7_u8; 4 * 1024 * 1024]).expect("source");
+        std::fs::write(&target, b"theirs").expect("target");
+        assert_eq!(
+            move_file_no_replace(&source, &target)
+                .expect_err("occupied")
+                .kind(),
+            ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&target).expect("target bytes"), b"theirs");
+        assert!(source.exists());
+        std::fs::remove_file(&target).expect("remove target");
+        move_file_no_replace(&source, &target).expect("empty target");
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::metadata(&target).expect("target").len(),
+            4 * 1024 * 1024
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn visible_file_move_reports_unsupported_exclusive_rename() {
+        use rustix::io::Errno;
+        for err in [Errno::INVAL, Errno::NOSYS, Errno::NOTSUP, Errno::OPNOTSUPP] {
+            assert_eq!(
+                exclusive_move_result(Err(err))
+                    .expect_err("unsupported rename")
+                    .kind(),
+                ErrorKind::Unsupported
+            );
+        }
+        for err in [Errno::EXIST, Errno::ACCES, Errno::XDEV] {
+            assert_eq!(
+                exclusive_move_result(Err(err))
+                    .expect_err("rename refusal")
+                    .raw_os_error(),
+                Some(err.raw_os_error())
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn visible_file_move_rejects_null_paths_without_touching_files() {
+        let scratch = Scratch::new("visible-file-move-null");
+        let source = scratch.root.join("source.bin");
+        let target = scratch.root.join("target.bin");
+        std::fs::write(&source, b"mine").expect("source");
+        for (from, to) in [
+            (source.clone(), scratch.root.join("target.bin\0other")),
+            (scratch.root.join("source.bin\0other"), target.clone()),
+        ] {
+            assert_eq!(
+                move_file_no_replace(&from, &to)
+                    .expect_err("null path")
+                    .kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(std::fs::read(&source).expect("source"), b"mine");
+        assert!(!target.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn visible_file_move_preserves_windows_readonly_attribute() {
+        let scratch = Scratch::new("visible-file-move-attributes");
+        let source = scratch.root.join("source.bin");
+        let target = scratch.root.join("target.bin");
+        std::fs::write(&source, b"mine").expect("source");
+        let original = std::fs::metadata(&source).expect("metadata").permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&source, readonly).expect("readonly");
+        move_file_no_replace(&source, &target).expect("move readonly file");
+        assert!(
+            std::fs::metadata(&target)
+                .expect("metadata")
+                .permissions()
+                .readonly()
+        );
+        std::fs::set_permissions(&target, original).expect("cleanup attributes");
     }
 
     #[cfg(windows)]

@@ -569,6 +569,9 @@ export interface VersionedTextStore {
     fromPath: string;
     toPath: string;
     metadata: ActorNeutralWriteMetadata;
+    author?: MomentWriteAuthor;
+    // Refused once this `capture.hold` ended.
+    captureHoldId?: string;
   }): Promise<VersionedTextRenameResult>;
   deleteTextFile(input: {
     workspaceId: WorkspaceId;
@@ -583,6 +586,8 @@ export interface VersionedTextStore {
     metadata: ActorNeutralWriteMetadata;
     author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
+    // Refused once this `capture.hold` ended.
+    captureHoldId?: string;
   }): Promise<VersionedTextDeleteResult>;
   // Fails closed (invalid-input) on sync record-only moments: divergent peer
   // history never rewrites the local materialized snapshot.
@@ -591,6 +596,8 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
     mutationMomentId: VersionedTextMomentId;
+    origin: ActorNeutralWriteMetadata["origin"];
+    author?: MomentWriteAuthor;
   }): Promise<void>;
   getObject(input: {
     workspaceId: WorkspaceId;

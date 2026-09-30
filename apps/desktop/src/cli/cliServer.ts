@@ -279,6 +279,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
   writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
+  movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
+  deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies of its own.
   keptCopies?: CliKeptCopiesPort;
   automations?: CliAutomationsPort;
@@ -525,6 +527,16 @@ function rawMomentSummary(
 
 function mcpFailure(error: unknown, fallback: string) {
   const reason = error instanceof Error ? error.message : fallback;
+  return { ok: false as const, reason };
+}
+
+// A failure whose reason never names a host path. Node's own messages name
+// absolute paths, so a system error becomes `failed` and its code; dohc's own
+// refusals, which name paths as the caller spelled them, pass through.
+function pathFreeFailure(error: unknown, failed: string) {
+  const system = error instanceof Error && "syscall" in error && "code" in error;
+  const reason = system ? `${failed} (${String(error.code)}). Check the path, then try again.`
+    : error instanceof Error && !/(?:[A-Za-z]:[\\/]|\\\\|(?<![\p{L}\p{N}_./\\-])\/)/u.test(error.message) ? error.message : failed;
   return { ok: false as const, reason };
 }
 
@@ -1989,7 +2001,7 @@ function refusePathColon(path: string): void {
 }
 
 function validateRequestPathSpellings(request: CliRequest): void {
-  const fields = ["path", "recordPath", "collectionPath", "datasetPath", "descriptorPath", "migrationPath", "sourcePath", "savePath", "appRoot", "outDir", "schemaPath", "operationsPath"];
+  const fields = ["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "descriptorPath", "migrationPath", "sourcePath", "savePath", "appRoot", "outDir", "schemaPath", "operationsPath"];
   const check = (value: object) => {
     for (const [key, path] of Object.entries(value)) {
       if (fields.includes(key) && typeof path === "string") refusePathColon(path);
@@ -2042,8 +2054,8 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       return path;
     },
     result(value: unknown, changeSnapshots = false): unknown {
-      const paths = new Set(["path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath"]);
-      const lists = new Set(["paths", "sourcePaths", "created", "written"]);
+      const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath"]);
+      const lists = new Set(["paths", "sourcePaths", "created", "written", "deleted", "withoutHistory"]);
       const data = new Set(["values", "fields", "kept", "input", "result", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
       if (changeSnapshots) { data.delete("before"); data.delete("after"); }
       const collect = (entry: unknown, key = ""): void => {
@@ -2089,16 +2101,28 @@ async function dispatch(
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): Promise<unknown> {
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options);
   }
-  const paths = await callerPaths(context, request.args.cwd);
+  let paths: Awaited<ReturnType<typeof callerPaths>>;
+  try { paths = await callerPaths(context, request.args.cwd); } catch (error) {
+    if (request.verb === "fileMove" || request.verb === "fileDelete") {
+      return pathFreeFailure(error, `dohc could not ${request.verb === "fileMove" ? "move" : "delete"} the file.`);
+    }
+    throw error;
+  }
   let rebased: CliRequest;
   try {
     validateRequestPathSpellings(request);
     switch (request.verb) {
+      case "fileMove":
+        rebased = { ...request, args: { ...request.args, fromPath: paths.rebase(request.args.fromPath, "materialize"), toPath: paths.rebase(request.args.toPath, "materialize") } };
+        break;
+      case "fileDelete":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "materialize") } };
+        break;
       case "fileWrite":
         rebased = { ...request, args: { ...request.args, files: request.args.files.map(file => ({
           ...file, path: paths.rebase(file.path, "materialize"),
@@ -2624,7 +2648,28 @@ async function dispatchWorkspace(
         const result = await context.writeFiles(request.args.files, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
         if (result.written?.length) await notifyWrite(options, context);
         return result;
-      } catch (error) { return mcpFailure(error, "dohc could not write the files. Check that the files are writable."); }
+      } catch (error) { return pathFreeFailure(error, "dohc could not write the files."); }
+    }
+
+    case "fileMove":
+    case "fileDelete": {
+      const change = request.verb === "fileMove" ? "move" : "delete";
+      if (request.args.actor !== "agent") return { ok: false, reason: `A file ${change} through the CLI socket is recorded as an agent's; send actor "agent".` };
+      if (!context.movePath || !context.deletePath) return { ok: false, reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
+      try {
+        const origin = documentEditOrigin(request.args.agent, context, options);
+        if (request.verb === "fileMove") {
+          const result = await context.movePath({ fromPath: request.args.fromPath, toPath: request.args.toPath,
+            ...(request.args.overwrite !== undefined ? { overwrite: request.args.overwrite } : {}) }, origin, request.args.requestId);
+          if (result.ok || result.deleted?.length || result.withoutHistory?.length) await notifyWrite(options, context);
+          return result;
+        }
+        const result = await context.deletePath(request.args.path, origin, request.args.requestId);
+        if (result.ok || result.deleted?.length || result.withoutHistory?.length) await notifyWrite(options, context);
+        return result;
+      } catch (error) {
+        return pathFreeFailure(error, `dohc could not ${change} the file.`);
+      }
     }
 
     // A shared view's press is checked and relayed as the app's is.
@@ -3258,8 +3303,9 @@ async function workspaceContextForRequest(
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
+  const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete";
   const documentWriteRequest =
-    request.verb === "documentEdit" || request.verb === "documentCreate" || request.verb === "fileWrite";
+    request.verb === "documentEdit" || request.verb === "documentCreate" || fileRequest;
   const writeRequest =
     collectionWriteRequest ||
     documentWriteRequest ||
@@ -3271,7 +3317,7 @@ async function workspaceContextForRequest(
     (request.verb === "show" && !request.args.peek);
   if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
-      request.verb === "fileWrite"
+      fileRequest
         ? "This workspace is read-only. Write in the owning workspace."
         : collectionWriteRequest
         ? "collection writes are not available in a read-only shared view"

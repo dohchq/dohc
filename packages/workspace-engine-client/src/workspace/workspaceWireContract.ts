@@ -36,6 +36,10 @@ export const WORKSPACE_METHOD = {
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
   captureSetAuthor: "capture.setAuthor",
+  captureHold: "capture.hold",
+  captureRenew: "capture.renew",
+  captureRelease: "capture.release",
+  captureMoveFile: "capture.moveFile",
   automationsSubscribe: "automations.subscribe",
   automationsUnsubscribe: "automations.unsubscribe",
   automationsReleaseGroups: "automations.releaseGroups",
@@ -183,6 +187,8 @@ export type KeptCopySaveResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesSave];
 
 export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
+export type CaptureMoveFileResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.captureMoveFile];
 /** A kind of record change a subscription wants and a claim runs for. */
 export type AutomationChangeKind = "added" | "changed" | "removed";
 
@@ -437,6 +443,10 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
+  [WORKSPACE_METHOD.captureHold]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
+  [WORKSPACE_METHOD.captureRelease]: WorkspaceJsonObject & { holdId: string };
+  [WORKSPACE_METHOD.captureMoveFile]: WorkspaceJsonObject & { holdId: string; fromPath: string; toPath: string };
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeParams;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeParams;
   [WORKSPACE_METHOD.automationsReleaseGroups]: WorkspaceEmptyParams;
@@ -1265,6 +1275,24 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),
+  /** The hold ends `leaseMs` after it started, or after its last renewal. */
+  [WORKSPACE_METHOD.captureHold]: mutableStruct({ holdId: Schema.String, leaseMs: Schema.Int }),
+  /** False when the hold had already ended; every write that names it refuses. */
+  [WORKSPACE_METHOD.captureRenew]: mutableStruct({ renewed: Schema.Boolean }),
+  /** False when the hold had already ended, as it does when the workspace closes or its lease ran out. */
+  [WORKSPACE_METHOD.captureRelease]: mutableStruct({ released: Schema.Boolean }),
+  /**
+   * One rename that refuses to replace, under a hold. `moved: false` says
+   * why the file stayed: the destination is taken, the source is gone, or
+   * this filesystem has no such rename, and the caller moves it another way.
+   */
+  [WORKSPACE_METHOD.captureMoveFile]: Schema.Union([
+    mutableStruct({ moved: Schema.Literal(true) }),
+    mutableStruct({
+      moved: Schema.Literal(false),
+      reason: Schema.Literals(["destination-exists", "source-missing", "no-replace-unsupported"]),
+    }),
+  ]),
   /** True when the call inserted the pair or replaced its filter. */
   [WORKSPACE_METHOD.automationsSubscribe]: mutableStruct({
     subscribed: Schema.Boolean,

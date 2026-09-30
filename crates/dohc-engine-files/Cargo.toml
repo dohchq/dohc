@@ -41,7 +41,7 @@ notify = "8"
 # directory open, because inode NUMBERS are recycled and identity is only
 # meaningful while the object is pinned (see `watch::WatchedRoot`).
 # Already in the tree via `notify`; same safe API the runtime's EngineDbIdentity
-# uses, so this crate keeps forbid(unsafe_code).
+# uses.
 file-id = "0.2"
 # Stable cross-platform identity for already-open file handles. The post-hash
 # fence compares the descriptor we hashed with one opened from the current path;
@@ -73,6 +73,8 @@ rustix = { version = "1.1", features = ["fs"] }
 [target.'cfg(windows)'.dependencies]
 # Read identity from the pinned restoration handle without unsafe code.
 winapi-util = "0.1"
+# Safe exclusive Windows rename wrapper.
+dohc-windows-files = { path = "../dohc-windows-files" }
 
 [dev-dependencies]
 # The differential harness parses the workspace-kernel golden fixtures under tests/fixtures
@@ -84,6 +86,5 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] 
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 
-# Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]
 workspace = true

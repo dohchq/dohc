@@ -1,5 +1,6 @@
 use crate::EngineService;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
+use crate::rpc::capture::require_capture_hold;
 use crate::rpc::error::map_runtime;
 use crate::rpc::history::moment_json;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
@@ -193,6 +194,9 @@ struct VersionedTextRenameParams {
     request_id: Option<String>,
     #[serde(default)]
     now_ms: Option<i64>,
+    /// The `capture.hold` this rename records under; refused once it ended.
+    #[serde(default)]
+    capture_hold_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -228,6 +232,9 @@ struct VersionedTextDeleteParams {
     request_id: Option<String>,
     #[serde(default)]
     now_ms: Option<i64>,
+    /// The `capture.hold` this delete records under; refused once it ended.
+    #[serde(default)]
+    capture_hold_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -758,6 +765,7 @@ impl EngineService {
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.rename (queued)")
             .await?;
+        require_capture_hold(&open, params.capture_hold_id.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &from_path)
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &to_path)
@@ -827,6 +835,7 @@ impl EngineService {
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.delete (queued)")
             .await?;
+        require_capture_hold(&open, params.capture_hold_id.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
         let request_id = params
