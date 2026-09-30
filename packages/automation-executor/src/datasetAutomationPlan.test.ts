@@ -3,7 +3,7 @@ import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contrac
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { chatDirectoryOf } from "./automationChat";
 import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
-import { reachStepId } from "./automationReach";
+import { checkAutomationReach, reachStepId } from "./automationReach";
 import {
   datasetAutomationProblem,
   datasetEffectKey,
@@ -57,6 +57,19 @@ function automation(steps: string, when = "field-changed: Status"): Automation {
 }
 
 describe("dataset automation steps", () => {
+  it("uses all definition labels to disambiguate an invoked operation", () => {
+    const invoking = automation("      - invoke: invoices.markPaid\n        collection: Budget\n");
+    const rules = { definition: { ...definition, operations: definition.operations.map((operation) => ({ ...operation, label: "Edit" })) }, generated: false, sourceCollection: "Source" };
+    const collection = { path: "Source", name: "Source" };
+    const steps = datasetReachSteps(invoking, { path: "Budget", name: "Budget" }, rules, { workspaceId: "workspace", grants: [] }, null)!;
+    expect(steps).toHaveLength(1);
+    const verdicts = checkAutomationReach({ kind: "owner", ownerUserId: "owner", grants: [{
+      grantId: "grant", recipientUserId: "ana", recipientEmail: "ana@dohc.test",
+      files: { paths: ["Source"], access: "edit", versionId: null }, channel: null,
+    }] }, { id: invoking.id, collection, codeFiles: [], steps });
+    expect(verdicts).toMatchObject([{ allowed: false, reason: "Only you can use Edit (invoices.markPaid) in Budget, and ana@dohc.test can also edit these automations." }]);
+  });
+
   it.each([false, true])("reaches only the action in a destination dataset with generated operations %s", (generated) => {
     const invoking = automation("      - invoke: invoices.markPaid\n        collection: Budget\n");
     const rules = { definition, generated, sourceCollection: "Source" };

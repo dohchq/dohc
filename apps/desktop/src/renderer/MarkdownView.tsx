@@ -1,5 +1,6 @@
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { RecordButtonsRow } from "./collections/RecordButtonsRow";
+import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
@@ -281,12 +282,12 @@ export function MarkdownView(props: {
   // continuously means the inspector already holds the answer. The setter bails
   // out when the value is unchanged, so this costs a comparison per render.
   onPendingDraftChange?: (pending: boolean) => void;
-  // A record's Button fields report here: a failed run with Try again, a
-  // finished one as a fading notice, and its History opens an automation's
-  // run through onOpenAutomationRun. Absent, the record view shows neither.
+  // A record's Button fields report here: a failed run with Try again, and a
+  // finished one as a fading notice. The shell opens the record's History
+  // through onOpenRecordHistory. Absent, the record view shows neither.
   onButtonError?: ReportButtonError;
   onButtonNotice?: (message: string) => void;
-  onOpenAutomationRun?: (automationId: string, claimId: string, name: string) => Promise<string | null>;
+  onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
   // The engine open, opened by the inspector and passed down. It deliberately
   // does not live here: this component is unmounted by the inspector's own
   // loading/error branch, and a version switch that removes the file makes the
@@ -867,8 +868,8 @@ export function MarkdownView(props: {
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
-  const recordButtons = props.onButtonError && props.onButtonNotice && props.onOpenAutomationRun ? (
-    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenAutomationRun={props.onOpenAutomationRun} />
+  const recordButtons = props.onButtonError && props.onButtonNotice && props.onOpenRecordHistory ? (
+    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} />
   ) : null;
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not

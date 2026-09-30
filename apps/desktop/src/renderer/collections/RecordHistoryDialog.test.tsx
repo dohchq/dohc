@@ -32,7 +32,7 @@ function dialog(props: Partial<Parameters<typeof RecordHistoryDialog>[0]> = {}) 
   return (
     <RecordHistoryDialog
       workspaceId="ws-1" collectionPath="Tasks" recordId="rec_a" recordName="Plan the trip"
-      onClose={() => undefined} onOpenRun={() => undefined} onError={() => undefined}
+      onClose={() => undefined} onOpenRun={() => undefined} onFailed={() => undefined} onRead={() => undefined}
       {...props}
     />
   );
@@ -128,14 +128,32 @@ describe("RecordHistoryDialog", () => {
     expect(screen.queryByText(/Stale:/)).toBeNull();
   });
 
-  it("reports a failed read with Try again", async () => {
+  it("reports a failed read with the page it asked for, and each read that lands", async () => {
     const bridge = stub(async () => { throw new Error("The workspace engine is not running."); });
-    const onError = vi.fn();
-    render(dialog({ onError }));
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not read this record's history.", expect.any(Error), expect.any(Function)));
+    const onFailed = vi.fn();
+    const onRead = vi.fn();
+    render(dialog({ onFailed, onRead }));
+    await waitFor(() => expect(onFailed).toHaveBeenCalledWith(null, expect.any(Error)));
+    expect(onRead).not.toHaveBeenCalled();
     bridge.getCollectionRecordHistory.mockResolvedValue({ entries: [], nextBeforeHistoryId: null });
-    (onError.mock.calls[0]![2] as () => void)();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await screen.findByText("No field of this record has changed yet.");
+    expect(onRead.mock.calls).toEqual([[null]]);
+  });
+
+  it("reads on to the older page it was asked for", async () => {
+    const bridge = stub(async (payload) => {
+      if (payload.beforeHistoryId === undefined) return { entries: [entry(12, null)], nextBeforeHistoryId: 12 };
+      if (payload.beforeHistoryId === 12) return { entries: [entry(10, null)], nextBeforeHistoryId: 10 };
+      return { entries: [entry(4, null, "Owner")], nextBeforeHistoryId: 4 };
+    });
+    // A change arrived since the page before 10 failed, so the pages moved.
+    render(dialog({ until: 10 }));
+    await screen.findByText(/Owner:/);
+    expect(bridge.getCollectionRecordHistory.mock.calls.map(([payload]) => payload.beforeHistoryId)).toEqual([undefined, 12, 10]);
+    expect(screen.getAllByTestId("record-history-entry")).toHaveLength(3);
+    // Older pages stay for the person to ask for.
+    expect(screen.getByRole("button", { name: "Older changes" })).toBeTruthy();
   });
 
   it("says in the dialog that the read failed, and its own Try again leaves focus in the dialog", async () => {
@@ -175,17 +193,18 @@ describe("RecordHistoryDialog", () => {
   });
 
   it("says in the dialog when older changes could not be read, and reads that page again from its Try again", async () => {
-    const onError = vi.fn();
+    const onFailed = vi.fn();
     const bridge = stub(async (payload) => {
       if (payload.beforeHistoryId === undefined) return { entries: [entry(9, null)], nextBeforeHistoryId: 9 };
       throw new Error("The workspace engine is not running.");
     });
-    render(dialog({ onError }));
+    render(dialog({ onFailed }));
     const older = await screen.findByRole("button", { name: "Older changes" });
     older.focus();
     fireEvent.click(older);
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("dohc could not read this record's history."));
-    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onFailed).toHaveBeenCalledTimes(1);
+    expect(onFailed).toHaveBeenCalledWith(9, expect.any(Error));
     // Try again takes the place of Older changes, and focus with it.
     expect(screen.queryByRole("button", { name: "Older changes" })).toBeNull();
     const retry = screen.getByRole("button", { name: "Try again" });
@@ -213,24 +232,6 @@ describe("RecordHistoryDialog", () => {
     older.resolve({ entries: [entry(4, null, "Owner")], nextBeforeHistoryId: null });
     await screen.findByText(/Owner:/);
     expect(document.activeElement).toBe(screen.getByTestId("record-history"));
-  });
-
-  it("starts nothing from a Try again kept from the record it showed before", async () => {
-    const bridge = stub(async (payload) => {
-      if (payload.recordId === "rec_a") throw new Error("The workspace engine is not running.");
-      return { entries: [entry(2, null, "Owner")], nextBeforeHistoryId: null };
-    });
-    const onError = vi.fn();
-    const { rerender } = render(dialog({ onError }));
-    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
-    rerender(dialog({ onError, recordId: "rec_b", recordName: "Book flights" }));
-    // The failure was the other record's.
-    expect(screen.queryByText("dohc could not read this record's history.")).toBeNull();
-    await screen.findByText(/Owner:/);
-    const reads = bridge.getCollectionRecordHistory.mock.calls.length;
-    (onError.mock.calls[0]![2] as () => void)();
-    expect(bridge.getCollectionRecordHistory).toHaveBeenCalledTimes(reads);
-    expect(screen.getAllByTestId("record-history-entry")).toHaveLength(1);
   });
 
   it("groups only consecutive changes from one run", () => {

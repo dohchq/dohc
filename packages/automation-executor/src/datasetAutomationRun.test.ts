@@ -728,7 +728,7 @@ automations:
   }
 
   it("stops a run that uses an operation another editor holds no grant for", async () => {
-    expect((await run([ana], [LIST])).outcome).toEqual({ kind: "failed", error: "ana@dohc.test has no grant to use invoices.edit in Budget.", timedOut: false });
+    expect((await run([ana], [LIST])).outcome).toEqual({ kind: "failed", error: "ana@dohc.test has no grant to use Edit in Budget.", timedOut: false });
   });
 
   it("shows formulas only the fields every other editor can read through a granted read", async () => {
@@ -1105,7 +1105,7 @@ describe("a dataset action a run invokes", () => {
     }, {
       held: fromLedger(numbered), automation: markPaid, collection: { path: "Budget", name: "Budget" }, roster: alone,
       signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "failed", error: "Only you can use invoices.markPaid in Budget, and ana@dohc.test can also edit these automations.", timedOut: false });
+    })).toEqual({ kind: "failed", error: "Only you can use Mark paid in Budget, and ana@dohc.test can also edit these automations.", timedOut: false });
     expect(host.sent).toEqual([]);
   });
 
