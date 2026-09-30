@@ -318,17 +318,27 @@ describe("the automation run store", () => {
   it("tells a missing reach file from one it cannot read", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
-    await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: false });
+    const none = { verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenPaths: [], unprovenFolders: [], pending: null, taken: null };
+    await expect(store.readReachVerdicts()).resolves.toEqual({ ...none, unreadable: false });
     await writeFile(await store.reachVerdictsPath(), "{ torn");
-    await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: true });
+    await expect(store.readReachVerdicts()).resolves.toEqual({ ...none, unreadable: true });
+  });
+
+  it("keeps the verdicts with the host record they were taken at and the definitions still unproven", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const verdict = { automationId: AUTOMATION, definitionHash: "h1", step: "0", verdict: "held" as const, stoppedFor: null, seq: 3 };
+    const reach = { verdicts: [verdict], hostRecord: 7, unproven: [JSON.stringify([AUTOMATION, "h1"])], unprovenAll: true, unprovenPaths: ["Unknown"], unprovenFolders: ["Tasks"], pending: 9, taken: 8 };
+    await store.saveReachVerdicts(reach);
+    await expect(store.readReachVerdicts()).resolves.toEqual({ ...reach, unreadable: false });
   });
 
   it("fails closed on old unqualified reach keys", async () => {
     const store = createAutomationRunStore(await createTestScratch("dohc-reach-old-"), testMetadataDir);
-    await writeFile(await store.reachVerdictsPath(), JSON.stringify({ version: 1, verdicts: [{
+    await writeFile(await store.reachVerdictsPath(), JSON.stringify({ version: 2, verdicts: [{
       automationId: AUTOMATION, definitionHash: "h", step: "operation:records.edit", verdict: "stopped", stoppedFor: "Ana", seq: 1,
     }] }));
-    expect(await store.readReachVerdicts()).toEqual({ unreadable: true, verdicts: [] });
+    expect(await store.readReachVerdicts()).toEqual({ unreadable: true, verdicts: [], hostRecord: 0, pending: null, taken: null, unproven: [], unprovenAll: false, unprovenPaths: [], unprovenFolders: [] });
   });
 
   it("reads a run in another format, a run without its progress, or a renamed run as unreadable", async () => {

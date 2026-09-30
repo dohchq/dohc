@@ -203,10 +203,16 @@ export function registerCollectionAutomationsIpc<
   registerHandler(CHANNELS.listAutomationHolds, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListAutomationHoldsPayload.parse(payload);
-    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationHoldsResult> =>
-      dependencies.sharedViewOf(input.workspaceId)
-        ? { holds: [], stops: [], unreadable: false }
-        : operation.state.collectionAutomations.holdState());
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationHoldsResult> => {
+        if (dependencies.sharedViewOf(input.workspaceId)) return { holds: [], stops: [], unreadable: false, unprovenPaths: [] };
+        const executor = operation.state.collectionAutomations;
+        if (input.retryPath !== undefined) {
+          assertCollectionPath(input.retryPath);
+          executor.handlePulledPaths([`${input.retryPath}/${AUTOMATIONS_FILE_NAME}`]);
+          await executor.automationsIn(input.retryPath);
+        }
+        return executor.holdState();
+      });
   });
 
   // After the saved verdicts could not be read: hold every step the roster

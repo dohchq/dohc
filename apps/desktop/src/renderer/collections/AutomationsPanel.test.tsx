@@ -379,7 +379,7 @@ describe("the ⚡ panel", () => {
   it("says an automation waits to check who can edit, and lets a person allow a held step", async () => {
     const held = summary(nudge, {
       automationId: "collection:Tasks#nudge",
-      reach: { kind: "checked", steps: [{ verdict: "held", step: "operation:invoices.edit", stoppedFor: "bob@dohc.test", seq: 7, target: "Budget", action: "change" }] },
+      reach: { kind: "checked", steps: [{ verdict: "held", step: "operation:invoices.edit", stoppedFor: "bob@dohc.test", fileUnread: false, seq: 7, target: "Budget", action: "change" }] },
     });
     const { bridge } = makeBridge(read([
       summary(stamp, { reach: { kind: "waiting", reason: "dohc could not check who can edit Tasks. Try again later." } }),
@@ -393,6 +393,19 @@ describe("the ⚡ panel", () => {
     expect(bridge.confirmCollectionAutomationStep).toHaveBeenCalledWith({
       workspaceId: "ws-1", automationId: "collection:Tasks#nudge", definitionHash: "0123456789abcdef", step: "operation:invoices.edit", seq: 7,
     });
+  });
+
+  it("says a step waits because the automations file does not read in one version", async () => {
+    makeBridge(read([summary(nudge, {
+      automationId: "collection:Tasks#nudge",
+      reach: { kind: "checked", steps: [{ verdict: "held", step: "0", stoppedFor: null, fileUnread: true, seq: 3, target: "Budget", action: "change" }] },
+    })]));
+    render(<Panel />);
+    const row = await screen.findByTestId("automation-nudge");
+    expect(row.textContent).toContain(
+      "A step can change Budget. dohc cannot read the automations file in one version of the workspace. New steps here wait for you.",
+    );
+    expect(within(row).getByRole("button", { name: "Allow" })).toBeTruthy();
   });
 });
 

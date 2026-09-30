@@ -27,6 +27,8 @@ const host = (installId: string, generation: number, handoverFrom: string | null
 
 // The Group handover this computer's engine answers when it releases.
 const GROUPS = { floorMs: 1, automations: [] };
+// This computer's reach verdicts, released with it.
+const REACH = { version: 1, verdicts: [] };
 
 const answer = (row: RelayAutomationHost | null): HostAnswer => ({ status: 200, body: { ok: true, host: row, computers: [] } });
 
@@ -76,7 +78,7 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
     finishHere: async (_workspaceId, stillHandingOver) => {
       finishes += 1;
       whileFinishing?.(stillHandingOver);
-      return finish === null ? null : { throughMs: finish, groups: GROUPS, groupsWatched: 2 };
+      return finish === null ? null : { throughMs: finish, groups: GROUPS, groupsWatched: 2, reach: REACH };
     },
     logError: (_workspaceId, error) => { errors.push(error); },
     monotonicMs: () => clock,
@@ -169,7 +171,7 @@ describe("automation hosts", () => {
     await w.settle();
     expect(w.requests[1], "the release carries the Group handover").toEqual({
       action: "release",
-      body: { installId: ME, generation: 3, releasedThroughMs: 5_000, groups: GROUPS, groupsWatched: 2 },
+      body: { installId: ME, generation: 3, releasedThroughMs: 5_000, groups: GROUPS, groupsWatched: 2, reach: REACH },
     });
     expect(w.relay()).toEqual(host(OTHER, 4, null, 5_000));
     expect(await w.hosts.runsHere("ws")).toBe(false);

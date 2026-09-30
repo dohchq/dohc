@@ -223,6 +223,7 @@ import {
 } from "@dohc/automation-executor/collection-automations";
 import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { AutomationScheduler } from "@dohc/automation-executor/automation-scheduler";
+import { parseReachHandover, type ReachRelayRecord } from "@dohc/automation-executor/reach-verdicts";
 import {
   computerLabel,
   computersOfAnswer,
@@ -3566,7 +3567,10 @@ const automationHosts = createAutomationHosts({
     const released = automations ? await automations.releaseGroupSubscriptions(stillHandingOver) : null;
     if (released === null) return null;
     const throughMs = await automationScheduler.finishHere(workspaceId);
-    return throughMs === null ? null : { throughMs, groups: released.handover, groupsWatched: released.watchedGeneration };
+    if (throughMs === null) return null;
+    // Carried so a step stopped here stays stopped on the next host.
+    const reach = automations ? await automations.reachHandover() : null;
+    return { throughMs, groups: released.handover, groupsWatched: released.watchedGeneration, reach };
   },
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
 });
@@ -3658,8 +3662,35 @@ function stillRunsSchedulesHere(workspaceId: string): boolean {
 // the engine takes it: 0 for none, with the handover when a release left it
 // for this computer. The engine checks a handover again before it takes it.
 async function automationGroupRelayRecord(workspaceId: string, generation: number): Promise<AutomationGroupRelayRecord> {
+  const kept = await automationHandoverRecord(workspaceId, generation);
+  if (kept === null) return { generation: 0, handover: null };
+  return {
+    generation: typeof kept.generation === "number" ? kept.generation : 0,
+    handover: kept.groups === null ? null : decodeAutomationGroupHandover(kept.groups),
+  };
+}
+
+// The same record, as the executor takes the last host's reach verdicts:
+// verdicts it cannot read count as none, so it holds what it cannot prove.
+async function automationReachRelayRecord(workspaceId: string, generation: number): Promise<ReachRelayRecord> {
+  const kept = await automationHandoverRecord(workspaceId, generation);
+  if (kept === null) return { generation: 0, reach: null, everShared: false };
+  if (typeof kept.everShared !== "boolean") throw new Error("The relay's Group handover read did not say whether the workspace was shared.");
+  return {
+    generation: typeof kept.generation === "number" ? kept.generation : 0,
+    reach: kept.reach === null ? null : parseReachHandover(kept.reach),
+    everShared: kept.everShared,
+  };
+}
+
+// The relay's last release or take over at this host generation, or null
+// for a workspace that does not sync. Throws when the relay does not answer.
+async function automationHandoverRecord(
+  workspaceId: string,
+  generation: number,
+): Promise<{ generation: unknown; groups: NonNullable<unknown> | null; reach: NonNullable<unknown> | null; everShared: unknown } | null> {
   const entry = findWorkspace(workspaceId);
-  if (!entry?.remote) return { generation: 0, handover: null };
+  if (!entry?.remote) return null;
   const { credentials } = await remoteForWorkspace(entry);
   const response = await relayShareResponseWithCredentials(
     credentials,
@@ -3668,15 +3699,15 @@ async function automationGroupRelayRecord(workspaceId: string, generation: numbe
   );
   const body: unknown = await response.json().catch(() => undefined);
   const kept = response.status === 200 && body && typeof body === "object" && (body as { ok?: unknown }).ok === true
-    ? body as { generation?: unknown; groups?: unknown }
+    ? body as { generation?: unknown; groups?: unknown; reach?: unknown; everShared?: unknown }
     : undefined;
-  if (kept === undefined || !(kept.generation === null || Number.isSafeInteger(kept.generation)) || kept.groups === undefined) {
+  if (
+    kept === undefined || !(kept.generation === null || Number.isSafeInteger(kept.generation)) ||
+    kept.groups === undefined || kept.reach === undefined
+  ) {
     throw new Error(`The relay answered the Group handover read with ${response.status}.`);
   }
-  return {
-    generation: typeof kept.generation === "number" ? kept.generation : 0,
-    handover: kept.groups === null ? null : decodeAutomationGroupHandover(kept.groups),
-  };
+  return { generation: kept.generation, groups: kept.groups, reach: kept.reach, everShared: kept.everShared };
 }
 
 // Whether any computer can run this workspace's schedules and Group
@@ -3861,6 +3892,7 @@ function createCollectionAutomationsFor(
     // hostChanged when the answer may differ.
     groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
     groupRelayRecord: (generation) => automationGroupRelayRecord(workspaceId, generation),
+    reachRelayRecord: (generation) => automationReachRelayRecord(workspaceId, generation),
     requestHost: () => automationHosts.admit(workspaceId),
     groupMessagesSkipped: (reason, atMs) => noticeStore().postNotice(groupMessagesNotice({ workspaceId, reason, atMs })),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>

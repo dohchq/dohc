@@ -48,7 +48,7 @@ export type HostRequest =
     // `groups` is the engine's Group handover, carried to the next host
     // unread; `groupsWatched` is the host generation at which it last
     // watched its Group subscriptions.
-    body: { installId: string; generation: number; releasedThroughMs: number; groups: unknown; groupsWatched: number };
+    body: { installId: string; generation: number; releasedThroughMs: number; groups: unknown; groupsWatched: number; reach: unknown };
   };
 
 /**
@@ -60,6 +60,8 @@ export interface FinishedHere {
   throughMs: number;
   groups: unknown;
   groupsWatched: number;
+  /** This computer's reach verdicts, or null when it could not read them. */
+  reach: unknown;
 }
 
 export interface AutomationHostsDependencies {
@@ -348,6 +350,7 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
           releasedThroughMs: finished.throughMs,
           groups: finished.groups,
           groupsWatched: finished.groupsWatched,
+          reach: finished.reach,
         },
       });
       if (states.get(workspaceId) !== state) return;

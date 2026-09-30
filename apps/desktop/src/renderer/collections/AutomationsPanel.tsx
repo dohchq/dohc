@@ -228,8 +228,11 @@ function ReachStatus(props: {
         step.verdict === "held" ? (
           <StatusLine key={index} tone="warning" icon={AlertTriangle} label="Waiting for you">
             <p className="m-0">
-              A step can now {automationReachCopy(step)}.{" "}
-              {step.stoppedFor ? `It stopped before because ${step.stoppedFor} could not.` : "It could not before."}
+              {step.stoppedFor
+                ? `A step can now ${automationReachCopy(step)}. It stopped before because ${step.stoppedFor} could not.`
+                : step.fileUnread
+                  ? `A step can ${automationReachCopy(step)}. dohc cannot read the automations file in one version of the workspace. New steps here wait for you.`
+                  : `A step can now ${automationReachCopy(step)}. It could not before.`}
             </p>
             <SecondaryButton size="compact" className="mt-1" onClick={() => props.onAllow(step.step, step.seq)}>
               Allow

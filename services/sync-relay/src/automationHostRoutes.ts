@@ -2,6 +2,7 @@ import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/se
 import {
   AUTOMATION_COMPUTER_LABEL_MAX_CHARS,
   AUTOMATION_HOST_MAX_BODY_BYTES,
+  AUTOMATION_HOST_REACH_MAX_BYTES,
   AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES,
   AUTOMATION_INSTALL_ID_MAX_CHARS,
   AUTOMATION_SERVER_INSTALL_ID,
@@ -129,6 +130,7 @@ export function createAutomationHostRoutes(
             generation: generation(body.generation),
             releasedThroughMs: nonNegativeInteger(body.releasedThroughMs, "releasedThroughMs"),
             groups: groupHandover(body.groups),
+            reach: reachHandover(body.reach),
             groupsWatched: generation(body.groupsWatched),
           });
         case "take-over":
@@ -160,6 +162,18 @@ function groupHandover(value: unknown): string {
     throw badRequest("groups must be a JSON object");
   }
   return JSON.stringify(value);
+}
+
+// The reach verdicts a release carries, kept as JSON text the relay does not
+// read, or null when the computer releasing could not read its own.
+function reachHandover(value: unknown): string | null {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw badRequest("reach must be a JSON object or null");
+  }
+  const text = JSON.stringify(value);
+  if (Buffer.byteLength(text) > AUTOMATION_HOST_REACH_MAX_BYTES) throw relayError("payload_too_large");
+  return text;
 }
 
 function installId(value: unknown): string {

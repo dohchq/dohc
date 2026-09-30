@@ -351,6 +351,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     onPressWaiting: (event) => { waiting.push(event); wake(); },
     groupHost: async () => (options.groups ? 0 : null),
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
+    reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
     groupMessagesSkipped: async () => undefined,
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("These test messages carry their whole body."); },

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
@@ -10,6 +10,7 @@ import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-co
 import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
+import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { collectionRecordWrites, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -182,6 +183,21 @@ async function world(options: {
   };
 
   const engine: CollectionAutomationEngine = {
+    workspaceId: "ws",
+    listVersions: async () => [{ id: "main" }],
+    // A path the version does not hold reads as null, as the engine answers.
+    readTextFile: async ({ path }) => {
+      try {
+        return { text: await readFile(join(root, path), "utf8"), contentKind: "text", objectId: collections.get(dirname(path).replaceAll("\\", "/")) ?? path };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    },
+    // Every file under the workspace folder, as the engine lists text files.
+    listTextFileMetadata: async () => (await readdir(root, { recursive: true, withFileTypes: true }))
+      .filter((entry) => entry.isFile())
+      .map((entry) => ({ path: relative(root, join(entry.parentPath, entry.name)).split("\\").join("/"), objectId: collections.get(relative(root, entry.parentPath).split("\\").join("/")) ?? entry.name })),
     listCollections: async () => ({ collections: [...collections.keys()].map(summaryOf) }),
     getCollectionRecord: async ({ collectionPath, recordId }) => {
       const record = records.get(recordId);
@@ -583,6 +599,7 @@ async function world(options: {
     },
     groupHost: async () => (options.runsGroupTriggers ?? true ? 0 : null),
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
+    reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
     requestHost: async () => { hostRequests += 1; },
     groupMessagesSkipped: async (reason, atMs) => { skipNotices.push({ reason, atMs }); },
     readMessageBody: async (messageId) => options.messageBodies?.[messageId] ?? null,
@@ -2669,7 +2686,7 @@ describe("Collection automations", () => {
     const w = await world({ automations: { Tasks: unsupported } });
     await w.executor.open();
     await w.executor.automationsIn("Tasks");
-    await expect(w.baseStore.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: false });
+    await expect(w.baseStore.readReachVerdicts()).resolves.toEqual({ verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenPaths: [], unprovenFolders: [], pending: null, taken: null, unreadable: false });
   });
   it("passes a waiting claim by in later drains until what it waits for clears", async () => {
     const w = await world({ automations: {
@@ -2911,7 +2928,7 @@ describe("Collection automations", () => {
     const claim = w.claim("collection:Tasks#seen", task);
     await w.executor.open();
     await w.until(() => w.events.includes(`released ${claim.claimId}`));
-    expect(w.executor.holdState()).toEqual({ holds: [], stops: [], unreadable: true });
+    expect(w.executor.holdState()).toEqual({ holds: [], stops: [], unreadable: true, unprovenPaths: [] });
     expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { kind: "waiting", reason: UNREADABLE_REACH } }] });
     // Nothing overwrote the file dohc could not read.
     expect(await readFile(join(w.root, ".dohc", "automations", "reach.json"), "utf8")).toBe("{ torn");
@@ -4240,8 +4257,12 @@ describe("Collection automations that a Group message starts", () => {
     onRelease?: () => void;
     down?: boolean;
     checkIns?: number;
-    // The last release's Group handover, for the computer it named.
-    kept: { generation: number; forInstall: string; groups: AutomationGroupHandover } | null;
+    // The last release's Group handover and reach verdicts, for the computer it named.
+    kept: { generation: number; forInstall: string; groups: AutomationGroupHandover; reach: unknown } | null;
+    everShared?: boolean;
+    // Only the reach verdicts read fails, or answers what this returns.
+    reachDown?: boolean;
+    onReachRead?: () => Promise<never>;
   };
   // One of the owner's computers: its host module and executor, wired as main.ts wires them.
   const ownersComputer = (installId: string, w: World, relay: Relay, workspace: Workspace) => {
@@ -4267,6 +4288,7 @@ describe("Collection automations that a Group message starts", () => {
             generation: relay.row.generation,
             forInstall: relay.row.installId,
             groups: request.body.groups as AutomationGroupHandover,
+            reach: request.body.reach,
           };
         }
         return { status: 200, body: { ok: true, host: relay.row } };
@@ -4277,7 +4299,8 @@ describe("Collection automations that a Group message starts", () => {
       hostChanged: () => executor.hostChanged(),
       finishHere: async (_workspaceId, stillHandingOver) => {
         const released = await executor.releaseGroupSubscriptions(stillHandingOver);
-        return released === null ? null : { throughMs: 5_000, groups: released.handover, groupsWatched: released.watchedGeneration };
+        if (released === null) return null;
+        return { throughMs: 5_000, groups: released.handover, groupsWatched: released.watchedGeneration, reach: await executor.reachHandover() };
       },
       logError: (_workspaceId, error) => { hostErrors.push(error); },
       monotonicMs: () => clock.ms,
@@ -4298,6 +4321,19 @@ describe("Collection automations that a Group message starts", () => {
         return {
           generation: relay.kept.generation,
           handover: relay.kept.forInstall === relay.row.installId ? relay.kept.groups : null,
+        };
+      },
+      reachRelayRecord: async (generation) => {
+        if (relay.down) throw new TypeError("fetch failed");
+        if (relay.row?.generation !== generation) throw new Error("The relay answered the Group handover read with 409.");
+        const everShared = relay.everShared ?? false;
+        if (relay.reachDown) throw new TypeError("fetch failed");
+        if (relay.onReachRead) return relay.onReachRead();
+        if (relay.kept === null) return { generation: 0, reach: null, everShared };
+        return {
+          generation: relay.kept.generation,
+          reach: relay.kept.forInstall === relay.row.installId ? parseReachHandover(relay.kept.reach) : null,
+          everShared,
         };
       },
       requestHost: () => hosts.admit("ws"),
@@ -4432,6 +4468,619 @@ describe("Collection automations that a Group message starts", () => {
     here.hosts.relayAnswered("ws");
     await w.until(() => subscribed(w));
     expect(relay.row).toMatchObject({ installId: "laptop" });
+  });
+
+  describe("reach verdicts across the owner's computers", () => {
+    it("makes no schedule claim as a new host until it saved that it has not taken the last host's verdicts", async () => {
+      const hourly = ["  - id: hourly", "    name: Hourly", "    when: {schedule: hour, timezone: UTC}", "    do: [{add-record: {Title: Tick}}]"];
+      const w = await world({ automations: { Tasks: hourly.join("\n") } });
+      let full = true;
+      const executor = w.makeExecutor({
+        groupHost: async () => 5,
+        reachRelayRecord: async () => { throw new TypeError("fetch failed"); },
+        store: {
+          ...w.baseStore,
+          saveReachVerdicts: async (reach) => {
+            if (full) throw new Error("The disk is full.");
+            await w.baseStore.saveReachVerdicts(reach);
+          },
+        },
+      });
+      await executor.open();
+      const [schedule] = executor.schedules() ?? [];
+      const due = (Math.floor(Date.now() / 3_600_000) + 1) * 3_600_000;
+      const step = { automationId: schedule!.automationId, scheduleHash: schedule!.scheduleHash, run: [due], throughMs: due };
+      await expect(executor.claimSchedule(step)).rejects.toThrow("The disk is full.");
+      expect([...w.claims.values()].filter((claim) => claim.change.kind === "schedule")).toEqual([]);
+
+      full = false;
+      // The engine starts the schedule's mark, then claims the due time.
+      await executor.claimSchedule({ ...step, run: [], throughMs: due - 1 });
+      await executor.claimSchedule(step);
+      expect((await w.baseStore.readReachVerdicts()).pending).toBe(5);
+      expect([...w.claims.values()].filter((claim) => claim.change.kind === "schedule")).toHaveLength(1);
+    });
+
+    const spend = [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+    ].join("\n");
+    // Bob can edit Tasks but not Budget, so the step he wrote stops.
+    const withBob: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] };
+    type Step = { verdict: string; stoppedFor: string | null; seq: number };
+    const stepOf = async (executor: CollectionAutomations, id: string) => {
+      const { automations } = await executor.automationsIn("Tasks") as {
+        automations: Array<{ automationId: string; definitionHash: string; reach: { steps: Step[] } }>;
+      };
+      const summary = automations.find((automation) => automation.automationId === `collection:Tasks#${id}`)!;
+      return { ...summary.reach.steps[0]!, definitionHash: summary.definitionHash };
+    };
+    const spendStep = (executor: CollectionAutomations) => stepOf(executor, "spend");
+
+    // The laptop hosts and saw Bob's share; the desk opened after it ended.
+    async function laptopAndDesk(everShared: boolean) {
+      const workspace = { rootPath: "", remote: {} };
+      const relay: Relay = { row: null, kept: null, everShared };
+      const options = { collections: ["Tasks", "Budget"], channels: [TRIP], automations: { Tasks: `${task}\n${spend}` } };
+      const laptop = await world(options);
+      const desk = await world(options);
+      laptop.setRoster(withBob);
+      desk.setRoster(OWNER);
+      const onLaptop = ownersComputer("laptop", laptop, relay, workspace);
+      await onLaptop.executor.open();
+      await laptop.until(() => subscribed(laptop));
+      const onDesk = ownersComputer("desk", desk, relay, workspace);
+      await onDesk.executor.open();
+      expect(await spendStep(onLaptop.executor)).toMatchObject({ verdict: "stopped", reason: "bob@dohc.test cannot edit Budget." });
+      expect(await spendStep(onDesk.executor)).toMatchObject({ verdict: "allowed" });
+      return { relay, desk, onLaptop, onDesk };
+    }
+
+    it("ignores root automations.yaml when ending a takeover listing", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      await writeFile(join(desk.root, "automations.yaml"), "- alias: Home Assistant");
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      expect(await desk.baseStore.readReachVerdicts()).toMatchObject({ unprovenAll: false, unprovenPaths: [] });
+      expect(desk.errors).toEqual([]);
+    });
+
+    it.each([false, true])("holds only an unidentified path, including a malformed dataset (%s), until every version reads", async (malformed) => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      await mkdir(join(desk.root, "Unknown"));
+      await desk.writeAutomations("Unknown", spend);
+      if (malformed) await writeFile(join(desk.root, "Unknown", "dataset.json"), "{ broken");
+      const list = desk.engine.listTextFileMetadata;
+      let listings = 0;
+      desk.engine.listTextFileMetadata = async (input) => { listings += 1; return list(input); };
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      expect(await desk.baseStore.readReachVerdicts()).toMatchObject({ unprovenAll: false, unprovenFolders: [], unprovenPaths: ["Unknown"] });
+      // No Collection is indexed there, so the path holds nothing and no notice names it.
+      expect(onDesk.executor.holdState().unprovenPaths).toEqual([]);
+      expect(await onDesk.executor.reachHandover()).toMatchObject({ unprovenPaths: ["Unknown"] });
+      const listed = listings;
+      onDesk.executor.relayAnswered();
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      expect(listings).toBe(listed);
+      await desk.writeAutomations("Budget", "  - id: fresh\n    name: Fresh\n    when: {field-changed: Amount}\n    do: [{set: {Total: 1}}]");
+      onDesk.executor.handlePulledPaths(["Budget/automations.yaml"]);
+      const budget = await onDesk.executor.automationsIn("Budget");
+      expect(budget).toMatchObject({ automations: [{ reach: { steps: [{ verdict: "allowed" }] } }] });
+      // The current version gains an identity; the older version still cannot identify it.
+      const read = desk.engine.readTextFile;
+      desk.engine.listVersions = async () => [{ id: "main" }, { id: "old" }];
+      desk.engine.readTextFile = async (input) => input.versionId === "old" && input.path === "Unknown/collection.yaml" ? null : read(input);
+      desk.engine.listTextFileMetadata = async (input) => (await list(input)).filter((file) => input.versionId !== "old" || file.path !== "Unknown/collection.yaml");
+      await desk.addCollection("Unknown", "unknown-id");
+      onDesk.executor.handlePulledPaths(["Unknown/collection.yaml"]);
+      await onDesk.executor.automationsIn("Unknown");
+      expect(await desk.baseStore.readReachVerdicts()).toMatchObject({ unprovenAll: false, unprovenFolders: ["unknown-id"], unprovenPaths: ["Unknown"] });
+      expect(onDesk.executor.holdState().unprovenPaths).toEqual(["Unknown"]);
+      // A different Collection used this path in the old version. Both identities now read.
+      desk.engine.readTextFile = async (input) => {
+        const result = await read(input);
+        return input.versionId === "old" && input.path === "Unknown/collection.yaml" && result !== null
+          ? { ...result, objectId: "old-unknown-id" } : result;
+      };
+      onDesk.executor.handleWatcherEvents([{ operation: "update", path: "Unknown/collection.yaml" }]);
+      await onDesk.executor.automationsIn("Unknown");
+      expect(await desk.baseStore.readReachVerdicts()).toMatchObject({ unprovenFolders: [], unprovenPaths: [] });
+      expect(desk.errors).toEqual([]);
+    });
+
+    it("drops an unidentified path once a later take over lists its Collection in every version", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      await mkdir(join(desk.root, "Unknown"));
+      await desk.writeAutomations("Unknown", spend);
+      const takeOver = async (generation: number) => {
+        relay.row = { installId: "desk", generation, handoverFrom: null, releasedThroughMs: null };
+        relay.kept = { generation, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+        onDesk.hosts.learned("ws", relay.row);
+        await desk.until(() => subscribed(desk));
+        await onDesk.executor.automationsIn("Tasks");
+        onDesk.executor.relayAnswered();
+        await onDesk.executor.automationsIn("Tasks");
+      };
+      await takeOver(2);
+      expect(await desk.baseStore.readReachVerdicts()).toMatchObject({ unprovenAll: false, unprovenPaths: ["Unknown"] });
+      // The file gains its Collection without the executor reading the folder again.
+      await desk.addCollection("Unknown", "unknown-id");
+      await takeOver(3);
+      expect(await desk.baseStore.readReachVerdicts()).toMatchObject({ unprovenAll: false, unprovenPaths: [] });
+      expect(desk.errors).toEqual([]);
+    });
+
+    it("holds the unproven definitions when a previous host releases a v1 handover", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "desk", groups: { floorMs: 1, automations: [] }, reach: {
+        version: 1, verdicts: [], unproven: [], unprovenAll: false, unprovenFolders: [],
+      } };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      expect(await spendStep(onDesk.executor)).toMatchObject({ verdict: "held" });
+      expect(await desk.baseStore.readReachVerdicts()).toMatchObject({ unprovenAll: true });
+    });
+
+    it("keeps a step the laptop stopped waiting on the desk after the laptop hands over", async () => {
+      const { relay, desk, onLaptop, onDesk } = await laptopAndDesk(true);
+      let released: () => void = () => undefined;
+      const release = new Promise<void>((resolve) => { released = resolve; });
+      relay.onRelease = () => released();
+      relay.row = { installId: "desk", generation: 2, handoverFrom: "laptop", releasedThroughMs: null };
+      onLaptop.hosts.learned("ws", relay.row);
+      await release;
+      expect(relay.kept?.reach).toMatchObject({ version: 2, verdicts: expect.arrayContaining([
+        expect.objectContaining({ automationId: "collection:Tasks#spend", verdict: "stopped" }),
+      ]) });
+
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      // Bob is gone, so the step is allowed now, but his leaving does not switch it on.
+      const held = await spendStep(onDesk.executor);
+      expect(held).toMatchObject({ verdict: "held", stoppedFor: "bob@dohc.test" });
+      await expect(onDesk.executor.confirmReach({
+        automationId: "collection:Tasks#spend", definitionHash: held.definitionHash, step: "0", seq: held.seq,
+      })).resolves.toBe("confirmed");
+      expect(await spendStep(onDesk.executor)).toMatchObject({ verdict: "allowed" });
+    });
+
+    for (const everShared of [true, false]) {
+      it(everShared
+        ? "holds what the desk would allow when it takes over without the laptop's verdicts"
+        : "holds nothing after a take over in a workspace never shared", async () => {
+        const { relay, desk, onDesk } = await laptopAndDesk(everShared);
+        // The owner took over on the desk: the relay kept a mark and no verdicts.
+        relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+        relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+        onDesk.hosts.learned("ws", relay.row);
+        await desk.until(() => subscribed(desk));
+        expect(await spendStep(onDesk.executor)).toMatchObject(everShared ? { verdict: "held", stoppedFor: null } : { verdict: "allowed" });
+      });
+    }
+    it("holds a definition that reaches the desk after it took over, until the next pull shows it every one", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      // Written before the take over, by someone who may have left since; it arrives only now.
+      const late = ["  - id: late", "    name: Late", "    when: {field-changed: Status}", "    do: [{add-record: {Amount: 1}, collection: Budget}]"];
+      await desk.writeAutomations("Tasks", `${task}\n${spend}\n${late.join("\n")}`);
+      onDesk.executor.handlePulledPaths(["Tasks/automations.yaml"]);
+      expect(await stepOf(onDesk.executor, "late")).toMatchObject({ verdict: "held", stoppedFor: null });
+
+      // A pull reached the relay: every definition it had is here, so one
+      // a current editor writes after that runs as usual.
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      const fresh = ["  - id: fresh", "    name: Fresh", "    when: {field-changed: Status}", "    do: [{add-record: {Amount: 2}, collection: Budget}]"];
+      await desk.writeAutomations("Tasks", `${task}\n${spend}\n${late.join("\n")}\n${fresh.join("\n")}`);
+      onDesk.executor.handlePulledPaths(["Tasks/automations.yaml"]);
+      expect(await stepOf(onDesk.executor, "fresh")).toMatchObject({ verdict: "allowed" });
+      expect(await stepOf(onDesk.executor, "late")).toMatchObject({ verdict: "held" });
+      expect((await desk.baseStore.readReachVerdicts()).unprovenAll).toBe(false);
+    });
+
+    it("keeps holding a definition that could not run when the mark ended, once a schema fix lets it run", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      // Tasks has no Priority field here yet, so this cannot run.
+      const waiting = ["  - id: waiting", "    name: Waiting", "    when: {field-changed: Status}", "    do: [{add-record: {Amount: 1}, collection: Budget}, {set: {Priority: 1}}]"];
+      await desk.writeAutomations("Tasks", `${task}\n${spend}\n${waiting.join("\n")}`);
+      onDesk.executor.handlePulledPaths(["Tasks/automations.yaml"]);
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      expect((await desk.baseStore.readReachVerdicts()).unprovenAll).toBe(false);
+
+      await writeFile(join(desk.root, "Tasks", "collection.yaml"), `${SCHEMA}  Priority:\n    type: text\n`);
+      onDesk.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/collection.yaml" }]);
+      expect(await stepOf(onDesk.executor, "waiting")).toMatchObject({ verdict: "held", stoppedFor: null });
+    });
+
+    it("runs automations a Collection gains after the listing without asking", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      expect(await desk.baseStore.readReachVerdicts()).toMatchObject({ unprovenAll: false });
+
+      // Budget had no automations when the listing ran; someone adds one now.
+      await desk.writeAutomations("Budget", "  - id: tally\n    name: Tally\n    when: {field-changed: Amount}\n    do: [{set: {Total: 1}}]");
+      onDesk.executor.handlePulledPaths(["Budget/automations.yaml"]);
+      const { automations } = await onDesk.executor.automationsIn("Budget") as { automations: Array<{ reach: { steps: Step[] } }> };
+      expect(automations[0]?.reach.steps[0]).toMatchObject({ verdict: "allowed" });
+    });
+
+    it("holds a definition that is only in another version when the listing ran, once that version is active", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      const other = ["  - id: other", "    name: Other", "    when: {field-changed: Status}", "    do: [{add-record: {Amount: 4}, collection: Budget}]"];
+      const draft = `version: 1\nautomations:\n${task}\n${spend}\n${other.join("\n")}`;
+      desk.engine.listVersions = async () => [{ id: "main" }, { id: "draft" }];
+      const list = desk.engine.listTextFileMetadata;
+      desk.engine.listTextFileMetadata = async (input) => input.versionId === "draft" ? [{ path: "Tasks/automations.yaml", objectId: "automations-tasks" }] : await list(input);
+      const read = desk.engine.readTextFile;
+      desk.engine.readTextFile = async (input) => input.versionId === "draft" && input.path.endsWith("automations.yaml") ? { text: draft, contentKind: "text", objectId: "automations-tasks" } : await read(input);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      expect((await desk.baseStore.readReachVerdicts()).unprovenAll).toBe(false);
+
+      // The owner switches to the draft version: its automations arrive here.
+      await desk.writeAutomations("Tasks", `${task}\n${spend}\n${other.join("\n")}`);
+      onDesk.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+      expect(await stepOf(onDesk.executor, "other")).toMatchObject({ verdict: "held", stoppedFor: null });
+    });
+
+    it("holds another version's definition of an automation the active version defines differently", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      const draftSpend = spend.replace("Amount: 5", "Amount: 50");
+      const draft = `version: 1\nautomations:\n${task}\n${draftSpend}`;
+      desk.engine.listVersions = async () => [{ id: "main" }, { id: "draft" }];
+      const list = desk.engine.listTextFileMetadata;
+      desk.engine.listTextFileMetadata = async (input) => input.versionId === "draft" ? [{ path: "Tasks/automations.yaml", objectId: "automations-tasks" }] : await list(input);
+      const read = desk.engine.readTextFile;
+      desk.engine.readTextFile = async (input) => input.versionId === "draft" && input.path.endsWith("automations.yaml") ? { text: draft, contentKind: "text", objectId: "automations-tasks" } : await read(input);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+
+      await desk.writeAutomations("Tasks", `${task}\n${draftSpend}`);
+      onDesk.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+      expect(await spendStep(onDesk.executor)).toMatchObject({ verdict: "held", stoppedFor: null });
+    });
+
+    const late = ["  - id: late", "    name: Late", "    when: {field-changed: Status}", "    do: [{add-record: {Amount: 1}, collection: Budget}]"].join("\n");
+    it.each([
+      ["a file that did not parse", `${late}\n  - id: [unclosed`],
+      ["an entry that did not read", late.replace("    do:", "    dox:")],
+    ])("holds a definition that comes back when someone fixes %s at the listing, until Allow", async (_case, broken) => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      const { definitionHash } = await spendStep(onDesk.executor);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      // Written before the take over by someone who may have left since, and
+      // broken in every version when the listing runs.
+      await desk.writeAutomations("Tasks", `${task}\n${spend}\n${broken}`);
+      onDesk.executor.handlePulledPaths(["Tasks/automations.yaml"]);
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      const listed = await desk.baseStore.readReachVerdicts();
+      expect(listed).toMatchObject({ unprovenAll: false, unprovenPaths: [], unprovenFolders: ["Tasks"] });
+      expect(listed.unproven, "a definition the broken file may still name stays").toContain(JSON.stringify(["collection:Tasks#spend", definitionHash]));
+
+      // A current editor fixes only the syntax: the definition comes back as it was.
+      await desk.writeAutomations("Tasks", `${task}\n${spend}\n${late}`);
+      onDesk.executor.handlePulledPaths(["Tasks/automations.yaml"]);
+      const held = await stepOf(onDesk.executor, "late");
+      // The file reads in every version now, so the take over's hold is the reason.
+      expect(held).toMatchObject({ verdict: "held", stoppedFor: null, fileUnread: false });
+      expect((await desk.baseStore.readReachVerdicts()).unprovenFolders, "the file reads in every version now").toEqual([]);
+      await onDesk.executor.confirmReach({ automationId: "collection:Tasks#late", definitionHash: held.definitionHash, step: "0", seq: held.seq });
+      expect(await stepOf(onDesk.executor, "late")).toMatchObject({ verdict: "allowed" });
+
+      // One written after that runs as usual.
+      const fresh = ["  - id: fresh", "    name: Fresh", "    when: {field-changed: Status}", "    do: [{add-record: {Amount: 2}, collection: Budget}]"];
+      await desk.writeAutomations("Tasks", `${task}\n${spend}\n${late}\n${fresh.join("\n")}`);
+      onDesk.executor.handlePulledPaths(["Tasks/automations.yaml"]);
+      expect(await stepOf(onDesk.executor, "fresh")).toMatchObject({ verdict: "allowed" });
+    });
+
+    it("keeps holding a Collection whose file does not read in another version, until it reads in every one", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      let draft = `version: 1\nautomations:\n${task}\n${late}\n  - id: [unclosed`;
+      desk.engine.listVersions = async () => [{ id: "main" }, { id: "draft" }];
+      const list = desk.engine.listTextFileMetadata;
+      desk.engine.listTextFileMetadata = async (input) => input.versionId === "draft" ? [{ path: "Tasks/automations.yaml", objectId: "automations-tasks" }] : await list(input);
+      const read = desk.engine.readTextFile;
+      desk.engine.readTextFile = async (input) => input.versionId === "draft" && input.path.endsWith("automations.yaml") ? { text: draft, contentKind: "text", objectId: "automations-tasks" } : await read(input);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      // Reading the Collection again reads its file in each version, and lists none.
+      let listed = 0;
+      const listing = desk.engine.listTextFileMetadata;
+      desk.engine.listTextFileMetadata = async (input) => { listed += 1; return await listing(input); };
+
+      // The active version reads, but the draft still does not.
+      const early = ["  - id: early", "    name: Early", "    when: {field-changed: Status}", "    do: [{add-record: {Amount: 3}, collection: Budget}]"];
+      await desk.writeAutomations("Tasks", `${task}\n${spend}\n${early.join("\n")}`);
+      onDesk.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+      expect(await stepOf(onDesk.executor, "early"), "held for the unread file, and says so").toMatchObject({ verdict: "held", stoppedFor: null, fileUnread: true });
+      expect((await desk.baseStore.readReachVerdicts()).unprovenFolders).toEqual(["Tasks"]);
+
+      // The draft is fixed and becomes active: its definition waits too.
+      draft = `version: 1\nautomations:\n${task}\n${late}`;
+      await desk.writeAutomations("Tasks", `${task}\n${late}`);
+      onDesk.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+      expect(await stepOf(onDesk.executor, "late")).toMatchObject({ verdict: "held", stoppedFor: null });
+      expect((await desk.baseStore.readReachVerdicts()).unprovenFolders).toEqual([]);
+      expect(listed).toBe(0);
+    });
+
+    it("keeps an unread version held when its Collection has moved in the active version", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      const read = desk.engine.readTextFile;
+      const list = desk.engine.listTextFileMetadata;
+      desk.engine.listVersions = async () => [{ id: "main" }, { id: "draft" }];
+      desk.engine.listTextFileMetadata = async (input) => input.versionId === "draft"
+        ? [{ path: "Tasks/collection.yaml", objectId: "Tasks" }, { path: "Tasks/automations.yaml", objectId: "automations-tasks" }]
+        : await list(input);
+      desk.engine.readTextFile = async (input) => input.versionId !== "draft" ? await read(input)
+        : input.path === "Tasks/collection.yaml" ? { text: SCHEMA, contentKind: "text", objectId: "Tasks" }
+        : input.path === "Tasks/automations.yaml" ? { text: "version: 1\nautomations: [unclosed", contentKind: "text", objectId: "automations-tasks" }
+        : null;
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      await desk.renameCollection("Tasks", "Moved");
+      onDesk.executor.handlePulledPaths(["Tasks/collection.yaml", "Tasks/automations.yaml", "Moved/collection.yaml", "Moved/automations.yaml"]);
+      await onDesk.executor.automationsIn("Moved");
+      expect((await desk.baseStore.readReachVerdicts()).unprovenFolders).toEqual(["Tasks"]);
+    });
+
+    it("holds a step it never judged in a Collection the last host could not list", async () => {
+      const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+      const reach = { version: 2 as const, verdicts: [], unproven: [], unprovenAll: false, unprovenPaths: [], unprovenFolders: ["Tasks"] };
+      const executor = w.makeExecutor({ groupHost: async () => 3, reachRelayRecord: async () => ({ generation: 3, reach, everShared: true }) });
+      await executor.open();
+      expect(await stepOf(executor, "seen")).toMatchObject({ verdict: "held", stoppedFor: null });
+    });
+
+    it("keeps holding a Collection whose file is binary in another version", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      desk.engine.listVersions = async () => [{ id: "main" }, { id: "draft" }];
+      const list = desk.engine.listTextFileMetadata;
+      desk.engine.listTextFileMetadata = async (input) => input.versionId === "draft" ? [{ path: "Tasks/automations.yaml", objectId: "automations-tasks" }] : await list(input);
+      // The engine gives a binary file as empty text.
+      const read = desk.engine.readTextFile;
+      desk.engine.readTextFile = async (input) => input.versionId === "draft" && input.path.endsWith("automations.yaml") ? { text: "", contentKind: "binary", objectId: "automations-tasks" } : await read(input);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      expect((await desk.baseStore.readReachVerdicts()).unprovenFolders).toEqual(["Tasks"]);
+
+      onDesk.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+      await onDesk.executor.automationsIn("Tasks");
+      expect((await desk.baseStore.readReachVerdicts()).unprovenFolders).toEqual(["Tasks"]);
+    });
+
+    it("drops an unproven definition no version names at the next listing", async () => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      const { definitionHash } = await spendStep(onDesk.executor);
+      const spendKey = JSON.stringify(["collection:Tasks#spend", definitionHash]);
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 2, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      expect((await desk.baseStore.readReachVerdicts()).unproven).toContain(spendKey);
+
+      await desk.writeAutomations("Tasks", task);
+      onDesk.executor.handlePulledPaths(["Tasks/automations.yaml"]);
+      relay.row = { installId: "desk", generation: 3, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = { generation: 3, forInstall: "none", groups: { floorMs: 1, automations: [] }, reach: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await onDesk.executor.automationsIn("Tasks");
+      expect((await desk.baseStore.readReachVerdicts()).unprovenAll).toBe(true);
+      onDesk.executor.relayAnswered();
+      await onDesk.executor.automationsIn("Tasks");
+      const { unproven, unprovenAll } = await desk.baseStore.readReachVerdicts();
+      expect(unprovenAll).toBe(false);
+      expect(unproven).not.toContain(spendKey);
+      expect(unproven.map((key) => JSON.parse(key)[0])).toEqual(["collection:Tasks#task"]);
+    });
+
+    it("ends only the take-over mark a listing was asked for", async () => {
+      const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+      let host = 3;
+      let record: { generation: number; reach: null; everShared: boolean } = { generation: 3, reach: null, everShared: true };
+      const executor = w.makeExecutor({ groupHost: async () => host, reachRelayRecord: async () => record });
+      await executor.open();
+      expect((await w.baseStore.readReachVerdicts()).unprovenAll, "the first take over's mark").toBe(true);
+
+      // The listing for that mark waits on the engine while a second take over sets a new one.
+      let release: () => void = () => undefined;
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const list = w.engine.listTextFileMetadata;
+      w.engine.listTextFileMetadata = async (input) => { await blocked; return await list(input); };
+      executor.relayAnswered();
+      host = 4;
+      record = { generation: 4, reach: null, everShared: true };
+      w.claim("collection:Tasks#seen", w.addRecord("Tasks", "one", { Status: "Done" }));
+      executor.notifyClaimed();
+      await vi.waitFor(async () => expect((await w.baseStore.readReachVerdicts()).taken).toBe(4));
+      release();
+      await executor.automationsIn("Tasks");
+      expect((await w.baseStore.readReachVerdicts()).unprovenAll, "the second mark stays until a later pull").toBe(true);
+    });
+
+    it("runs claims after a restart with the relay out of reach, having taken the verdicts before", async () => {
+      const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+      const first = w.makeExecutor({ groupHost: async () => 3, reachRelayRecord: async () => ({ generation: 3, reach: null, everShared: true }) });
+      await first.open();
+      expect((await w.baseStore.readReachVerdicts()).taken).toBe(3);
+      await first.dispose();
+      const second = w.makeExecutor({ groupHost: async () => 3, reachRelayRecord: async () => { throw new TypeError("fetch failed"); } });
+      await second.open();
+      const held = await stepOf(second, "seen");
+      expect(held, "the take over held it once").toMatchObject({ verdict: "held" });
+      await second.confirmReach({ automationId: "collection:Tasks#seen", definitionHash: held.definitionHash, step: "0", seq: held.seq });
+      const claim = w.claim("collection:Tasks#seen", w.addRecord("Tasks", "one", { Status: "Done" }));
+      second.notifyClaimed();
+      await w.settledClaim(claim);
+      expect(claim.state).toBe("done");
+    });
+
+    it("holds everything when the relay's generation goes back, as after a restore from an older copy", async () => {
+      const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+      let record = { generation: 5, reach: { version: 2 as const, verdicts: [], unproven: [], unprovenAll: false, unprovenPaths: [], unprovenFolders: [] }, everShared: true };
+      let host = 6;
+      const executor = w.makeExecutor({ groupHost: async () => host, reachRelayRecord: async () => record });
+      await executor.open();
+      expect(await stepOf(executor, "seen")).toMatchObject({ verdict: "allowed" });
+      record = { ...record, generation: 2 };
+      host = 3;
+      executor.hostChanged();
+      expect(await stepOf(executor, "seen")).toMatchObject({ verdict: "held", stoppedFor: null });
+    });
+
+    it.each(["a definition", "a Collection"])("holds what only the desk allowed in %s the last host could not prove either", async (what) => {
+      const { relay, desk, onDesk } = await laptopAndDesk(true);
+      const { definitionHash } = await spendStep(onDesk.executor);
+      const unproven = what === "a definition" ? [JSON.stringify(["collection:Tasks#spend", definitionHash])] : [];
+      const unprovenFolders = what === "a Collection" ? ["Tasks"] : [];
+      relay.row = { installId: "desk", generation: 2, handoverFrom: null, releasedThroughMs: null };
+      relay.kept = {
+        generation: 2, forInstall: "desk", groups: { floorMs: 1, automations: [] },
+        reach: { version: 2, verdicts: [], unproven, unprovenAll: false, unprovenPaths: [], unprovenFolders },
+      };
+      onDesk.hosts.learned("ws", relay.row);
+      await desk.until(() => subscribed(desk));
+      expect(await spendStep(onDesk.executor)).toMatchObject({ verdict: "held", stoppedFor: null });
+      // It passes them on, so the next host holds them as well.
+      expect(await onDesk.executor.reachHandover()).toMatchObject({ unproven, unprovenPaths: [], unprovenFolders });
+    });
+
+    it("watches no Groups and releases no verdicts until it took the last host's", async () => {
+      const { relay, desk, onLaptop, onDesk } = await laptopAndDesk(true);
+      let released: () => void = () => undefined;
+      const release = new Promise<void>((resolve) => { released = resolve; });
+      relay.onRelease = () => released();
+      relay.row = { installId: "desk", generation: 2, handoverFrom: "laptop", releasedThroughMs: null };
+      onLaptop.hosts.learned("ws", relay.row);
+      await release;
+
+      relay.reachDown = true;
+      onDesk.hosts.learned("ws", relay.row);
+      // The reconcile the host change queued has finished once this answers.
+      await onDesk.executor.automationsIn("Tasks");
+      expect(desk.errors.map(({ context }) => context)).toContain("read the last automation host's reach verdicts");
+      expect(subscribed(desk)).toBe(false);
+      await expect(onDesk.executor.reachHandover()).resolves.toBeNull();
+      // A claim waits meanwhile.
+      const claim = messageClaim(desk);
+      const drained = desk.idleDrains();
+      onDesk.executor.notifyClaimed();
+      await desk.until(() => desk.idleDrains() > drained);
+      expect(added(desk)).toEqual([]);
+
+      relay.reachDown = false;
+      onDesk.executor.relayAnswered();
+      await desk.until(() => subscribed(desk));
+      expect(await spendStep(onDesk.executor)).toMatchObject({ verdict: "held", stoppedFor: "bob@dohc.test" });
+      await expect(onDesk.executor.reachHandover()).resolves.not.toBeNull();
+      // Taking the verdicts ends that wait. Bob could not read the Group, so
+      // the laptop had stopped this automation too: it runs once allowed.
+      const task = await stepOf(onDesk.executor, "task");
+      expect(task).toMatchObject({ verdict: "held", stoppedFor: "bob@dohc.test" });
+      await onDesk.executor.confirmReach({ automationId: "collection:Tasks#task", definitionHash: task.definitionHash, step: "0", seq: task.seq });
+      await desk.settledClaim(claim);
+      expect(claim.state).toBe("done");
+    });
+
+    it("holds what it would allow once the host moves on before the relay answered for its verdicts", async () => {
+      const { relay, onLaptop, onDesk } = await laptopAndDesk(true);
+      let released: () => void = () => undefined;
+      const release = new Promise<void>((resolve) => { released = resolve; });
+      relay.onRelease = () => released();
+      relay.row = { installId: "desk", generation: 2, handoverFrom: "laptop", releasedThroughMs: null };
+      onLaptop.hosts.learned("ws", relay.row);
+      await release;
+      relay.reachDown = true;
+      onDesk.hosts.learned("ws", relay.row);
+      await onDesk.executor.automationsIn("Tasks");
+
+      // The owner takes the automations back to the laptop: the desk can no
+      // longer read the record it missed, so its claims from then run held.
+      relay.row = { installId: "laptop", generation: 4, handoverFrom: null, releasedThroughMs: null };
+      onDesk.hosts.learned("ws", relay.row);
+      await onDesk.executor.automationsIn("Tasks");
+      expect(await spendStep(onDesk.executor)).toMatchObject({ verdict: "held", stoppedFor: null });
+      await expect(onDesk.executor.reachHandover()).resolves.not.toBeNull();
+    });
+
+    it("remembers across a restart that it never took the last host's verdicts", async () => {
+      const { relay, desk, onLaptop, onDesk } = await laptopAndDesk(true);
+      let released: () => void = () => undefined;
+      const release = new Promise<void>((resolve) => { released = resolve; });
+      relay.onRelease = () => released();
+      relay.row = { installId: "desk", generation: 2, handoverFrom: "laptop", releasedThroughMs: null };
+      onLaptop.hosts.learned("ws", relay.row);
+      await release;
+      // dohc closes while the relay has not answered the read.
+      let reading: () => void = () => undefined;
+      const read = new Promise<void>((resolve) => { reading = resolve; });
+      relay.onReachRead = () => new Promise<never>(() => reading());
+      onDesk.hosts.learned("ws", relay.row);
+      await read;
+      expect((await desk.baseStore.readReachVerdicts()).pending).toBe(3);
+
+      // The process ends there, so nothing settles. The owner takes the
+      // automations back on the laptop.
+      relay.onReachRead = undefined;
+      relay.row = { installId: "laptop", generation: 4, handoverFrom: null, releasedThroughMs: null };
+      const reopened = ownersComputer("desk", desk, relay, { rootPath: "", remote: {} });
+      await reopened.executor.open();
+      expect(await spendStep(reopened.executor)).toMatchObject({ verdict: "held", stoppedFor: null });
+      expect((await desk.baseStore.readReachVerdicts()).pending).toBeNull();
+    });
   });
 
   it("holds a Group trigger an editor's leaving newly allows, until Allow", async () => {
