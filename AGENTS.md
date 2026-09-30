@@ -47,6 +47,15 @@ A workspace must be useful to one person on one device. Team collaboration is st
 
 Do not turn dohc into an AI wrapper, company brain, Notion clone, dashboard generator, chat overlay, prescribed workflow, template marketplace, or productivity theater. Reusable examples and templates are useful; making users conform to them is not the product.
 
+### Design for work nobody has read
+
+Agents now write apps and changes that no person reads line by line. A person must still be able to trust that work, and an agent must still be able to continue it.
+
+- Shape each surface like the user's task, not its implementation. A person sees whether their work is saved, synced, and shared, not relay or engine state. An agent edits a file with ordinary tools without knowing about Y.Doc settlement.
+- Let a person oversee work they did not read. For any agent change or app, the person can see who made it, what it can reach, and how to reverse it without opening the source.
+- Make invalid states impossible to express. An app cannot request data its owner did not expose; a rule that tells it not to is not enough.
+- Keep capabilities composable. Changing sharing, apps, or chat must not require changing how the others store their state.
+
 ### A note from Ice
 
 We are building something ambitious. Put that ambition into what the product lets people do, not into unnecessary machinery. Question conventional product boundaries when they hold us back, then build the smallest system that makes the correct behavior obvious.
