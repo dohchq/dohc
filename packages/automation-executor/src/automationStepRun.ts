@@ -1,5 +1,7 @@
+import { MAX_RUN_FIELD_WRITES } from "./automationLimits";
 import { prepareRecordBackend, type RecordRunDependencies, type RecordRunInput, type RunSource } from "./automationRecordBackend";
 import { AutomationRunWait } from "./automationRunWait";
+import { runReservationBytes, stepReservationBytes } from "./automationRunBudget";
 import type { AutomationTimeSpent, JsonValue } from "@dohc/app-backend-runtime/automation";
 import {
   answersOf,
@@ -10,7 +12,6 @@ import {
   filterValues,
   findRequest,
   formulaPeople,
-  MAX_RUN_FIELD_WRITES,
   namesUsed,
   orderSteps,
   planStep,
@@ -46,9 +47,8 @@ import {
 // evaluated again, the step that stopped lands its remaining effects, and the
 // steps after it read and evaluate as if the run had not stopped.
 //
-// Nothing is saved until the first step that changes something. A run that
-// stops before then wrote nothing, so the next attempt starts it over,
-// conditions and all.
+// Finds are saved even before the first effect, so recovery keeps their
+// membership and order when a Collection changes between attempts.
 
 // A record that keeps changing while a step reads it stops the run rather than loop.
 export const MAX_REREADS = 5;
@@ -222,9 +222,7 @@ async function walkSteps(
   let reused = 0;
   let effectIndex = 0;
   let fieldWrites = run.steps.reduce((count, step) => count + fieldWriteCount(step.effects), 0);
-  // Each step and its effects' records, as the run's files will hold them.
-  const sizeOf = (step: StoredStep) => 2 * Buffer.byteLength(JSON.stringify(step));
-  let bytes = run.steps.reduce((total, step) => total + sizeOf(step), Buffer.byteLength(JSON.stringify({ ...run, steps: [] })));
+  let bytes = runReservationBytes(run, MAX_REREADS);
 
   // The step the walk is at, which a run that fails names.
   let at = 0;
@@ -361,10 +359,6 @@ async function walkSteps(
         // Checked before the step writes: earlier steps stay landed and undoable.
         fieldWrites += fieldWriteCount(step.effects);
         if (fieldWrites > MAX_RUN_FIELD_WRITES) return end(failed(tooManyWritesError(ordinal)));
-        bytes += sizeOf(step);
-        if (bytes > RUN_PLAN_BUDGET_BYTES) return end(failed(tooLargeError(ordinal)));
-        run.steps.push(step);
-        reused += 1;
         // Saved before its first effect, so a run that stops part way lands
         // these effects and evaluates the step no more.
         // A Collection the step writes that the run does not name yet is
@@ -373,11 +367,16 @@ async function walkSteps(
         const joined = backend.collectionsOf(step).filter(({ collectionId }) => !known.has(collectionId));
         if (joined.length > 0) {
           step.collections = joined;
-          run.collections.push(...joined);
         }
+        // Include Collection associations before reserving the complete step.
+        bytes += stepReservationBytes(step, MAX_REREADS);
+        if (bytes > RUN_PLAN_BUDGET_BYTES) return end(failed(tooLargeError(ordinal)));
+        run.steps.push(step);
+        run.collections.push(...joined);
+        reused += 1;
         if (saved) {
           await store.appendStep(run, step);
-        } else if (step.effects.length > 0) {
+        } else if (step.effects.length > 0 || step.output?.kind === "find") {
           await store.save(run);
           saved = true;
         }

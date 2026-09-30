@@ -1,4 +1,5 @@
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { DATASET_FIND_PAGE_SIZE, MAX_FOUND_RECORDS } from "./automationLimits";
 import type { StoredRun } from "./automationRunStore";
 import { datasetUndoDeletes, datasetCodeTable, datasetCodeOperation, datasetTableNamed, datasetStepsOf } from "./datasetAutomationPlan";
 import { isDeepStrictEqual } from "node:util";
@@ -13,7 +14,6 @@ import {
   definitionHash,
   findOverflowError,
   findQueryOf,
-  MAX_FOUND_RECORDS,
   runRecordOf,
   scheduleDueAt,
   stepsInOrder,
@@ -532,7 +532,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
                 if (reads === null) throw new AutomationRunWait("The workspace engine is unavailable.");
                 const result = await reads.queryCollectionRecords({ collectionPath: path, limit: MAX_FOUND_RECORDS,
                   ...(query.match === "all" ? {} : { filter: { field: query.field, operator: query.operator, value: values[0] ?? null } }) });
-                return result.nextCursor !== null ? { problem: findOverflowError(ordinal) } : result.records.map((found) => {
+                return result.nextCursor !== null || result.records.length > MAX_FOUND_RECORDS ? { problem: findOverflowError(ordinal) } : result.records.map((found) => {
                   const record = runRecordOf(found), key = JSON.stringify([path, record.id]);
                   const previous = snapshots.get(key);
                   if (previous !== undefined && !isDeepStrictEqual(previous.values, record.values)) throw new StepRecordChanged();
@@ -548,17 +548,37 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
                 if (problem !== null) throw new Error(problem);
                 return { fieldId: field.fieldId, value };
               });
-              let result;
-              try { result = await call(path, operation.operationId, { limit: MAX_FOUND_RECORDS, filters }); }
-              catch (error) {
-                const formulas = (dataset.steps.finds.get(ordinal) ?? []).filter((filter) => filter.value.kind === "formula");
-                if (!isAppBackendRuntimeError(error) || error.refusal.code !== "invalid_input" || formulas.length === 0) throw error;
-                const names = new Intl.ListFormat("en", { type: "conjunction" }).format(formulas.map((filter) => filter.field));
-                return { problem: `The Find in step ${ordinal + 1} compares ${names} with a value this Collection does not accept.` };
+              const records: RunRecord[] = [];
+              const identities = new Set<string>();
+              const cursors: JsonValue[] = [];
+              let after: JsonValue | undefined;
+              for (;;) {
+                let result;
+                try { result = await call(path, operation.operationId, {
+                  limit: Math.min(DATASET_FIND_PAGE_SIZE, MAX_FOUND_RECORDS - records.length), filters,
+                  ...(after === undefined ? {} : { after }),
+                }); }
+                catch (error) {
+                  const formulas = (dataset.steps.finds.get(ordinal) ?? []).filter((filter) => filter.value.kind === "formula");
+                  if (!isAppBackendRuntimeError(error) || error.refusal.code !== "invalid_input" || formulas.length === 0) throw error;
+                  const names = new Intl.ListFormat("en", { type: "conjunction" }).format(formulas.map((filter) => filter.field));
+                  return { problem: `The Find in step ${ordinal + 1} compares ${names} with a value this Collection does not accept.` };
+                }
+                for (const row of rowsOf(result)) {
+                  const identity = JSON.stringify([typeof row.id, row.id]);
+                  if (identities.has(identity)) return { problem: `The Find in step ${ordinal + 1} returned a duplicate record identity. Ask the owner to check its read operation.` };
+                  identities.add(identity);
+                  records.push(remember(path, row, table));
+                  if (records.length > MAX_FOUND_RECORDS) return { problem: findOverflowError(ordinal) };
+                }
+                const page = result.result;
+                const cursor = page !== null && typeof page === "object" && !Array.isArray(page) ? page.nextCursor : null;
+                if (cursor == null) return records;
+                if (records.length === MAX_FOUND_RECORDS) return { problem: findOverflowError(ordinal) };
+                if (cursors.some((seen) => isDeepStrictEqual(seen, cursor))) return { problem: `The Find in step ${ordinal + 1} returned a repeated cursor. Ask the owner to check its read operation.` };
+                cursors.push(cursor);
+                after = cursor;
               }
-              const page = result.result;
-              if (page !== null && typeof page === "object" && !Array.isArray(page) && page.nextCursor != null) return { problem: findOverflowError(ordinal) };
-              return rowsOf(result).map((row) => remember(path, row, table));
             },
             effects(ordinal, planned) {
               const convert = (planned: readonly PlannedEffect[], path: string) => {

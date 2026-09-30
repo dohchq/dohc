@@ -510,11 +510,12 @@ automations:
       ...host({ resolves: () => true, edit: async () => { throw new Error("A refused run writes nothing."); } }).surface,
       invoke: async (_context, input): Promise<DatasetInvocationResult> => {
         sent.push(input);
-        const { limit } = input.input as { limit: number };
+        const { limit, after } = input.input as { limit: number; after?: { id: string } };
         // The trigger read asks for one record; the Find asks for a page and there is more.
         if (limit === 1) return { result: { rows: [{ id: "a", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false };
-        const rows = Array.from({ length: limit }, (_, index) => ({ id: `r${index}`, version: 1, values: { [STATUS]: "Open" } }));
-        return { result: { rows, nextCursor: { id: "r49", value: "r49" } }, revision: 7, replayed: false };
+        const start = after === undefined ? 0 : Number(after.id.slice(1)) + 1;
+        const rows = Array.from({ length: limit }, (_, index) => ({ id: `r${start + index}`, version: 1, values: { [STATUS]: "Open" } }));
+        return { result: { rows, nextCursor: { id: `r${start + limit - 1}`, value: `r${start + limit - 1}` } }, revision: 7, replayed: false };
       },
     };
     const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
@@ -525,8 +526,8 @@ automations:
     }, {
       held: fromLedger(claim), automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
       roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "failed", error: "The Find in step 1 matched more than 50 records. Narrow its condition, then try again.", timedOut: false });
-    expect(sent.map((input) => input.operationId)).toEqual([LIST, LIST, LIST]);
+    })).toEqual({ kind: "failed", error: "The Find in step 1 matched more than 500 records. Narrow its condition, then try again.", timedOut: false });
+    expect(sent.map((input) => input.operationId)).toEqual(Array(7).fill(LIST));
     expect((await store.runsOf(claim.automationId, claim.claimId)).runs).toEqual([]);
   });
 });

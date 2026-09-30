@@ -20,7 +20,7 @@ import {
 } from "./collectionAutomationRun";
 import { createTestScratch, testMetadataDir } from "./testScratch";
 import { createAutomationTargets } from "./automationTargets";
-import { MAX_FOUND_RECORDS } from "./automationPlan";
+import { MAX_FOUND_RECORDS } from "./automationLimits";
 
 // A document Collection's run against an in-memory engine: each step reads
 // what the steps before it wrote, and a run that stops at any durable point
@@ -412,12 +412,28 @@ describe("a stepwise run", () => {
   it("refuses a step over the run's field limit before it writes, and keeps what earlier steps wrote", async () => {
     const fields = Array.from({ length: 5 }, (_, index) => `F${index}: 1`).join(", ");
     const definition = automation(`id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Early: 1}}, {find: 'true', as: all}, {set: {${fields}}, records: all}]`);
-    const space = workspace(Array.from({ length: 45 }, (_, index) => task(index === 0 ? "rec_t" : `rec_${index}`, {})));
+    const space = workspace(Array.from({ length: 201 }, (_, index) => task(index === 0 ? "rec_t" : `rec_${index}`, {})));
     await expect(runToEnd(space, definition)).resolves.toEqual({
-      kind: "failed", error: "Step 3 would make this run change more than 200 fields. Narrow its Find steps, or split it into smaller automations.", timedOut: false,
+      kind: "failed", error: "Step 3 would change more than 1000 fields across this run. Narrow its Find steps, or split it into smaller automations.", timedOut: false,
     });
     expect(space.records.get("rec_t")!.values).toEqual({ Early: 1 });
     expect(space.records.get("rec_1")!.values).toEqual({});
+  });
+
+  it("reserves the prepared step and progress bytes before any of its effects", async () => {
+    const big = "x".repeat(12_500);
+    const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Early: 1}}, {find: 'true', as: all}, {set: {A: 1, B: 1, C: 1, D: 1}, records: all}]");
+    const space = workspace(Array.from({ length: 50 }, (_, index) => task(index === 0 ? "rec_t" : `rec_${index}`, { A: big, B: big, C: big, D: big })));
+    const store = await scratchStore();
+    expect(await runToEnd(space, definition, undefined, store)).toMatchObject({ kind: "failed",
+      error: "Step 3 would make this run change more data than dohc can save for it. Narrow its Find steps, or split it into smaller automations." });
+    expect(space.keys.size).toBe(1);
+    const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    expect(run!.steps.map((step) => step.ordinal)).toEqual([0, 1]);
+    expect(run!.applied).toHaveLength(1);
+    expect(space.records.get("rec_t")!.values).toMatchObject({ Early: 1, A: big });
+    expect(await undoCollectionAutomationRuns(space.undo([]), [run!], new AbortController().signal)).toMatchObject({ undone: { reverted: 1 } });
+    expect(space.records.get("rec_t")!.values.Early).toBeUndefined();
   });
 });
 

@@ -1,3 +1,4 @@
+import { MAX_FINDS, MAX_FOUND_RECORDS, MAX_RUN_FIELD_WRITES } from "./automationLimits";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { parse, parseExpressionAt, tokenizer, tokTypes, type Expression } from "acorn";
@@ -62,15 +63,10 @@ type AutomationValue = Extract<AutomationStep, { kind: "set" }>["values"][number
 
 /** The claim prefix this executor drains. */
 export const COLLECTION_AUTOMATION_PREFIX = "collection:";
-const MAX_FINDS = 5;
-export const MAX_FOUND_RECORDS = 50;
 export const findOverflowError = (ordinal: number) =>
   `The Find in step ${ordinal + 1} matched more than ${MAX_FOUND_RECORDS} records. Narrow its condition, then try again.`;
-// The field changes one run may plan. Every one is saved before and after it
-// lands, so a run stays small enough to resume and to undo.
-export const MAX_RUN_FIELD_WRITES = 200;
-// The records one code step can add or change: as many as a Find returns.
-export const MAX_CODE_RECORD_CHANGES = MAX_FOUND_RECORDS;
+// Keep the existing code-step output bound independent of Find paging.
+export const MAX_CODE_RECORD_CHANGES = 50;
 // The trigger record before its change, which a starts-matching condition
 // is also checked against.
 const BEFORE_BINDING = "__dohc_before";
@@ -1546,7 +1542,7 @@ export function fieldWriteCount(effects: ReadonlyArray<{ kind: string; fields?: 
 }
 
 export const tooManyWritesError = (ordinal: number) =>
-  `Step ${ordinal + 1} would make this run change more than ${MAX_RUN_FIELD_WRITES} fields. Narrow its Find steps, or split it into smaller automations.`;
+  `Step ${ordinal + 1} would change more than ${MAX_RUN_FIELD_WRITES} fields across this run. Narrow its Find steps, or split it into smaller automations.`;
 
 /**
  * Turns one step's answers into its effects and its result: which branch an

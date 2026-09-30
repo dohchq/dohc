@@ -826,6 +826,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     const folder = await runsFolder(run.automationId);
     const path = join(folder, `${runName(run.claimId, run.keySeed)}${PROGRESS_SUFFIX}`);
     const text = `${JSON.stringify(line)}\n`;
+    if (Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
     const existing = await lstat(path).catch(() => null);
     if (existing !== null) {
       if (existing.size + Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();

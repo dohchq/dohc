@@ -71,6 +71,12 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 // identifier that is not in AUTOMATION_RESERVED_NAMES: a formula name, a
 // reserved word, or a standard global such as Math.
 //
+// The executor admits at most five Finds per definition, 500 matches per
+// Find, and 1,000 supplied field assignments per run, including Add fields.
+// Each step reserves journal bytes before any effect. A refused later step
+// leaves earlier steps recorded and undoable. Invoke operations retain their
+// own runtime bounds; the assignment cap does not count their hidden writes.
+//
 // Fields, Groups, and Button fields are referenced by name. Collections are
 // workspace-relative folder paths. A code file is relative to the
 // Collection's folder and cannot leave it, so the people who can edit the

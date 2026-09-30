@@ -68,6 +68,7 @@ async function fixture(sourceDataset = false, targetDataset = true) {
   const hooks: {
     hideDatasetLocations?: boolean; beforeRead?: () => void; afterEffect?: () => void;
     beforeEffect?: () => void; hostDown: boolean; crashAppend: boolean;
+    readPage?: (request: DatasetInvocation, found: Row[]) => DatasetInvocationResult;
   } = { hostDown: false, crashAppend: false };
   for (const [path, dataset] of [["Source", sourceDataset], ["Target", targetDataset], ["Other", true]] as const) {
     collectionIds.set(path, dataset ? path + "-dataset" : path);
@@ -88,9 +89,11 @@ async function fixture(sourceDataset = false, targetDataset = true) {
       if (!doc) throw new Error(RECORD_NOT_FOUND);
       return { collection: { objectId: collectionPath, path: collectionPath, status: "valid", reasons: [] }, record: record(doc), history: [], nextBeforeHistoryId: null };
     },
-    async queryCollectionRecords({ collectionPath, filter }) {
+    async queryCollectionRecords({ collectionPath, filter, limit = 500 }) {
       const found = [...docs.values()].filter((doc) => doc.collection === collectionPath && (!filter || isDeepStrictEqual(filter.value, doc.status)));
-      return { collection: { objectId: collectionPath, path: collectionPath, status: "valid", reasons: [] }, records: found.map(record), groups: null, nextCursor: null };
+      const page = found.slice(0, limit);
+      return { collection: { objectId: collectionPath, path: collectionPath, status: "valid", reasons: [] }, records: page.map(record), groups: null,
+        nextCursor: found.length > limit ? { sortValues: [], recordPath: page.at(-1)!.path, recordId: page.at(-1)!.id } : null };
     },
   };
   const writes: CollectionRecordWrites = {
@@ -130,7 +133,14 @@ async function fixture(sourceDataset = false, targetDataset = true) {
       hooks.beforeRead?.();
       const filters = Array.isArray(input.filters) ? input.filters : [];
       const found = [...own.values()].filter((row) => filters.every((filter) => filter !== null && typeof filter === "object" && !Array.isArray(filter) && isDeepStrictEqual(row.values[String(filter.fieldId)], filter.value)));
-      return { result: { rows: structuredClone(found), nextCursor: null }, revision: 1, replayed: false };
+      if (hooks.readPage) return hooks.readPage(request, found);
+      const after = input.after;
+      const start = after !== null && typeof after === "object" && !Array.isArray(after)
+        ? found.findIndex((row) => row.id === after.id) + 1 : 0;
+      const limit = typeof input.limit === "number" ? input.limit : 100;
+      const page = found.slice(start, start + limit);
+      return { result: { rows: structuredClone(page), nextCursor: start + limit < found.length
+        ? { id: page.at(-1)!.id, value: page.at(-1)!.id } : null }, revision: 1, replayed: false };
     }
     hooks.beforeEffect?.();
     let result: JsonValue;
@@ -1301,4 +1311,96 @@ it.each([false, true])("retains pre-upgrade verdict keys and accounted links acr
       }
     }
   }
+});
+
+
+describe("Find limits and admission", () => {
+  function populate(f: Awaited<ReturnType<typeof fixture>>, dataset: boolean, count: number) {
+    if (dataset) {
+      const rows = f.rows.get("Target-dataset")!;
+      rows.clear();
+      for (let i = 0; i < count; i += 1) rows.set(i, { id: i, version: 1, values: { id: i, status: "Open" } });
+    } else {
+      for (const [key, doc] of f.docs) if (doc.collection === "Target") f.docs.delete(key);
+      for (let i = 0; i < count; i += 1) f.docs.set("Target/" + i, { id: "target-" + i, path: "Target/" + i + ".md", collection: "Target", status: "Open" });
+    }
+  }
+
+  it.each([false, true])("accepts 500 matches and refuses 501 without partial binding, dataset=%s", async (dataset) => {
+    for (const count of [500, 501]) {
+      const f = await fixture(false, dataset);
+      populate(f, dataset, count);
+      const outcome = await f.run(automation(find("Target", dataset)));
+      expect(outcome).toEqual(count === 500 ? { kind: "done" } : { kind: "failed", timedOut: false,
+        error: "The Find in step 1 matched more than 500 records. Narrow its condition, then try again." });
+      const saved = await f.runs();
+      if (count === 500) {
+        expect(saved[0]?.steps[0]?.output).toMatchObject({ kind: "find", records: Array.from({ length: 500 }, () => expect.objectContaining({ id: expect.any(String) })) });
+      } else expect(saved).toEqual([]);
+      if (dataset) {
+        const pages = f.calls.filter((call) => call.operationId === "read");
+        expect(pages).toHaveLength(5);
+        expect(pages.map((call) => call.input)).toEqual(Array.from({ length: 5 }, (_, index) => ({ limit: 100,
+          filters: [{ fieldId: "status", value: "Open" }], ...(index === 0 ? {} : { after: { id: index * 100 - 1, value: index * 100 - 1 } }) })));
+      }
+    }
+  });
+
+  it.each(["cursor", "identity"])("refuses a repeated dataset %s without any effects", async (mode) => {
+    const f = await fixture();
+    let pages = 0;
+    f.hooks.readPage = () => {
+      pages += 1;
+      return { result: { rows: [{ id: mode === "identity" ? 1 : pages, version: 1, values: { status: "Open" } }],
+        nextCursor: { id: 7, value: "same" } }, revision: 1, replayed: false };
+    };
+    expect(await f.run(automation(find("Target", true) + set(true, "found")))).toMatchObject({ kind: "failed",
+      error: expect.stringContaining(mode === "cursor" ? "repeated cursor" : "duplicate record identity") });
+    expect(pages).toBe(2);
+    expect(f.calls.every((call) => call.operationId === "read")).toBe(true);
+    expect(await f.runs()).toEqual([]);
+  });
+
+  it("preserves numeric and text identities with the same printed ID", async () => {
+    const f = await fixture();
+    const rows = f.rows.get("Target-dataset")!;
+    rows.clear();
+    rows.set(1, { id: 1, version: 1, values: { id: 1, status: "Open" } });
+    rows.set("1", { id: "1", version: 1, values: { id: "1", status: "Open" } });
+    expect(await f.run(automation(find("Target", true)))).toEqual({ kind: "done" });
+    expect((await f.runs())[0]?.steps[0]?.output).toMatchObject({ kind: "find", records: [{ key: 1 }, { key: "1" }] });
+  });
+
+  it.each([false, true])("saves a Find before a busy later step and recovers its order, dataset=%s", async (dataset) => {
+    const f = await fixture(false, dataset);
+    populate(f, dataset, 2);
+    const evaluator = f.dependencies.evaluator;
+    f.dependencies.evaluator = { ...evaluator, evaluate: async () => "busy" };
+    const rule = automation(find("Target", dataset) + set(dataset, "found", "'=\"Closed\"'"));
+    expect(await f.run(rule)).toEqual({ kind: "wait", reason: "busy" });
+    const output = (await f.runs())[0]?.steps[0]?.output;
+    expect(output).toMatchObject({ kind: "find", records: [{ id: expect.any(String) }, { id: expect.any(String) }] });
+    if (dataset) f.rows.get("Target-dataset")!.set(2, { id: 2, version: 1, values: { id: 2, status: "Open" } });
+    else f.docs.set("Target/2", { id: "target-2", path: "Target/2.md", collection: "Target", status: "Open" });
+    f.dependencies.evaluator = evaluator;
+    expect(await f.run(rule)).toEqual({ kind: "done" });
+    expect((await f.runs())[0]?.steps[0]?.output).toEqual(output);
+    if (dataset) expect([...f.rows.get("Target-dataset")!.values()].map((row) => row.values.status)).toEqual(["Closed", "Closed", "Open"]);
+    else expect([...f.docs.values()].filter((doc) => doc.collection === "Target").map((doc) => doc.status)).toEqual(["Closed", "Closed", "Open"]);
+  });
+
+  it.each([false, true])("admits 1000 assignments across repeated fields and refuses an Add before effects, dataset=%s", async (dataset) => {
+    const f = await fixture(false, dataset);
+    populate(f, dataset, 500);
+    const rule = automation(find("Target", dataset) + set(dataset, "found", "First") + set(dataset, "found", "Last") + add("Target", dataset));
+    f.hooks.crashAppend = true;
+    await expect(f.run(rule)).rejects.toThrow("crash before journal append");
+    expect(await f.run(rule)).toMatchObject({ kind: "failed", error: "Step 4 would change more than 1000 fields across this run. Narrow its Find steps, or split it into smaller automations." });
+    const run = (await f.runs())[0]!;
+    expect(run.steps).toHaveLength(3);
+    expect(run.applied).toHaveLength(1000);
+    expect(await f.undo()).toMatchObject({ undone: { reverted: 500 } });
+    if (dataset) expect([...f.rows.get("Target-dataset")!.values()].map((row) => row.values.status)).toEqual(Array(500).fill("Open"));
+    else expect([...f.docs.values()].filter((doc) => doc.collection === "Target").map((doc) => doc.status)).toEqual(Array(500).fill("Open"));
+  }, 120_000);
 });

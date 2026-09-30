@@ -850,6 +850,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     notes: [
       "Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml.",
       "Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.",
+      "An automation can use five Finds, each matching at most 500 records, and supply at most 1,000 field assignments per run, including Add fields. Invoked operations have their own runtime limits.",
     ],
     verbs: AUTOMATION_VERBS,
   },
