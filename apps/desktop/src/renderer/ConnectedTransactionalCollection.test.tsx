@@ -72,9 +72,9 @@ describe("a dataset table's buttons", () => {
     const onNotice = vi.fn();
     render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
     const button = await screen.findByRole("button", { name: "Confirm for record 12" });
-    expect(backend.listAutomationButtons).toHaveBeenCalledWith({ workspaceId: "workspace-a", datasetId: id(1) });
     // The state of this table's button, not another table's button of the same name.
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    expect(backend.listAutomationButtons).toHaveBeenCalledWith({ workspaceId: "workspace-a", datasetId: id(1) });
     fireEvent.click(button);
     await waitFor(() => expect(backend.pressAutomationButton).toHaveBeenCalledWith({
       workspaceId: "workspace-a", datasetId: id(1), table: "Registrations", field: "Confirm", recordId: "12", pressId: expect.any(String), confirmed: [],
