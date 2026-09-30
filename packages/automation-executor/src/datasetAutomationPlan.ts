@@ -302,7 +302,7 @@ function resolve(
   return { steps: { trigger: table === null ? null : { table, read: triggerRead }, steps, finds, rereads }, pinned };
 }
 
-const GENERATED_ONLY = (name: string) =>
+export const GENERATED_ONLY = (name: string) =>
   `${name}'s operations were written or changed outside dohc, so Set fields, Add record, and Find steps cannot use them.`;
 const AUTHORED_MATCHING = (name: string) =>
   `${name}'s operations were written or changed outside dohc, so dohc cannot read a record to check a condition. Choose a record change or a button as the trigger.`;
