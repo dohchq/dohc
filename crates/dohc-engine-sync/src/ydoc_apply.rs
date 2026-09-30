@@ -3470,7 +3470,8 @@ pub fn project_and_write_in_tx(
         )?;
     }
     enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
-    dohc_engine_collab::author_coverage::advance_moment_in(tx, key, &result.moment.moment_id)
+    // Later envelopes may supersede this disk projection; the history moment already covers its interval.
+    dohc_engine_collab::author_coverage::advance_in(tx, key, false)
         .map_err(map_collab_hard_error)?;
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the

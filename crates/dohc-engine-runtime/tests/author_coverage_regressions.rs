@@ -633,16 +633,7 @@ async fn sync_projection_credits_folded_authors_and_consumes_pending() {
         rusqlite::params![WS,state.key.object_id],|row|row.get(0)).map_err(StorageError::persist_public)).expect("authors");
     assert!(authors.contains("bob"));
     assert!(!authors.contains("alice"));
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE materialization_jobs SET status='complete' WHERE status='pending'",
-                [],
-            )
-            .map_err(StorageError::persist_public)?;
-            author_coverage::reconcile_in(tx, &state.key, 7)
-        })
-        .expect("complete");
+    assert_eq!(coverage(&store, &state.key).3, None);
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(

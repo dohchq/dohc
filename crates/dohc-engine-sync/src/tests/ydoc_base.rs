@@ -5794,9 +5794,39 @@ fn assert_seed_edits_converge(
     assert!(left.contains("from A") && left.contains("from B"));
 }
 
+fn prepare_unpublished_lineage(
+    engine: &mut EngineStore,
+    key: &dohc_engine_collab::DocKey,
+    live: bool,
+) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?1, ?2, 1100)",
+                rusqlite::params![key.workspace_id, key.object_id],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .unwrap();
+    dohc_engine_collab::ensure_marker(
+        engine,
+        key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        if live {
+            dohc_engine_collab::Regime::Replicated
+        } else {
+            dohc_engine_collab::Regime::LocalOnly
+        },
+        &NoFaults,
+        1_100,
+    )
+    .unwrap();
+}
+
 #[test]
 fn local_unpublished_authors_survive_compaction_base_replacement_and_local_choice() {
-    use dohc_engine_collab::{ContentKind, DocKey, LocalAppend, Regime, WriterDocCache, Ydoc};
+    use dohc_engine_collab::{DocKey, LocalAppend, WriterDocCache, Ydoc};
     use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
     for deferred in [false, true] {
         for external_head in [false, true] {
@@ -5809,15 +5839,7 @@ fn local_unpublished_authors_survive_compaction_base_replacement_and_local_choic
             if external_head {
                 seed_text_head(&mut engine, &key.object_id, path, "external head");
             }
-            dohc_engine_collab::ensure_marker(
-                &mut engine,
-                &key,
-                ContentKind::Plaintext,
-                Regime::LocalOnly,
-                &NoFaults,
-                1_100,
-            )
-            .unwrap();
+            prepare_unpublished_lineage(&mut engine, &key, deferred);
             let local = Ydoc::wire();
             let edit = local.plaintext_insert(0, "Bob's local edit");
             let attribution = ChangeAttribution {
@@ -5945,7 +5967,7 @@ fn local_unpublished_authors_survive_compaction_base_replacement_and_local_choic
 
 #[test]
 fn incomplete_local_side_credits_preservation_before_later_recovery() {
-    use dohc_engine_collab::{ContentKind, DocKey, LocalAppend, Regime, WriterDocCache, Ydoc};
+    use dohc_engine_collab::{DocKey, LocalAppend, WriterDocCache, Ydoc};
     use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
     for deferred in [false, true] {
         let (_scratch, db, mut engine) = open_store();
@@ -5955,15 +5977,7 @@ fn incomplete_local_side_credits_preservation_before_later_recovery() {
         let path = "notes/pending-author.md";
         let key = DocKey::new("ws", "main", "pending-author").unwrap();
         seed_text_head(&mut engine, &key.object_id, path, "external head");
-        dohc_engine_collab::ensure_marker(
-            &mut engine,
-            &key,
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
-            &NoFaults,
-            1_100,
-        )
-        .unwrap();
+        prepare_unpublished_lineage(&mut engine, &key, deferred);
         let local = Ydoc::wire();
         let first = local.plaintext_insert(0, "first");
         let second = local.plaintext_insert(5, " Bob");
@@ -6084,7 +6098,7 @@ fn incomplete_local_side_credits_preservation_before_later_recovery() {
 
 #[test]
 fn incomplete_preserved_local_side_credits_authors_before_choice_or_noop_completion() {
-    use dohc_engine_collab::{ContentKind, DocKey, LocalAppend, Regime, WriterDocCache, Ydoc};
+    use dohc_engine_collab::{DocKey, LocalAppend, WriterDocCache, Ydoc};
     use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
     for deferred in [false, true] {
         for complete_before_choice in [false, true] {
@@ -6094,15 +6108,7 @@ fn incomplete_preserved_local_side_credits_authors_before_choice_or_noop_complet
                 .unwrap();
             let path = "notes/partial-preserved.md";
             let key = DocKey::new("ws", "main", "partial-preserved").unwrap();
-            dohc_engine_collab::ensure_marker(
-                &mut engine,
-                &key,
-                ContentKind::Plaintext,
-                Regime::LocalOnly,
-                &NoFaults,
-                1_100,
-            )
-            .unwrap();
+            prepare_unpublished_lineage(&mut engine, &key, deferred);
             let local = Ydoc::wire();
             let ready = local.plaintext_insert(0, "local content");
             dohc_engine_collab::record_local_update(
@@ -6254,7 +6260,7 @@ fn incomplete_preserved_local_side_credits_authors_before_choice_or_noop_complet
 }
 
 #[test]
-fn deferred_author_capacity_projects_a_prefix_and_resumes_after_materialization() {
+fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
     use dohc_engine_collab::{
         ContentKind, DocKey, WriterDocCache, Ydoc, author_coverage::MAX_INTERVAL_AUTHORS,
     };
@@ -6352,14 +6358,6 @@ fn deferred_author_capacity_projects_a_prefix_and_resumes_after_materialization(
     );
     drop(engine);
     let mut engine = EngineStore::open(&db, 3_000).unwrap();
-    let waiting =
-        drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
-            .unwrap();
-    assert_eq!(
-        waiting.drained, 0,
-        "open can continue while the prefix's disk write is pending"
-    );
-    assert_eq!(pending_count(&engine), 2);
     let job = format!("ydoc-mat_{}", prefix.latest_moment_id);
     assert_eq!(
         engine
@@ -6369,7 +6367,6 @@ fn deferred_author_capacity_projects_a_prefix_and_resumes_after_materialization(
             .status,
         dohc_engine_storage::JobStatus::Pending
     );
-    engine.mark_materialization_complete(&job, 3_100).unwrap();
     let resumed =
         drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
             .unwrap();
