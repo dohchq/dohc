@@ -637,6 +637,17 @@ describe("a server that runs automations", () => {
       expect(again.host).toEqual({ installId: "laptop", generation: 7, handoverFrom: null, releasedThroughMs: 25_000 });
     });
 
+    it("starts the next computer after the latest schedule the server ran, when the relay's clock went back", async () => {
+      const { off, on, storage } = await relays();
+      await checkIn(on, "desktop", true);
+      // The server's schedules ran through 30,000 before a restart set the clock back.
+      storage.recordAutomationServerProgress({ workspaceId: WORKSPACE, throughMs: 30_000 });
+      storage.recordAutomationServerProgress({ workspaceId: WORKSPACE, throughMs: 25_000 });
+      clock = 20_000;
+      const moved = await checkIn(off, "laptop", true);
+      expect(moved.host).toEqual({ installId: "laptop", generation: 2, handoverFrom: null, releasedThroughMs: 30_000 });
+    });
+
     it("keeps a placed computer placed across a handover it called off", async () => {
       const { off, on } = await relays();
       await checkIn(off, "desktop", true);

@@ -963,11 +963,19 @@ describe("sync relay startup guards", () => {
     await vi.waitFor(async () => {
       const response = await fetch(`${relay.baseUrl}/ready`);
       expect(response.status, `relay stayed unready\nstderr:\n${relay.stderr()}`).toBe(200);
-      expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true, apiVersions: RELAY_API_VERSIONS});
+      // The self-host profile runs automations by default.
+      expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true, apiVersions: RELAY_API_VERSIONS, automations: "on"});
     }, {timeout: 10_000});
     expect((await fetch(`${relay.baseUrl}/sync/workspace/live-host`)).status).toBe(404);
   });
 
+  it.each(["true", "", "2"])("refuses an invalid automations flag before opening storage: %j", async value => {
+    const dbPath = join(await tempRoot("invalid-automations"), "relay.sqlite");
+    const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, DOHC_RELAY_AUTOMATIONS: value});
+    expect(code).toBe(1); expect(stderr).toContain("DOHC_RELAY_AUTOMATIONS must be 0 or 1.");
+    await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
+  });
   it.each(["true", "", "2"])("refuses an invalid self-host live flag before opening storage: %j", async value => {
     const dbPath = join(await tempRoot("invalid-self-host"), "relay.sqlite");
     const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",

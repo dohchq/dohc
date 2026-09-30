@@ -106,6 +106,8 @@ Check existing routes before changing them.
 The setup tool does not change your Tailscale configuration.
 The configured HTTPS address must also work from inside the relay container.
 The readiness check tests that connection and reports DNS, TLS, or routing failures.
+If you add your own proxy in front of the relay, do not let it log the `Authorization` header.
+That header carries sign-in credentials and the credential your server syncs with to run your automations.
 
 ## Start and check the server
 

@@ -390,6 +390,14 @@ export interface CollectionAutomationsOptions {
    * Unset, relayed presses run with no hold.
    */
   holdForHost?(): (() => void) | null;
+  /**
+   * Admits the drain's next claim where the host bounds its runs, as a
+   * server does for every workspace it runs: resolves once one may run, or
+   * null when `signal` aborted first. While it waits, claims stay pending.
+   * The drain calls `release` after the claim, saying whether it ran rather
+   * than went back to wait. Unset, claims run at once.
+   */
+  admitRun?(signal: AbortSignal): Promise<RunAdmission | null>;
   onError(context: string, error: unknown): void;
   /**
    * This workspace's dataset host, while it is open; resolves null when it is
@@ -399,6 +407,11 @@ export interface CollectionAutomationsOptions {
   nowMs?: () => number;
   /** Starts a run's deadline, which calls `abort`; returns its cancel. Five minutes unless a test sets it. */
   deadline?: (abort: () => void) => () => void;
+}
+
+/** One claim's turn, from CollectionAutomationsOptions.admitRun. */
+export interface RunAdmission {
+  release(ran: boolean): void;
 }
 
 type IndexedFile = { file: AutomationsFileParseResult; contentHash: string | null };
@@ -4068,27 +4081,35 @@ export class CollectionAutomations {
       // What the ledgers have not heard yet goes first.
       await this.payOwed(true);
       while (!stop.aborted) {
-        const held = await this.nextClaim();
-        if (held === null) return;
-        const { claimId } = held.claim;
-        // From here this drain owns the claim: it settles, waits, or is left
-        // to its ledger's recovery. One that still waits goes straight back.
-        const action = stop.aborted || this.waitingFor.has(claimId)
-          ? { kind: "release" as const }
-          : await this.execute(held, stop);
-        if (action === null) continue;
-        // Released at the end, so this drain does not take the claim again.
-        if (action.kind === "release") {
-          release.push(held);
-          if (action.waitsFor) {
-            this.waitingFor.set(claimId, action.waitsFor);
-            if (isPress(held) && action.waitsFor !== "dataset") this.options.onPressWaiting({ claimId, reason: action.waitsFor });
+        const admitted = this.options.admitRun ? await this.options.admitRun(stop) : null;
+        if (this.options.admitRun && admitted === null) return;
+        let ran = false;
+        try {
+          const held = await this.nextClaim();
+          if (held === null) return;
+          const { claimId } = held.claim;
+          // From here this drain owns the claim: it settles, waits, or is left
+          // to its ledger's recovery. One that still waits goes straight back.
+          const action = stop.aborted || this.waitingFor.has(claimId)
+            ? { kind: "release" as const }
+            : await this.execute(held, stop);
+          ran = action?.kind !== "release";
+          if (action === null) continue;
+          // Released at the end, so this drain does not take the claim again.
+          if (action.kind === "release") {
+            release.push(held);
+            if (action.waitsFor) {
+              this.waitingFor.set(claimId, action.waitsFor);
+              if (isPress(held) && action.waitsFor !== "dataset") this.options.onPressWaiting({ claimId, reason: action.waitsFor });
+            }
+            continue;
           }
-          continue;
+          this.waitingFor.delete(claimId);
+          this.owed.set(claimId, { held, action });
+          if (!stop.aborted) await this.payOwed(true, claimId);
+        } finally {
+          admitted?.release(ran);
         }
-        this.waitingFor.delete(claimId);
-        this.owed.set(claimId, { held, action });
-        if (!stop.aborted) await this.payOwed(true, claimId);
       }
     } catch (error) {
       this.options.onError("drain Collection automation claims", error);

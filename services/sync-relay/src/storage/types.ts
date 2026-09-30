@@ -596,6 +596,12 @@ export interface SyncRelayStorage {
   takeOverAutomationHost(input: import("./automationHosts").AutomationHostTakeOverInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   readAutomationGroupHandover(input: import("./automationHosts").AutomationGroupHandoverInput): import("./automationHosts").AutomationGroupHandover;
   authorizeLinkCollectionWrite(input: Parameters<typeof import("./collectionWrites").authorizeLinkCollectionWrite>[1]): import("../shareAuthorization").AuthorizedShareAction;
+  automationHostRecord(workspaceId: string): import("@dohc/workspace-contracts/relay").RelayAutomationHost | null;
+  readAutomationServerSchedules(workspaceId: string): import("./automationHosts").AutomationServerSchedules | null;
+  beginAutomationServerCopy(input: { workspaceId: string; incarnation: number }): void;
+  recordAutomationServerStart(input: { workspaceId: string; incarnation: number; generation: number; releasedThroughMs: number | null }): void;
+  recordAutomationServerTaken(input: { workspaceId: string; generation: number }): void;
+  recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }): void;
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   listAutomationWorkspaces(): import("./automationWorkspaces").AutomationWorkspace[];

@@ -587,6 +587,48 @@ describe("AutomationScheduler with an automation host", () => {
     scheduler.dispose();
   });
 
+  it("resumes a copy that lost its marks at the recorded progress, and reports what it missed since", async () => {
+    const time = fakeClock(NINE + 2 * HOUR + 30 * MINUTE);
+    const skips: Array<{ first: number[]; count: number }> = [];
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => { throw error; },
+      onSkipped: async (_workspaceId, _schedule, skipped) => { skips.push(skipped); },
+    });
+    const host = movableHost();
+    host.runs = true;
+    const work = fakeSource([hourly]);
+    scheduler.add("ws", work.source, host);
+    scheduler.resumedHere("ws", NINE - HOUR);
+    await idle(scheduler);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [], throughMs: NINE - HOUR },
+      { automationId: hourly.automationId, run: [], throughMs: NINE + 2 * HOUR + 30 * MINUTE },
+    ]);
+    expect(skips).toEqual([{ first: [NINE, NINE + HOUR, NINE + 2 * HOUR], count: 3 }]);
+    scheduler.dispose();
+  });
+
+  it("runs nothing a lost copy recorded, while its clock is behind that progress", async () => {
+    const time = fakeClock(NINE + 30 * MINUTE);
+    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const host = movableHost();
+    host.runs = true;
+    const work = fakeSource([hourly]);
+    scheduler.add("ws", work.source, host);
+    scheduler.resumedHere("ws", NINE + HOUR);
+    await idle(scheduler);
+    time.advance(40 * MINUTE);
+    scheduler.wake();
+    await idle(scheduler);
+    expect(work.steps.flatMap((step) => step.run), "ten o'clock ran on the lost copy").toEqual([]);
+    time.advance(HOUR);
+    scheduler.wake();
+    await idle(scheduler);
+    expect(work.steps.flatMap((step) => step.run)).toEqual([NINE + 2 * HOUR]);
+    scheduler.dispose();
+  });
+
   it("hands over with every schedule stepped through one cutoff, past the engine's bound", async () => {
     const time = fakeClock(NINE);
     const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });

@@ -1,7 +1,7 @@
 import {createHash, randomBytes} from "node:crypto";
 import {mkdir, readdir, rm} from "node:fs/promises";
 import {join} from "node:path";
-import type {JsonValue} from "@dohc/workspace-engine-client";
+import type {Event, JsonValue} from "@dohc/workspace-engine-client";
 import {createEngineClient, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {SyncRelayStorage} from "./storage";
 import {
@@ -67,6 +67,10 @@ export async function startAutomationReplicas(options: {
   nowMs?(): number;
   /** A replica opened or closed. */
   onChanged?(workspaceId: string): void;
+  /** The engine announced something, such as an automation claim, for a workspace it names. */
+  onEngineEvent?(event: Event): void;
+  /** A pull wrote these paths into a replica. */
+  onPulled?(workspaceId: string, paths: readonly string[]): void;
   /** A pass ran to its end. A workspace that failed in it is in failedSyncs. */
   onReconciled?(): void;
   /** A pass failed, or one workspace in it did (`workspaceId` names it). */
@@ -116,6 +120,7 @@ export async function startAutomationReplicas(options: {
         },
         onStderr: text => console.error("[automation-replicas]", text.trimEnd()),
       });
+      if (options.onEngineEvent) started.onEvent(options.onEngineEvent);
       client = {engine: started, exited};
       return client;
     })().finally(() => { starting = undefined; });
@@ -173,7 +178,11 @@ export async function startAutomationReplicas(options: {
         const head = logHead(row.workspaceId);
         let pushMore = true, pullMore = true;
         for (let round = 0; pushMore && round < rounds; round++) pushMore = (await replication.push(callerSignal)).hasMore;
-        for (let round = 0; pullMore && round < rounds; round++) pullMore = (await replication.pull(callerSignal)).hasMore;
+        // Each committed page is heard at once, so a later page that fails loses nothing already applied.
+        for (let round = 0; pullMore && round < rounds; round++) {
+          // A page with no file paths can still carry Group messages.
+          pullMore = (await replication.pull(callerSignal, (page) => options.onPulled?.(row.workspaceId, page.changedPaths))).hasMore;
+        }
         if (pushMore || pullMore) return false;
         replica.pulledHead = Math.max(replica.pulledHead, head);
         return true;

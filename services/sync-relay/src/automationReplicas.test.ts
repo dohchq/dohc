@@ -157,7 +157,8 @@ describe("the automation replicas", () => {
             case "sync.materializePendingCursor": return { result: { materialized: true } };
             case "sync.commitCursor": return { result: { committed: true, sharingDeclined: [] } };
             case "sync.pull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
-              fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [] } };
+              fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [],
+              changedPaths: [{ versionId: "main", path: "Tasks/automations.yaml", operation: "write", contentKind: "text" }] } };
             default: throw new Error(`unexpected ${request.method}`);
           }
         }),
@@ -174,10 +175,11 @@ describe("the automation replicas", () => {
     wanted: () => string[],
     clock: { ms: number },
     onError: (error: unknown) => void = (error) => { throw error; },
+    onPulled?: (workspaceId: string, paths: readonly string[]) => void,
   ) {
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
     const started = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
-      key, namespace, wanted, nowMs: () => clock.ms, onError });
+      key, namespace, wanted, nowMs: () => clock.ms, onError, ...(onPulled ? { onPulled } : {}) });
     cleanup.push(async () => { await started.close(); await rm(root, { recursive: true, force: true }); });
     await started.settled();
     return { replicas: started, root };
@@ -187,9 +189,11 @@ describe("the automation replicas", () => {
     const { storage, log } = await relay();
     const engine = fakeEngine();
     const clock = { ms: 5 };
-    const { replicas: running } = await replicas(storage, () => [WORKSPACE], clock);
+    const pulled: Array<[string, readonly string[]]> = [];
+    const { replicas: running } = await replicas(storage, () => [WORKSPACE], clock, undefined, (workspaceId, paths) => pulled.push([workspaceId, paths]));
     const replica = running.replica(WORKSPACE)!;
     expect(replica).toMatchObject({ workspaceId: WORKSPACE, ownerUserId: "owner", incarnation: 1, startedAtMs: 5, workspace: "handle-1" });
+    expect(pulled, "the executor hears which files a pull wrote").toEqual([[WORKSPACE, ["Tasks/automations.yaml"]]]);
     const open = engine.sent.find((request) => request.method === "workspace.open")!;
     expect(open.params).toMatchObject({ workspaceId: WORKSPACE, captureMode: "none", reconcileCollections: true, rootDir: replica.root,
       relay: { baseUrl: "https://relay.example", bearerToken: deriveAutomationReplicaBearer(storage.currentAutomationWorkspace(WORKSPACE)!, { key, namespace }) } });

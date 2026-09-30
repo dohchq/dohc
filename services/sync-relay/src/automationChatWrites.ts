@@ -1,11 +1,10 @@
 import {
   NoticeNotSentError,
   readChatDirectory,
-  type AutomationNotice,
 } from "@dohc/automation-executor/automation-chat";
 import type {AutomationChatDependencies} from "@dohc/automation-executor/collection-automation-run";
 import type {LinkedChatStore} from "@dohc/workspace-contracts/engine";
-import {isNoticeTarget} from "@dohc/workspace-contracts/relay";
+import {isNoticeTarget, type PostNoticeRequest} from "@dohc/workspace-contracts/relay";
 import {ChatsLiveAdapter} from "@dohc/workspace-engine-client";
 import type {TokenBucketLimiter} from "@dohc/service-http";
 import type {AutomationReplica} from "./automationReplicas";
@@ -94,6 +93,9 @@ export function replicaAutomationChat(input: {
   };
 }
 
+/** A notice this server sends for a workspace's automations. */
+export type ServerNotice = Pick<PostNoticeRequest, "noticeId" | "kind" | "title" | "body" | "target"> & { recipientUserId: string };
+
 /**
  * Sends an automation's notice from this server, in process, as the relay's
  * notice route would for the workspace owner: the owner is the sender, and
@@ -107,7 +109,7 @@ export function replicaNoticePoster(input: {
   noticeLimiter: TokenBucketLimiter;
   ownerName(): Promise<string>;
   nowMs(): number;
-}): (notice: AutomationNotice, signal: AbortSignal) => Promise<void> {
+}): (notice: ServerNotice, signal: AbortSignal) => Promise<void> {
   const {replica, storage} = input;
   return async (notice, signal) => {
     const run = AbortSignal.any([signal, replica.signal]);
@@ -138,7 +140,7 @@ export function replicaNoticePoster(input: {
         const { path } = notice.target;
         throw new NoticeNotSentError(isNoticeTarget(notice.target)
           ? "This server refused the notice."
-          : path !== path.trim()
+          : path !== undefined && path !== path.trim()
             ? "This notice points to a path that starts or ends with whitespace."
             : "This notice points to a path too long to send.");
       }
