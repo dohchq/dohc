@@ -1198,6 +1198,24 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
     expect(h.onError.mock.calls[1]![0]).not.toContain("Your reaction was saved");
   });
 
+  it("keeps a queued old-account rollback from changing the new account's baseline", async () => {
+    const currentRow = you({ reactionId: "r-current", authorId: "next-account" });
+    const h = harness([currentRow], { deferSetters: true });
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    toggle(h, "added");
+    h.flush();
+    writes[0]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    h.ctx.setViewerAuthorId("next-account");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "removed" });
+    h.flush();
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledTimes(2));
+    h.flush();
+    expect(h.reactions).toEqual([currentRow]);
+    expect(h.ctx.pendingReactions.current.size).toBe(0);
+  });
+
   it("adopts only its own cell from the listing, so another cell's pending write survives", async () => {
     const h = harness();
     bridgeMock.setChatReaction.mockResolvedValue(undefined);
