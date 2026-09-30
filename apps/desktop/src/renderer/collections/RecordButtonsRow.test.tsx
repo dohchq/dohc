@@ -96,6 +96,7 @@ describe("RecordButtonsRow", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(button);
     await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1));
+    expect(bridge.pressAutomationButton).toHaveBeenCalledWith(expect.objectContaining({ confirmed: ["invoices.settle", "receipts.send"] }));
   });
 
   it("closes the question on scroll even when its words were already showing", async () => {

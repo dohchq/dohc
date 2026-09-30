@@ -20,9 +20,9 @@ import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { ReachRoster } from "./automationReach";
 import type { AutomationTarget } from "./automationTargets";
 import { chatDirectoryOf } from "./automationChat";
-import { automationInventory } from "./automationInventory";
+import { automationInventory, canPressInventory, irreversibleActionsOf } from "./automationInventory";
 import { definitionHash, reachStepsOf, chatReachStepsOf } from "./automationPlan";
-import { reachStepId } from "./automationReach";
+import { checkAutomationReach, reachStepId } from "./automationReach";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 
 const evaluator = createAutomationFormulaEvaluator();
@@ -136,6 +136,12 @@ async function fixture(sourceDataset = false, targetDataset = true) {
       const values = input.values as Record<string, JsonValue>;
       own.set(id, { id, version: 1, values: { id, ...values } });
       result = { id, version: 1 };
+    } else if (request.operationId === "action" || request.operationId === "reverse") {
+      const row = own.get(input.id as string | number)!;
+      const before = row.values.status;
+      row.values.status = input.status ?? "Acted";
+      row.version += 1;
+      result = { undo: { id: row.id, status: before ?? null } };
     } else {
       const row = own.get(input.id as string | number);
       if (!row) throw new AppBackendRuntimeError({ code: "not_found", message: "Gone" });
@@ -202,6 +208,216 @@ async function fixture(sourceDataset = false, targetDataset = true) {
   };
   return { run, runs, undo, move, targets, rows, docs, hooks, host, calls, dependencies, held, setRoster: (roster: Exclude<ReachRoster, { kind: "unknown" }>) => { currentRoster = roster; } };
 }
+
+function authored(f: Awaited<ReturnType<typeof fixture>>, path: string, reversible = true) {
+  const target = f.targets.get(path);
+  if (target?.kind !== "dataset") throw new Error("Expected a dataset");
+  target.generated = false;
+  target.approved.definition.operations.push(
+    { operationId: "action", name: "rows.act", label: "Act", kind: "action", tableId: "table", access: "owner", readOnly: false, fieldIds: ["status"], ...(reversible ? { reversedBy: "rows.reverse" } : {}) },
+    { operationId: "reverse", name: "rows.reverse", label: "Reverse", kind: "action", tableId: "table", access: "owner", readOnly: false, fieldIds: ["status"] },
+  );
+  return target;
+}
+const actionStep = (path: string) => `      - invoke: rows.act\n        collection: ${path}\n        input: {id: same}\n`;
+
+describe("cross-Collection authored actions", () => {
+  it.each([false, true])("resolves an action only in its destination from dataset source %s", async (sourceDataset) => {
+    const f = await fixture(sourceDataset);
+    authored(f, "Target");
+    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "done" });
+    expect(f.calls.filter((call) => call.operationId === "action")).toMatchObject([{ datasetId: "Target-dataset" }]);
+    expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Acted");
+    expect((await f.runs())[0]!.steps[0]!.effects[0]).toMatchObject({ kind: "dataset-action", collectionPath: "Target", rules: { datasetId: "Target-dataset" } });
+    expect(await f.undo()).toMatchObject({ undone: { actionsReversed: 1 } });
+    expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Open");
+  });
+
+  it("does not borrow a same-named operation from the source", async () => {
+    const f = await fixture(true);
+    authored(f, "Source");
+    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "failed", error: expect.stringContaining("no approved action") });
+    expect(f.calls).toEqual([]);
+  });
+
+  it("keeps authored source fields unreadable while allowing a document add and a destination action", async () => {
+    const f = await fixture(true, false);
+    authored(f, "Source");
+    authored(f, "Other");
+    expect(await f.run(automation(add("Target", false) + actionStep("Other")))).toMatchObject({ kind: "done" });
+    expect(f.calls.every((call) => call.datasetId !== "Source-dataset")).toBe(true);
+    const blocked = await fixture(true);
+    authored(blocked, "Source");
+    authored(blocked, "Target");
+    expect(await blocked.run(automation(actionStep("Target").replace("{id: same}", "{id: '=record.Status'}")))).toMatchObject({ kind: "failed" });
+    expect(blocked.calls).toEqual([]);
+  });
+
+  it.each([add("Target", true), find("Target", true), '      - set: {Status: Closed}\n        operation: rows.edit\n'])("keeps generic steps generated-only: %s", async (steps) => {
+    const f = await fixture(true);
+    authored(f, "Source");
+    authored(f, "Target");
+    expect(await f.run(automation(steps))).toMatchObject({ kind: "failed", error: expect.stringContaining("written or changed") });
+    expect(f.calls).toEqual([]);
+  });
+
+  it("replays a committed action after a journal failure and retains the destination after it moves", async () => {
+    const f = await fixture();
+    authored(f, "Target");
+    const definition = automation(actionStep("Target"));
+    f.hooks.crashAppend = true;
+    await expect(f.run(definition)).rejects.toThrow("crash before journal append");
+    f.move("Target", "Moved");
+    expect(await f.run(definition)).toMatchObject({ kind: "done" });
+    expect(f.rows.get("Target-dataset")!.get("same")!.version).toBe(2);
+    expect((await f.runs())[0]!.steps[0]!.effects[0]).toMatchObject({ collectionPath: "Moved" });
+    expect(await f.undo()).toMatchObject({ undone: { actionsReversed: 1 } });
+  });
+
+  it("does not invent a reverse action", async () => {
+    const f = await fixture();
+    authored(f, "Target", false);
+    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "done" });
+    expect(await f.undo()).toMatchObject({ undone: { actions: 1, actionsReversed: 0 } });
+    expect(f.calls.some((call) => call.operationId === "reverse")).toBe(false);
+  });
+
+  it.each([null, "Source"])("treats invoke destination %s as the source", async (collection) => {
+    const f = await fixture(true);
+    authored(f, "Source");
+    const steps = actionStep("Source");
+    expect(await f.run(automation(collection === null ? steps.replace("        collection: Source\n", "") : steps))).toMatchObject({ kind: "done" });
+    expect(f.calls).toMatchObject([{ datasetId: "Source-dataset", operationId: "action" }]);
+  });
+
+  it("rejects document destinations for invoke", async () => {
+    const f = await fixture(true, false);
+    authored(f, "Source");
+    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "failed", error: "Only a dataset Collection has actions." });
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each(["descriptor", "revision"])("refuses a changed action destination %s on replay", async (change) => {
+    const f = await fixture();
+    const target = authored(f, "Target");
+    const definition = automation(actionStep("Target"));
+    f.hooks.crashAppend = true;
+    await expect(f.run(definition)).rejects.toThrow();
+    target.approved = { ...target.approved, ...(change === "descriptor" ? { datasetId: "replacement" } : { revision: 2, revisionSha256: "b".repeat(64) }) };
+    expect(await f.run(definition)).toMatchObject({ kind: "failed", error: "Collection rules changed after this run started." });
+    expect(f.calls.filter((call) => call.operationId === "action")).toHaveLength(1);
+  });
+
+  it("waits for the destination host without invoking", async () => {
+    const f = await fixture();
+    authored(f, "Target");
+    f.hooks.hostDown = true;
+    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "wait" });
+    expect(f.calls).toEqual([]);
+    f.hooks.hostDown = false;
+    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "done" });
+  });
+
+  it("reverses mixed actions in journal order across datasets and selected branches", async () => {
+    const f = await fixture();
+    authored(f, "Target");
+    authored(f, "Other");
+    const branch = '      - if: "true"\n        do:\n' + actionStep("Other").replace(/^/gm, "    ").trimEnd() + '\n        otherwise:\n' + actionStep("Target").replace(/^/gm, "    ").trimEnd() + '\n';
+    expect(await f.run(automation(actionStep("Target") + branch))).toMatchObject({ kind: "done" });
+    expect(f.calls.filter((call) => call.operationId === "action").map((call) => call.datasetId)).toEqual(["Target-dataset", "Other-dataset"]);
+    expect(await f.undo()).toMatchObject({ undone: { actionsReversed: 2 } });
+    expect(f.calls.filter((call) => call.operationId === "reverse").map((call) => call.datasetId)).toEqual(["Other-dataset", "Target-dataset"]);
+  });
+
+  it("rechecks action grants immediately before invocation", async () => {
+    const f = await fixture();
+    authored(f, "Target");
+    const save = f.dependencies.store.save;
+    f.dependencies.store.save = async (run) => {
+      await save(run);
+      f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "person", recipientEmail: "person@example.com", files: { paths: ["Source"], access: "edit", versionId: null }, channel: null }] });
+    };
+    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "failed" });
+    expect(f.calls).toEqual([]);
+  });
+
+  it("resumes a destination action after unused read access is removed", async () => {
+    const f = await fixture();
+    const target = authored(f, "Target");
+    target.approved.definition.operations = target.approved.definition.operations.map((operation) => ({ ...operation, access: "helper" }));
+    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "person", recipientEmail: "person@example.com",
+      files: { paths: ["Source"], access: "edit", versionId: null }, channel: null }] });
+    const principalKey = datasetPrincipalKey("workspace", "editor", "person");
+    target.grants = { workspaceId: "workspace", grants: [{ principalKey, operationIds: ["action", "read"] }] };
+    const definition = automation(actionStep("Target"));
+    f.hooks.crashAppend = true;
+    await expect(f.run(definition)).rejects.toThrow("crash before journal append");
+    expect((await f.runs())[0]!.readableFields).toEqual([]);
+    target.grants = { workspaceId: "workspace", grants: [{ principalKey, operationIds: ["action"] }] };
+    expect(await f.run(definition)).toMatchObject({ kind: "done" });
+    expect(f.calls.every((call) => call.operationId === "action")).toBe(true);
+    expect(f.rows.get("Target-dataset")!.get("same")!.version).toBe(2);
+  });
+
+  it("checks destination grants against source editors before invoking", async () => {
+    const f = await fixture();
+    authored(f, "Target");
+    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@test.local", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null }] });
+    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "failed" });
+    expect(f.calls).toEqual([]);
+  });
+
+  it("requires destination grants for the declared reverse as well as the forward action", async () => {
+    const f = await fixture();
+    const target = authored(f, "Target");
+    target.approved.definition.operations = target.approved.definition.operations.map((operation) => ({ ...operation, access: "helper" }));
+    const editor = { grantId: "editor", recipientUserId: "person", recipientEmail: "person@example.com", files: { paths: ["Source"], versionId: null, access: "edit" as const }, channel: null };
+    const roster: ReachRoster = { kind: "owner", ownerUserId: "owner", grants: [editor] };
+    f.setRoster(roster);
+    target.grants = { workspaceId: "workspace", grants: [{ principalKey: datasetPrincipalKey("workspace", "editor", "person"), operationIds: ["action"] }] };
+    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "done" });
+    const reach = await automationUndoReach(await f.runs(), f.dependencies.targets, () => "Target", null, f.host);
+    expect(reach).toMatchObject([{ kind: "dataset-operation", datasetId: "Target-dataset", operation: { operationId: "reverse" } }]);
+    expect(checkAutomationReach(roster, { id: "test", collection: { path: "Source", name: "Source" }, codeFiles: [], steps: reach }))
+      .toMatchObject([{ allowed: false }]);
+    expect(f.calls.some((call) => call.operationId === "reverse")).toBe(false);
+    target.grants = { ...target.grants, grants: target.grants.grants.map((grant) => ({ ...grant, operationIds: [...grant.operationIds, "reverse"] })) };
+    const allowed = await automationUndoReach(await f.runs(), f.dependencies.targets, () => "Target", null, f.host);
+    expect(checkAutomationReach(roster, { id: "test", collection: { path: "Source", name: "Source" }, codeFiles: [], steps: allowed }))
+      .toMatchObject([{ allowed: true }]);
+    expect(await f.undo()).toMatchObject({ undone: { actionsReversed: 1 } });
+  });
+
+  it("requires the presser's destination operation and distinguishes confirmations across datasets", async () => {
+    const f = await fixture();
+    const target = authored(f, "Target", false);
+    const other = authored(f, "Other", false);
+    const definition = automation(actionStep("Target") + actionStep("Other"));
+    const inventory = automationInventory(definition, "Source", (path) => f.targets.get(path)!, null);
+    const describe = async (id: string) => {
+      const own = id === target.approved.datasetId ? target : other;
+      return { ...own.approved, name: own.collection.name, tables: own.approved.definition.tables, operations: own.approved.definition.operations };
+    };
+    expect(await canPressInventory(inventory)).toBe(false);
+    expect(await canPressInventory(inventory, describe)).toBe(true);
+    expect(await canPressInventory(inventory, async (id) => ({ ...await describe(id), operations: id === other.approved.datasetId ? [] : (await describe(id)).operations }))).toBe(false);
+    expect(await canPressInventory(inventory, async () => describe(target.approved.datasetId))).toBe(false);
+    expect(irreversibleActionsOf(definition, "Source", inventory)).toEqual([
+      { name: "Target-dataset/rows.act", label: "Target: Act" }, { name: "Other-dataset/rows.act", label: "Other: Act" },
+    ]);
+  });
+
+  it("keeps caller access during approval re-indexing while requiring every operation", async () => {
+    const f = await fixture();
+    const target = authored(f, "Target");
+    const inventory = automationInventory(automation(actionStep("Target")), "Source", (path) => f.targets.get(path)!, null);
+    const description = { ...target.approved, revision: 2, revisionSha256: "b".repeat(64),
+      name: target.collection.name, tables: target.approved.definition.tables, operations: target.approved.definition.operations };
+    expect(await canPressInventory(inventory, async () => description)).toBe(true);
+    expect(await canPressInventory(inventory, async () => ({ ...description, operations: [] }))).toBe(false);
+    expect(await canPressInventory(inventory, async () => ({ ...description, datasetId: "replacement" }))).toBe(false);
+  });
+});
 
 describe("static steps across storage kinds", () => {
   it.each([1, 2])("waits before reading when the source moves as read session %s opens", async (session) => {

@@ -881,9 +881,13 @@ function placeOf(
 
 type InvokeStep = Extract<AutomationStep, { kind: "invoke" }>;
 
-/** An action step the builder edits: one in a dataset Collection's own list of steps. */
+/**
+ * An action step the builder edits: one in a dataset Collection's own list
+ * of steps that runs one of its own actions. An action in another
+ * Collection shows as its sentence, since this panel lists only its own.
+ */
 function editableAction(step: AutomationStep, table: AutomationTable | null): InvokeStep | null {
-  return step.kind === "invoke" && table !== null ? step : null;
+  return step.kind === "invoke" && step.collection === null && table !== null ? step : null;
 }
 
 /** A step's saved verdict, from its places among the automation's verdicts, as one sentence; or null when it may run. */
@@ -2378,7 +2382,7 @@ export function AutomationBuilder(props: {
                 // The trigger's table's first action, as its record is the one a new step names.
                 const first = actionsByTable[0]!;
                 addStep(listId, {
-                  kind: "invoke",
+                  kind: "invoke", collection: null,
                   operation: first.name,
                   // The action reads its record itself, so it takes the record's id, when the trigger has one in its table.
                   input: noRecord || draft.when.kind === "record-removed" || first.table !== watched

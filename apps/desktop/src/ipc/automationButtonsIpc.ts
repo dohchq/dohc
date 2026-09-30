@@ -200,7 +200,7 @@ export function registerAutomationButtonsIpc<
    * view's are read from its automations.yaml and run on the owner's
    * computer; anything less than Edit on the Collection's folder refuses all.
    */
-  async function documentButtons(operation: Operation, collectionPath: string): Promise<CollectionAutomationButton[]> {
+  async function documentButtons(operation: Operation, collectionPath: string, describe: (datasetId: string) => Promise<DatasetDescription>): Promise<CollectionAutomationButton[]> {
     const fields = await dependencies.buttonFields(operation, collectionPath);
     if (fields.length === 0) return [];
     const access = documentButtonAccess(operation.workspace.shareView, collectionPath);
@@ -208,7 +208,7 @@ export function registerAutomationButtonsIpc<
       const reason = noAccessReason(nameOf(collectionPath));
       return fields.map((field) => ({ field, state: { kind: "disabled", reason } }));
     }
-    if (access === "press") return await operation.state.collectionAutomations.buttons(collectionPath, fields);
+    if (access === "press") return await operation.state.collectionAutomations.buttons(collectionPath, fields, describe);
     const file = await sharedAutomations(operation, collectionPath);
     const collectionId = await dependencies.collectionId(operation, collectionPath);
     return fields.map((field) => ({ field, state: relayedButtonState(file, collectionId, field, nameOf(collectionPath)) }));
@@ -223,7 +223,7 @@ export function registerAutomationButtonsIpc<
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListRecordButtonsResult> => {
       const found = await dependencies.recordAt(operation, input.path);
       if (found === null) return { record: null };
-      return { ...found, buttons: await documentButtons(operation, found.collectionPath) };
+      return { ...found, buttons: await documentButtons(operation, found.collectionPath, (id) => dependencies.describeDataset(event.sender, input.workspaceId, id)) };
     });
   });
 
@@ -242,7 +242,7 @@ export function registerAutomationButtonsIpc<
       return { buttons: buttons.map((button, index) => ({ ...button, state: states[index]! })) };
     }
     assertCollectionPath(input.collectionPath);
-    const buttons = await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, (operation) => documentButtons(operation, input.collectionPath));
+    const buttons = await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, (operation) => documentButtons(operation, input.collectionPath, (id) => dependencies.describeDataset(event.sender, input.workspaceId, id)));
     return { buttons: buttons.map((button) => ({ ...button, table: null })) };
   });
 
@@ -283,13 +283,14 @@ export function registerAutomationButtonsIpc<
         return { kind: "relayed" as const };
       }
       const pressed = await operation.state.collectionAutomations.press(
-        { collectionPath: input.collectionPath, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy, by: caller.by },
+        { collectionPath: input.collectionPath, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy, by: caller.by, confirmed: input.confirmed ?? [] },
         watch,
         async () => {
           if (!(await dependencies.buttonFields(operation, input.collectionPath)).includes(input.field)) {
             throw new Error(`${input.field} is not a button in ${nameOf(input.collectionPath)}.`);
           }
         },
+        caller.describeDataset,
       );
       return { kind: "document" as const, pressed };
     });
@@ -325,7 +326,18 @@ export function registerAutomationButtonsIpc<
     const datasetId = await caller.withOperation((operation) => shareViewIsPresent(operation.workspace.shareView)
       ? Promise.resolve(null)
       : operation.state.collectionAutomations.datasetIn(collectionPath));
-    if (datasetId === null) return await press({ workspaceId, collectionPath, field, recordId, pressId: namedPressId(input, "document") }, caller);
+    if (datasetId === null) {
+      const pressId = namedPressId(input, "document");
+      const unconfirmed = await caller.withOperation(async (operation) => {
+        if (shareViewIsPresent(operation.workspace.shareView) || await operation.state.collectionAutomations.documentPressed({ collectionPath, field, pressId })) return [];
+        const [button] = await operation.state.collectionAutomations.buttons(collectionPath, [field], caller.describeDataset);
+        if (button === undefined) throw new Error(`${field} did not start.`);
+        if (button.state.kind !== "ready") throw new Error(button.state.reason);
+        return (button.state.irreversible ?? []).filter((action) => !input.confirm.includes(action.name));
+      });
+      if (unconfirmed.length > 0) return { confirm: unconfirmed };
+      return await press({ workspaceId, collectionPath, field, recordId, pressId, confirmed: [...input.confirm] }, caller);
+    }
     const pressId = namedPressId(input, "dataset");
     const description = await caller.describeDataset(datasetId);
     const named = describedButtons(description)

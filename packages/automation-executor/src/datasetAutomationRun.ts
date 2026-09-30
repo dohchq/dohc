@@ -496,7 +496,7 @@ export function datasetStepEffects(
     if (effect.kind === "notice") return datasetNotice(effect, collectionPath);
     if (effect.kind === "invoke") {
       const { operation, table } = steps.steps.get(ordinal)!;
-      return { kind: "dataset-action", rules, operationId: operation.operationId, tableId: table.tableId, input: effect.input };
+      return { kind: "dataset-action", collectionPath, rules, operationId: operation.operationId, tableId: table.tableId, input: effect.input };
     }
     let operation: DatasetOperation, table: DatasetTable;
     if (isCode) {

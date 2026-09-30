@@ -1468,7 +1468,7 @@ describe("Collection automations", () => {
     await w.executor.open();
     const draft: Automation = {
       id: "settle", name: "Settle", enabled: true, when: { kind: "record-added", table: null }, if: null,
-      do: [{ kind: "invoke", operation: "tasks.settle", input: [] }],
+      do: [{ kind: "invoke", collection: null, operation: "tasks.settle", input: [] }],
     };
     await expect(w.executor.draftCannotRun("Tasks", draft)).resolves.toBe("Only a dataset Collection has actions.");
     await expect(w.executor.draftCannotRun("Tasks", { ...draft, do: [{ kind: "set", values: [{ field: "Points", value: { kind: "literal", value: 1 } }], records: null, operation: null }] }))

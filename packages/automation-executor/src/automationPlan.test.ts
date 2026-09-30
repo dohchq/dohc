@@ -273,7 +273,7 @@ describe("a formula's syntax, for the builder", () => {
         { kind: "if", if: "1 +", do: [
           { kind: "find", condition: "1 +", collection: null, as: "found", operation: null },
         ], otherwise: [
-          { kind: "invoke", operation: "a.b", input: [{ key: "id", value: bad }] },
+          { kind: "invoke", collection: null, operation: "a.b", input: [{ key: "id", value: bad }] },
           { kind: "notify", text: "Hi {record.Title", to: [{ kind: "literal", value: "ana" }, bad] },
           { kind: "post", text: "Hi {record.Title} {{ok}}", group: "Trip" },
           { kind: "wake-agent", text: "{record?.of / 2}", person: "owner" },

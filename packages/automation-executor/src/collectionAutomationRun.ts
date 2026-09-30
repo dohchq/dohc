@@ -780,7 +780,7 @@ export function rebaseRun(run: StoredRun, collectionPathOf: (collectionId: strin
     ...(step.collections ? { collections: step.collections.map((target) => ({ ...target, path: folder(target.path) })) } : {}),
     effects: step.effects.map((effect) => {
       if (effect.kind === "add") return { ...effect, collectionPath: folder(effect.collectionPath) };
-      if (effect.kind === "dataset-edit" || effect.kind === "dataset-create") return effect.collectionPath === undefined ? effect : { ...effect, collectionPath: folder(effect.collectionPath) };
+      if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") return effect.collectionPath === undefined ? effect : { ...effect, collectionPath: folder(effect.collectionPath) };
       if (effect.kind !== "set") return effect;
       return { ...effect, target: { ...effect.target, collectionPath: folder(effect.target.collectionPath), path: record(effect.target.path) } };
     }),

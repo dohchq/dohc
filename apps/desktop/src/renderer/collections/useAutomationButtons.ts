@@ -236,7 +236,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       notes.delete(key);
       changed(key);
       try {
-        const result = await bridge().pressAutomationButton({ workspaceId, ...of, field, recordId: record.id, pressId, ...("datasetId" in of ? { confirmed: [...confirmed] } : {}) });
+        const result = await bridge().pressAutomationButton({ workspaceId, ...of, field, recordId: record.id, pressId, confirmed: [...confirmed] });
         if (closed) return;
         if (result.busy) {
           notes.set(key, result.reason);

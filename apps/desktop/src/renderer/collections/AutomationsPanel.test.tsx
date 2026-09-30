@@ -491,7 +491,7 @@ describe("a dataset table's ⚡ panel", () => {
     await user.type(screen.getByRole("textbox", { name: "Step 2, note" }), "Due soon");
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1), SLOW);
-    expect(written[0]!.automations[0]!.do[1]).toEqual({ kind: "invoke", operation: "invoices.remind", input: [
+    expect(written[0]!.automations[0]!.do[1]).toEqual({ kind: "invoke", collection: null, operation: "invoices.remind", input: [
       { key: "id", value: { kind: "formula", expression: "record.id" } },
       { key: "note", value: { kind: "literal", value: "Due soon" } },
     ] });
@@ -499,7 +499,7 @@ describe("a dataset table's ⚡ panel", () => {
 
   it("keeps a saved action input's number as the file wrote it, shows it as a number, and keeps a typed today() in view", async () => {
     const withActions: AutomationTable = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] };
-    const saved: Automation = { ...onInvoices, id: "settle", name: "Settle it", do: [{ kind: "invoke", operation: "invoices.settle", input: [
+    const saved: Automation = { ...onInvoices, id: "settle", name: "Settle it", do: [{ kind: "invoke", collection: null, operation: "invoices.settle", input: [
       { key: "amount", value: { kind: "literal", value: 12 } },
       { key: "due", value: { kind: "formula", expression: "today()" } },
     ] }] };
@@ -521,7 +521,7 @@ describe("a dataset table's ⚡ panel", () => {
       { name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false },
       { name: "refunds.issue", label: "Issue refund", table: "Refunds", reversible: false },
     ] };
-    const saved: Automation = { ...onInvoices, id: "refund", name: "Refund it", do: [{ kind: "invoke", operation: "refunds.issue", input: [] }] };
+    const saved: Automation = { ...onInvoices, id: "refund", name: "Refund it", do: [{ kind: "invoke", collection: null, operation: "refunds.issue", input: [] }] };
     makeBridge(read([summary(saved)]));
     const user = userEvent.setup();
     render(<Panel table={withActions} />);
@@ -535,7 +535,7 @@ describe("a dataset table's ⚡ panel", () => {
     makeBridge(read([]));
     const onStarted = vi.fn();
     const draft: Automation = { id: "", name: "Settle", enabled: true, when: { kind: "button", field: "Settle", table: "Invoices" }, if: null,
-      do: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
+      do: [{ kind: "invoke", collection: null, operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
     render(<Panel table={{ ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] }}
       start={{ automation: draft, seq: 1 }} onStarted={onStarted} />);
     await waitFor(() => expect(onStarted).toHaveBeenCalledTimes(1));
@@ -549,7 +549,7 @@ describe("a dataset table's ⚡ panel", () => {
     makeBridge(read([]));
     const user = userEvent.setup();
     const draft: Automation = { id: "", name: "Settle", enabled: true, when: { kind: "button", field: "Settle", table: "Invoices" }, if: null,
-      do: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
+      do: [{ kind: "invoke", collection: null, operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
     const table = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] };
     let start: { automation: Automation; seq: number } | null = { automation: draft, seq: 1 };
     const { rerender, unmount } = render(<Panel table={table} start={start} onStarted={() => { start = null; }} />);
@@ -568,7 +568,7 @@ describe("a dataset table's ⚡ panel", () => {
 
   it("keeps each action input's kind, asks for a number where one is typed, and saves it as a number", async () => {
     const withActions: AutomationTable = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: true }] };
-    const saved: Automation = { ...onInvoices, id: "settle", name: "Settle it", do: [{ kind: "invoke", operation: "invoices.settle", input: [
+    const saved: Automation = { ...onInvoices, id: "settle", name: "Settle it", do: [{ kind: "invoke", collection: null, operation: "invoices.settle", input: [
       { key: "amount", value: { kind: "literal", value: 3 } },
       { key: "paid", value: { kind: "literal", value: false } },
       { key: "note", value: { kind: "literal", value: null } },
@@ -614,9 +614,9 @@ describe("a dataset table's ⚡ panel", () => {
       { name: "refunds.issue", label: "Issue refund", table: "Refunds", reversible: false },
     ] };
     const saved: Automation = { ...onInvoices, id: "branch", name: "Branch", do: [{ kind: "if", if: "record.Points > 1", do: [
-      { kind: "invoke", operation: "gone.op", input: [] },
+      { kind: "invoke", collection: null, operation: "gone.op", input: [] },
     ], otherwise: [
-      { kind: "invoke", operation: "invoices.settle", input: [] },
+      { kind: "invoke", collection: null, operation: "invoices.settle", input: [] },
     ] }] };
     const { written } = makeBridge(read([summary(saved)]));
     const user = userEvent.setup();
@@ -630,7 +630,7 @@ describe("a dataset table's ⚡ panel", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1), SLOW);
     const [branch] = written[0]!.automations[0]!.do;
-    expect(branch).toEqual({ ...saved.do[0], otherwise: [{ kind: "invoke", operation: "refunds.issue", input: [] }] });
+    expect(branch).toEqual({ ...saved.do[0], otherwise: [{ kind: "invoke", collection: null, operation: "refunds.issue", input: [] }] });
   }, 30_000);
 
   it("keeps the list's reason on an unchanged automation when main's check gives none", async () => {
@@ -672,7 +672,7 @@ describe("a dataset table's ⚡ panel", () => {
     await waitFor(() => expect(screen.queryByText(reason)).toBeNull(), SLOW);
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1), SLOW);
-    expect(written[0]!.automations[0]!.do).toEqual([{ kind: "invoke", operation: "invoices.remind", input: [] }]);
+    expect(written[0]!.automations[0]!.do).toEqual([{ kind: "invoke", collection: null, operation: "invoices.remind", input: [] }]);
   }, 30_000);
 
   it("gives an action on another table than the trigger's no record input", async () => {
@@ -957,7 +957,7 @@ describe("the builder's triggers", () => {
     const { written } = makeBridge(read([]));
     const user = userEvent.setup();
     const draft: Automation = { id: "", name: "Settle", enabled: true, when: { kind: "button", field: "Settle", table: "Invoices" }, if: null,
-      do: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
+      do: [{ kind: "invoke", collection: null, operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }] };
     render(<Panel table={table} fields={[...FIELDS, { name: "Settle", type: "button" }]} start={{ automation: draft, seq: 1 }} />);
     expect((await screen.findByRole("combobox", { name: "Trigger" }) as HTMLSelectElement).value).toBe("button");
     expect((screen.getByRole("combobox", { name: "Table" }) as HTMLSelectElement).value).toBe("Invoices");
@@ -2636,8 +2636,8 @@ describe("the builder", () => {
   it("shows a syntax error in an action's input on its step, inside an If too, and does not save", async () => {
     const settle: Automation = { ...stamp, id: "settle", name: "Settle", do: [{
       kind: "if", if: "true",
-      do: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "note", value: { kind: "literal", value: "x" } }] }],
-      otherwise: [{ kind: "invoke", operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id +" } }] }],
+      do: [{ kind: "invoke", collection: null, operation: "invoices.settle", input: [{ key: "note", value: { kind: "literal", value: "x" } }] }],
+      otherwise: [{ kind: "invoke", collection: null, operation: "invoices.settle", input: [{ key: "id", value: { kind: "formula", expression: "record.id +" } }] }],
     }] };
     const { written, bridge } = makeBridge(read([summary(settle)]));
     const user = userEvent.setup();
@@ -2840,7 +2840,7 @@ describe("the builder", () => {
       { kind: "set", values: title("B"), records: "open", operation: null },
     ], otherwise: [
       { kind: "set", values: title("C"), records: null, operation: null },
-      { kind: "invoke", operation: "tasks.close", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] },
+      { kind: "invoke", collection: null, operation: "tasks.close", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] },
     ] },
     { kind: "notify", text: "Done: {record.Title}", to: [{ kind: "literal", value: "ana" }] },
     { kind: "post", text: "Done", group: "Trip" },
@@ -2962,7 +2962,7 @@ describe("the builder", () => {
   }, 30_000);
 
   it("shows a problem with an action input's name beside the name", async () => {
-    const settle: Automation = { ...stamp, id: "settle", name: "Settle", do: [{ kind: "invoke", operation: "invoices.settle", input: [
+    const settle: Automation = { ...stamp, id: "settle", name: "Settle", do: [{ kind: "invoke", collection: null, operation: "invoices.settle", input: [
       { key: "__proto__", value: { kind: "literal", value: "x" } },
     ] }] };
     makeBridge(read([summary(settle)]));

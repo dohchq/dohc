@@ -116,7 +116,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     if (result.lost) return { outcome: failed(LOST_COLLECTION_ERROR) };
     moved = result.moved;
     for (const { ordinal, step } of stepsInOrder(located)) {
-      if ((step.kind === "find" || step.kind === "add-record") && current.steps.some((saved) => saved.ordinal === ordinal)) {
+      if ((step.kind === "find" || step.kind === "add-record" || step.kind === "invoke") && current.steps.some((saved) => saved.ordinal === ordinal)) {
         step.collection = current.steps.find((saved) => saved.ordinal === ordinal)?.destinations?.[0]?.path ?? step.collection;
       }
     }

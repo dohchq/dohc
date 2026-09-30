@@ -50,7 +50,11 @@ describe("an automation in plain words", () => {
   it("names the action a button runs", () => {
     expect(sentenceText(automationSentence(automation({
       when: { kind: "button", field: "Mark paid", table: "Invoices" },
-      do: [{ kind: "invoke", operation: "invoices.markPaid", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }],
+      do: [{ kind: "invoke", collection: null, operation: "invoices.markPaid", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }],
     })))).toBe("When someone clicks Mark paid, run invoices.markPaid");
+    expect(sentenceText(automationSentence(automation({
+      when: { kind: "button", field: "Mark paid", table: "Invoices" },
+      do: [{ kind: "invoke", collection: "Ledger", operation: "entries.post", input: [] }],
+    })))).toBe("When someone clicks Mark paid, run entries.post in Ledger");
   });
 });
