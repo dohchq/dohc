@@ -45,7 +45,7 @@ it("rejects unknown, invalid, and cross-workspace source captures", async () => 
   for (const path of ["unknown/dataset.json", "bad/dataset.json"]) await expect(resolveDatasetAddress(adapter, "w", path, signal)).rejects.toThrow(`Collection reference broken: ${path}`);
   await expect(resolveDatasetAddress(adapter, "other", "data/dataset.json", signal)).rejects.toThrow();
   for (const path of [id(1), "data", "/data/dataset.json", "../data/dataset.json", "data/../dataset.json", ".dohc/dataset.json", "data\\dataset.json"]) {
-    await expect(resolveDatasetAddress(adapter, "w", path, signal)).rejects.toThrow("workspace-relative dataset.json path");
+    await expect(resolveDatasetAddress(adapter, "w", path, signal)).rejects.toThrow("relative dataset.json path");
   }
 });
 

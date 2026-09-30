@@ -7,6 +7,13 @@ import { generateDatasetSources } from "./datasetGenerator";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { generateFieldMigration } from "./datasetFieldMigration";
 
+export class DatasetSchemaChangeError extends Error {
+  constructor(message: string, readonly workspacePaths: readonly string[]) {
+    super(message);
+    this.name = "DatasetSchemaChangeError";
+  }
+}
+
 const quote = (value: string) => `"${value}"`;
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
 function column(field: DatasetColumnField): string {
@@ -73,7 +80,7 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
       if (field.type === "button") throw new Error(`${field.name} is a button. It has no type or value to change.`);
       if (!generated) {
         const actions = original.operations.filter(operation => operation.fieldIds.includes(field.fieldId)).map(operation => operation.label).join(", ");
-        throw new Error(`${field.name} uses custom rules${actions ? ` in ${actions}` : ""}. Update ${original.operationsPath}, then choose Review source change.`);
+        throw new DatasetSchemaChangeError(`${field.name} uses custom rules${actions ? ` in ${actions}` : ""}. Update ${original.operationsPath}, then choose Review source change.`, [original.operationsPath]);
       }
       if (field.sqlColumn === table.primaryKey) throw new Error("The record ID cannot change type or become optional. Choose another field.");
       const previous = structuredClone(field);

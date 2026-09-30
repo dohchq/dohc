@@ -6,7 +6,7 @@ import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { datasetColumnFields, datasetRevisionsPreserveAccess, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
-import { generateDatasetSchemaChange } from "./datasetSchemaChanges";
+import { DatasetSchemaChangeError, generateDatasetSchemaChange } from "./datasetSchemaChanges";
 import { generateDatasetSources } from "./datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
@@ -167,7 +167,12 @@ it("refuses changed capture, stale revision and missing required defaults while 
   const addition = generateDatasetSchemaChange({ ...artifacts, operationSource: customSource, change: { kind: "addField", tableId: id(2), field: {name:"Notes",type:"text",required:false,unique:false} } });
   expect(addition.operationSource).toBe(customSource);
   expect(addition.definition.operations).toEqual(artifacts.revision.definition.operations);
-  expect(() => generateDatasetSchemaChange({ ...artifacts, operationSource: customSource, change: { kind: "changeField", tableId:id(2), fieldId:id(4), type:"number",required:true } })).toThrow(/custom rules.*people\/operations.js/);
+  let customRulesFailure: unknown;
+  try {
+    generateDatasetSchemaChange({ ...artifacts, operationSource: customSource, change: { kind: "changeField", tableId:id(2), fieldId:id(4), type:"number",required:true } });
+  } catch (error) { customRulesFailure = error; }
+  expect(customRulesFailure).toBeInstanceOf(DatasetSchemaChangeError);
+  expect(customRulesFailure).toMatchObject({ message: expect.stringMatching(/custom rules.*people\/operations.js/), workspacePaths: ["people/operations.js"] });
   f.tamper(paths => { const migration = paths.find(path => path.endsWith("migration.sql"))!; f.files.set(migration, "DELETE FROM people;"); });
   await expect(f.prepare({ kind: "renameCollection", name: "Guests" })).rejects.toThrow("differs from this review");
   expect(f.host.describe(id(1)).revision).toBe(1);

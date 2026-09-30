@@ -660,14 +660,14 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Save a private recovery archive of a Collection.",
     required: ["savePath"],
     notes: [
-      "savePath is an absolute path ending in .dohc-recovery. Set overwrite to true to replace a file.",
+      "savePath is an absolute path outside the workspace ending in .dohc-recovery. Set overwrite to true to replace a file.",
       "Recovery archives contain private records, uploaded files, history, and retry credentials. Store them privately.",
     ],
   },
   prepareRecovery: {
     summary: "Check a recovery archive before restoring it.",
     required: ["sourcePath"],
-    notes: ["sourcePath is an absolute path ending in .dohc-recovery. Review the result before claimRecovery."],
+    notes: ["sourcePath ends in .dohc-recovery. A relative sourcePath is read only and resolves from the caller folder. Review the result before claimRecovery."],
   },
   claimRecovery: {
     summary: "Restore a Collection from a prepared archive.",
@@ -832,7 +832,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
   },
   dataset: {
     summary: "Create, change, and use transactional Collections.",
-    notes: [workspaceNote, "datasetPath is the workspace-relative dataset.json path. List and describe return it alongside the internal datasetId.", "After moving the file, update commands and app manifests. An old path reports a broken reference.", "These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity."],
+    notes: [workspaceNote, "datasetPath is the caller-relative dataset.json path. List and describe return it alongside the internal datasetId.", "After moving the file, update commands and app manifests. An old path reports a broken reference.", "These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity."],
     verbs: DATASET_VERBS,
   },
   app: {
