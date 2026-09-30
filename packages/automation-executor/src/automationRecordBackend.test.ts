@@ -1357,7 +1357,8 @@ describe("Find limits and admission", () => {
     }
     const task = automation(find("Target", dataset) + set(dataset, "found", "First") + set(dataset, "found", "=record.Status + '-Second'"));
     expect(await f.run(task)).toEqual({ kind: "done" });
-    expect(reads).toBe(34);
+    // Document writes also resolve each record's current path by id.
+    expect(reads).toBe(dataset ? 34 : 68);
     expect(peak).toBe(8);
     expect(active).toBe(0);
     const saved = (await f.runs())[0]!;
