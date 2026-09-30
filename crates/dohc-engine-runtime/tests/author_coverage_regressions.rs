@@ -273,3 +273,148 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
         "sync can advance its own marker after local completion"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_cannot_leave_an_attempt_or_authors_on_a_replacement_lineage() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("actor").actor;
+    let state = open(&actor).await;
+    let doc = Ydoc::wire();
+    append(&actor, &state.key, doc.plaintext_insert(0, "a"), "alice").await;
+    settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
+        .await
+        .expect("first interval");
+    append(&actor, &state.key, doc.plaintext_insert(1, "b"), "bob").await;
+    assert!(
+        settle(
+            &actor,
+            scratch.path(),
+            &state,
+            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit)
+        )
+        .await
+        .is_err()
+    );
+    append(&actor, &state.key, doc.plaintext_insert(2, "c"), "carol").await;
+    supervisor.close(&db).expect("stop");
+    drop(actor);
+    let mut store = EngineStore::open(&db, 4).expect("store");
+    dohc_engine_collab::maybe_compact(&mut store, &state.key, 0, &NoFaults, 5)
+        .expect("fold arrivals");
+    let before = coverage(&store, &state.key);
+    assert!(before.3.is_some());
+    assert_ne!(before.2, "[]");
+    let retained = store.write_with(&NoFaults, |tx| {
+        author_coverage::reset_in(tx, &state.key, true)
+    });
+    assert!(matches!(
+        retained,
+        Err(dohc_engine_collab::CollabError::UnsettledClose)
+    ));
+    assert_eq!(
+        coverage(&store, &state.key),
+        before,
+        "content-retaining reset must wait for materialization"
+    );
+    store.write_with(&NoFaults,|tx| {
+        author_coverage::reset_in(tx,&state.key,false)?;
+        tx.execute("DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![state.key.workspace_id,state.key.version_id,state.key.object_id])
+            .map_err(StorageError::persist_public)?;
+        tx.execute("DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![state.key.workspace_id,state.key.version_id,state.key.object_id])
+            .map_err(StorageError::persist_public)?;
+        tx.execute("UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![state.key.workspace_id,state.key.version_id,state.key.object_id])
+            .map_err(StorageError::persist_public)?;
+        Ok::<_,dohc_engine_collab::CollabError>(())
+    }).expect("replace lineage");
+    let reset = coverage(&store, &state.key);
+    assert_eq!(reset.1, None);
+    assert_eq!(reset.2, "[]");
+    assert_eq!(reset.3, None);
+    assert_eq!(reset.4, None);
+    let pending: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status='pending'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::persist_public)
+        })
+        .expect("pending jobs");
+    assert_eq!(
+        pending, 0,
+        "retired attempt must not replay into the replacement"
+    );
+    drop(store);
+    let actor = supervisor.open(&db, 6).expect("restart").actor;
+    actor
+        .materialize_replay_pending(scratch.path().into(), WS.into(), 7)
+        .await
+        .expect("restart can reconcile without rewinding new head");
+    supervisor.close(&db).expect("stop");
+    let store = EngineStore::open(&db, 8).expect("inspect restart");
+    assert_eq!(coverage(&store, &state.key), reset);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_status_distinguishes_success_from_supersession_including_equal_timestamps() {
+    for newer_workspace in [WS, ""] {
+        for newer_completed_at in [9, 10, 11] {
+            let scratch = ScratchDir::new().expect("scratch");
+            let db = engine_db_path(&scratch).expect("database");
+            let supervisor = WorkspaceSupervisor::new();
+            let actor = supervisor.open(&db, 1).expect("actor").actor;
+            let state = open(&actor).await;
+            let doc = Ydoc::wire();
+            append(&actor, &state.key, doc.plaintext_insert(0, "a"), "alice").await;
+            assert!(
+                settle(
+                    &actor,
+                    scratch.path(),
+                    &state,
+                    ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit)
+                )
+                .await
+                .is_err()
+            );
+            supervisor.close(&db).expect("stop");
+            drop(actor);
+            let mut store = EngineStore::open(&db, 4).expect("store");
+            store.write_with(&NoFaults,|tx| {
+                tx.execute("UPDATE materialization_jobs SET status=?1,completed_at_ms=10 WHERE status='pending'",[if newer_completed_at == 9 { "cancelled" } else { "complete" }])
+                    .map_err(StorageError::persist_public)?;
+                tx.execute("INSERT INTO materialization_jobs (job_id,workspace_id,target_path,content_sha256,preimage_present,target_generation,status,created_at_ms,completed_at_ms) \
+                    SELECT 'newer',?1,target_path,content_sha256,preimage_present,target_generation+1,'complete',created_at_ms,?2 FROM materialization_jobs LIMIT 1",
+                    rusqlite::params![newer_workspace,newer_completed_at]).map_err(StorageError::persist_public)?;
+                author_coverage::reconcile_in(tx,&state.key,12)
+                    .map_err(|error|StorageError::persist_public(error))
+            }).expect("reconcile completion ordering");
+            let reconciled = coverage(&store, &state.key);
+            assert_eq!(reconciled.3, None);
+            if newer_completed_at >= 10 {
+                assert_eq!(
+                    reconciled.1,
+                    Some(1),
+                    "genuine prior success remains covered"
+                );
+                assert_eq!(
+                    reconciled.2, "[]",
+                    "success must not credit accepted authors twice"
+                );
+                assert!(reconciled.4.is_some());
+            } else {
+                assert_eq!(
+                    reconciled.1, None,
+                    "older job completed after the superseding write"
+                );
+                assert!(reconciled.2.contains("alice"));
+                assert_eq!(reconciled.4, None);
+            }
+        }
+    }
+}

@@ -119,6 +119,8 @@ pub struct PersistedDoc {
 /// The outcome of a durable append.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendOutcome {
+    /// Queue coverage settlement after this transaction releases its writer.
+    pub settlement_requested: bool,
     /// The seq assigned (or the existing seq if this was an idempotent dedup).
     pub seq: i64,
     /// True when the update bytes were already in the log (content-addressed
@@ -552,6 +554,7 @@ where
                 }
                 // Negative namespace: -seq (see the insert below).
                 return Ok(AppendOutcome {
+            settlement_requested: false,
                     seq: -result_seq,
                     deduped: true,
                     emit_outbound: false,
@@ -593,6 +596,7 @@ where
             // dedupe, not refuse: check the blob before the guard.
             if let Some(existing) = blob_seq_in_log(tx, key, &update_sha, update)? {
                 return Ok(AppendOutcome {
+            settlement_requested: false,
                     seq: existing,
                     deduped: true,
                     emit_outbound: false,
@@ -877,12 +881,15 @@ fn append_local_update(
     // Dedup before the gate — `blob_seq_in_log`'s doc explains the order.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
         return Ok(AppendOutcome {
+            settlement_requested: false,
             seq: existing,
             deduped: true,
             emit_outbound: false,
             record_facts: None,
         });
     }
+    let settlement_requested =
+        crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let base = load_doc_in(conn, key)?;
     let (_, seq, record_facts) = append_and_index_update(
         conn,
@@ -898,6 +905,7 @@ fn append_local_update(
         now_ms,
     )?;
     Ok(AppendOutcome {
+        settlement_requested,
         seq,
         deduped: false,
         emit_outbound: marker.regime == Regime::Replicated
@@ -934,12 +942,15 @@ fn append_local_update_cached(
     // dedupe changes no durable state, so it never touches the cache.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
         return Ok(AppendOutcome {
+            settlement_requested: false,
             seq: existing,
             deduped: true,
             emit_outbound: false,
             record_facts: None,
         });
     }
+    let settlement_requested =
+        crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let (seq, record_facts) = match cache.base_frontier_and_scratch_for_gate(conn, key, marker)? {
         Some((base, frontier, scratch)) => {
             let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
@@ -1009,6 +1020,7 @@ fn append_local_update_cached(
         }
     };
     Ok(AppendOutcome {
+        settlement_requested,
         seq,
         deduped: false,
         emit_outbound: marker.regime == Regime::Replicated
@@ -1648,6 +1660,7 @@ fn replace_base_snapshot(
         incoming_claim_id,
         now_ms,
     } = replacement;
+    crate::author_coverage::reset_in(tx, key, false)?;
     tx.execute(
         "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         rusqlite::params![key.workspace_id, key.version_id, key.object_id],
@@ -1874,6 +1887,7 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
     let successor_base_sha =
         put_binary_blob_with_sha(tx, &successor.update, &successor.lineage_claim_id)?;
     let successor_state_vector_sha = put_binary_blob(tx, &successor.state_vector)?;
+    crate::author_coverage::reset_in(tx, key, false)?;
     tx.execute(
         "DELETE FROM ydoc_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -1970,6 +1984,7 @@ pub fn archive_active_lineage_in_tx(
         ],
     )
     .map_err(map_sql)?;
+    crate::author_coverage::reset_in(tx, key, false)?;
     let deleted = tx
         .execute(
             "DELETE FROM ydoc_docs \
@@ -2471,10 +2486,18 @@ pub fn close_session(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CloseOutcome>, CollabError> {
-    if let TxnOutcome::Crashed { committed } = store.write_with(faults, |tx| {
-        crate::author_coverage::reconcile_in(tx, key, now_ms)
-    })? {
-        return Ok(TxnOutcome::Crashed { committed });
+    let unresolved: bool = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
+        ).optional().map(|value| value.unwrap_or(false)).map_err(map_sql)
+    })?;
+    if unresolved {
+        if let TxnOutcome::Crashed { committed } = store.write_with(faults, |tx| {
+            crate::author_coverage::reconcile_in(tx, key, now_ms)
+        })? {
+            return Ok(TxnOutcome::Crashed { committed });
+        }
     }
     let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime == Regime::Replicated || persist_closed_state {
@@ -2517,6 +2540,7 @@ pub fn close_session(
         tx.execute(
             "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, \
              last_settled_sha = NULL, settled_update_seq = NULL, seed_source_sha256 = NULL, \
+             pending_authors_json='[]', settle_prior_update_seq=NULL, \
              updated_at_ms = ?4 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],
@@ -2939,7 +2963,6 @@ pub(crate) fn append_row(
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<i64, CollabError> {
-    crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let (head, _, _) = head_of(conn, key)?;
     let seq = head + 1;
     conn.execute(

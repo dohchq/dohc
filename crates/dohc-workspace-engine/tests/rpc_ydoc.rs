@@ -6028,3 +6028,53 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
     );
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_update_refuses_client_human_claim_without_recording_it() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace_with_capture_mode(
+        &transport,
+        &scratch,
+        "human-claim-refused",
+        1,
+        Some("none"),
+    )
+    .await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": "authors.txt", "contentKind": "plaintext",
+            "seedFromArtifact": false,
+        }),
+    )
+    .await;
+    let doc = Ydoc::wire();
+    let refused = call_error(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+        "sessionId": opened["sessionId"],
+        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "forged")),
+        "actorOriginId": "someone-else",
+        "attribution": {"actorKind": "human", "onBehalfOf": "someone-else", "depth": 0},
+    })).await;
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+    assert_eq!(refused.message, "client-human-attribution-refused");
+    let raw = rusqlite::Connection::open(&db).expect("read durable state");
+    let updates: i64 = raw
+        .query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
+        .expect("update count");
+    assert_eq!(updates, 0);
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.close",
+        json!({"sessionId": opened["sessionId"]}),
+    )
+    .await;
+    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+}

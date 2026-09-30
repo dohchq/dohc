@@ -772,6 +772,48 @@ impl ActorHandle {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_settle_queued(
+        &self,
+        root_dir: PathBuf,
+        key: DocKey,
+        path: String,
+        content_kind: ContentKind,
+        expected_lineage_claim_id: Option<String>,
+        expected_head_sha: Option<String>,
+        session_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        restore_generation: Option<i64>,
+    ) -> Result<YdocSettleOutcome, RuntimeError> {
+        self.run(move |store, cache| {
+            ydoc_settle_on_store(
+                store,
+                cache,
+                &root_dir,
+                &key,
+                &path,
+                content_kind,
+                false,
+                expected_lineage_claim_id.as_deref(),
+                expected_head_sha,
+                None,
+                &session_id,
+                self_writes.as_ref(),
+                now_ms,
+                faults.as_ref(),
+                &token,
+                None,
+                None,
+                restore_generation,
+                SettlementKind::Document,
+            )
+        })
+        .await
+    }
+
     pub async fn ydoc_resync(
         &self,
         key: DocKey,
@@ -1558,6 +1600,8 @@ pub(super) fn ydoc_open_state_on_store(
         // actor can run any post-transaction hook.
         doc_cache.remove(&key);
         let cleared = store.write_with(&NoFaults, |tx| {
+            dohc_engine_collab::author_coverage::reset_in(tx, &key, false)
+                .map_err(|error| StorageError::persist_public(error))?;
             tx.execute(
                 "DELETE FROM ydoc_updates                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                 params![key.workspace_id, key.version_id, key.object_id],
@@ -1887,28 +1931,6 @@ pub(super) fn ydoc_record_update_on_store(
         faults,
         now_ms,
         |tx, outcome, update_sha| {
-            // The lineage's first update names who created it.
-            if outcome.seq == 1
-                && !outcome.deduped
-                && let Some(creator) = dohc_engine_domain::moment_author_json(
-                    actor_origin_id.as_deref(),
-                    attribution.as_ref(),
-                )
-            {
-                tx.execute(
-                    "UPDATE ydoc_docs SET creator_author_json = ?4 \
-                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                    params![
-                        journal_key.workspace_id,
-                        journal_key.version_id,
-                        journal_key.object_id,
-                        creator
-                    ],
-                )
-                .map_err(|error| {
-                    dohc_engine_collab::CollabError::Storage(StorageError::persist_public(error))
-                })?;
-            }
             dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &journal_key,
@@ -2034,12 +2056,7 @@ pub(super) fn ydoc_record_update_on_store(
             let lineage_claim_id = dohc_engine_collab::read_marker(store, key)?
                 .and_then(|marker| marker.lineage_claim_id);
             Ok(YdocAppend {
-                settlement_requested: store.read_with(|conn| {
-                    dohc_engine_collab::author_coverage::reserved_in(conn, key).map(|authors| {
-                        authors.len()
-                            >= dohc_engine_collab::author_coverage::SETTLE_AUTHOR_THRESHOLD
-                    })
-                })?,
+                settlement_requested: outcome.settlement_requested,
                 outcome,
                 sharing_declined,
                 lineage_claim_id,
@@ -2594,7 +2611,7 @@ pub(super) fn ydoc_settle_on_store(
         }
     }
     if !reconcile_author_coverage(store, key, now_ms, faults)? {
-        return Err(DomainError::InvalidInput {
+        return Err(dohc_engine_sync::SyncError::RetryableState {
             reason: "settlement-materialization-pending",
         }
         .into());

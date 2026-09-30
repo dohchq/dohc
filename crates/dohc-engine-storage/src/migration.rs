@@ -2658,8 +2658,7 @@ BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
 
 /// Live edits keep their authors. A moment's `author_json` becomes a list
 /// with one entry per author, so each stored single author becomes a list of
-/// one; NULL stays NULL. A lineage's creator author is a moment author list
-/// too. `pending_authors_json` holds the authors of updates compaction folded
+/// one; NULL stays NULL. `pending_authors_json` holds the authors compaction folded
 /// before a settle covered them. `settle_prior_update_seq` holds the
 /// boundary one unresolved settle replaced: -1 when that boundary was NULL,
 /// and NULL when no settle is unresolved.
@@ -2671,8 +2670,6 @@ ALTER TABLE ydoc_docs ADD COLUMN settle_prior_update_seq INTEGER
 UPDATE moments SET author_json = json_array(json(author_json))
     WHERE author_json IS NOT NULL AND json_valid(author_json)
       AND json_type(author_json) = 'object';
-UPDATE ydoc_docs SET creator_author_json = json_array(json(creator_author_json))
-    WHERE creator_author_json IS NOT NULL AND json_type(creator_author_json) = 'object';
 ";
 
 /// The frozen, ordered list of migrations this build knows. No build may
@@ -3187,7 +3184,7 @@ mod tests {
             ),
             (
                 "v2-ydoc-live-edit-authors",
-                "f4fdc3aed10824852d0ecbf3ad16b8510dcc78fff91b5b508c3d036570b6788f",
+                "ab1074773e55c9fe3bd11b9d47e16bb42d009faff4271fa3a53ec0b52e0974ae",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3448,7 +3445,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(doc, (Some(list), "[]".to_owned(), None));
+        assert_eq!(doc, (Some(agent.to_owned()), "[]".to_owned(), None));
         assert!(
             conn.execute("UPDATE ydoc_docs SET pending_authors_json = '{}'", [])
                 .is_err(),

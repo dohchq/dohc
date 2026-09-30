@@ -179,7 +179,9 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
     if let Some(json) = reserved {
         authors.union_json(&json)?;
     }
-    authors.union_json(&interval_in(conn, key, i64::MAX)?.json())?;
+    for author in interval_in(conn, key, i64::MAX)?.0.into_values() {
+        authors.insert(author)?;
+    }
     Ok(authors)
 }
 
@@ -188,11 +190,17 @@ pub fn check_admission_in(
     key: &DocKey,
     actor: Option<&str>,
     attribution: Option<&ChangeAttribution>,
-) -> Result<(), CollabError> {
-    if let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) {
-        reserved_in(conn, key)?.union_json(&json)?;
-    }
-    Ok(())
+) -> Result<bool, CollabError> {
+    let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
+        return Ok(false);
+    };
+    let mut authors = reserved_in(conn, key)?;
+    authors.union_json(&json)?;
+    let unresolved: bool = conn.query_row(
+        "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+    ).map_err(sql)?;
+    Ok(!unresolved && authors.len() >= SETTLE_AUTHOR_THRESHOLD)
 }
 
 /// Restore coverage once. The moment stays in history, even when its file write failed.
@@ -249,27 +257,61 @@ pub fn compensate_in(
     Ok(())
 }
 
+/// End a lineage's coverage before its rows are removed or its sequence is rebased.
+pub fn reset_in(conn: &Connection, key: &DocKey, retain_content: bool) -> Result<(), CollabError> {
+    let updated: Option<i64> = conn.query_row(
+        "SELECT updated_at_ms FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+    ).optional().map_err(sql)?;
+    let Some(now_ms) = updated else {
+        return Ok(());
+    };
+    if !reconcile_in(conn, key, now_ms)? {
+        if retain_content {
+            return Err(CollabError::UnsettledClose);
+        }
+        conn.execute(
+            "UPDATE materialization_jobs SET status='cancelled',completed_at_ms=?4 \
+             WHERE status='pending' AND job_id IN (SELECT 'ydoc-mat_'||m.moment_id \
+             FROM ydoc_docs d JOIN moments m ON m.workspace_id=d.workspace_id \
+             AND m.version_id=d.version_id AND m.object_id=d.object_id AND m.moment_order=d.settle_seq \
+             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3)",
+            params![key.workspace_id,key.version_id,key.object_id,now_ms],
+        ).map_err(sql)?;
+        if retain_content {
+            compensate_in(conn, key, None, now_ms)?;
+        }
+    }
+    if retain_content {
+        fold_in(conn, key, i64::MAX)?;
+    }
+    conn.execute(
+        "UPDATE ydoc_docs SET settled_update_seq=NULL,settle_prior_update_seq=NULL,last_settled_sha=NULL, \
+         pending_authors_json=CASE WHEN ?4 THEN pending_authors_json ELSE '[]' END \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id,key.version_id,key.object_id,retain_content],
+    ).map_err(sql)?;
+    Ok(())
+}
+
 /// Reconcile terminal jobs too: their status can commit before the caller compensates.
 pub fn reconcile_in(conn: &Connection, key: &DocKey, now_ms: i64) -> Result<bool, CollabError> {
-    let attempt: Option<(String, bool)> = conn
+    let attempt: Option<String> = conn
         .query_row(
-            "SELECT j.status, EXISTS(SELECT 1 FROM materialization_jobs newer \
-         WHERE newer.workspace_id=j.workspace_id AND newer.target_path=j.target_path \
-         AND newer.status='complete' AND newer.target_generation>j.target_generation \
-         AND newer.job_id NOT LIKE 'version-switch-%') \
+            "SELECT j.status \
          FROM ydoc_docs d JOIN moments m ON m.workspace_id=d.workspace_id \
          AND m.version_id=d.version_id AND m.object_id=d.object_id AND m.moment_order=d.settle_seq \
          JOIN materialization_jobs j ON j.job_id='ydoc-mat_'||m.moment_id \
          WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
          AND d.settle_prior_update_seq IS NOT NULL",
             params![key.workspace_id, key.version_id, key.object_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .optional()
         .map_err(sql)?;
     match attempt {
-        Some((status, _)) if status == "pending" => Ok(false),
-        Some((status, false)) if status == "complete" => {
+        Some(status) if status == "pending" => Ok(false),
+        Some(status) if status == "complete" => {
             conn.execute(
                 "UPDATE ydoc_docs SET settle_prior_update_seq=NULL \
                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",

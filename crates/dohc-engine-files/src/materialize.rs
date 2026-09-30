@@ -782,7 +782,11 @@ fn materialize_one_ordinary(
             store.max_completed_generation_for_path(&job.workspace_id, &job.target_path)?
         && done_gen > job.target_generation
     {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        if job.job_id.starts_with("ydoc-mat_") {
+            store.mark_materialization_cancelled(&job.job_id, now_ms)?;
+        } else {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+        }
         return Ok(JobOutcome::Superseded);
     }
 

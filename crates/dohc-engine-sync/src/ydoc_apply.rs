@@ -145,7 +145,10 @@ fn valid_actor_origin_id(value: Option<&str>) -> bool {
 }
 
 fn valid_attribution(value: Option<&dohc_engine_domain::ChangeAttribution>) -> bool {
-    value.is_none_or(|attribution| attribution.validate().is_ok())
+    value.is_none_or(|attribution| {
+        attribution.actor_kind != dohc_engine_domain::ChangeActorKind::Human
+            && attribution.validate().is_ok()
+    })
 }
 
 /// Admit a valid base only for authenticated, exact-coordinate repair.
@@ -480,6 +483,8 @@ fn apply_deferred_base(
             None
         };
         if local_unpublished {
+            dohc_engine_collab::author_coverage::reset_in(tx, &key, false)
+                .map_err(map_collab_hard_error)?;
             tx.execute(
                 "DELETE FROM ydoc_updates \
                  WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -1555,6 +1560,7 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
     complete: &CompleteYdocLineage,
 ) -> Result<(), SyncError> {
     let key = &complete.key;
+    dohc_engine_collab::author_coverage::reset_in(tx, key, false).map_err(map_collab_hard_error)?;
     ensure_adopted_owner_binding_unchanged(tx, key, None)?;
     require_unfenced_lineage(tx, key)?;
     for statement in [
@@ -2518,6 +2524,8 @@ fn preserve_incomplete_base_in_tx(
             local_sha,open_sync_conflict_id(tx,key)?,now_ms],
     ).map_err(SyncError::persist)?;
     if marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed {
+        dohc_engine_collab::author_coverage::reset_in(tx, key, false)
+            .map_err(map_collab_hard_error)?;
         tx.execute(
             "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             params![key.workspace_id, key.version_id, key.object_id],
@@ -3898,6 +3906,8 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             // in arbitration. Preserve its projection above, then clear its
             // rows so the winning base starts a clean causal lineage.
             if local_unpublished {
+                dohc_engine_collab::author_coverage::reset_in(tx, &claim_key, false)
+                    .map_err(map_collab_hard_error)?;
                 tx.execute(
                     "DELETE FROM ydoc_updates
                      WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -4826,6 +4836,22 @@ pub(crate) fn map_domain_hard_error(error: DomainError) -> SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_live_admission_refuses_client_human_attribution() {
+        let human = dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::Human,
+            on_behalf_of: Some("forged-person".into()),
+            depth: 0,
+        };
+        assert!(!valid_attribution(Some(&human)));
+        let agent = dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+            ..human
+        };
+        assert!(valid_attribution(Some(&agent)));
+        assert!(valid_attribution(None));
+    }
 
     /// A receiver that holds no local snapshot or blob for the document.
     fn receiver_database() -> Connection {

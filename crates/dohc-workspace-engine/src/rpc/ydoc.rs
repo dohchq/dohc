@@ -1030,6 +1030,15 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: YdocRecordUpdateParams = parse(params)?;
+        if params.attribution.as_ref().is_some_and(|attribution| {
+            attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Human
+        }) {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "client-human-attribution-refused",
+            ));
+        }
+
         let cancellation = OperationCancellation::new(ctx);
         let open = self.open(handle.as_ref())?;
         // An owned guard: it moves INTO the spawned task below, so a dropped
@@ -1189,7 +1198,7 @@ impl EngineService {
                         };
                         match settle_open
                             .actor
-                            .ydoc_settle(
+                            .ydoc_settle_queued(
                                 settle_open.root.clone(),
                                 key,
                                 path,

@@ -632,6 +632,7 @@ mod dedupe_hoist_tests {
         assert_eq!(
             again,
             crate::durable::AppendOutcome {
+                settlement_requested: false,
                 seq: first.seq,
                 deduped: true,
                 emit_outbound: false,

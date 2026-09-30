@@ -53,7 +53,9 @@ fn identities_are_scoped_bounded_and_known_authors_still_enter_at_capacity() {
     seed_parents(&mut ts.store, &key, 1);
     let doc = Ydoc::wire();
     let started = Instant::now();
+    let mut admission_us = Vec::new();
     for index in 0..author_coverage::MAX_INTERVAL_AUTHORS {
+        let admission_started = Instant::now();
         record(
             &mut ts.store,
             &mut ts.cache,
@@ -63,8 +65,14 @@ fn identities_are_scoped_bounded_and_known_authors_still_enter_at_capacity() {
             &format!("person-{index}"),
         )
         .expect("admit distinct scoped author");
+        admission_us.push(admission_started.elapsed().as_micros());
     }
     let admitted = started.elapsed();
+    admission_us.sort_unstable();
+    println!(
+        "AUTHOR_MEASURE durable_admission_p95_us={} durable_admission_p99_us={}",
+        admission_us[972], admission_us[1013]
+    );
     let before = ts
         .store
         .read_with(|conn| author_coverage::reserved_in(conn, &key))
@@ -201,5 +209,76 @@ fn one_identity_keeps_its_deepest_accepted_chain() {
     assert_eq!(
         dohc_engine_domain::moment_author_depth(Some(&authors.json())),
         32
+    );
+}
+
+#[test]
+fn winning_base_replacement_clears_compacted_losing_authors() {
+    let mut ts = fresh_store("author-base-reset");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let first = Ydoc::wire();
+    first.plaintext_insert(0, "losing base");
+    dohc_engine_collab::claim_base_at_relay(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        &first.encode_full_state(),
+        &dohc_engine_collab::BaseRelayCoordinate::new("first", 1, 10).expect("coordinate"),
+        &NoFaults,
+        2,
+    )
+    .expect("first base");
+    dohc_engine_collab::record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &first.plaintext_insert(11, " edit"),
+        LocalAppend {
+            actor_origin_id: Some("losing-agent"),
+            attribution: Some(&author("person")),
+            ..LocalAppend::default()
+        },
+        &NoFaults,
+        3,
+        |_, _, _| Ok(()),
+    )
+    .expect("admit losing edit");
+    maybe_compact(&mut ts.store, &key, 0, &NoFaults, 4).expect("fold losing edit");
+    assert_eq!(
+        ts.store
+            .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+            .expect("before")
+            .len(),
+        1
+    );
+    let winner = Ydoc::wire();
+    winner.plaintext_insert(0, "winning base");
+    let outcome = dohc_engine_collab::claim_base_at_relay(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        &winner.encode_full_state(),
+        &dohc_engine_collab::BaseRelayCoordinate::new("winner", 1, 5).expect("coordinate"),
+        &NoFaults,
+        5,
+    )
+    .expect("replace losing base");
+    assert!(matches!(
+        outcome,
+        TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
+    ));
+    assert!(ts
+        .store
+        .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+        .expect("after")
+        .is_empty());
+    assert_eq!(
+        dohc_engine_collab::load_persisted(&ts.store, &key)
+            .expect("load")
+            .expect("lineage")
+            .doc
+            .plaintext_string(),
+        "winning base"
     );
 }

@@ -301,10 +301,10 @@ async fn terminal_job_commit_before_compensation_recovers_with_concurrent_arriva
             {
                 let mut store = EngineStore::open(&db, 6).expect("crashed store");
                 store.write_with(&NoFaults, |tx| {
-                tx.execute("UPDATE materialization_jobs SET status=?1 WHERE status='pending'",[if status == "superseded" { "complete" } else { status }]).map_err(StorageError::persist_public)?;
+                tx.execute("UPDATE materialization_jobs SET status=?1,completed_at_ms=6 WHERE status='pending'",[if status == "superseded" { "cancelled" } else { status }]).map_err(StorageError::persist_public)?;
                 if status=="superseded" {
-                    tx.execute("INSERT INTO materialization_jobs (job_id,workspace_id,target_path,content_sha256,preimage_present,target_generation,status,created_at_ms) \
-                        SELECT 'newer',workspace_id,target_path,content_sha256,preimage_present,target_generation+1,'complete',created_at_ms FROM materialization_jobs ORDER BY target_generation DESC LIMIT 1",[]).map_err(StorageError::persist_public)?;
+                    tx.execute("INSERT INTO materialization_jobs (job_id,workspace_id,target_path,content_sha256,preimage_present,target_generation,status,created_at_ms,completed_at_ms) \
+                        SELECT 'newer',workspace_id,target_path,content_sha256,preimage_present,target_generation+1,'complete',created_at_ms,5 FROM materialization_jobs ORDER BY target_generation DESC LIMIT 1",[]).map_err(StorageError::persist_public)?;
                 }
                 Ok::<_,StorageError>(())
             }).expect("terminal job commits before compensation");
@@ -371,7 +371,7 @@ async fn completion_clear_noop_and_close_crashes_restart_idempotently() {
             if phase == "completion" {
                 let faults = Arc::new(NthStorageCrash {
                     point,
-                    remaining: AtomicUsize::new(2),
+                    remaining: AtomicUsize::new(1),
                 });
                 assert!(
                     settle(&actor, scratch.path(), &state, faults)
@@ -403,7 +403,7 @@ async fn completion_clear_noop_and_close_crashes_restart_idempotently() {
                                 4,
                                 Arc::new(NthStorageCrash {
                                     point,
-                                    remaining: AtomicUsize::new(2)
+                                    remaining: AtomicUsize::new(1)
                                 }),
                                 CancellationToken::new()
                             )
@@ -453,7 +453,7 @@ async fn completion_clear_noop_and_close_crashes_restart_idempotently() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pending_attempt_reserves_capacity_and_queues_settlement_before_full() {
+async fn pending_attempt_reserves_capacity_without_requeueing_settlement() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -471,7 +471,6 @@ async fn pending_attempt_reserves_capacity_and_queues_settlement_before_full() {
         .await
         .is_err()
     );
-    let mut requested = false;
     for index in 1..1024 {
         let result = actor
             .ydoc_record_update(
@@ -497,12 +496,11 @@ async fn pending_attempt_reserves_capacity_and_queues_settlement_before_full() {
             )
             .await
             .expect("admit");
-        if index == 959 {
-            assert!(result.settlement_requested);
-            requested = true;
-        }
+        assert!(
+            !result.settlement_requested,
+            "an unresolved attempt must not requeue"
+        );
     }
-    assert!(requested);
     let refused = actor
         .ydoc_record_update(
             state.key.clone(),
