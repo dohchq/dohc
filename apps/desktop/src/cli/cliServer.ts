@@ -2037,16 +2037,15 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       known.set(absolute, path);
       return absolute;
     },
-    async exportPath(path: string): Promise<string> {
+    exportPath(path: string): string {
       if (!isAbsolute(path)) throw new CliCommandError(`savePath must be absolute: ${path}`);
-      const destination = resolve(await realpath(dirname(path)).catch(() => { throw new CliCommandError("Choose an existing folder outside the workspace."); }), basename(path));
-      if (isInside(root, destination)) throw new CliCommandError("Save the private recovery archive outside the workspace.");
       return path;
     },
-    result(value: unknown): unknown {
+    result(value: unknown, changeSnapshots = false): unknown {
       const paths = new Set(["path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath"]);
       const lists = new Set(["paths", "sourcePaths", "created", "written"]);
       const data = new Set(["values", "fields", "kept", "input", "result", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
+      if (changeSnapshots) { data.delete("before"); data.delete("after"); }
       const collect = (entry: unknown, key = ""): void => {
         if (typeof entry === "string" && (paths.has(key) || lists.has(key)) && workspacePath(entry)) {
           known.set(entry, callerPath(entry));
@@ -2090,7 +2089,7 @@ async function dispatch(
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): Promise<unknown> {
-  const pathVerbs = new Set(["moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options);
@@ -2158,7 +2157,7 @@ async function dispatch(
         if ("descriptorPath" in translated) translated.descriptorPath = paths.rebase(translated.descriptorPath, "read");
         if ("migrationPath" in translated) translated.migrationPath = paths.rebase(translated.migrationPath, "read");
         if ("sourcePath" in translated && translated.sourcePath !== undefined) translated.sourcePath = paths.recoveryPath(translated.sourcePath, "read");
-        if ("savePath" in translated && translated.savePath !== undefined) translated.savePath = await paths.exportPath(translated.savePath);
+        if ("savePath" in translated && translated.savePath !== undefined) translated.savePath = paths.exportPath(translated.savePath);
         if ("appRoot" in translated) translated.appRoot = paths.rebase(translated.appRoot, "materialize");
         if (translated.action === "create") translated.definition = { ...translated.definition,
           schemaPath: paths.rebase(translated.definition.schemaPath, "read"),
@@ -2175,7 +2174,7 @@ async function dispatch(
     return request.verb === "dataset" ? { kind: "refused", code: "path_rejected", message: reason } : { ok: false, reason };
   }
   try {
-    return paths.result(parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options)));
+    return paths.result(parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options)), request.verb === "moment");
   } catch (error) {
     const workspacePaths = error instanceof DatasetSchemaChangeError
       ? error.workspacePaths

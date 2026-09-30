@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { createApp, importData, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
@@ -1808,6 +1808,15 @@ describe("CLI socket server", () => {
     await expect(invoke("dataset", { cwd: workspaceRoot, actor: "agent", request: { action: "list", workspaceId: WORKSPACE_ID } })).resolves.toMatchObject({ message: "Cannot open (missing)" });
   });
 
+  it("returns a change path relative to the caller at the root and in a subfolder", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
+    context.readMoment = async () => ({ ...moments.detail, path: "app/notes.md", payload: { before: { ...moments.detail.payload.after!, path: "app/old.md" }, after: { ...moments.detail.payload.after!, path: "app/notes.md" } } });
+    await expect(invoke("moment", { cwd, actor: "agent", id: moments.detail.id })).resolves.toMatchObject({ change: { path: "notes.md", before: { path: "old.md" }, after: { path: "notes.md" } } });
+    await expect(invoke("moment", { cwd: workspaceRoot, actor: "agent", id: moments.detail.id })).resolves.toMatchObject({ change: { path: "app/notes.md", before: { path: "app/old.md" }, after: { path: "app/notes.md" } } });
+  });
+
   it("rebases both file chat verbs from a subfolder", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
@@ -1821,7 +1830,7 @@ describe("CLI socket server", () => {
     await expect(invoke("fileChatStart", { cwd, actor: "agent", path: "missing.md", title: "Missing", body: "Comment" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("does not track missing.md") });
   });
 
-  it("preserves absolute recovery exports and refuses private archives inside the workspace", async () => {
+  it("preserves absolute recovery export destinations for writer validation", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
     const savePath = join(tempRoot, "backup.dohc-recovery");
@@ -1831,12 +1840,7 @@ describe("CLI socket server", () => {
       await expect(invoke("dataset", { cwd: folder, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath } })).resolves.toEqual({ kind: "exported", savedPath: savePath });
     }
     dataset.mockClear();
-    for (const savePath of ["backup.dohc-recovery", join(cwd, "backup.dohc-recovery"), join(workspaceRoot, "backup.dohc-recovery"), join(tempRoot, "missing", "backup.dohc-recovery")]) {
-      await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath } })).resolves.toMatchObject({ kind: "refused", code: "path_rejected" });
-    }
-    const alias = join(tempRoot, "workspace-alias");
-    await symlink(cwd, alias, "junction");
-    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: join(alias, "backup.dohc-recovery") } })).resolves.toMatchObject({ kind: "refused", message: expect.stringContaining("outside the workspace") });
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: "backup.dohc-recovery" } })).resolves.toMatchObject({ kind: "refused", code: "path_rejected" });
     expect(dataset).not.toHaveBeenCalled();
     context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "unavailable", message: "Cannot open " + savePath }));
     for (const folder of [cwd, workspaceRoot]) {

@@ -78,7 +78,7 @@ it("reopens the same recovery archive after installation was interrupted before 
   await sourceHost.host.invoke(call(approved, id(6), "saved", { name: "Preserved" }));
   const archive = await sourceHost.host.prepareExport(id(1));
   const sourcePath = join(sourceHost.workspaceRoot, "resume.dohc-recovery");
-  await writeDatasetRecoveryExport({ path: sourcePath, stream: archive.stream(), signal: new AbortController().signal, maxBytes: archive.maxBytes, authorize() {} });
+  await writeDatasetRecoveryExport({ workspaceRoots: [], path: sourcePath, stream: archive.stream(), signal: new AbortController().signal, maxBytes: archive.maxBytes, authorize() {} });
   await archive.dispose(); await sourceHost.host.close();
   let observer: DatabaseSync | undefined;
   const target = await open({ assertCurrent() {
@@ -198,7 +198,7 @@ describe("local dataset owner adapter", () => {
     const uploaded = await first.host.upload({datasetId:id(1),revision:1,revisionSha256:approved.revision.revisionSha256,idempotencyKey:"delete-file",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:Buffer.from("%PDF-delete").toString("base64")});
     await first.host.action(call(approved,id(6),"delete-write",{name:"Saved",fileId:uploaded.file.fileId}));
     const archive = await first.host.prepareExport(id(1)), backupPath = join(first.workspaceRoot,"saved.dohc-recovery");
-    await writeDatasetRecoveryExport({path:backupPath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}}); await archive.dispose();
+    await writeDatasetRecoveryExport({ workspaceRoots: [], path:backupPath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}}); await archive.dispose();
     const preview = first.host.deletePreview({datasetId:id(1)});
     await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
     expect(first.host.list({includeArchived:true}).datasets).toEqual([]);
@@ -225,7 +225,7 @@ describe("local dataset owner adapter", () => {
     const committed = await sourceHost.host.invoke(invocation);
     const archive = await sourceHost.host.prepareExport(id(1));
     const sourcePath = join(sourceHost.workspaceRoot,"backup.dohc-recovery");
-    await writeDatasetRecoveryExport({path:sourcePath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}});
+    await writeDatasetRecoveryExport({ workspaceRoots: [], path:sourcePath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}});
     await archive.dispose();
     const oneShotLaunch = vi.fn(() => { throw Error("Recovery cannot use the one-shot worker."); });
     const persistentLaunch = vi.fn<AppRuntimeLauncher>(options => {
@@ -262,7 +262,7 @@ describe("local dataset owner adapter", () => {
     const sourceHost = await open(); await activate(sourceHost.host);
     const archive = await sourceHost.host.prepareExport(id(1));
     const sourcePath = join(sourceHost.workspaceRoot,"backup.dohc-recovery");
-    await writeDatasetRecoveryExport({path:sourcePath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}}); await archive.dispose();
+    await writeDatasetRecoveryExport({ workspaceRoots: [], path:sourcePath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}}); await archive.dispose();
     const target = await open(), prepared = await target.host.prepareRecovery({sourcePath});
     await target.host.discardRecovery(prepared.transferId);
     expect(target.host.list().datasets).toEqual([]);
@@ -286,7 +286,7 @@ describe("local dataset owner adapter", () => {
     const archive = await host.prepareExport(id(1));
     try {
       const path = join(directory,"items.dohc-recovery");
-      const saved = await writeDatasetRecoveryExport({path,stream:archive.stream(),maxBytes:archive.maxBytes,
+      const saved = await writeDatasetRecoveryExport({ workspaceRoots: [], path,stream:archive.stream(),maxBytes:archive.maxBytes,
         signal:new AbortController().signal,authorize(){}});
       expect(saved.byteLength).toBeGreaterThan(4096);
       const limits = {maxTotalBytes:archive.maxBytes};
@@ -339,7 +339,7 @@ describe("local dataset owner adapter", () => {
       oldStore.close();
       const oldHost=(await open({workspaceRoot:local.workspaceRoot})).host;
       const originalArchive=await oldHost.prepareExport(id(1)),sourcePath=join(local.workspaceRoot,"before-recovery.dohc-recovery");
-      await writeDatasetRecoveryExport({path:sourcePath,stream:originalArchive.stream(),maxBytes:originalArchive.maxBytes,signal:controller.signal,authorize(){}});await originalArchive.dispose();await oldHost.close();
+      await writeDatasetRecoveryExport({ workspaceRoots: [], path:sourcePath,stream:originalArchive.stream(),maxBytes:originalArchive.maxBytes,signal:controller.signal,authorize(){}});await originalArchive.dispose();await oldHost.close();
       local=await open();
       const recovery=await local.host.prepareRecovery({sourcePath});
       expect(local.host.list().datasets).toEqual([]);
