@@ -83,6 +83,7 @@ export interface EngineYdocProviderSessionOptions {
   onRemoteUpdate: (update: Uint8Array) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
+  onLocalUpdateAcknowledged?: (idempotencyKey: string) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
   onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
   onSessionError?: (error: unknown) => void;
@@ -190,6 +191,7 @@ export async function openEngineYdocProviderSession(
 
   const settleDebounceMs =
     options.settleDebounceMs ?? DEFAULT_SETTLE_DEBOUNCE_MS;
+  session.onLocalUpdateAcknowledged((id) => options.onLocalUpdateAcknowledged?.(id));
   const scheduleSettle =
     options.scheduleSettle ??
     ((fn: () => void, ms: number) => {

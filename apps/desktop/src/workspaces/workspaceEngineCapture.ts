@@ -419,9 +419,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // under (an agent's id from the CLI/MCP write seam), and
   // `options.attribution` is the declared provenance recorded beside it
   // (actor kind, `onBehalfOf`, chain depth). Both ride the primary journal
-  // call; a dead-generation revive or recovery replay re-journals canonical
-  // state without them, falling back to device attribution — the same
-  // attribution every human edit carries. `options.idempotencyKey` replaces
+  // call and every retry of the original record. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
   // claim id, attempt, and write ordinal), so a retried request of the same
   // write dedupes engine-side. A keyed update's failure goes to the error
@@ -441,8 +439,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // the same state, which a caller comparing against `initialUpdate` cannot
   // promise. Resolves whether an update was journaled; rejects when the
   // session closed before its turn or `decide` threw. With
-  // `options.idempotencyKey`, the update must insert content (one that only
-  // deletes is refused before it is sent), and the promise also rejects when
+  // `options.idempotencyKey`, the promise also rejects when
   // the engine did not record it: with the engine's refusal when the key
   // already recorded other content, and otherwise with an error that says
   // whether the update may have been recorded. A rejected update does not
@@ -838,16 +835,6 @@ function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
 }
 
-// Whether the update carries any new item, rather than only deletions: some
-// client's struct range in it is not empty.
-function insertsContent(update: Uint8Array): boolean {
-  const { from, to } = Y.parseUpdateMeta(update);
-  for (const [client, end] of to) {
-    if (end > (from.get(client) ?? 0)) return true;
-  }
-  return false;
-}
-
 function isLineageChangedCause(error: unknown): boolean {
   return hasRefusalInCauseChain(
     error,
@@ -947,21 +934,6 @@ function isExactYDocClaimPromotion(doc: Y.Doc, claimId: string): boolean {
   // then fork. The exact base hash proves that this unclaimed document is the
   // lineage that received the claim.
   return sha256Bytes(Y.encodeStateAsUpdate(doc)) === claimId;
-}
-
-// Whether applying `replay` would change `target`: an item it lacks, or a
-// deletion it has not applied. The probe keeps deleted content so a deletion
-// the target already holds compares equal.
-function replacementLacks(target: Y.Doc, replay: Uint8Array): boolean {
-  const probe = new Y.Doc({ gc: false });
-  Y.applyUpdate(probe, Y.encodeStateAsUpdate(target));
-  const before = Y.snapshot(probe);
-  Y.applyUpdate(probe, replay);
-  return (
-    probe.store.pendingStructs !== null ||
-    probe.store.pendingDs !== null ||
-    !Y.equalSnapshots(before, Y.snapshot(probe))
-  );
 }
 
 // Whether a claimed lineage holds every item of the history this session
@@ -2103,6 +2075,12 @@ export function createWorkspaceEngineCapture(
     // under it.
     let sessionObjectId: string | undefined;
     let recordedStateVector: Uint8Array | null = null;
+    type PendingRecord = {
+      readonly update: Uint8Array;
+      readonly options: NonNullable<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]>;
+      acknowledged: boolean;
+    };
+    const pendingRecords = new Set<PendingRecord>();
     // Set when a reopen found another object at this path. Terminal: the
     // session stops reopening, since every reopen would meet the same
     // refusal.
@@ -2268,6 +2246,14 @@ export function createWorkspaceEngineCapture(
               retired.destroy();
             },
             onLocalEditError: requestReconnect,
+            onLocalUpdateAcknowledged: (id) => {
+              for (const record of pendingRecords) {
+                if (record.options.idempotencyKey === id) {
+                  record.acknowledged = true;
+                  pendingRecords.delete(record);
+                }
+              }
+            },
             // requestReconnect returns early for anything that is not a
             // reconnect error, so it is not an error sink: every settle
             // failure also goes to onSettleError, which reports it.
@@ -2346,6 +2332,7 @@ export function createWorkspaceEngineCapture(
               claimCoversRecordedHistory(replacement.doc, recordedStateVector)));
         if (claimChanged && !promotedSameLineage) {
           openingRemoteUpdates.delete(replacement);
+          pendingRecords.clear();
           canonicalDoc = replacement.doc;
           canonicalLineageClaimId = replacementClaimId;
           recordedStateVector = Y.encodeStateVector(replacement.doc);
@@ -2369,26 +2356,22 @@ export function createWorkspaceEngineCapture(
           Y.applyUpdate(doc, remoteDelta);
           input.onRemoteUpdate(remoteDelta);
         }
-        const replay = Y.encodeStateAsUpdate(
-          doc,
-          Y.encodeStateVector(replacement.doc),
-        );
-        // A diff against a state vector still carries the whole delete set,
-        // so its size cannot say whether the replacement lacks anything.
-        if (replacementLacks(replacement.doc, replay)) {
+        // Replay only unacknowledged originals. State-vector diffs include the
+        // full delete set and cannot preserve each operation's author.
+        for (const record of [...pendingRecords]) {
           replayArmed = !settleForgiven;
-          const journaled = replacement.applyLocalUpdate(replay, {
+          const journaled = replacement.applyLocalUpdate(record.update, {
+            ...record.options,
             armSettle: replayArmed,
           });
           onReplayArmed?.();
           await journaled;
-          replacementClaimId =
-            replacement.lineageClaimId ?? replacementClaimId;
-        } else {
-          // Nothing to replay: the replacement already holds this text, so
-          // every settle it runs carries it.
-          onReplayArmed?.();
+          record.acknowledged = true;
+          pendingRecords.delete(record);
+          Y.applyUpdate(doc, record.update);
+          replacementClaimId = replacement.lineageClaimId ?? replacementClaimId;
         }
+        onReplayArmed?.();
         current = replacement;
         if (opening) {
           opening.installed = true;
@@ -2405,7 +2388,7 @@ export function createWorkspaceEngineCapture(
       } catch (error) {
         openingRemoteUpdates.delete(replacement);
         try {
-          await releaseGeneration(replacement);
+          await replacement.evict();
           markDead(null);
         } catch {
           markDead(replacement);
@@ -2443,7 +2426,9 @@ export function createWorkspaceEngineCapture(
       const doc = canonicalDoc;
       if (options?.releaseBeforeOpen) {
         try {
-          await releaseGeneration(failed);
+          // Recovery must retain acknowledged originals in the durable lineage.
+          // A prune-close would leave only the artifact and lose their CRDT IDs.
+          await failed.evict();
         } catch (error) {
           markDead(failed);
           throw error;
@@ -2511,24 +2496,15 @@ export function createWorkspaceEngineCapture(
       return true;
     };
 
-    // A recovery replay carries no idempotency key, so it must never carry a
-    // keyed update. A failed send therefore restores the canonical doc to
-    // its state before the update, when the generation shares that doc,
-    // rebuilds the generation, and resends the update under its key. The
-    // key ledger answers that resend: other content is the key's refusal,
-    // and a fresh record is a success. One resend gets no ledger answer:
-    // when the rebuilt generation already holds the update, applying it
-    // changes nothing and the client sends nothing. That is a success too,
-    // because only the engine recording this write can have put its
-    // inserted items there, which is why a keyed update must insert. Once a
-    // send has gone out, a failure nobody answered may have recorded the
-    // update, and the caller hears exactly that.
+    // A keyed refusal restores the caller's document. A lost answer retains
+    // the original record so a replacement can ask the ledger for its result.
     const applyKeyedUpdate = async (
       update: Uint8Array,
       applyOptions: Parameters<
         WorkspaceEngineYDocProviderSession["applyLocalUpdate"]
       >[2],
       armed: () => void,
+      record: PendingRecord,
     ): Promise<void> => {
       let sent = false;
       const unanswered = (error: unknown): Error =>
@@ -2537,7 +2513,15 @@ export function createWorkspaceEngineCapture(
         if (canonicalDoc === null || closed) throw unanswered(closedError());
         const doc = canonicalDoc;
         try {
-          if (current === null) await reviveDeadSession(doc);
+          if (current === null) {
+            sent = true;
+            await reviveDeadSession(doc, armed);
+            if (record.acknowledged) return;
+            if (!pendingRecords.has(record)) {
+              throw new YdocAdapterError("lineage-changed",
+                "The document lineage changed before the write was acknowledged.");
+            }
+          }
         } catch (error) {
           throw unanswered(error);
         }
@@ -2552,6 +2536,7 @@ export function createWorkspaceEngineCapture(
           const journaled = generation.applyLocalUpdate(update, applyOptions);
           armed();
           await journaled;
+          pendingRecords.delete(record);
           Y.applyUpdate(doc, update);
           recordedStateVector = Y.encodeStateVector(doc);
           if (
@@ -2571,6 +2556,7 @@ export function createWorkspaceEngineCapture(
           // something replaces the generation.
           if (isLineageChangedCause(error)) throw error;
           const refused = isIdempotencyKeyReuseRefusal(error);
+          if (refused) pendingRecords.delete(record);
           const retired = canonicalDoc === doc ? null : doc;
           try {
             await rebind(generation, {
@@ -2580,11 +2566,17 @@ export function createWorkspaceEngineCapture(
             // The session's own failure, reported as one. The write's result
             // is still the engine's answer when it gave one.
             onError(`Y.Doc rebind of ${input.path}`, rebindError);
+            if (isIdempotencyKeyReuseRefusal(rebindError)) throw rebindError;
             throw refused ? error : keyedWriteUncertain(error);
           }
           // Its generation was replaced, so nothing reads this doc now.
           retired?.destroy();
           if (refused) throw error;
+          if (record.acknowledged) return;
+          if (!pendingRecords.has(record)) {
+            throw new YdocAdapterError("lineage-changed",
+              "The document lineage changed before the write was acknowledged.");
+          }
           if (attempt > 0) throw keyedWriteUncertain(error);
         }
       }
@@ -2680,6 +2672,7 @@ export function createWorkspaceEngineCapture(
       decide: (doc: Y.Doc) => Uint8Array | null,
       onArmed: (() => void) | undefined,
       applyOptions: Parameters<WorkspaceEngineYDocProviderSession["applyLocalUpdate"]>[2],
+      confirmRecording = true,
     ): Promise<boolean> => {
       // One announcement per update, at the first provider call that arms a
       // settle carrying it. Three calls can be that first one — the live
@@ -2692,25 +2685,34 @@ export function createWorkspaceEngineCapture(
       // it, leaving the document on "Saving…" with nothing left to arm
       // another settle). #514, and its two review rounds.
       const armed = announceOnce(onArmed);
-      const keyed = applyOptions?.idempotencyKey !== undefined;
+      const keyed = confirmRecording && applyOptions?.idempotencyKey !== undefined;
+      const capturedOptions = {
+        ...structuredClone(applyOptions ?? {}),
+        idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
+      };
       let decided = false;
       return append(async () => {
         if (canonicalDoc === null || closed) throw closedError();
         const doc = canonicalDoc;
-        const update = decide(doc);
+        const decidedUpdate = decide(doc);
         decided = true;
-        if (update === null) return false;
-        if (keyed && !insertsContent(update)) {
-          throw new Error(
-            `A write with an idempotency key must insert content; this update to ${input.path} only deletes.`,
-          );
-        }
+        if (decidedUpdate === null) return false;
+        const update = new Uint8Array(decidedUpdate);
+        const record: PendingRecord = { update, options: capturedOptions, acknowledged: false };
+
         // Counted before any generation arms a settle for it, so a settle
         // that starts afterwards covers it and one that started before
         // does not.
         updatesCounted += 1;
+        pendingRecords.add(record);
         if (keyed) {
-          await applyKeyedUpdate(update, applyOptions, armed);
+          try {
+            await applyKeyedUpdate(update, capturedOptions, armed, record);
+            pendingRecords.delete(record);
+          } catch (error) {
+            if (hasRefusalInCauseChain(error, isIdempotencyKeyReuseRefusal)) pendingRecords.delete(record);
+            throw error;
+          }
           return true;
         }
         // The renderer has already accepted this update, so the canonical doc
@@ -2720,9 +2722,8 @@ export function createWorkspaceEngineCapture(
         // once a generation died.
         if (current === null) {
           Y.applyUpdate(doc, update);
-          // The revive replays the canonical doc — this update included —
-          // into the new generation. It announces the update when that
-          // replay is ARMED, not when its journal RPC returns.
+          // Revival replays pending originals, including this update.
+          // Announce it when replay arms settlement.
           await reviveDeadSession(doc, armed);
           return true;
         }
@@ -2732,9 +2733,11 @@ export function createWorkspaceEngineCapture(
           // this call, so the update is covered from here. Announce it before
           // awaiting the journal round trip: the settle it just armed may
           // start before that round trip returns.
-          const journaled = generation.applyLocalUpdate(update, applyOptions);
+          const journaled = generation.applyLocalUpdate(update, capturedOptions);
           armed();
           await journaled;
+          record.acknowledged = true;
+          pendingRecords.delete(record);
           Y.applyUpdate(doc, update);
           recordedStateVector = Y.encodeStateVector(doc);
           // A successful record can promote a local-only lineage. Retain
@@ -2836,7 +2839,8 @@ export function createWorkspaceEngineCapture(
         );
       },
       applyLocalUpdate(update, onArmed, applyOptions) {
-        void journalLocalUpdate(() => update, onArmed, applyOptions).catch((error: unknown) => {
+        const capturedUpdate = new Uint8Array(update);
+        void journalLocalUpdate(() => capturedUpdate, onArmed, applyOptions, false).catch((error: unknown) => {
           onError(`Y.Doc local update of ${input.path}`, error);
         });
       },

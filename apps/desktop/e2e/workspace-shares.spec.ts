@@ -839,7 +839,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         api.applyEngineYDocUpdate({
           sessionId: "shared-view-bypass",
           update: new Uint8Array([1, 2, 3]),
-          lineageGeneration: 1,
+          lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
           // Typing this from the contract surfaced a second drift the
           // hand-written shape hid: `seq` is required too, so the call would
           // have been rejected at the schema again.

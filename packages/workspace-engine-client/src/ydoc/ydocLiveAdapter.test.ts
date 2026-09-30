@@ -3149,7 +3149,9 @@ describe("YdocLiveAdapter", () => {
     expect(engine.requests.map((request) => request.method)).not.toContain(
       YDOC_METHOD.settle,
     );
-    await expect(provider.close({ settle: false })).resolves.toBeUndefined();
+    await expect(provider.close({ settle: false })).rejects.toMatchObject({
+      name: "YdocReleasedWithSettleFailureError",
+    });
     expect(methods.at(-1)).toBe(YDOC_METHOD.close);
   });
 
@@ -5310,4 +5312,112 @@ it("notifies durable owner observers only after commit and preserves lost-respon
     await session.applyLocalTextEdit({root: "plainText", index: 7, insert: "!"});
     expect(changed).toHaveBeenCalledTimes(1);
   } finally {release(); await session.close(); adapter.dispose();}
+});
+
+
+describe("immutable original-record recovery", () => {
+  it("retries a lost acknowledgement with the same bytes, ID and author snapshot", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const attempts: Request[] = [];
+    let loseAck = false;
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine),
+      onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate && loseAck) {
+          attempts.push(structuredClone(request));
+          const response = await engine.sendRequest(request);
+          if (attempts.length === 1) throw new Error("acknowledgement lost");
+          return response;
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    const before = engine.recordedUpdates.length;
+    const attribution = { actorKind: "automation" as const, onBehalfOf: "alice", depth: 2,
+      run: { claimId: "run-a", automationName: "Original name" } };
+    loseAck = true;
+    const deleting = session.applyLocalTextEdit({ root: "plainText", index: 0, deleteLength: 1 },
+      { actorOriginId: "automation-a", attribution });
+    attribution.onBehalfOf = "bob";
+    attribution.depth = 9;
+    attribution.run.automationName = "Renamed";
+    await deleting;
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.params).toEqual(attempts[0]?.params);
+    expect(attempts[1]?.idempotencyKey).toBe(attempts[0]?.idempotencyKey);
+    expect(attempts[0]?.params).toMatchObject({ actorOriginId: "automation-a",
+      attribution: { onBehalfOf: "alice", depth: 2, run: { automationName: "Original name" } } });
+    expect(engine.recordedUpdates.length - before).toBe(1);
+    expect(session.missingLocalState).toBe(false);
+    await session.close();
+    adapter.dispose();
+  });
+
+  it("replays mixed pending authors separately, including an original deletion-only record", async () => {
+    const engine = seedPlaintextEngine("abc");
+    let busy = false;
+    const accepted: Request[] = [];
+    const refused: Request[] = [];
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          if (busy) {
+            refused.push(structuredClone(request));
+            throw new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined);
+          }
+          accepted.push(structuredClone(request));
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    accepted.length = 0;
+    busy = true;
+    const first = session.applyLocalTextEdit({ root: "plainText", index: 0, deleteLength: 1 },
+      { actorOriginId: "alice-agent", attribution: { actorKind: "agent", onBehalfOf: "alice", depth: 1 } });
+    const second = session.applyLocalTextEdit({ root: "plainText", index: 2, insert: "d" },
+      { actorOriginId: "bob-agent", attribution: { actorKind: "agent", onBehalfOf: "bob", depth: 3 } });
+    await expect(first).rejects.toBeInstanceOf(DaemonRefusalError);
+    await expect(second).rejects.toBeInstanceOf(DaemonRefusalError);
+    busy = false;
+    await session.resendMissingState();
+    expect(accepted).toHaveLength(2);
+    expect(accepted.map(request => request.params)).toEqual([refused[0]?.params, refused[2]?.params]);
+    expect(accepted.map(request => request.idempotencyKey)).toEqual([refused[0]?.idempotencyKey, refused[2]?.idempotencyKey]);
+    const deletion = Y.decodeUpdate(Buffer.from((accepted[0]?.params as { updateBase64: string }).updateBase64, "base64"));
+    expect(deletion.structs).toHaveLength(0);
+    expect(deletion.ds.clients.size).toBeGreaterThan(0);
+    await expect(session.settle()).resolves.toMatchObject({ content: "bcd" });
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it.each(["author", "bytes", "run name", "run claim"])("refuses changed %s reuse even when the local document already holds the update", async change => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    const source = new Y.Doc();
+    const update = (() => { source.getText("plainText").insert(0, "a"); return Y.encodeStateAsUpdate(source); })();
+    const options = { idempotencyKey: "fixed-id", actorOriginId: "automation-a",
+      attribution: { actorKind: "automation" as const, onBehalfOf: "alice", depth: 2,
+        run: { claimId: "run-a", automationName: "Original name" } } };
+    await session.applyLocalUpdate(update, options);
+    const before = engine.recordedUpdates.length;
+    await session.applyLocalUpdate(update, options);
+    expect(engine.recordedUpdates).toHaveLength(before);
+    const changed = structuredClone(options);
+    if (change === "author") changed.actorOriginId = "automation-b";
+    if (change === "run name") changed.attribution.run.automationName = "New name";
+    if (change === "run claim") changed.attribution.run.claimId = "run-b";
+    if (change === "bytes") source.getText("plainText").insert(1, "b");
+    await expect(session.applyLocalUpdate(change === "bytes" ? Y.encodeStateAsUpdate(source) : update, changed))
+      .rejects.toThrow("idempotency-key-reuse-mismatch");
+    expect(engine.recordedUpdates).toHaveLength(before);
+    await session.evict();
+    adapter.dispose();
+    source.destroy();
+  });
 });

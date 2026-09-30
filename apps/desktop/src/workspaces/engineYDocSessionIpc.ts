@@ -746,7 +746,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           // agent and automation writes take the collection write seam,
           // never this IPC. The declared kind and person ride beside the
           // device attribution.
-          { attribution: { actorKind: "human", onBehalfOf: this.#localPersonId() } },
+          { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: this.#localPersonId() } },
         );
         return { accepted: true };
       },

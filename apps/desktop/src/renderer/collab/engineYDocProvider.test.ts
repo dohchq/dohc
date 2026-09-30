@@ -6,7 +6,6 @@ import {
   bindEngineYDoc,
   EngineYDocDeliveryRefusedError,
   EngineYDocUpdateTooLargeError,
-  mergeYDocUpdatesForTransport,
   type EngineYDocBatchScheduler,
   type EngineYDocTransport,
 } from "./engineYDocProvider";
@@ -450,33 +449,6 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     threeFrameReceiver.destroy();
   });
 
-  it("splits a merged batch before it exceeds the existing transport byte contract", () => {
-    const { seed, updates } = pointerDragUpdates(6);
-    const maxBytes = Y.mergeUpdates(updates.slice(0, 2)).byteLength;
-    const batches = mergeYDocUpdatesForTransport(
-      updates.map((update, index) => ({ update, sequence: index + 1 })),
-      maxBytes,
-    );
-
-    expect(batches.length).toBeGreaterThan(1);
-    expect(batches.every((batch) => batch.update.byteLength <= maxBytes)).toBe(
-      true,
-    );
-    expect(batches.at(-1)?.sequence).toBe(6);
-
-    const rawReceiver = new Y.Doc();
-    const batchedReceiver = new Y.Doc();
-    Y.applyUpdate(rawReceiver, seed);
-    Y.applyUpdate(batchedReceiver, seed);
-    updates.forEach((update) => Y.applyUpdate(rawReceiver, update));
-    batches.forEach(({ update }) => Y.applyUpdate(batchedReceiver, update));
-    expect(Array.from(Y.encodeStateAsUpdate(batchedReceiver))).toEqual(
-      Array.from(Y.encodeStateAsUpdate(rawReceiver)),
-    );
-    rawReceiver.destroy();
-    batchedReceiver.destroy();
-  });
-
   it("does not lose a lineage replacement announced while open is in flight", async () => {
     const initial = new Y.Doc();
     typeIntoBody(initial, "Losing root.");
@@ -592,7 +564,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
-  it("coalesces consecutive local transactions and sends the newest staged sequence", async () => {
+  it("preserves each original transaction and staged sequence before scheduled delivery", async () => {
     const mock = mockTransport();
     const batches = manualBatchScheduler();
     const binding = await bindEngineYDoc(mock.transport, batches.scheduler);
@@ -604,13 +576,14 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     expect(mock.staged()).toBe(3);
     expect(mock.shipped).toHaveLength(0);
-    expect(batches.delays).toEqual([32]);
+    expect(batches.delays).toEqual([0]);
     expect(batches.pendingCount()).toBe(1);
 
     await batches.runNext();
+    await binding.flushPendingLocalUpdates();
 
-    expect(mock.shipped).toHaveLength(1);
-    expect(mock.shippedSequences).toEqual([3]);
+    expect(mock.shipped).toHaveLength(3);
+    expect(mock.shippedSequences).toEqual([1, 2, 3]);
     expect(bodyText(mock.mainDoc)).toContain("Frame one.");
     expect(bodyText(mock.mainDoc)).toContain("Frame two.");
     expect(bodyText(mock.mainDoc)).toContain("Frame three.");
@@ -621,6 +594,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const mainDoc = new Y.Doc();
     mainDoc.getText("plainText").insert(0, "seed");
     const attempts: number[] = [];
+    const records: Array<{ update: Uint8Array; id: string }> = [];
     const accepted: number[] = [];
     let staged = 0;
     let rejectFirstAttempt = true;
@@ -636,10 +610,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
         staged += 1;
         return staged;
       },
-      async applyLocalUpdate(update, sequence) {
+      async applyLocalUpdate(update, sequence, _generation, requestId) {
+        records.push({ update: new Uint8Array(update), id: requestId });
         attempts.push(sequence);
         if (rejectFirstAttempt) {
           rejectFirstAttempt = false;
+          update.fill(0);
           throw new Error("IPC request rejected");
         }
         Y.applyUpdate(mainDoc, update);
@@ -664,7 +640,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await batches.runNext();
     expect(attempts).toEqual([1]);
     expect(accepted).toEqual([]);
-    expect(batches.delays).toEqual([32, 250]);
+    expect(batches.delays).toEqual([0, 250]);
 
     // This delta advances the same Yjs client clock and depends on the batch
     // that just failed. It is staged while that batch is awaiting retry.
@@ -677,6 +653,8 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await batches.runNext();
     expect(attempts).toEqual([1, 1, 2]);
     expect(accepted).toEqual([1, 2]);
+    expect(records[1]).toEqual(records[0]);
+    expect(records[2]?.id).not.toBe(records[0]?.id);
     expect(mainDoc.getText("plainText").toString()).toBe("seed-one-two");
     expect(Array.from(Y.encodeStateVector(mainDoc))).toEqual(
       Array.from(Y.encodeStateVector(mirror)),
@@ -762,14 +740,14 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const binding = await bindEngineYDoc(
       {
         ...mock.transport,
-        async applyLocalUpdate(update, sequence, generation) {
+        async applyLocalUpdate(update, sequence, generation, requestId) {
           if (refuseNext) {
             refuseNext = false;
             throw new EngineYDocUpdateTooLargeError(
               ENGINE_YDOC_UPDATE_MAX_BYTES + 1,
             );
           }
-          await baseApply(update, sequence, generation);
+          await baseApply(update, sequence, generation, requestId);
         },
       },
       batches.scheduler,

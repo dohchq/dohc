@@ -248,7 +248,7 @@ function makeTransport(
       localSeq.current += 1;
       return localSeq.current;
     },
-    async applyLocalUpdate(update, seq, updateGeneration) {
+    async applyLocalUpdate(update, seq, updateGeneration, requestId) {
       if (writesRefused.current) return;
       // The provider owns ordered retry. Rejecting here keeps this batch at
       // the head of that queue; resolving is the acknowledgement that main
@@ -261,6 +261,7 @@ function makeTransport(
         update,
         seq,
         lineageGeneration: updateGeneration,
+        requestId,
       });
       if (!result.accepted) {
         throw new EngineYDocDeliveryRefusedError(result.reason);

@@ -5939,6 +5939,7 @@ export type ReadEngineYDocArtifactAssetResult = z.infer<
 
 export const ApplyEngineYDocUpdatePayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
+  requestId: z.string().uuid(),
   update: ENGINE_YDOC_UPDATE,
   lineageGeneration: z.number().int().positive(),
   // Monotonic per-session local-edit counter. Main echoes the seq a settle

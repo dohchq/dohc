@@ -642,14 +642,15 @@ export class YdocLoopbackEngine implements EngineTransport {
     const seed = optionalBoolean(params, "seed") ?? false;
     // A seed can only be the first update of a lineage-absent session —
     // mirrors the daemon refusal in crates/dohc-workspace-engine/src/lib.rs.
-    if (seed && !(session.lineageAbsentAtOpen && session.firstUpdatePending)) {
-      throw seedNotFirstUpdateRefusal();
-    }
-    const payload = `${this.lineageKeyFor(session)}\0${sha256(update)}`;
+    const payload = JSON.stringify([this.lineageKeyFor(session), sha256(update),
+      params.actorOriginId ?? null, params.attribution ?? null, seed]);
     const recorded = this.recordRequests.get(request.idempotencyKey);
     if (recorded !== undefined) {
       if (recorded.payload !== payload) throw idempotencyKeyReuseRefusal();
       return recorded.result;
+    }
+    if (seed && !(session.lineageAbsentAtOpen && session.firstUpdatePending)) {
+      throw seedNotFirstUpdateRefusal();
     }
     const validationDoc = declaredDoc(session.contentKind);
     Y.applyUpdate(validationDoc, Y.encodeStateAsUpdate(session.doc));
