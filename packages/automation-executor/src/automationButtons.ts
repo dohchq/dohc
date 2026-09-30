@@ -18,8 +18,8 @@ export type AutomationButtonState =
   | { kind: "disabled"; reason: string };
 
 /**
- * An action a press runs that dohc cannot undo. `name` is unique in its
- * dataset and is what a press confirms; `label` is what the question shows,
+ * An action a press runs that dohc cannot undo. `name` includes the dataset
+ * id for another Collection and is what a press confirms; `label` is what the question shows,
  * with the name added where two actions share a label.
  */
 export interface IrreversibleAction { name: string; label: string }

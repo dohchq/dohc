@@ -146,7 +146,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
     const named = dataset.operations.filter(operation => operation.tableId === table.tableId && operation.kind === "action" && !operation.readOnly && operation.label === field);
     const action = named.length === 1 ? named[0] : undefined;
     automations.start(buttonAutomation(field, table.name, action === undefined ? []
-      : [{ kind: "invoke", operation: action.name, input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }]));
+      : [{ kind: "invoke", collection: null, operation: action.name, input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }]));
   };
   const automations = useDatasetAutomations({ workspaceId, datasetId, tableId, dataset, refreshKey: recordsVersion, onError,
     onRecordsChanged: () => setRecordsVersion(value => value + 1),

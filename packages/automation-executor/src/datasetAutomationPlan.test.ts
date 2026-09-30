@@ -3,6 +3,7 @@ import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contrac
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { chatDirectoryOf } from "./automationChat";
 import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
+import { reachStepId } from "./automationReach";
 import {
   datasetAutomationProblem,
   datasetEffectKey,
@@ -56,6 +57,29 @@ function automation(steps: string, when = "field-changed: Status"): Automation {
 }
 
 describe("dataset automation steps", () => {
+  it.each([false, true])("reaches only the action in a destination dataset with generated operations %s", (generated) => {
+    const invoking = automation("      - invoke: invoices.markPaid\n        collection: Budget\n");
+    const rules = { definition, generated, sourceCollection: "Source" };
+    const steps = datasetReachSteps(invoking, { path: "Budget", name: "Budget" }, rules, { workspaceId: "workspace", grants: [] }, null)!;
+    expect(steps).toMatchObject([{ kind: "dataset-operation", operation: { name: "invoices.markPaid" } }]);
+    const ownSteps = datasetReachSteps(invoking, { path: "Budget", name: "Budget" }, { ...rules, sourceCollection: "Budget" }, { workspaceId: "workspace", grants: [] }, null)!;
+    expect(ownSteps.filter((step) => step.kind === "dataset-field")).toHaveLength(4);
+    expect(steps.map(reachStepId)).toEqual(ownSteps.filter((step) => step.kind === "dataset-operation" && step.operation.name === "invoices.markPaid").map(reachStepId));
+  });
+
+  it("keeps only fields read by destination Find and reread operations, with stable verdict identities", () => {
+    const narrow: DatasetRules = { definition: { ...definition, operations: definition.operations.map((operation) =>
+      operation.kind === "read" ? { ...operation, fieldIds: [STATUS] } : operation) }, generated: true, sourceCollection: "Source" };
+    const found = automation("      - invoke: invoices.markPaid\n        collection: Budget\n      - find: 'true'\n        collection: Budget\n        as: found\n        operation: invoices.list\n");
+    const added = automation("      - add-record: {Status: Open}\n        collection: Budget\n        as: added\n        operation: invoices.create\n");
+    for (const automation of [found, added]) {
+      const steps = datasetReachSteps(automation, { path: "Budget", name: "Budget" }, narrow, { workspaceId: "workspace", grants: [] }, null)!;
+      expect(steps.filter((step) => step.kind === "dataset-field")).toMatchObject([{ field: { fieldId: STATUS } }]);
+      const ownSteps = datasetReachSteps(automation, { path: "Budget", name: "Budget" }, { ...narrow, sourceCollection: "Budget" }, { workspaceId: "workspace", grants: [] }, null)!;
+      expect(ownSteps.map(reachStepId)).toEqual(expect.arrayContaining(steps.map(reachStepId)));
+    }
+  });
+
   it("treats an explicit self destination like an omitted destination", () => {
     const omitted = automation("      - add-record:\n          Status: Open\n        operation: invoices.create\n      - find: 'record.Status == \"Open\"'\n        as: found\n        operation: invoices.list\n");
     const explicit: Automation = { ...omitted, do: omitted.do.map((step) => step.kind === "add-record" || step.kind === "find" ? { ...step, collection: "Budget" } : step) };

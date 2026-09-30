@@ -115,7 +115,8 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 //           Status: Closed
 //         operation: invoices.edit
 //
-// An invoke step runs one of the dataset's actions, the operations its
+// An invoke step uses `collection` as its destination, defaulting to the source.
+// It runs one of that dataset's actions, the operations its
 // author wrote for work a field edit cannot express. `input` maps each key
 // of the action's input to a value or a formula, so the action learns which
 // record to work on:
@@ -308,7 +309,7 @@ type AutomationStep =
     }
   | { kind: "find"; condition: string; collection: string | null; as: string; operation: string | null }
   /** Runs the dataset action named `operation` with `input` as its input. */
-  | { kind: "invoke"; operation: string; input: AutomationInputValue[] }
+  | { kind: "invoke"; collection: string | null; operation: string; input: AutomationInputValue[] }
   | { kind: "if"; if: string; do: AutomationStep[]; otherwise: AutomationStep[] }
   | { kind: "notify"; text: string; to: AutomationValue[] }
   | { kind: "post"; text: string; group: string }
@@ -463,7 +464,7 @@ const STEP_OPTIONS = {
   set: ["records", "operation"],
   "add-record": ["collection", "as", "operation"],
   find: ["collection", "as", "operation"],
-  invoke: ["input"],
+  invoke: ["collection", "input"],
   if: ["do", "otherwise"],
   notify: ["to"],
   post: ["group"],
@@ -1054,8 +1055,9 @@ function readStep(
     }
     case "invoke": {
       const name = readOperationName(argument, argumentPath, issues);
+      const collection = readPath(entries.get("collection"), option("collection"), issues);
       const input = readInput(entries.get("input"), option("input"), issues);
-      return name === null || input === null ? null : { kind, operation: name, input };
+      return name === null || input === null ? null : { kind, collection, operation: name, input };
     }
     case "if": {
       if (ifDepth >= MAX_IF_DEPTH) {
@@ -1394,7 +1396,7 @@ function stepYaml(step: AutomationStep): Map<string, unknown> {
         ["operation", step.operation],
       ]);
     case "invoke":
-      return withOptions(step.kind, step.operation, [["input", inputYaml(step.input)]]);
+      return withOptions(step.kind, step.operation, [["collection", step.collection], ["input", inputYaml(step.input)]]);
     case "if":
       return withOptions(step.kind, step.if, [
         ["do", step.do.map(stepYaml)],

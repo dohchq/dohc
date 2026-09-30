@@ -78,7 +78,7 @@ import {
   rebaseRun,
   LOST_COLLECTION_ERROR,
 } from "./collectionAutomationRun";
-import { automationInventory, type AutomationInventory } from "./automationInventory";
+import { automationInventory, canPressInventory, irreversibleActionsOf, type AutomationInventory } from "./automationInventory";
 import { AutomationRunWait } from "./automationRunWait";
 import { automationUndoReach, undoAutomationRuns } from "./automationUndo";
 import {
@@ -86,7 +86,6 @@ import {
   type CollectionAutomationUndone,
 } from "./collectionAutomationUndo";
 import {
-  datasetIrreversibleActions,
   datasetFieldWritesOf,
   datasetTableNamed,
   datasetUndoDeletes,
@@ -2151,9 +2150,9 @@ export class CollectionAutomations {
     await this.opened;
     const home = await this.datasetFolder(datasetId);
     const dataset = home === null ? undefined : this.datasets.get(home);
-    if (dataset === undefined || dataset.generated === null) return [];
+    if (home === null || dataset === undefined || dataset.generated === null) return [];
     return await this.marksOf(this.writableCollections(), ({ collectionPath, automation }) => collectionPath !== home ? [] :
-      datasetFieldWritesOf(automation, { ...dataset, generated: dataset.generated === true }).flatMap((write) => (write.table === table ? [write.field] : [])));
+      datasetFieldWritesOf(automation, { ...dataset, generated: dataset.generated === true, sourceCollection: home }).flatMap((write) => (write.table === table ? [write.field] : [])));
   }
 
   /** Each field `fieldsOf` names for a switched-on automation that can run, with those automations' names in file order. */
@@ -2415,11 +2414,12 @@ export class CollectionAutomations {
    * the relay. A roster dohc cannot read yet does not stop a press: the
    * run checks reach again before it writes, and waits for the roster.
    */
-  async buttons(collectionPath: string, fields: readonly string[]): Promise<CollectionAutomationButton[]> {
+  async buttons(collectionPath: string, fields: readonly string[], describe?: (datasetId: string) => Promise<DatasetDescription>): Promise<CollectionAutomationButton[]> {
     await this.ready();
     const roster = await this.options.cachedRoster();
     const buttons: CollectionAutomationButton[] = [];
-    for (const field of fields) buttons.push({ field, state: await this.buttonState(collectionPath, field, roster) });
+    const descriptions = describe === undefined ? undefined : this.buttonDescriptions(describe);
+    for (const field of fields) buttons.push({ field, state: await this.buttonState(collectionPath, field, roster, descriptions) });
     return buttons;
   }
 
@@ -2432,10 +2432,11 @@ export class CollectionAutomations {
    * the drain wakes, so the pressing window hears how the run settles.
    */
   async press(
-    input: { collectionPath: string; field: string; recordId: string; pressId: string; pressedBy: string; by: AutomationPressActor },
+    input: { collectionPath: string; field: string; recordId: string; pressId: string; pressedBy: string; by: AutomationPressActor; confirmed?: readonly string[] },
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
     /** Checks a new press the way the caller must, such as that the field is still a button. */
     checkNew: () => Promise<void> = async () => undefined,
+    describe?: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<CollectionAutomationPress> {
     await this.ready();
     const remembered = this.presses.get(input.pressId) ?? await this.pressInEngine(input);
@@ -2448,8 +2449,9 @@ export class CollectionAutomations {
       automationId = remembered.automationId;
     } else {
       await checkNew();
-      const state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster());
+      const state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster(), describe);
       if (state.kind !== "ready") throw new Error(state.reason);
+      if ((state.irreversible ?? []).some((action) => !input.confirmed?.includes(action.name))) throw new Error(changedSincePressed(input.field));
       automationId = state.automationId;
     }
     const pressed = await this.withLiveEngine(async (engine) => {
@@ -2649,25 +2651,11 @@ export class CollectionAutomations {
     let inventory: AutomationInventory;
     try { inventory = this.inventory(collectionPath, automation); }
     catch (error) { return disabled(errorText(error)); }
-    const operations = new Map<string, Set<string>>();
-    for (const step of inventory.reach) {
-      if (step.kind !== "dataset-operation") continue;
-      const names = operations.get(step.datasetId) ?? new Set<string>();
-      names.add(step.operation.name);
-      operations.set(step.datasetId, names);
-    }
-    for (const [datasetId, names] of operations) {
-      let access: DatasetDescription;
-      try { access = await describe(datasetId); }
-      catch { return disabled(noAccessReason(table.name)); }
-      if (access.datasetId !== datasetId || [...names].some((name) => !access.operations.some((operation) => operation.name === name))) {
-        return disabled(noAccessReason(table.name));
-      }
-    }
+    if (!await canPressInventory(inventory, describe)) return disabled(noAccessReason(table.name));
     const state = await this.runnableButtonState(collectionPath, automation, roster, inventory.reach);
     if (state.kind !== "ready") return { state };
     // A press that runs an action asks first, since dohc cannot undo what the action did.
-    const irreversible = datasetIrreversibleActions(automation, definition);
+    const irreversible = irreversibleActionsOf(automation, collectionPath, inventory);
     return {
       state: irreversible.length === 0 ? state : { ...state, irreversible },
       checked: { automation, datasetId: definition.datasetId, tableId: table.tableId, fieldId: field.fieldId },
@@ -2701,6 +2689,12 @@ export class CollectionAutomations {
       await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`)) {
       await this.enqueue(() => this.indexDatasets(true));
     }
+  }
+
+  /** Whether this document press already has a claim, so a resend needs no new confirmation. */
+  async documentPressed(input: { collectionPath: string; field: string; pressId: string }): Promise<boolean> {
+    await this.ready();
+    return this.presses.has(input.pressId) || await this.pressInEngine(input) !== null;
   }
 
   /**
@@ -2808,9 +2802,20 @@ export class CollectionAutomations {
     collectionPath: string,
     field: string,
     roster: ReachRoster,
+    describe?: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<AutomationButtonState> {
     const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, field, (table) => table === null, collectionNamed(collectionPath).name);
-    return resolved.kind === "state" ? resolved.state : await this.runnableButtonState(collectionPath, resolved.automation, roster);
+    if (resolved.kind === "state") return resolved.state;
+    const unsupported = this.cannotRun(collectionPath, resolved.automation);
+    if (unsupported !== null) return { kind: "disabled", reason: unsupported };
+    let inventory: AutomationInventory;
+    try { inventory = this.inventory(collectionPath, resolved.automation); }
+    catch (error) { return { kind: "disabled", reason: errorText(error) }; }
+    if (!await canPressInventory(inventory, describe)) return { kind: "disabled", reason: noAccessReason(collectionNamed(collectionPath).name) };
+    const state = await this.runnableButtonState(collectionPath, resolved.automation, roster, inventory.reach);
+    if (state.kind !== "ready") return state;
+    const irreversible = irreversibleActionsOf(resolved.automation, collectionPath, inventory);
+    return irreversible.length === 0 ? state : { ...state, irreversible };
   }
 
   /**
