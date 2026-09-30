@@ -233,6 +233,7 @@ import {
   hostOfAnswer,
   automationHostGeneration,
   isAutomationHost,
+  refusalOfAnswer,
   relayUnreachable,
 } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
@@ -3633,6 +3634,9 @@ async function scheduleHostState(
   if (credentialCacheGeneration !== credentialGeneration) {
     throw new Error("Your account changed while dohc asked. Open this setting again.");
   }
+  // The server refused the choice, as when it runs no more workspaces: say why.
+  const refusal = change ? refusalOfAnswer(answer) : undefined;
+  if (refusal !== undefined) throw new Error(refusal);
   const answered = hostOfAnswer(answer);
   const computers = computersOfAnswer(answer);
   if (answered === undefined || computers === undefined) {

@@ -642,6 +642,10 @@ export const AUTOMATION_SERVER_INSTALL_ID = "server";
 // The most workspaces one server runs automations for. Past it, a workspace's
 // host stays one of the owner's computers.
 export const AUTOMATION_SERVER_MAX_WORKSPACES = 64;
+// Why the relay refuses to make the server a workspace's host. The owner's
+// settings show these words as they are.
+export const AUTOMATION_SERVER_OFF = "This server does not run automations.";
+export const AUTOMATION_SERVER_FULL = "This server is running automations for as many workspaces as it can. Choose one of your computers.";
 export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
 // A release carries, as `groups`, what the next host needs so each Group
 // message starts its automations exactly once across the handover: the
