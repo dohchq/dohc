@@ -22,6 +22,7 @@ import { createChatWrites } from "../workspaces/chatWrites";
 import type { CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
 import { desktopRecordEditContext } from "../workspaces/desktopRecordEdits";
 import type { AuthoredPathChanges, WorkspaceEngineMomentSummary, WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
+import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 
@@ -71,9 +72,12 @@ function fixture(rootPath = resolve("cli-workspace")) {
       }
       return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
     }),
-    // Runs the move or delete as the capture does, with no live documents to settle.
+    // Runs the move or delete as the capture does, with no live documents to
+    // settle: the policy is read once the change runs, History holds every
+    // regular file, and the disk has no rename that refuses to replace.
     changePathsAs: vi.fn(async (_paths: readonly string[], _authored: unknown, work: (engine: AuthoredPathChanges) => Promise<unknown>) =>
-      await work({ recordDisk: async () => undefined, rename: async () => undefined, delete: async () => "moment",
+      await work({ policy: await readWorkspaceEnginePolicy(rootPath), recordDisk: async (_path, files) => [...files],
+        moveFile: async () => false, rename: async () => undefined, delete: async () => "moment",
         undoDelete: async () => undefined })) as Capture["changePathsAs"],
   };
   const requestWorkspace = vi.fn(async (_root: string, _id: string, method: string, _input: unknown) =>
@@ -719,7 +723,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
     await writeFile(join(f.root, "plain.txt"), "original");
     expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: "moved.txt", ...(agent ? { agent } : {}) }))
       .toEqual({ ok: true, fromPath: "plain.txt", toPath: "moved.txt" });
-    expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toEqual({ ok: true, path: "moved.txt", trashed: true });
+    expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//) });
     const author = { kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
     expect(vi.mocked(f.capture.changePathsAs).mock.calls.map(call => call[1])).toEqual([
       { operation: "move", author, correlationId: "fileMove:raw" }, { operation: "delete", author, correlationId: "fileDelete:raw" },

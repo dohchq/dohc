@@ -32,6 +32,7 @@ import {
   type VersionedTextListEntry,
   type VersionedTextReadValue,
   type KeptCopy,
+  type CaptureMoveFileResult,
   type KeptCopySaveResult,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
@@ -169,9 +170,13 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
-  // Capture records nothing from hold to release, or until the workspace closes.
-  holdCapture?(): Promise<string>;
+  // Capture records nothing from hold to release, or until the hold's lease
+  // runs out unrenewed or the workspace closes.
+  holdCapture?(): Promise<{ holdId: string; leaseMs: number }>;
+  renewCapture?(holdId: string): Promise<boolean>;
   releaseCapture?(holdId: string): Promise<boolean>;
+  // One rename that refuses to replace, of a visible regular file, under a hold.
+  moveFileUnderHold?(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult>;
 };
 
 export interface CaptureLiveStores {
@@ -1412,8 +1417,14 @@ export function createCaptureLiveStores(
 
     holdCapture: async () => await runMutation(async (adapter) => await adapter.holdCapture()),
 
+    renewCapture: async (holdId: string) =>
+      await runMutation(async (adapter) => await adapter.renewCapture(holdId)),
+
     releaseCapture: async (holdId: string) =>
       await runMutation(async (adapter) => await adapter.releaseCapture(holdId)),
+
+    moveFileUnderHold: async (input: { holdId: string; fromPath: string; toPath: string }) =>
+      await runMutation(async (adapter) => await adapter.moveFileUnderHold(input)),
 
     async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {
       const desired = author === null ? null : captureAuthor(author);

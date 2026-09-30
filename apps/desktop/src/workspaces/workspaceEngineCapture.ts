@@ -84,6 +84,9 @@ import {
   type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
 import {
+  EngineDaemonUnavailableError,
+  EngineWorkspaceSessionsClosedError,
+  EngineWorkspaceShuttingDownError,
   isEngineSessionReconnectError,
   isEngineWorkspaceOpenRefusedError,
   TRANSPORT_REBIND_MAX_BACKOFF_MS,
@@ -311,12 +314,22 @@ export type WorkspaceEngineRenameFinisher = (ok: boolean) => Promise<void>;
 // What an authored move or delete records while capture is held. Every path
 // is workspace-relative.
 export interface AuthoredPathChanges {
+  // The workspace file policy, read once for this change after it left the
+  // queue, so admission and recording judge the same files.toml.
+  policy: WorkspaceEnginePolicySnapshot;
   // Records what the disk holds for `files`, the whole list of files at or
   // under `path`, as capture would and without an author: a new or changed
   // file is written and one gone from disk is deleted. A file capture had not
-  // seen yet lands as its own row. Afterward History holds exactly `files`
-  // there, with their bytes. Refuses a file History cannot hold.
-  recordDisk(path: string, files: readonly string[]): Promise<void>;
+  // seen yet lands as its own row. Answers the files History holds afterward,
+  // with their bytes: a regular file over the size History keeps is left out,
+  // and any head History had for it is deleted. Refuses a file that is not a
+  // regular file.
+  recordDisk(path: string, files: readonly string[]): Promise<string[]>;
+  // Moves one visible regular file to an empty name in one rename that
+  // refuses to replace. Answers false where this filesystem has no such
+  // rename, and the caller moves the file another way. Throws when the
+  // destination is taken or the source is gone.
+  moveFile(fromPath: string, toPath: string): Promise<boolean>;
   rename(fromPath: string, toPath: string): Promise<void>;
   // Records a delete of a file already gone from disk. Answers its row's id.
   delete(path: string): Promise<string>;
@@ -1939,22 +1952,57 @@ export function createWorkspaceEngineCapture(
   // A release may be sent again. It is sent until the engine confirms the
   // hold ended, waiting longer between tries while the engine is busy, so the
   // change does not finish while capture is still held. Only the engine can
-  // confirm it: by answering the release, or by answering that the
-  // workspace's handle is gone, since a hold ends with its handle. This
-  // capture stopping confirms nothing, because stopping flushes capture
-  // through the same gate before it closes the handle. A hold that ended
-  // early refused every record under it, and the change restored the disk.
+  // confirm it: by answering the release, or by being unable to answer for
+  // the hold's workspace or session, since a hold ends with its handle, its
+  // session and its process. This capture stopping confirms nothing, because
+  // stopping flushes capture through the same gate before it closes the
+  // handle. A hold that ended early refused every record under it, and the
+  // change restored the disk. A hold nobody can release ends with its lease.
   async function endCaptureHold(release: (holdId: string) => Promise<boolean>, holdId: string): Promise<void> {
     for (let attempt = 1; ; attempt += 1) {
       try {
         if (!(await release(holdId))) onError("capture release", new Error("The capture hold ended before the change finished."));
         return;
       } catch (error) {
-        if (error instanceof DaemonRefusalError && error.wireCode === "WORKSPACE_UNAVAILABLE") return;
+        if (captureHoldIsGone(error)) return;
         onError("capture release", error);
         await new Promise(resolve => setTimeout(resolve, Math.min(50 * 2 ** attempt, 5_000)));
       }
     }
+  }
+
+  // The hold cannot outlive these: the workspace's handle is gone, the
+  // session it was made in expired or needs a reconnect, the daemon is down
+  // or restarting, or the sessions are shutting down. A busy engine is none
+  // of them, so a release is sent again.
+  function captureHoldIsGone(error: unknown): boolean {
+    return (error instanceof DaemonRefusalError
+      && (error.wireCode === "WORKSPACE_UNAVAILABLE" || error.wireCode === "SESSION_EXPIRED"))
+      || isEngineSessionReconnectError(error)
+      || error instanceof EngineDaemonUnavailableError
+      || error instanceof EngineWorkspaceSessionsClosedError
+      || error instanceof EngineWorkspaceShuttingDownError;
+  }
+
+  // Renews the hold at a third of its lease while the change runs. A renewal
+  // the engine refuses means the hold ended: every record under it refuses,
+  // and the change restores the disk, so nothing more is sent.
+  function keepCaptureHold(renew: (holdId: string) => Promise<boolean>, holdId: string, leaseMs: number): { stop(): void } {
+    const every = Math.max(1_000, Math.floor(leaseMs / 3));
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      let renewed = false;
+      try {
+        renewed = await renew(holdId);
+      } catch (error) {
+        onError("capture renew", error);
+        renewed = !captureHoldIsGone(error);
+      }
+      if (renewed && !stopped) timer = setTimeout(tick, every);
+    };
+    timer = setTimeout(tick, every);
+    return { stop() { stopped = true; clearTimeout(timer); } };
   }
 
   // Lands every pending document write at either end of a move, on the
@@ -5108,42 +5156,60 @@ export function createWorkspaceEngineCapture(
         let result: { value: Awaited<ReturnType<typeof work>> } | undefined;
         try {
           await ensureAllowed();
-          const { holdCapture, releaseCapture } = engine;
-          if (!holdCapture || !releaseCapture) {
+          const { holdCapture, renewCapture, releaseCapture, moveFileUnderHold } = engine;
+          if (!holdCapture || !renewCapture || !releaseCapture || !moveFileUnderHold) {
             throw new Error("This engine cannot record the change under its author. Restart dohc to try again.");
           }
           // Changes capture has seen land as their own rows first. Changes it
           // has not seen yet are recorded by recordDisk under the hold.
           await engine.flushCapture?.();
-          const holdId = await holdCapture.call(engine);
+          const { holdId, leaseMs } = await holdCapture.call(engine);
+          const lease = keepCaptureHold(holdId => renewCapture.call(engine, holdId), holdId, leaseMs);
           try {
             const authoredMetadata = (summary: string): ActorNeutralWriteMetadata =>
               ({ origin: "api", summary, correlationId: authored.correlationId });
             const policy = await readPolicyForTask();
             result = { value: await work({
+              policy,
               recordDisk: async (path, files) => {
-                const recordable = async (file: string) => {
+                const readable = async (file: string) => {
                   assertEngineWritablePath(file, policy);
                   const disk = await readDiskTextState(rootPath, file);
+                  if (disk.kind === "text" || disk.kind === "binary") return disk;
                   if (disk.kind === "absent") throw new Error(`${file} changed while dohc prepared the change. Try again.`);
                   if (disk.kind === "unreadable") throw new Error(`dohc could not read ${file}. Close any program using it, then try again.`);
-                  if (disk.kind !== "text" && disk.kind !== "binary") {
-                    throw new Error(`History cannot keep ${file}: it is ${disk.reason.startsWith("oversized") ? "over the size History keeps" : "not a regular file"}. Move or delete it yourself.`);
-                  }
+                  if (!disk.reason.startsWith("oversized")) throw new Error(`History cannot record ${file}. Move or delete it yourself.`);
                   return disk;
                 };
                 // Every file is checked before any is recorded, and only one
                 // file's bytes are held at a time.
-                for (const file of files) await recordable(file);
+                for (const file of files) await readable(file);
+                const held: string[] = [];
                 for (const file of files) {
-                  await writeIfChanged(engine, versionId, file, await recordable(file), { origin: "local-file", summary: "Saved latest edits" });
+                  const disk = await readable(file);
+                  if (disk.kind === "untracked-content") continue;
+                  await writeIfChanged(engine, versionId, file, disk, { origin: "local-file", summary: "Saved latest edits" });
+                  held.push(file);
                 }
+                // A head for a file gone from disk, or for one now over the
+                // size History keeps, is deleted as capture would delete it.
                 const onDisk = new Set(files);
+                const kept = new Set(held);
                 for (const head of await listTextFileMetadata(engine, versionId)) {
-                  if (!pathIsAtOrUnder(head.path, path) || onDisk.has(head.path)) continue;
+                  if (!pathIsAtOrUnder(head.path, path) || kept.has(head.path)) continue;
                   await deleteIfTracked(engine, versionId, head.path,
-                    { origin: "local-file", summary: `Deleted ${pathBasename(head.path)}` }, undefined, true);
+                    { origin: "local-file", summary: `Deleted ${pathBasename(head.path)}` }, undefined, !onDisk.has(head.path));
                 }
+                return held;
+              },
+              moveFile: async (fromPath, toPath) => {
+                assertEngineWritablePath(toPath, policy);
+                const outcome = await moveFileUnderHold.call(engine, { holdId, fromPath, toPath });
+                if (outcome.moved) return true;
+                if (outcome.reason === "no-replace-unsupported") return false;
+                throw new Error(outcome.reason === "destination-exists"
+                  ? `Something new is at ${toPath}. Choose another destination.`
+                  : `${fromPath} changed while dohc prepared the change. Try again.`);
               },
               rename: async (fromPath, toPath) => {
                 assertEngineWritablePath(toPath, policy);
@@ -5157,6 +5223,7 @@ export function createWorkspaceEngineCapture(
             }) };
             return result.value;
           } finally {
+            lease.stop();
             await endCaptureHold(holdId => releaseCapture.call(engine, holdId), holdId);
           }
         } finally {

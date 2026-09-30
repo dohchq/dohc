@@ -73,6 +73,8 @@ rustix = { version = "1.1", features = ["fs"] }
 [target.'cfg(windows)'.dependencies]
 # Read identity from the pinned restoration handle without unsafe code.
 winapi-util = "0.1"
+# Safe MoveFileExW without REPLACE_EXISTING or COPY_ALLOWED.
+atomicwrites = "=0.4.4"
 
 [dev-dependencies]
 # The differential harness parses the workspace-kernel golden fixtures under tests/fixtures

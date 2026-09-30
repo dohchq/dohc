@@ -629,6 +629,47 @@ describe("CLI socket server", () => {
     });
   });
 
+  it("rebases whole path tokens and descendants without rewriting ordinary words", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    context.deletePath = async path => ({ ok: true, path, trashed: true });
+    context.movePath = async () => ({ ok: false, path: "app/a",
+      reason: "Cannot move app/a. app/apple and app/a.txt stay. app/a/child.txt stays too. It happened again. Choose app/a, then retry." });
+    expect(await invoke("fileMove", { cwd, actor: "agent", requestId: "tokens", fromPath: "a", toPath: "b" })).toEqual({
+      ok: false, path: "a", reason: "Cannot move a. apple and a.txt stay. a/child.txt stays too. It happened again. Choose a, then retry.",
+    });
+  });
+
+  it.each(["fileMove", "fileDelete"] as const)("hides realpath host errors before %s dispatch", async verb => {
+    context.rootPath = join(workspaceRoot, "missing-root");
+    context.movePath = async input => ({ ok: true, ...input });
+    context.deletePath = async path => ({ ok: true, path, trashed: true });
+    const args = { cwd: workspaceRoot, actor: "agent" as const, requestId: "realpath" };
+    const result = verb === "fileMove" ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })
+      : await invoke(verb, { ...args, path: "a" });
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("ENOENT") });
+    expect(JSON.stringify(result)).not.toContain(workspaceRoot);
+  });
+
+  it.each(["fileMove", "fileDelete"] as const)("keeps host paths out of %s failures", async verb => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const absolute = join(workspaceRoot, "private.txt");
+    const error = Object.assign(new Error("EACCES: realpath '" + absolute + "'"), { code: "EACCES", syscall: "realpath" });
+    context.movePath = async () => { throw error; };
+    context.deletePath = async () => { throw error; };
+    const args = { cwd, actor: "agent" as const, requestId: "private" };
+    const result = verb === "fileMove" ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })
+      : await invoke(verb, { ...args, path: "a" });
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("EACCES") });
+    expect(JSON.stringify(result)).not.toContain(workspaceRoot);
+    context.movePath = async () => { throw new Error("Failed at host=" + absolute + "."); };
+    context.deletePath = async () => { throw new Error("Failed at host=" + absolute + "."); };
+    const unstructured = verb === "fileMove" ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })
+      : await invoke(verb, { ...args, path: "a" });
+    expect(JSON.stringify(unstructured)).not.toContain(workspaceRoot);
+  });
+
   it("refuses a raw move or delete from a person, through traversal, or in a read-only view", async () => {
     const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>();
     const deletePath = vi.fn<NonNullable<CliWorkspaceContext["deletePath"]>>();

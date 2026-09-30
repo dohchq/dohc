@@ -43,6 +43,7 @@ import {
   type AutomationWatchGroupsParams,
   type AutomationWatchGroupsResult,
   type CaptureFlushResult,
+  type CaptureMoveFileResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
   type CollectionGetRecordResult,
@@ -1592,13 +1593,23 @@ export class VersionedLiveAdapter {
     await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
   }
 
-  // Capture records nothing until the hold is released or the workspace closes.
-  async holdCapture(): Promise<string> {
-    return (await this.workspaceRequest(WORKSPACE_METHOD.captureHold, {})).holdId;
+  // Capture records nothing until the hold is released, its lease runs out
+  // unrenewed, or the workspace closes.
+  async holdCapture(): Promise<{ holdId: string; leaseMs: number }> {
+    return await this.workspaceRequest(WORKSPACE_METHOD.captureHold, {});
+  }
+
+  async renewCapture(holdId: string): Promise<boolean> {
+    return (await this.workspaceRequest(WORKSPACE_METHOD.captureRenew, { holdId })).renewed;
   }
 
   async releaseCapture(holdId: string): Promise<boolean> {
     return (await this.workspaceRequest(WORKSPACE_METHOD.captureRelease, { holdId })).released;
+  }
+
+  // One rename that refuses to replace, of a visible regular file, under a hold.
+  async moveFileUnderHold(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult> {
+    return await this.workspaceRequest(WORKSPACE_METHOD.captureMoveFile, input);
   }
 
   async close(): Promise<void> {

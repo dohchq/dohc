@@ -42,7 +42,14 @@ use std::time::Duration;
 
 pub(super) const MAX_OPEN_HANDLES: usize = 64;
 
-pub(super) type CaptureHolds = Arc<Mutex<HashMap<String, tokio::sync::OwnedMutexGuard<()>>>>;
+/// A `capture.hold`: the apply gate it holds, and when it ends unless the
+/// holder renews it first.
+pub(super) struct CaptureHold {
+    pub(super) _guard: tokio::sync::OwnedMutexGuard<()>,
+    pub(super) expires_at: tokio::time::Instant,
+}
+
+pub(super) type CaptureHolds = Arc<Mutex<HashMap<String, CaptureHold>>>;
 
 pub(crate) struct OpenWorkspace {
     pub(super) root: PathBuf,
@@ -65,8 +72,8 @@ pub(crate) struct OpenWorkspace {
     /// apply and prevents a new one from resolving the destination version
     /// across the active-version boundary.
     pub(super) capture_apply_gate: capture_driver::ApplyGate,
-    /// The apply gate, held by `capture.hold` until `capture.release` or the
-    /// workspace closes, keyed by hold id.
+    /// The apply gate, held by `capture.hold` until `capture.release`, the
+    /// end of an unrenewed lease, or the workspace closes, keyed by hold id.
     pub(super) capture_holds: CaptureHolds,
     /// Serializes Y.Doc admission and versioned mutations for this workspace.
     /// Version fences retain this gate through their destructive continuation,
