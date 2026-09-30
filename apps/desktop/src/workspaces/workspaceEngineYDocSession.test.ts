@@ -69,6 +69,7 @@ let closeRefusal: unknown = null;
 // Refuses the next journal write once, the way the daemon refuses it on the
 // wire, then lets later writes (the adapter's recovery included) through.
 let nextRecordRefusal: unknown = null;
+let nextOpenRefusal: unknown = null;
 let busyRecordAttempts = 0;
 // Records the next journal write, then loses its answer with the connection;
 // the resync that recovery sends next is lost the same way.
@@ -117,6 +118,11 @@ function daemonSessions(): EngineWorkspaceSessions {
       }
       if (request.method === "ydoc.close" && closeRefusal !== null) {
         throw closeRefusal;
+      }
+      if (request.method === YDOC_METHOD.open && nextOpenRefusal !== null) {
+        const refusal = nextOpenRefusal;
+        nextOpenRefusal = null;
+        throw refusal;
       }
       if (request.method === YDOC_METHOD.recordUpdate && busyRecordAttempts > 0) {
         busyRecordAttempts -= 1;
@@ -223,6 +229,7 @@ beforeEach(async () => {
   settleRefusal = null;
   closeRefusal = null;
   nextRecordRefusal = null;
+  nextOpenRefusal = null;
   busyRecordAttempts = 0;
   loseNextRecordAnswer = false;
   loseNextResync = false;
@@ -1250,6 +1257,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
 function keyedWrite(
   session: Awaited<ReturnType<typeof capture.openYDocSession>>,
   text: string,
+  idempotencyKey = "claim/1/0",
 ): Promise<boolean> {
   return session.applyDecidedLocalUpdate(
     (doc) => {
@@ -1260,7 +1268,7 @@ function keyedWrite(
       return Y.encodeStateAsUpdate(scratch, before);
     },
     undefined,
-    { idempotencyKey: "claim/1/0" },
+    { idempotencyKey },
   );
 }
 
@@ -1355,8 +1363,8 @@ it("retries a lost keyed acknowledgement with the original record and no second 
 
 it("drops a definitively refused caller-confirmed original so later typing can settle", async () => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
-  nextRecordRefusal = wireRefusal("invalid-change-attribution");
-  await expect(keyedWrite(session, "Refused write.")).rejects.toThrow("invalid-change-attribution");
+  nextRecordRefusal = wireRefusal("attribution depth exceeds the supported chain bound");
+  await expect(keyedWrite(session, "Refused write.")).rejects.toThrow("attribution depth exceeds the supported chain bound");
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused write.");
   expect(requests.filter(request => request.idempotencyKey === "claim/1/0")).toHaveLength(1);
 
@@ -1368,6 +1376,41 @@ it("drops a definitively refused caller-confirmed original so later typing can s
   expect(content).not.toContain("Refused write.");
   await session.close({ settle: false });
   editor.destroy();
+});
+
+it.each(["confirmed write", "typing"])("drops only the refused original during recovery triggered by %s", async trigger => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  // No answer proves whether the original reached the engine. A failed reopen
+  // leaves it pending until a later operation revives the session.
+  nextRecordRefusal = transportLost();
+  loseNextResync = true;
+  nextOpenRefusal = new Error("replacement unavailable");
+  await expect(keyedWrite(session, "Uncertain original.", "uncertain-original"))
+    .rejects.toThrow("may have been recorded");
+  nextRecordRefusal = wireRefusal("attribution depth exceeds the supported chain bound");
+
+  if (trigger === "confirmed write") {
+    await expect(keyedWrite(session, "Later write.", "later-original")).resolves.toBe(true);
+    expect(requests.filter(request => request.idempotencyKey === "later-original")).toHaveLength(1);
+  } else {
+    const editor = mirrorEditor(session);
+    typeIntoBody(editor, "Later write.");
+    await session.applyDecidedLocalUpdate(() => null);
+    editor.destroy();
+  }
+  await session.settleNow();
+  const original = requests.filter(request => request.idempotencyKey === "uncertain-original");
+  expect(original).toHaveLength(2);
+  expect(original[1]!.params).toEqual({
+    ...(original[0]!.params as Record<string, JsonValue>), sessionId: expect.any(String),
+  });
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Later write.");
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Uncertain original.");
+  expect(journalMarkdown()).not.toContain("Uncertain original.");
+  const content = await readFile(join(root, PATH), "utf8");
+  expect(content).toContain("Later write.");
+  expect(content).not.toContain("Uncertain original.");
+  await session.close({ settle: false });
 });
 
 it("records a keyed deletion with its original ID", async () => {

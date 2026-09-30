@@ -2078,7 +2078,9 @@ export function createWorkspaceEngineCapture(
     type PendingRecord = {
       readonly update: Uint8Array;
       readonly options: NonNullable<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]>;
+      readonly confirmed: boolean;
       acknowledged: boolean;
+      refusal: { error: unknown } | null;
     };
     const pendingRecords = new Set<PendingRecord>();
     // Set when a reopen found another object at this path. Terminal: the
@@ -2313,6 +2315,7 @@ export function createWorkspaceEngineCapture(
       onReplayArmed?: () => void,
     ): Promise<void> => {
       let replayArmed = false;
+      let handedOff = false;
       try {
         let replacementClaimId = replacement.lineageClaimId ?? null;
         const claimChanged = replacementClaimId !== canonicalLineageClaimId;
@@ -2360,12 +2363,27 @@ export function createWorkspaceEngineCapture(
         // full delete set and cannot preserve each operation's author.
         for (const record of [...pendingRecords]) {
           replayArmed = !settleForgiven;
-          const journaled = replacement.applyLocalUpdate(record.update, {
-            ...record.options,
-            armSettle: replayArmed,
-          });
-          onReplayArmed?.();
-          await journaled;
+          try {
+            const journaled = replacement.applyLocalUpdate(record.update, {
+              ...record.options,
+              armSettle: replayArmed,
+            });
+            onReplayArmed?.();
+            await journaled;
+          } catch (error) {
+            if (!record.confirmed || !hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) throw error;
+            record.refusal = { error };
+            pendingRecords.delete(record);
+            // This provider applied the refused bytes before admission. Reopen
+            // from durable state before replaying the remaining originals.
+            openingRemoteUpdates.delete(replacement);
+            await replacement.evict();
+            markDead(null);
+            handedOff = true;
+            const clean = await openGeneration(false, { retryTransportErrors: false });
+            await adoptGeneration(doc, clean, onReplayArmed);
+            return;
+          }
           record.acknowledged = true;
           pendingRecords.delete(record);
           Y.applyUpdate(doc, record.update);
@@ -2386,6 +2404,7 @@ export function createWorkspaceEngineCapture(
         canonicalLineageClaimId = replacementClaimId;
         recordedStateVector = Y.encodeStateVector(doc);
       } catch (error) {
+        if (handedOff) throw error;
         openingRemoteUpdates.delete(replacement);
         try {
           await replacement.evict();
@@ -2517,12 +2536,14 @@ export function createWorkspaceEngineCapture(
             sent = true;
             await reviveDeadSession(doc, armed);
             if (record.acknowledged) return;
+            if (record.refusal !== null) throw record.refusal.error;
             if (!pendingRecords.has(record)) {
               throw new YdocAdapterError("lineage-changed",
                 "The document lineage changed before the write was acknowledged.");
             }
           }
         } catch (error) {
+          if (record.refusal !== null) throw record.refusal.error;
           throw unanswered(error);
         }
         if (current === null) throw unanswered(closedError());
@@ -2556,7 +2577,10 @@ export function createWorkspaceEngineCapture(
           // something replaces the generation.
           if (isLineageChangedCause(error)) throw error;
           const refused = hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal);
-          if (refused) pendingRecords.delete(record);
+          if (refused) {
+            record.refusal = { error };
+            pendingRecords.delete(record);
+          }
           const retired = canonicalDoc === doc ? null : doc;
           try {
             await rebind(generation, {
@@ -2566,15 +2590,13 @@ export function createWorkspaceEngineCapture(
             // The session's own failure, reported as one. The write's result
             // is still the engine's answer when it gave one.
             onError(`Y.Doc rebind of ${input.path}`, rebindError);
-            if (hasRefusalInCauseChain(rebindError, isYdocUpdateAdmissionRefusal)) {
-              pendingRecords.delete(record);
-              throw rebindError;
-            }
-            throw refused ? error : keyedWriteUncertain(error);
+            if (record.acknowledged) return;
+            if (record.refusal !== null) throw record.refusal.error;
+            throw keyedWriteUncertain(error);
           }
           // Its generation was replaced, so nothing reads this doc now.
           retired?.destroy();
-          if (refused) throw error;
+          if (record.refusal !== null) throw record.refusal.error;
           if (record.acknowledged) return;
           if (!pendingRecords.has(record)) {
             throw new YdocAdapterError("lineage-changed",
@@ -2701,7 +2723,10 @@ export function createWorkspaceEngineCapture(
         decided = true;
         if (decidedUpdate === null) return false;
         const update = new Uint8Array(decidedUpdate);
-        const record: PendingRecord = { update, options: capturedOptions, acknowledged: false };
+        const record: PendingRecord = {
+          update, options: capturedOptions, confirmed: keyed,
+          acknowledged: false, refusal: null,
+        };
 
         // Counted before any generation arms a settle for it, so a settle
         // that starts afterwards covers it and one that started before
@@ -2709,13 +2734,8 @@ export function createWorkspaceEngineCapture(
         updatesCounted += 1;
         pendingRecords.add(record);
         if (keyed) {
-          try {
-            await applyKeyedUpdate(update, capturedOptions, armed, record);
-            pendingRecords.delete(record);
-          } catch (error) {
-            if (hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) pendingRecords.delete(record);
-            throw error;
-          }
+          await applyKeyedUpdate(update, capturedOptions, armed, record);
+          pendingRecords.delete(record);
           return true;
         }
         // The renderer has already accepted this update, so the canonical doc

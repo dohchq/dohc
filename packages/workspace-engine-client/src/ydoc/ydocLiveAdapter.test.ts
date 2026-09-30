@@ -1562,7 +1562,7 @@ describe("YdocLiveAdapter", () => {
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate && foreign) {
-          throw new Error("ydoc-lineage-stale");
+          throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "ydoc-lineage-stale", retry: "no" }, undefined);
         }
         if (request.method === YDOC_METHOD.resync && foreign) {
           const response = await engine.sendRequest(request);

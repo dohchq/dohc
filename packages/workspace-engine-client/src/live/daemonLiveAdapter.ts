@@ -233,16 +233,20 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error);
 }
 
-// A record rejected for its input was not admitted. Session loss and capacity
-// still need recovery, so exclude them before treating a reply as definitive.
+// Only named input refusals prove non-admission. INVALID_PARAMS also describes
+// session and lineage state that must go through recovery.
 export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
+  const message = refusalMessageOf(error);
   return isIdempotencyKeyReuseRefusal(error) || (
-    error instanceof DaemonRefusalError &&
-    (error.wireCode === "INVALID_PARAMS" || error.wireCode === "LIMIT_EXCEEDED") &&
-    !isTransientEngineRefusal(error) &&
-    !isDaemonReconnectError(error) &&
-    !isYdocSessionNotFoundRefusal(error)
-  );
+    message !== null && (
+      message.startsWith("attribution ") ||
+      message === "only an automation's attribution names a run" ||
+      message.startsWith("invalid identifier: actor_origin_id ") ||
+      message === "Y.Doc replay parity violation" ||
+      message === "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
+    )
+  ) || refusalMessageOf(error, "LIMIT_EXCEEDED") ===
+    "This edit's author details exceed the supported size. Shorten the author details and try again.";
 }
 
 // The store refusals the desktop names and recovers from. Each is the
