@@ -575,3 +575,70 @@ async fn pending_attempt_reserves_capacity_without_requeueing_settlement() {
     assert_eq!(coverage(&db).3, None);
     supervisor.close(&db).expect("stop");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_head_noop_restores_close_proof_across_crash_and_restart() {
+    for point in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("db");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("actor").actor;
+        let state = open(&actor).await;
+        let doc = Ydoc::wire();
+        append(
+            &actor,
+            &state.key,
+            doc.plaintext_insert(0, "same bytes"),
+            "alice",
+        )
+        .await;
+        settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
+            .await
+            .expect("first settle");
+        actor
+            .ydoc_close_session(state.key, 4, Arc::new(NoFaults), CancellationToken::new())
+            .await
+            .expect("first close");
+        let reopened = open(&actor).await;
+        let peer = Ydoc::wire();
+        append(
+            &actor,
+            &reopened.key,
+            peer.plaintext_insert(0, "same bytes"),
+            "bob",
+        )
+        .await;
+        let count = authors(&db).len();
+        assert!(
+            settle(
+                &actor,
+                scratch.path(),
+                &reopened,
+                ScriptedFaults::crash_at(point)
+            )
+            .await
+            .is_err()
+        );
+        supervisor.close(&db).expect("stop");
+        drop(actor);
+        let actor = supervisor.open(&db, 5).expect("restart").actor;
+        settle(&actor, scratch.path(), &reopened, Arc::new(NoFaults))
+            .await
+            .expect("retry no-op");
+        assert_eq!(authors(&db).len(), count, "no-op creates no moment");
+        assert_eq!(coverage(&db), (1, Some(1), "[]".into(), None));
+        actor
+            .ydoc_close_session(
+                reopened.key,
+                6,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("verified artifact permits close");
+        supervisor.close(&db).expect("stop");
+    }
+}

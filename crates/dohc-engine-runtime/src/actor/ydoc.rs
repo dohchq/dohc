@@ -2142,25 +2142,35 @@ fn ydoc_file_holds_head(
 fn record_file_holds_head(
     store: &mut EngineStore,
     key: &DocKey,
+    verified_projection_sha: Option<&str>,
     faults: &dyn FaultInjector,
 ) -> Result<(), RuntimeError> {
-    let (head, settled, pending_empty): (i64, Option<i64>, bool) = store.read_with(|conn| {
+    let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
         conn.query_row(
-            "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]' FROM ydoc_docs \
+            "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]', last_settled_sha FROM ydoc_docs \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![key.workspace_id, key.version_id, key.object_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(StorageError::persist_public)
     })?;
-    if settled == Some(head) && pending_empty {
+    if settled == Some(head)
+        && pending_empty
+        && verified_projection_sha.is_none_or(|sha| last_sha.as_deref() == Some(sha))
+    {
         return Ok(());
     }
     let recorded = store.write_with(faults, |tx| {
         tx.execute(
-            "UPDATE ydoc_docs SET settled_update_seq = head_update_seq, pending_authors_json='[]' \
+            "UPDATE ydoc_docs SET settled_update_seq = head_update_seq, pending_authors_json='[]', \
+             last_settled_sha=COALESCE(?4,last_settled_sha) \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            params![key.workspace_id, key.version_id, key.object_id],
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                verified_projection_sha
+            ],
         )
         .map_err(StorageError::persist_public)?;
         Ok::<_, StorageError>(())
@@ -2651,10 +2661,8 @@ pub(super) fn ydoc_settle_on_store(
         && matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
-        if matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
-        {
-            record_file_holds_head(store, key, faults)?;
-        }
+        // Exact projection and disk equality restore the proof a prior prune cleared.
+        record_file_holds_head(store, key, Some(&projected_sha), faults)?;
         if let Some(audit) = live_audit {
             let recorded = store.write_with(faults, |tx| {
                 let id = audit.record_in_tx(
@@ -2709,7 +2717,7 @@ pub(super) fn ydoc_settle_on_store(
         )
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
-        record_file_holds_head(store, key, faults)?;
+        record_file_holds_head(store, key, None, faults)?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,

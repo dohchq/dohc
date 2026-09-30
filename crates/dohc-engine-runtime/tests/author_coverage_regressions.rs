@@ -543,7 +543,7 @@ async fn terminal_status_distinguishes_success_from_supersession_including_equal
                     SELECT 'newer',?1,target_path,content_sha256,preimage_present,target_generation+1,'complete',created_at_ms,?2 FROM materialization_jobs LIMIT 1",
                     rusqlite::params![newer_workspace,newer_completed_at]).map_err(StorageError::persist_public)?;
                 author_coverage::reconcile_in(tx,&state.key,12)
-                    .map_err(|error|StorageError::persist_public(error))
+                    .map_err(StorageError::persist_public)
             }).expect("reconcile completion ordering");
             let reconciled = coverage(&store, &state.key);
             assert_eq!(reconciled.3, None);
