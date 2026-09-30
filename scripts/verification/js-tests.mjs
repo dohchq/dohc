@@ -53,23 +53,34 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {}, repository = "full", desktopScripts = true, beforeDesktopScripts } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {}, repository = "full", desktopScripts = true, beforeDesktopScripts, runProofs } = {}) {
   if (!["full", "source"].includes(repository)) throw new Error("Unknown repository test scope.");
   if (typeof desktopScripts !== "boolean") throw new Error("Desktop script selection must be a boolean.");
+  if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("Proof selection must provide a function.");
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, concurrency: 2, repository, desktopScripts, steps: [], verdict: "RUNNING" };
+  const report = { version: 1, concurrency: 2, repository, desktopScripts, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
   const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(report, null, 2) + "\n");
   const cancellation = cancellationScope("Workspace tests");
   // The first command to fail stops every lane from starting another.
   let failure;
-  async function command(name, args) {
+  const databaseFinished = Promise.withResolvers();
+  function fail(error) {
+    failure ??= error;
+    // Wake the repository lane when failure prevents a queued database test.
+    databaseFinished.resolve();
+    throw error;
+  }
+  async function checkpoint() {
     await cancellation.checkpoint();
     if (failure) throw failure;
+  }
+  async function command(name, args) {
+    await checkpoint();
     const row = { name, args, log: join(output, name.replaceAll(/[^\w.-]/gu, "_") + ".log") };
     report.steps.push(row);
     return timed(row, () => run(...pnpm(args), { env, log: row.log }), save)
-      .catch(error => { failure ??= error; throw error; });
+      .catch(fail);
   }
   async function planPackages() {
     const inventory = await command("inventory", ["-r", "list", "--depth", "-1", "--json"]);
@@ -94,7 +105,24 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
     const repositoryChecks = command("repository", ["run", repository === "full" ? "test:repo" : "test:repo:source"]);
-    const plan = planPackages().catch(error => { failure ??= error; throw error; });
+    const plan = planPackages().catch(fail);
+    const databasePending = new Set();
+    const packages = plan.then(async tasks => {
+      for (const task of tasks) if (task.resource === "postgres") databasePending.add(task.name);
+      if (!databasePending.size) databaseFinished.resolve();
+      // Complete the shared database consumers before the repository lane's
+      // proofs, while the longest desktop package occupies the other slot.
+      const priority = task => task.name === "@dohc/desktop" ? 0 : task.resource === "postgres" ? 1 : 2;
+      const scheduled = runProofs ? tasks.toSorted((a, b) => priority(a) - priority(b)) : tasks;
+      await runBounded(scheduled, async task => {
+        try { await command(task.name, task.args); }
+        finally {
+          databasePending.delete(task.name);
+          if (!databasePending.size) databaseFinished.resolve();
+        }
+      }, report.concurrency);
+      return tasks;
+    }).catch(fail);
     // Isolated scripts take over the repository lane without adding another
     // concurrent command. Only the runtime packaging fixture rewrites dist.
     const runRepository = async () => {
@@ -103,18 +131,21 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       if (desktopScripts && tasks.some(task => task.name === "@dohc/desktop")) {
         await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"]);
       }
+      if (runProofs) {
+        await databaseFinished.promise;
+        await checkpoint();
+        const row = { name: "proofs", runner: "runProofs" };
+        report.steps.push(row);
+        await timed(row, () => runProofs(checkpoint), save);
+      }
     };
-    const packages = plan.then(async tasks => {
-      await runBounded(tasks, task => command(task.name, task.args), report.concurrency);
-      return tasks;
-    });
     // Every lane settles before cleanup, including after a sibling fails.
-    const results = await Promise.allSettled([runRepository(), packages]);
+    const results = await Promise.allSettled([runRepository().catch(fail), packages]);
     if (failure) throw failure;
     for (const result of results) if (result.status === "rejected") throw result.reason;
     const tasks = results[1].value;
     // Packaging rebuilds dist, which package tests and Rust's public-collection
-    // recovery fixture read. Both must finish before the rebuild.
+    // recovery fixture read. Package tests and proofs must also finish first.
     if (desktopScripts && tasks.some(task => task.name === "@dohc/desktop")) {
       await beforeDesktopScripts?.();
       await command("desktop-runtime-packaging", ["--filter", "@dohc/desktop", "run", "test:scripts:runtime"]);

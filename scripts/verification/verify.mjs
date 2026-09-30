@@ -183,16 +183,16 @@ export async function verify(args) {
   let lane;
   const previousIncremental = process.env.CARGO_INCREMENTAL;
   let desktopEnvironment;
-  async function checkedStep(row, action) {
-    await cancellation.checkpoint();
+  async function checkedStep(row, action, checkpoint = () => cancellation.checkpoint()) {
+    await checkpoint();
     report.steps.push(row); save();
     const result = await timed(row, action, save);
     await checkTree(row.name);
     return result;
   }
-  function step(name, command, commandArgs, env = process.env) {
+  function step(name, command, commandArgs, env = process.env, checkpoint) {
     const row = { name, command, args: commandArgs, log: join(output, `${name}.log`) };
-    return checkedStep(row, () => run(command, commandArgs, { env, log: row.log }));
+    return checkedStep(row, () => run(command, commandArgs, { env, log: row.log }), checkpoint);
   }
   save();
   const cancellation = cancellationScope("Verification");
@@ -250,49 +250,54 @@ export async function verify(args) {
       }
     }
     async function javascriptJob() {
+      async function selectedProofs(env, checkpoint) {
+        const proofStep = (name, command, commandArgs, env) => step(name, command, commandArgs, env, checkpoint);
+        if (mode === "pr" && proofs.selfHostNative) {
+          const nativeOutput = join(output, "self-host-native");
+          mkdirSync(nativeOutput, {recursive: true});
+          const nativeHash = hashFile(stagedEnginePath);
+          await proofStep("self-host-native", ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
+            "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`]),
+            {...env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
+          report.selfHostNative = readSelfHostNativeProof(nativeOutput, stagedEnginePath, nativeHash); save();
+        }
+        if (mode === "pr" && (proofs.accounts || proofs.desktop)) {
+          await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", ...(process.platform === "linux" ? ["--with-deps"] : []), "chromium"]), env);
+        }
+        if (mode === "pr" && proofs.accounts) {
+          const accountReport = join(output, "accounts-playwright.json");
+          await proofStep("accounts", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "services/workspace-api/playwright.config.ts", "--output", join(output, "accounts"), "--reporter=list,json"], { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: accountReport });
+          report.accounts = JSON.parse(readFileSync(accountReport, "utf8")).stats;
+          if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
+        }
+        if (proofs.desktop) {
+          const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", mode === "pr" ? "@verification-smoke|@self-host-onboarding" : "@verification-smoke"];
+          const jsonReport = join(output, "playwright.json");
+          await proofStep("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env }), { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
+          const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
+          report.desktop = desktopReport.stats;
+          report.desktopProofs = passedSpecTitles(desktopReport.suites);
+          if (!report.desktop?.expected || report.desktop.unexpected || report.desktop.flaky) throw new Error("Desktop verification did not complete a passing test run.");
+          if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
+          if (mode === "pr" && ["@verification-smoke", "@self-host-onboarding"].some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error("The desktop gate did not pass both persistence and self-host onboarding proofs.");
+        }
+      }
       if (mode === "pr" && gates.js) {
         if (needs.postgres) {
           database = await measure("postgres-start", () => postgres(output, run, measure));
           report.postgres = { id: database.id }; save();
         }
         const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
-        desktopEnvironment = env;
         await step("typecheck", ...pnpm(["run", "typecheck"]), env);
         report.jsTests = join(output, "js-tests", "result.json");
         // Keep package groups under this owner so cancellation finishes their
         // escalation before database cleanup, without a competing parent timer.
         await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
           () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages, testFiles: javascript.testFiles, repository: javascript.repository, desktopScripts: javascript.desktopScripts,
-            beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled) }));
-        if (proofs.selfHostNative) {
-          const nativeOutput = join(output, "self-host-native");
-          mkdirSync(nativeOutput, {recursive: true});
-          const nativeHash = hashFile(stagedEnginePath);
-          await step("self-host-native", ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
-            "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`]),
-            {...env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
-          report.selfHostNative = readSelfHostNativeProof(nativeOutput, stagedEnginePath, nativeHash); save();
-        }
-        if (proofs.accounts || proofs.desktop) {
-          await step("browser-install", ...pnpm(["exec", "playwright", "install", ...(process.platform === "linux" ? ["--with-deps"] : []), "chromium"]), env);
-        }
-        if (proofs.accounts) {
-          const accountReport = join(output, "accounts-playwright.json");
-          await step("accounts", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "services/workspace-api/playwright.config.ts", "--output", join(output, "accounts"), "--reporter=list,json"], { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: accountReport });
-          report.accounts = JSON.parse(readFileSync(accountReport, "utf8")).stats;
-          if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
-        }
-      }
-      if (proofs.desktop) {
-        const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", mode === "pr" ? "@verification-smoke|@self-host-onboarding" : "@verification-smoke"];
-        const jsonReport = join(output, "playwright.json");
-        await step("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env: desktopEnvironment }), { ...desktopEnvironment, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
-        const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
-        report.desktop = desktopReport.stats;
-        report.desktopProofs = passedSpecTitles(desktopReport.suites);
-        if (!report.desktop?.expected || report.desktop.unexpected || report.desktop.flaky) throw new Error("Desktop verification did not complete a passing test run.");
-        if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
-        if (mode === "pr" && ["@verification-smoke", "@self-host-onboarding"].some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error("The desktop gate did not pass both persistence and self-host onboarding proofs.");
+            beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled),
+            ...(Object.values(proofs).some(Boolean) ? {runProofs: checkpoint => selectedProofs(env, checkpoint)} : {}) }));
+      } else if (mode !== "pr") {
+        await selectedProofs(desktopEnvironment, () => cancellation.checkpoint());
       }
     }
     const rustWork = rustJob();

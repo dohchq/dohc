@@ -121,7 +121,10 @@ Do not add step durations to estimate elapsed time.
 `pnpm test` builds the app runtime before testing packages.
 Repository checks run beside at most two package commands.
 Isolated desktop script tests then use the repository lane.
-The runtime packaging test waits for all three lanes because it rebuilds shared runtime files.
+PR verification then reuses that lane for selected integration proofs after every selected database package finishes.
+When proofs are selected, desktop and database package tests start first so proofs can overlap the remaining package tests.
+Standalone `pnpm test` does not run these integration proofs.
+The runtime packaging test waits for all three lanes, including proof readers, because it rebuilds shared runtime files.
 Database consumers share one slot. Vitest uses at most four workers per package and retains stricter existing limits.
 Package results and durations are in the JS test report referenced by `result.json`.
 The canonical verifier supplies the prerequisites once before running this test schedule.
