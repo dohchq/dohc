@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import { executeCli } from "@dohc/cli";
@@ -24,6 +24,7 @@ import {
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
@@ -1693,6 +1694,74 @@ describe("CLI socket server", () => {
     await expect(invoke("documentRead", { cwd: workspaceRoot, actor: "agent", path: "notes.md" })).resolves.toEqual({ ok: true, path: "notes.md", markdown: "Root" });
   });
 
+  it("maps change-list paths and preserves root errors without any path mappings", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
+    context.listMoments = async () => [{ ...moments.summary, path: "app/notes.md" }];
+    await expect(invoke("moments", { cwd, actor: "agent" })).resolves.toMatchObject({ changes: [{ path: "notes.md" }] });
+    context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "unavailable", message: "Cannot open (missing)" }));
+    await expect(invoke("dataset", { cwd: workspaceRoot, actor: "agent", request: { action: "list", workspaceId: WORKSPACE_ID } })).resolves.toMatchObject({ message: "Cannot open (missing)" });
+  });
+
+  it("rebases both file chat verbs from a subfolder", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    context.fileObjectIdForPath = vi.fn(async path => path === "app/notes.md" ? "object_subfolder" : null);
+    context.filePathForObjectId = vi.fn(async objectId => objectId === "object_subfolder" ? "app/notes.md" : null);
+    const started = await invoke("fileChatStart", { cwd, actor: "agent", path: "notes.md", title: "Subfolder", body: "Comment" });
+    expect(started).toMatchObject({ ok: true, path: "notes.md" });
+    await expect(invoke("fileChats", { cwd, actor: "agent", path: "notes.md" })).resolves.toMatchObject({ ok: true, path: "notes.md", fileObjectId: "object_subfolder", threads: [{ linkedPathHint: "notes.md" }] });
+    expect(context.fileObjectIdForPath).toHaveBeenCalledWith("app/notes.md");
+    await expect(invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "notes.md" })).resolves.toMatchObject({ ok: true, threads: [] });
+    await expect(invoke("fileChatStart", { cwd, actor: "agent", path: "missing.md", title: "Missing", body: "Comment" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("does not track missing.md") });
+  });
+
+  it("preserves absolute recovery exports and refuses private archives inside the workspace", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const savePath = join(tempRoot, "backup.dohc-recovery");
+    const dataset = vi.fn(async () => ({ kind: "exported" as const, savedPath: savePath }));
+    context.dataset = dataset;
+    for (const folder of [cwd, workspaceRoot]) {
+      await expect(invoke("dataset", { cwd: folder, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath } })).resolves.toEqual({ kind: "exported", savedPath: savePath });
+    }
+    dataset.mockClear();
+    for (const savePath of ["backup.dohc-recovery", join(cwd, "backup.dohc-recovery"), join(workspaceRoot, "backup.dohc-recovery"), join(tempRoot, "missing", "backup.dohc-recovery")]) {
+      await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath } })).resolves.toMatchObject({ kind: "refused", code: "path_rejected" });
+    }
+    const alias = join(tempRoot, "workspace-alias");
+    await symlink(cwd, alias, "junction");
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: join(alias, "backup.dohc-recovery") } })).resolves.toMatchObject({ kind: "refused", message: expect.stringContaining("outside the workspace") });
+    expect(dataset).not.toHaveBeenCalled();
+    context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "unavailable", message: "Cannot open " + savePath }));
+    for (const folder of [cwd, workspaceRoot]) {
+      await expect(invoke("dataset", { cwd: folder, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).resolves.toMatchObject({ message: "Cannot open " + savePath });
+    }
+    const absoluteWorkspacePath = join(workspaceRoot, "data", "dataset.json");
+    context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "unavailable", message: "Cannot open " + absoluteWorkspacePath }));
+    await expect(invoke("dataset", { cwd: workspaceRoot, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).resolves.toMatchObject({ message: "Cannot open " + absoluteWorkspacePath });
+  });
+
+  it("refuses colon segments for read, write, materialize, and chat paths", async () => {
+    for (const path of ["C:foo.md", "folder/C:foo.md", "foo:bar.md", ...(process.platform === "win32" ? [] : ["C:/foo.md"])]) {
+      await expect(invoke("documentRead", { cwd: workspaceRoot, actor: "agent", path })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("documentEdit", { cwd: workspaceRoot, actor: "agent", path, replacement: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("documentCreate", { cwd: workspaceRoot, actor: "agent", path, markdown: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("fileChatStart", { cwd: workspaceRoot, actor: "agent", path, title: "Wrong", body: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("colon") });
+      await expect(invoke("moments", { cwd: workspaceRoot, actor: "agent", path })).rejects.toThrow("colon");
+      await expect(invoke("export", { cwd: workspaceRoot, actor: "agent", scope: { kind: "all" }, outDir: path })).rejects.toThrow("colon");
+      await expect(invoke("post", { cwd: workspaceRoot, actor: "agent", group: "general", body: "Wrong", attachments: [path], needsDecision: false })).rejects.toThrow("colon");
+      await expect(invoke("reply", { cwd: workspaceRoot, actor: "agent", thread: "thread", body: "Wrong", attachments: [path], needsDecision: false })).rejects.toThrow("colon");
+      await expect(invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request: { action: "listLocal", workspaceId: WORKSPACE_ID, appRoot: path } })).rejects.toThrow("colon");
+      for (const action of ["prepareRecovery", "export"] as const) {
+        const request = action === "prepareRecovery" ? { action, workspaceId: WORKSPACE_ID, sourcePath: path } : { action, workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: path };
+        await expect(invoke("dataset", { cwd: workspaceRoot, actor: "agent", request })).resolves.toMatchObject({ kind: "refused", code: "path_rejected", message: expect.stringContaining("colon") });
+      }
+    }
+  });
+
   it("rebases automation paths while preserving planned, current, and undo JSON", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
@@ -1718,12 +1787,12 @@ describe("CLI socket server", () => {
     context.dataset = vi.fn(async request => request.action === "export"
       ? { kind: "exported" as const, savedPath: request.savePath ?? null }
       : { kind: "refused" as const, code: "unavailable", message: "Cannot open app/data/dataset.json" });
-    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: "export.zip" } })).resolves.toEqual({ kind: "exported", savedPath: "export.zip" });
-    expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ datasetPath: "app/data/dataset.json", savePath: join(cwd, "export.zip") }), { depth: 0 });
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: join(tempRoot, "backup.dohc-recovery") } })).resolves.toEqual({ kind: "exported", savedPath: join(tempRoot, "backup.dohc-recovery") });
+    expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ datasetPath: "app/data/dataset.json", savePath: join(tempRoot, "backup.dohc-recovery") }), { depth: 0 });
     await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).resolves.toMatchObject({ kind: "refused", message: "Cannot open data/dataset.json" });
     context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "custom_rules", message: "Update app/data/operations.js to change a field." }));
     await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).resolves.toMatchObject({ message: "Update data/operations.js to change a field." });
-    context.dataset = vi.fn(async () => { throw Object.assign(new Error("notes.md uses custom rules. Update shared/my rules.js, then choose Review source change."), { workspacePaths: ["shared/my rules.js"] }); });
+    context.dataset = vi.fn(async () => { throw new DatasetSchemaChangeError("notes.md uses custom rules. Update shared/my rules.js, then choose Review source change.", ["shared/my rules.js"]); });
     await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json" } })).rejects.toThrow("notes.md uses custom rules. Update ../shared/my rules.js, then choose Review source change.");
     context.dataset = vi.fn(async () => ({ kind: "refused" as const, code: "unavailable", message: "Unavailable" }));
     await invoke("dataset", { cwd, actor: "agent", request: { action: "prepare", workspaceId: WORKSPACE_ID, descriptorPath: "data/dataset.json" } });

@@ -7,7 +7,7 @@ const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const workspace = { workspaceId: z.string().min(1).max(128) };
 const datasetPath = z.string().min(1).max(1024).describe("Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference.").superRefine((value, context) => {
-  try { parseDatasetPath(value); } catch { context.addIssue({ code: "custom", message: "Use the workspace-relative dataset.json path." }); }
+  try { parseDatasetPath(value); } catch { context.addIssue({ code: "custom", message: value.startsWith("../") ? "This Collection sits outside the MCP folder. Run the MCP server from the workspace root or a folder containing the Collection." : "Use the caller-relative dataset.json path." }); }
 });
 // Result addresses can name a sibling of the caller folder. They grant no access.
 const resultDatasetPath = z.string().min(1).max(4096).superRefine((value, context) => {

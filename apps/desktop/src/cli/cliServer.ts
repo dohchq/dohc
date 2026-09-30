@@ -90,6 +90,7 @@ import {
 } from "node:path";
 import { Worker } from "node:worker_threads";
 import { z } from "zod";
+import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { AutomationRunRetry } from "../automations/automationNotices";
@@ -1978,6 +1979,27 @@ async function onceForRequestId(
   }
 }
 
+function refusePathColon(path: string): void {
+  const segments = isAbsolute(path) ? path.replace(/^[A-Za-z]:[\\/]/, "") : path;
+  if (segments.includes(":")) throw new CliCommandError(`path rejected (colon): ${path}`);
+}
+
+function validateRequestPathSpellings(request: CliRequest): void {
+  const fields = ["path", "recordPath", "collectionPath", "datasetPath", "descriptorPath", "migrationPath", "sourcePath", "savePath", "appRoot", "outDir", "schemaPath", "operationsPath"];
+  const check = (value: object) => {
+    for (const [key, path] of Object.entries(value)) {
+      if (fields.includes(key) && typeof path === "string") refusePathColon(path);
+      if (key === "attachments" && Array.isArray(path)) path.forEach(refusePathColon);
+    }
+  };
+  check(request.args);
+  if (request.verb === "dataset" || request.verb === "appPublication") {
+    check(request.args.request);
+    if (request.verb === "dataset" && request.args.request.action === "create") check(request.args.request.definition);
+  }
+  if (request.verb === "collectionQuery" && request.args.cursor) check(request.args.cursor);
+}
+
 type CliPathMode = "read" | "write" | "materialize";
 
 // Validate the caller spelling before rebasing, then validate workspace authority.
@@ -1987,7 +2009,9 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
   const folder = await realpath(cwd);
   if (!isInside(root, folder)) throw new CliCommandError("not inside a dohc workspace");
   const known = new Map<string, string>();
-  const callerPath = (path: string) => relative(folder, resolve(root, path)).split(sep).join("/") || ".";
+  const workspacePath = (path: string) => isInside(root, resolve(root, path));
+  const callerPath = (path: string) => workspacePath(path) ? relative(folder, resolve(root, path)).split(sep).join("/") || "." : path;
+  const escapePattern = (path: string) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const validate = (path: string, mode: CliPathMode) => mode === "write"
     ? validateUserWritePath(path)
     : mode === "materialize"
@@ -2010,12 +2034,18 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       known.set(absolute, path);
       return absolute;
     },
+    async exportPath(path: string): Promise<string> {
+      if (!isAbsolute(path)) throw new CliCommandError(`savePath must be absolute: ${path}`);
+      const destination = resolve(await realpath(dirname(path)).catch(() => { throw new CliCommandError("Choose an existing folder outside the workspace."); }), basename(path));
+      if (isInside(root, destination)) throw new CliCommandError("Save the private recovery archive outside the workspace.");
+      return path;
+    },
     result(value: unknown): unknown {
-      const paths = new Set(["path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "schemaPath", "operationsPath"]);
+      const paths = new Set(["path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath"]);
       const lists = new Set(["paths", "created", "written"]);
       const data = new Set(["values", "fields", "kept", "input", "result", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
       const collect = (entry: unknown, key = ""): void => {
-        if (typeof entry === "string" && (paths.has(key) || lists.has(key))) {
+        if (typeof entry === "string" && (paths.has(key) || lists.has(key)) && workspacePath(entry)) {
           known.set(entry, callerPath(entry));
           known.set(resolve(root, entry), callerPath(entry));
         }
@@ -2026,12 +2056,13 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       };
       collect(value);
       const text = (line: string) => {
-        const names = [...known.keys()].sort((a, b) => b.length - a.length).map(path => RegExp.escape(path));
+        const names = [...known.keys()].filter(path => root !== folder || !isAbsolute(path)).sort((a, b) => b.length - a.length).map(path => escapePattern(path));
         const prefix = relative(root, folder).split(sep).join("/") + "/";
         // A port can mention another source file beside the requested descriptor.
-        const anchors = [...(root === folder ? [] : [prefix]), root + sep, root.split(sep).join("/") + "/"];
-        const pathsInText = anchors.map(path => RegExp.escape(path) + '[^\\s"\'<>()]+');
+        const anchors = root === folder ? [] : [prefix, root + sep, root.split(sep).join("/") + "/"];
+        const pathsInText = anchors.map(path => escapePattern(path) + '[^\\s"\'<>()]+');
         const pattern = [...names, ...pathsInText].join("|");
+        if (!pattern) return line;
         return line.replace(new RegExp(`(?<![\\p{L}\\p{N}_./\\\\-])(?:${pattern})(?![\\p{L}\\p{N}_.\\\\-])`, "gu"), path => known.get(path) ?? callerPath(path));
       };
       const map = (entry: unknown, key = ""): unknown => {
@@ -2056,12 +2087,22 @@ async function dispatch(
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): Promise<unknown> {
-  const pathVerbs = new Set(["documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy"]);
-  if (!pathVerbs.has(request.verb)) return dispatchWorkspace(request, context, options);
+  const pathVerbs = new Set(["moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy"]);
+  if (!pathVerbs.has(request.verb)) {
+    validateRequestPathSpellings(request);
+    return dispatchWorkspace(request, context, options);
+  }
   const paths = await callerPaths(context, request.args.cwd);
   let rebased: CliRequest;
   try {
+    validateRequestPathSpellings(request);
     switch (request.verb) {
+      case "fileChats":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
+        break;
+      case "fileChatStart":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
+        break;
       case "documentRead":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
@@ -2103,7 +2144,7 @@ async function dispatch(
         if ("descriptorPath" in translated) translated.descriptorPath = paths.rebase(translated.descriptorPath, "read");
         if ("migrationPath" in translated) translated.migrationPath = paths.rebase(translated.migrationPath, "read");
         if ("sourcePath" in translated && translated.sourcePath !== undefined) translated.sourcePath = paths.recoveryPath(translated.sourcePath, "read");
-        if ("savePath" in translated && translated.savePath !== undefined) translated.savePath = paths.recoveryPath(translated.savePath, "materialize");
+        if ("savePath" in translated && translated.savePath !== undefined) translated.savePath = await paths.exportPath(translated.savePath);
         if ("appRoot" in translated) translated.appRoot = paths.rebase(translated.appRoot, "materialize");
         if (translated.action === "create") translated.definition = { ...translated.definition,
           schemaPath: paths.rebase(translated.definition.schemaPath, "read"),
@@ -2115,13 +2156,14 @@ async function dispatch(
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "path rejected";
+    if (request.verb === "moments") throw new CliCommandError(reason);
     return request.verb === "dataset" ? { kind: "refused", code: "path_rejected", message: reason } : { ok: false, reason };
   }
   try {
     return paths.result(parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options)));
   } catch (error) {
-    const workspacePaths = error instanceof Error && "workspacePaths" in error && Array.isArray(error.workspacePaths)
-      ? error.workspacePaths.filter((path: unknown): path is string => typeof path === "string")
+    const workspacePaths = error instanceof DatasetSchemaChangeError
+      ? error.workspacePaths
       : [];
     const mapped = paths.result({ error: error instanceof Error ? error.message : "request failed", paths: workspacePaths });
     if (mapped !== null && typeof mapped === "object" && "error" in mapped && typeof mapped.error === "string") throw new CliCommandError(mapped.error);

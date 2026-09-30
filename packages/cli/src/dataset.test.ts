@@ -32,7 +32,9 @@ describe("dataset CLI", () => {
   it("accepts caller-relative result addresses without accepting request traversal", () => {
     const dataset = { datasetId: id(1), name: "Equipment", revision: 1, revisionSha256: "a".repeat(64), tables: [], operations: [], datasetPath: "../equipment/dataset.json" };
     expect(DatasetResult.parse({ kind: "description", dataset })).toEqual({ kind: "description", dataset });
-    expect(DatasetRequest.safeParse({ action: "describe", workspaceId: "workspace", datasetPath: dataset.datasetPath }).success).toBe(false);
+    const refused = DatasetRequest.safeParse({ action: "describe", workspaceId: "workspace", datasetPath: dataset.datasetPath });
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues[0]?.message).toBe("This Collection sits outside the MCP folder. Run the MCP server from the workspace root or a folder containing the Collection.");
     expect(DatasetResult.safeParse({ kind: "description", dataset: { ...dataset, datasetPath: "../equipment/../dataset.json" } }).success).toBe(false);
     const revision = { datasetId: id(1), revision: 1, revisionSha256: "d".repeat(64), definition: { ...definition, schemaPath: "../equipment/schema.sql", operationsPath: "../equipment/actions.ts" }, definitionSha256: "a".repeat(64), schemaSha256: "b".repeat(64), operationsSha256: "c".repeat(64) };
     expect(DatasetResult.parse({ kind: "approved", revision })).toEqual({ kind: "approved", revision });

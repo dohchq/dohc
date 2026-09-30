@@ -9,6 +9,11 @@ describe("dataset MCP transport", () => {
     }
     expect(send).not.toHaveBeenCalled();
   });
+  it("explains how to address a Collection listed outside the MCP folder", async () => {
+    const send = vi.fn(), context: ToolContext = { root: "/workspace/app", home: "/home", request: send };
+    expect(await dataset(context, { action: "describe", workspaceId: "workspace", datasetPath: "../equipment/dataset.json" })).toMatchObject({ ok: false, reason: expect.stringContaining("Run the MCP server from the workspace root or a folder containing the Collection.") });
+    expect(send).not.toHaveBeenCalled();
+  });
   it("requires explicit owner cancellation acknowledgement and preserves the result", async () => {
     const reply = {kind:"attempt-cancelled",cancelled:true};
     const send = vi.fn(async () => reply), context:ToolContext = {root:"/workspace",home:"/home",request:send};
