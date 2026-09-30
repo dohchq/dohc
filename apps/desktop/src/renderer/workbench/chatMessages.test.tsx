@@ -1288,6 +1288,25 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
     expect(h.ctx.pendingReactions.current.size).toBe(0);
   });
 
+  it.each([false, true])("repaints a noncurrent account's accepted write after its queued intent was superseded, deferred=%s", async (deferSetters) => {
+    const h = harness([], { deferSetters });
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    bridgeMock.listChatReactions.mockRejectedValue(new TypeError("offline"));
+    toggle(h, "added");
+    toggle(h, "removed");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "added" });
+    h.flush();
+    writes[0]!.resolve(undefined);
+    await waitFor(() => expect(writes).toHaveLength(2));
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledTimes(2));
+    h.flush();
+    expect(h.reactions).toHaveLength(1);
+    expect(h.reactions[0]!.authorId).toBe("you@x");
+    expect(h.onError.mock.calls[1]![0]).not.toContain("Your reaction was saved");
+    expect(h.ctx.pendingReactions.current.size).toBe(0);
+  });
+
   it("refreshes a remembered account's rollback baseline on a new visit", async () => {
     const h = harness();
     const writes = controlled<undefined>(bridgeMock.setChatReaction);

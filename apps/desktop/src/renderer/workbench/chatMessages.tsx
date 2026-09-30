@@ -338,6 +338,15 @@ export function runReactionToggle(
             who.confirmed = rowsFor(state, who);
             who.confirmedAt = Number.POSITIVE_INFINITY;
           }
+          // Another account owns the cell, so this person's newer intent may
+          // have been dropped and their rows returned to the old snapshot.
+          // The accepted write is what the server holds: paint it, leaving
+          // the owner's rows alone. The owner's own paint stands otherwise.
+          if (!isNamed(cell.author, person.name)) {
+            owner.setReactions((current) =>
+              ownerLive() ? replaceRows(current, rowsOf(person), person.confirmed ?? []) : current,
+            );
+          }
         },
         (error: unknown) => {
           if (!ownerLive()) return;
