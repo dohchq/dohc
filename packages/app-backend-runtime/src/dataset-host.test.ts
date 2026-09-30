@@ -43,7 +43,7 @@ type Context = "owner" | "helper" | "friend";
 async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dohc-dataset-host-"));
   const db = new DatabaseSync(join(directory, "host.sqlite"));
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE permissions(user TEXT PRIMARY KEY,active INTEGER); INSERT INTO permissions VALUES('owner',1),('helper',1),('friend',1); CREATE TABLE accounting(bytes INTEGER); INSERT INTO accounting VALUES(0);");
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE; CREATE TABLE permissions(user TEXT PRIMARY KEY,active INTEGER); INSERT INTO permissions VALUES('owner',1),('helper',1),('friend',1); CREATE TABLE accounting(bytes INTEGER); INSERT INTO accounting VALUES(0); COMMIT;");
   function transaction<T>(run: () => T): T {
     db.exec("BEGIN IMMEDIATE");
     try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; }

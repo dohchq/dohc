@@ -28,7 +28,7 @@ async function fixture(options: { transform?: (journal: DatasetJournal) => Datas
   const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
   const checkpoint = await readFile(join(directory, "seed.sqlite"));
   const db = new DatabaseSync(join(directory, "authority.sqlite"));
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE grants(allowed INTEGER); INSERT INTO grants VALUES(1); CREATE TABLE files(attached INTEGER); INSERT INTO files VALUES(0);");
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE; CREATE TABLE grants(allowed INTEGER); INSERT INTO grants VALUES(1); CREATE TABLE files(attached INTEGER); INSERT INTO files VALUES(0); COMMIT;");
   function transaction<T>(work: () => T): T {
     db.exec("BEGIN IMMEDIATE");
     try { const result = work(); db.exec("COMMIT"); return result; }
