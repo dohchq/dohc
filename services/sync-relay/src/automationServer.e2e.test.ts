@@ -155,6 +155,7 @@ it.skipIf(engine.missing)("runs a schedule in the server's copy of the workspace
   let hooks: Parameters<typeof startAutomationReplicas>[0] | undefined;
   const errors: string[] = [];
   const replica: AutomationReplica = {
+    pulledHead: 0,
     workspaceId: WORKSPACE, ownerUserId: "owner", incarnation: row.incarnation, startedAtMs: row.startedAtMs,
     root: join(root, "server", "workspace"), metadataDir, client: copy.client, workspace: copy.workspace, signal: copy.lifetime,
     nextRequestId: copy.nextRequestId,

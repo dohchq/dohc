@@ -2727,7 +2727,7 @@ describe("Collection automations", () => {
     const w = await world({ automations: { Tasks: unsupported } });
     await w.executor.open();
     await w.executor.automationsIn("Tasks");
-    await expect(w.baseStore.readReachVerdicts()).resolves.toEqual({ verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenPaths: [], unprovenFolders: [], pending: null, taken: null, unreadable: false });
+    await expect(w.baseStore.readReachVerdicts()).resolves.toEqual({ verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenPaths: [], unprovenFolders: [], pending: null, taken: null, unreadable: false, missing: true });
   });
   it("passes a waiting claim by in later drains until what it waits for clears", async () => {
     const w = await world({ automations: {

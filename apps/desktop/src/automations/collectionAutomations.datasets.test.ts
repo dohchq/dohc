@@ -1051,6 +1051,20 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
+  it("names held dataset operations by their label", async () => {
+    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+    const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
+    await f.executor.open();
+    await f.executor.automationsIn("Budget");
+    f.setRoster(OWNER);
+    f.executor.rosterChanged();
+    await f.until(() => f.executor.holds().some((hold) => hold.step === JSON.stringify(["operation", definition.datasetId, STATUS_ONLY])));
+    expect(f.executor.holds()).toEqual(expect.arrayContaining([expect.objectContaining({
+      step: JSON.stringify(["operation", definition.datasetId, STATUS_ONLY]), operationName: "Set status",
+    })]));
+    await f.executor.dispose();
+  });
+
   it("holds a run when a field becomes readable only because an editor left, until a current editor allows it", async () => {
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     const withAna: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [ana] };

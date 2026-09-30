@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
-import type { ScheduledAutomation, CollectionAutomationsOptions } from "@dohc/automation-executor/collection-automations";
+import type { ScheduledAutomation, CollectionAutomationsOptions, DatasetAutomationHost, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
+import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/relay";
 import type { ReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
@@ -8,6 +9,7 @@ import type { AutomationReplica, startAutomationReplicas } from "./automationRep
 import type { LiveClaimLedger } from "./automationLiveClaims";
 import { createRunGate, SERVER_RUN_BURST, startAutomationServer, type AutomationServerOptions, type ServerExecutor } from "./automationServer";
 import type { Event } from "@dohc/workspace-engine-client";
+import type { RelayDatasetHost } from "./datasetHost";
 import type { SyncRelayStorage } from "./storage";
 import {
   claimWorkspace, closeTestStorages, createShare, inspectDatabase, json, jsonBody, request, storagePath, testHandler, testStorage,
@@ -56,15 +58,19 @@ function fakeExecutor(
   const claims: Array<{ run: number[]; throughMs: number }> = [];
   const pressed: Array<{ pressId: string; pressedBy: string }> = [];
   let hostChanges = 0;
-  let drains = 0;
+  let claimWakes = 0;
+  const holds: CollectionAutomationHold[] = [];
   const executor: ServerExecutor = {
+    holds: () => [...holds],
     open: async () => {
       opened = true;
       options.onSchedulesChanged?.();
     },
     dispose: async () => undefined,
-    notifyClaimed: () => { drains += 1; },
+    notifyClaimed: () => { claimWakes += 1; },
     failuresChanged: vi.fn(),
+    datasetsChanged: () => undefined,
+    pressDataset: async () => ({busy: true}),
     handlePulledPaths: () => undefined,
     relayAnswered: () => undefined,
     groupMessagesArrived: async () => undefined,
@@ -90,7 +96,7 @@ function fakeExecutor(
       return mark;
     },
   };
-  return { executor, options, claims, pressed, hostChanges: () => hostChanges, marksAsked: () => marksAsked, drains: () => drains };
+  return { executor, options, holds, claims, pressed, claimWakes: () => claimWakes, hostChanges: () => hostChanges, marksAsked: () => marksAsked };
 }
 
 type Fake = ReturnType<typeof fakeExecutor>;
@@ -107,6 +113,7 @@ async function relay() {
 }
 
 async function server(storage: SyncRelayStorage, h: ReturnType<typeof testHandler>, input: {
+  datasetHost?: RelayDatasetHost;
   marks?: Map<string, { automationId: string; scheduleHash: string; throughMs: number }>;
   incarnation?: number;
   startedAtMs?: number;
@@ -120,10 +127,15 @@ async function server(storage: SyncRelayStorage, h: ReturnType<typeof testHandle
   const marks = input.marks ?? new Map();
   const executors: Fake[] = [];
   const open = new Map<string, AutomationReplica>();
+  let pulledHead = 0;
+  const sync = vi.fn(async () => {
+    await input.sync?.();
+    pulledHead = storage.automationWorkspaceLogHead(WORKSPACE);
+  });
   let hooks: Parameters<typeof startAutomationReplicas>[0] | undefined;
   const errors: Array<[string, unknown]> = [];
   const run = await startAutomationServer({
-    storage,
+    storage, datasetHost: input.datasetHost,
     server: { label: "My dohc server" },
     replicas: { root: "unused", engineExecutable: "unused", relayOrigin: "https://relay.example.test", key: new Uint8Array(32), namespace: "test" },
     readOwnerShares: (ownerUserId, path) => h.readOwnerShares(ownerUserId, path),
@@ -146,7 +158,7 @@ async function server(storage: SyncRelayStorage, h: ReturnType<typeof testHandle
   });
   cleanup.push(() => run.close());
   return {
-    run, errors, marks,
+    run, errors, marks, sync,
     /** What the replicas module reports to the server. */
     replicaHooks: () => hooks!,
     /** What the replicas module is asked to keep. */
@@ -157,7 +169,7 @@ async function server(storage: SyncRelayStorage, h: ReturnType<typeof testHandle
       open.set(WORKSPACE, {
         workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: input.incarnation ?? 1, startedAtMs: input.startedAtMs ?? at(7),
         root: "unused", metadataDir: "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal,
-        nextRequestId: () => 1, sync: input.sync ?? (async () => undefined),
+        nextRequestId: () => 1, sync, get pulledHead() { return pulledHead; },
       });
       hooks!.onChanged?.(WORKSPACE);
       await vi.waitFor(() => expect(executors).toHaveLength(1));
@@ -594,9 +606,9 @@ describe("a server whose live host claims live-shared records", () => {
     expect(s.wanted(), "no host record names the server, but a live-shared record needs its automations").toEqual([WORKSPACE]);
     const fake = await s.openReplica();
     expect(await fake.options.groupHost(), "it runs no schedules or Group triggers there").toBeNull();
-    const before = fake.drains();
+    const before = fake.claimWakes();
     for (const handler of handlers) handler({ name: "automation.claimed", payload: { workspaceId: WORKSPACE, state: "pending", run: 1 } } as unknown as Event);
-    expect(fake.drains()).toBe(before + 1);
+    expect(fake.claimWakes()).toBe(before + 1);
     await s.run.close();
     expect(handlers.size, "closing stops listening").toBe(0);
   });
@@ -664,4 +676,133 @@ describe("the server's run gate", () => {
     (await third)!.release(true);
     expect(order).toEqual(["b", "c"]);
   });
+});
+
+it("wires dataset-only workspaces to their ledger and wakes them without owning schedules", async () => {
+  clock = at(8);
+  const { storage, h } = await relay();
+  let claimed: ((workspaceId: string, failed: boolean) => void) | undefined;
+  const failures = vi.fn(() => []);
+  const ledger = { failures } as unknown as DatasetAutomationHost;
+  const workspace = vi.fn(() => ledger);
+  const stop = vi.fn();
+  const datasetHost = {
+    automations: { workspace, wantedWorkspaces: () => [WORKSPACE], metadata: () => "rules" },
+    observeAutomationClaims(wake: (workspaceId: string, failed: boolean) => void) { claimed = wake; return stop; },
+  } as unknown as RelayDatasetHost;
+  const s = await server(storage, h, { datasetHost });
+  expect(s.wanted()).toEqual([WORKSPACE]);
+  const fake = await s.openReplica();
+  expect(await fake.options.withDatasetHost(host => host, false)).toBe(ledger);
+  expect(workspace).toHaveBeenCalledWith(WORKSPACE, OWNER, expect.any(AbortSignal));
+  expect(await fake.options.groupHost()).toBeNull();
+  expect(fake.executor.failuresChanged).toHaveBeenCalledOnce();
+  vi.mocked(fake.executor.failuresChanged).mockClear();
+  claimed?.(WORKSPACE, false);
+  expect(fake.executor.failuresChanged).not.toHaveBeenCalled();
+  claimed?.(WORKSPACE, true);
+  expect(fake.executor.failuresChanged).toHaveBeenCalledOnce();
+  expect(fake.claimWakes()).toBe(2);
+  await s.run.close();
+  expect(stop).toHaveBeenCalledOnce();
+});
+
+
+it("holds missing reach history on dataset-only copies even after the editor leaves", async () => {
+  const { storage, h } = await relay();
+  const shareId = await createShare(h, OWNER, WORKSPACE, { recipientUserId: "ana", paths: ["Tasks"], access: "edit" });
+  await h(request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" }));
+  for (const incarnation of [1, 2]) {
+    const s = await server(storage, h, { incarnation });
+    const fake = await s.openReplica();
+    expect(await fake.options.groupHost()).toBeNull();
+    expect(await fake.options.holdUnprovenWithoutHistory?.()).toBe(true);
+    await s.run.close();
+  }
+});
+
+it.each([
+  [false, "0", "Step 1", undefined], [true, "0", "Step 1", undefined],
+  [false, JSON.stringify(["operation", "dataset-budget", "00000000-0000-4000-8000-000000000001"]), 'Step "Edit invoice"', "Edit invoice"],
+  [false, JSON.stringify(["operation", "dataset-budget", "00000000-0000-4000-8000-000000000001"]), "The step", undefined],
+  [false, "[broken", "The step", undefined],
+] as const)("posts one notice per held step and withdraws it after clearing across restart: %s, %s", async (restart, step, label, operationName) => {
+  const { storage, h } = await relay();
+  const s = await server(storage, h);
+  const fake = await s.openReplica();
+  fake.holds.push({ automationId: PRESSED, automationName: "Pay", definitionHash: "a".repeat(64), step, operationName, seq: 1,
+    collection: "Tasks", collectionPath: "Tasks", target: "Budget", action: "change", stoppedFor: "ana", fileUnread: false });
+  fake.options.onHoldsChanged();
+  fake.options.onHoldsChanged();
+  await vi.waitFor(() => expect(notices(storage, OWNER)).toHaveLength(1), { timeout: 30_000 });
+  expect(notices(storage, OWNER)[0]).toMatchObject({ title: 'Automation "Pay" is waiting',
+    body: `${label} to change "Budget" waits for someone who can edit it to allow it.` });
+  if (restart) {
+    await s.run.close();
+    const next = await server(storage, h);
+    await next.openReplica();
+  } else {
+    fake.holds.splice(0);
+    fake.options.onHoldsChanged();
+  }
+  await vi.waitFor(() => expect(notices(storage, OWNER)[0]).toMatchObject({ dismissedAtMs: clock }), { timeout: 30_000 });
+  expect(s.errors).toEqual([]);
+});
+
+it.each([
+  ["chain-stopped", "An automation chain stopped", '"Pay" did not run. dohc stops a chain after automations and agents start each other 4 times in a row. Check which automations start each other.'],
+  ["claim-limit", 'Automation "Pay" failed', "This change triggered too many automation runs. Make a smaller change."],
+  ["record-id-too-long", 'Automation "Pay" failed', "This record's ID is too long for an automation run. Use a shorter ID."],
+  ["Unsupported change", 'Automation "Pay" failed', "The automation could not read this change. Unsupported change"],
+])("describes a failed dataset claim by its %s reason", async (error, title, body) => {
+  const { storage, h } = await relay();
+  const failure = { automationId: PRESSED, claimId: "failed", datasetInstance: "dataset", neverStarted: true, error, updatedAtMs: clock, generation: 1 };
+  const ledger = { failures: () => [failure],
+    claim: () => ({ claimId: "failed", attempts: 0, error, state: "failed" }) } as unknown as DatasetAutomationHost;
+  const datasetHost = { automations: { workspace: () => ledger, wantedWorkspaces: () => [WORKSPACE], metadata: () => "rules" },
+    observeAutomationClaims: () => () => undefined } as unknown as RelayDatasetHost;
+  const s = await server(storage, h, { datasetHost });
+  const fake = await s.openReplica();
+  expect(fake.executor.failuresChanged).toHaveBeenCalledOnce();
+  await fake.options.reportFailure({ failure: { ...failure, chainStopped: failure.neverStarted }, name: "Pay", collectionPath: "Tasks", startedBy: null, replaces: null });
+  expect(notices(storage, OWNER)).toEqual([expect.objectContaining({ title, body: `${body}${/[.!?]$/.test(body) ? "" : "."} This happened on My dohc server.` })]);
+  expect(notices(storage, OWNER)[0]!.target?.run).toBeUndefined();
+  expect(s.errors).toEqual([]);
+});
+
+it("tells the owner when dataset workspaces exceed the server cap", async () => {
+  const { storage, h } = await relay();
+  const ids = Array.from({ length: AUTOMATION_SERVER_MAX_WORKSPACES + 1 }, (_, index) => `workspace-${index}`);
+  for (const workspaceId of ids) await claimWorkspace(h, OWNER, workspaceId);
+  const datasetHost = { automations: { wantedWorkspaces: () => ids }, observeAutomationClaims: () => () => undefined } as unknown as RelayDatasetHost;
+  const s = await server(storage, h, { datasetHost });
+  expect(s.wanted()).toEqual(ids.slice(0, AUTOMATION_SERVER_MAX_WORKSPACES));
+  s.wanted();
+  await vi.waitFor(() => expect(notices(storage, OWNER)).toHaveLength(1), { timeout: 30_000 });
+  expect(notices(storage, OWNER)[0]).toMatchObject({ title: "This workspace's automations are waiting", workspaceId: ids.at(-1) });
+  const first = ids.shift()!; s.wanted();
+  await vi.waitFor(() => expect(notices(storage, OWNER)[0]).toMatchObject({ dismissedAtMs: clock }), { timeout: 30_000 });
+  clock += 1; ids.unshift(first); s.wanted();
+  await vi.waitFor(() => expect(notices(storage, OWNER).filter(notice => notice.dismissedAtMs === null)).toHaveLength(1), { timeout: 30_000 });
+  expect(s.errors).toEqual([]);
+});
+
+it.each([false, true])("syncs dataset presses only behind the log head, with a starting workspace: %s", async starting => {
+  const { storage, h } = await relay();
+  const press = vi.fn(async (_auth: unknown, _dataset: unknown, _signal: unknown, work: (description: unknown) => Promise<unknown>) => work({}));
+  const datasetHost = { automations: { press, workspace: () => ({ failures: () => [] }), wantedWorkspaces: () => [WORKSPACE], metadata: () => "rules" },
+    observeAutomationClaims: () => () => undefined } as unknown as RelayDatasetHost;
+  const s = await server(storage, h, { datasetHost });
+  const auth = { kind: "named" as const, userId: OWNER, workspaceId: WORKSPACE };
+  const input = { by: { kind: "human" as const }, confirmed: [], datasetId: "dataset", table: "Tasks", field: "Pay", recordId: "one", pressId: "press" };
+  const signal = new AbortController().signal;
+  if (starting) await expect(s.run.pressDataset(auth, input, signal)).rejects.toMatchObject({ statusCode: 503, message: expect.stringContaining("starting") });
+  await s.openReplica();
+  await s.run.pressDataset(auth, input, signal);
+  expect(s.sync).not.toHaveBeenCalled();
+  inspectDatabase(storagePath(storage)).prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES(?,'test',1,'test','{}',1,1)").run(WORKSPACE);
+  await s.run.pressDataset(auth, input, signal);
+  expect(s.sync).toHaveBeenCalledOnce();
+  await s.run.pressDataset(auth, input, signal);
+  expect(s.sync).toHaveBeenCalledOnce();
 });

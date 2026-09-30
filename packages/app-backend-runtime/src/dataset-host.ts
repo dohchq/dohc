@@ -374,8 +374,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
        * host still writes. The caller has checked who pressed and what they
        * may use.
        */
-      press(raw: DatasetScope & DatasetPressInput): DatasetPressed {
-        return automations.press({ ...raw, cursor: pressableHead(raw) });
+      press(raw: DatasetScope & DatasetPressInput, authorize: () => void = () => undefined): DatasetPressed {
+        return automations.press({ ...raw, cursor: pressableHead(raw) }, authorize);
       } },
     deletionStatus(context: Context, raw: DatasetScope) {
       const key = scope(raw); owner(context,key);

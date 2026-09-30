@@ -657,7 +657,7 @@ export interface AutomationRunStore {
    * The reach verdicts. `unreadable` is true when the file is there and
    * cannot be read, so no step can be treated as seen before.
    */
-  readReachVerdicts(): Promise<StoredReach & { unreadable: boolean }>;
+  readReachVerdicts(): Promise<StoredReach & { unreadable: boolean; missing: boolean }>;
   saveReachVerdicts(reach: StoredReach): Promise<void>;
   /** Where the reach verdicts are saved, for a person to look at. */
   reachVerdictsPath(): Promise<string>;
@@ -1111,15 +1111,15 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     async readReachVerdicts() {
       const read = await readJson(join(await base(), "reach.json"));
       const none = { verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenFolders: [], unprovenPaths: [], pending: null, taken: null };
-      if (read === undefined) return { ...none, unreadable: false };
+      if (read === undefined) return { ...none, unreadable: false, missing: true };
       const parsed = ReachVerdictsSchema.safeParse(read);
       return parsed.success
         ? {
           verdicts: parsed.data.verdicts, hostRecord: parsed.data.hostRecord, unproven: parsed.data.unproven,
           unprovenAll: parsed.data.unprovenAll, unprovenFolders: parsed.data.unprovenFolders, unprovenPaths: parsed.data.unprovenPaths,
-          pending: parsed.data.pending, taken: parsed.data.taken, unreadable: false,
+          pending: parsed.data.pending, taken: parsed.data.taken, unreadable: false, missing: false,
         }
-        : { ...none, unreadable: true };
+        : { ...none, unreadable: true, missing: false };
     },
     saveReachVerdicts(reach) {
       return serial(async () => {

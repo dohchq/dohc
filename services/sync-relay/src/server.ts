@@ -175,6 +175,7 @@ export interface CreateSyncRelayHandlerOptions {
   automationHostRateLimiter?: TokenBucketLimiter;
   // This server while it runs workspaces' automations; absent when it does not.
   automationServer?: AutomationServer;
+  pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
   // Button presses from shared views, per grant, and the host's answers, per owner.
   automationPressRateLimiters?: ReturnType<typeof createAutomationPressRateLimiters>;
   linkFreshnessPageSize?: number;
@@ -186,7 +187,7 @@ export interface CreateSyncRelayHandlerOptions {
 type SyncRelayRoute =
   | AppBackendRoute
   | DatasetRoute
-  | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" }
+  | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" | "press" }
   | DatasetReplicaRoute
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
@@ -286,12 +287,13 @@ export function createSyncRelayHandler({
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
   automationServer,
+  pressDataset,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
   const publicEditRelease = parsePublicEditRelease(releaseInput);
-  const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, pressDataset}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetExport = datasetHost ? createDatasetRecoveryExport(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, shareSenderLabel}) : undefined;
@@ -1111,7 +1113,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
       const datasetId = parts[4];
       if (!datasetId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw notFound();
       if (parts.length === 5) return { route: "named-dataset", shareId, datasetId, action: "describe" };
-      if (parts.length === 6 && ["invoke", "upload", "file"].includes(parts[5]!)) return { route: "named-dataset", shareId, datasetId, action: parts[5] as "invoke" | "upload" | "file" };
+      if (parts.length === 6 && ["invoke", "upload", "file", "press"].includes(parts[5]!)) return { route: "named-dataset", shareId, datasetId, action: parts[5] as "invoke" | "upload" | "file" | "press" };
       throw notFound();
     }
     if (parts.length === 3) return { route: "share", shareId };
@@ -1193,7 +1195,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 6 && parts[4] === "replica" && ["capture","page","blob"].includes(parts[5]!)) return {route:"dataset-replica",workspaceId,datasetId,action:parts[5] as DatasetReplicaRoute["action"]};
     if (parts.length === 6 && parts[4] === "imports" && /^[A-Za-z0-9_-]{1,128}$/.test(parts[5]!)) return {route: "dataset", workspaceId, datasetId, action: "import", transferId: parts[5]};
     if (parts.length === 4) return {route:"dataset", workspaceId, datasetId, action:"describe"};
-    if (parts.length === 5 && ["activate","artifacts","invoke","prepare-migration","approve-migration","discard-migration","migration-preview-page","permissions","upload","file","history","history-revision","export","lifecycle","archive","restore","pending-attempts","reconcile-attempt","cancel-attempt","delete-preview","delete","deletion-status"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
+    if (parts.length === 5 && ["press","activate","artifacts","invoke","prepare-migration","approve-migration","discard-migration","migration-preview-page","permissions","upload","file","history","history-revision","export","lifecycle","archive","restore","pending-attempts","reconcile-attempt","cancel-attempt","delete-preview","delete","deletion-status"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
     if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
     if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
     throw notFound();

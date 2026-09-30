@@ -27,6 +27,10 @@ import type { TokenBucketLimiter } from "@dohc/service-http";
 import {
   AUTOMATION_COMPUTER_LABEL_MAX_CHARS,
   AUTOMATION_SERVER_INSTALL_ID,
+  AUTOMATION_SERVER_MAX_WORKSPACES,
+  NOTICE_BODY_MAX_CHARS,
+  NOTICE_LIST_ROW_LIMIT,
+  NOTICE_TITLE_MAX_CHARS,
   type RelayAutomationHost,
 } from "@dohc/workspace-contracts/relay";
 import {
@@ -39,7 +43,10 @@ import { replicaAutomationChat, replicaChatStore, replicaNoticePoster, WAKE_ON_S
 import { ServerClaimEngine, type LiveClaimLedger } from "./automationLiveClaims";
 import { replicaRecordEditContext, replicaRecordEngine } from "./automationRecordEdits";
 import { startAutomationReplicas, type AutomationReplica } from "./automationReplicas";
-import { RelayError } from "./errors";
+import type { RelayDatasetHost } from "./datasetHost";
+import type { DatasetServerPress } from "./datasetAutomations";
+import type { AppBackendAuth } from "./appBackendAuthority";
+import { notFound, RelayError } from "./errors";
 import { observeRelayWrites } from "./relayWriteChanges";
 import type { SyncRelayStorage } from "./storage";
 import type { AutomationServer, AutomationServerSchedules } from "./storage/automationHosts";
@@ -85,11 +92,12 @@ export type ServerExecutor = Pick<
   CollectionAutomations,
   | "open" | "dispose" | "notifyClaimed" | "handlePulledPaths" | "relayAnswered" | "groupMessagesArrived" | "hostChanged"
   | "releaseGroupSubscriptions" | "reachHandover" | "relayedClaim" | "pressRelayed" | "automationName"
-  | "schedules" | "scheduleMarks" | "claimSchedule" | "failuresChanged"
+  | "schedules" | "scheduleMarks" | "claimSchedule" | "failuresChanged" | "datasetsChanged" | "pressDataset" | "holds"
 >;
 
 export interface AutomationServerOptions {
   storage: SyncRelayStorage;
+  datasetHost?: RelayDatasetHost;
   /** This server, as the owner's settings name it. */
   server: AutomationServer;
   replicas: Omit<Parameters<typeof startAutomationReplicas>[0], "storage" | "wanted" | "onChanged" | "onEngineEvent" | "onPulled" | "onReconciled" | "onError">;
@@ -139,7 +147,9 @@ interface WorkspaceState {
   syncFailures: number;
   syncTimer: ReturnType<typeof setTimeout> | undefined;
   reporting: Promise<void>;
+  readonly holdNotices: Set<string>;
   readonly names: Map<string, string>;
+  datasetMetadata?: string;
 }
 
 interface Hosted extends WorkspaceState {
@@ -378,6 +388,32 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     return ws.names.get(userId) ?? null;
   }
 
+  function reportHolds(ws: Hosted): void {
+    const holds = ws.executor.holds();
+    ws.reporting = ws.reporting.then(async () => {
+      if (ws.closed) return;
+      const current = new Set<string>();
+      for (const held of holds) {
+        const noticeId = `automation-held:${sha256(ws.replica.workspaceId)}:${sha256(JSON.stringify([ws.replica.incarnation, held.automationId, held.definitionHash, held.step, held.recipient, held.seq]))}`;
+        current.add(noticeId);
+        if (ws.holdNotices.has(noticeId)) continue;
+        const step = held.operationName ? `Step "${held.operationName}"`
+          : /^\d+$/.test(held.step) ? `Step ${Number(held.step) + 1}` : "The step";
+        await posterOf(ws)({
+          noticeId, kind: "automation-failed",
+          title: cutText(`Automation "${held.automationName}" is waiting`, NOTICE_TITLE_MAX_CHARS),
+          body: cutText(`${step} to ${held.action} "${held.target}" waits for someone who can edit it to allow it.`, NOTICE_BODY_MAX_CHARS),
+          target: { path: held.collectionPath, automation: held.automationId }, recipientUserId: ws.replica.ownerUserId,
+        }, ws.replica.signal);
+        ws.holdNotices.add(noticeId);
+      }
+      const cleared = [...ws.holdNotices].filter(noticeId => !current.has(noticeId));
+      if (cleared.length) storage.markNotices({ recipientUserId: ws.replica.ownerUserId,
+        marks: cleared.map(noticeId => ({ noticeId, mark: "dismissed" as const })), nowMs: nowMs() });
+      for (const noticeId of cleared) ws.holdNotices.delete(noticeId);
+    }).catch((error: unknown) => options.onError(`tell the owner of workspace "${ws.replica.workspaceId}" which steps wait`, error));
+  }
+
   function withdrawFailure(ws: WorkspaceState, failure: ReportedRun): void {
     storage.markNotices({
       recipientUserId: ws.replica.ownerUserId,
@@ -501,6 +537,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         },
       },
       groupHost: async () => runningGeneration(ws),
+      holdUnprovenWithoutHistory: async () => storage.automationWorkspaceInfo(workspaceId)?.everShared ?? true,
       // A handover an earlier copy already took reads as a take over: this
       // copy starts its Group triggers from now and holds what it cannot prove.
       groupRelayRecord: async (generation) => {
@@ -541,8 +578,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       withdrawFailure: async (failure) => withdrawFailure(ws, failure),
       // The owner's desktop reads author history and sends switch-off notices.
       onSwitchedOff: () => undefined,
-      // Nobody opens the server's panel: its holds and marks show through the owner's computers later.
-      onHoldsChanged: () => undefined,
+      onHoldsChanged: () => reportHolds(self()),
       onAutomationsChanged: () => undefined,
       onSchedulesChanged: () => scheduler.wake(),
       hostCanRun: async () => true,
@@ -555,8 +591,10 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       holdForHost: () => hold(ws),
       admitRun: (signal) => gate.admit(workspaceId, signal),
       onError: (context, error) => options.onError(`automations in workspace "${workspaceId}": ${context}`, error),
-      // The server's dataset host joins its executor in a later change.
-      withDatasetHost: async () => null,
+      withDatasetHost: async (work) => {
+        if (!options.datasetHost) return null;
+        return work(options.datasetHost.automations.workspace(workspaceId, ownerUserId, replica.signal));
+      },
       nowMs,
     };
   }
@@ -626,6 +664,9 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       syncFailures: 0,
       syncTimer: undefined,
       reporting: Promise.resolve(),
+      holdNotices: new Set(storage.readNoticeChanges({ recipientUserId: replica.ownerUserId, cursor: null, limit: NOTICE_LIST_ROW_LIMIT, nowMs: nowMs() })
+        .notices.filter(notice => notice.noticeId.startsWith(`automation-held:${sha256(replica.workspaceId)}:`) && notice.dismissedAtMs === null)
+        .map(notice => notice.noticeId)),
       names: new Map(),
     };
     storage.beginAutomationServerCopy({ workspaceId: replica.workspaceId, incarnation: replica.incarnation });
@@ -637,7 +678,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     hosted.set(replica.workspaceId, ws);
     // A write to the host record wakes the scheduler; it never asks on a timer.
     scheduler.add(replica.workspaceId, ws.executor, { ...hostSeam(state, () => ws), asksAgain: () => false });
-    void ws.executor.open().then(() => follow(ws), (error: unknown) =>
+    void ws.executor.open().then(() => { follow(ws); reportHolds(ws); if (options.datasetHost) ws.executor.failuresChanged(); }, (error: unknown) =>
       options.onError(`open the automations of workspace "${replica.workspaceId}"`, error));
   }
 
@@ -695,12 +736,43 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     if (state !== "failed") ws.executor.notifyClaimed();
   }
 
+  let capacityReporting = Promise.resolve();
+  const excluded = new Map<string, { ownerUserId: string; noticeId: string }>();
+  const allWantedWorkspaces = () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? []), ...(options.datasetHost?.automations.wantedWorkspaces() ?? [])])];
+  function wantedWorkspaces(): string[] {
+    const all = allWantedWorkspaces();
+    const waiting = new Set(all.slice(AUTOMATION_SERVER_MAX_WORKSPACES));
+    capacityReporting = capacityReporting.then(async () => {
+      if (closed) return;
+      for (const workspaceId of waiting) {
+        if (excluded.has(workspaceId)) continue;
+        const info = storage.automationWorkspaceInfo(workspaceId);
+        if (!info) continue;
+        const { ownerUserId } = info;
+        const noticeId = `automation-capacity:${sha256(workspaceId)}:${nowMs()}`;
+        await replicaNoticePoster({ replica: { workspaceId, ownerUserId, signal: storage.unavailable }, storage,
+          noticeLimiter: options.noticeLimiter, ownerName: async () => cutText((await options.lookupUserDisplayName(ownerUserId))?.trim() || "Unnamed", 40), nowMs })({
+          noticeId, kind: "automation-failed",
+          title: "This workspace's automations are waiting",
+          body: `Your server can run automations in ${AUTOMATION_SERVER_MAX_WORKSPACES} workspaces. Free a place to run this workspace's automations.`,
+          target: {}, recipientUserId: ownerUserId,
+        }, storage.unavailable);
+        excluded.set(workspaceId, { ownerUserId, noticeId });
+      }
+      for (const [workspaceId, { ownerUserId, noticeId }] of excluded) if (!waiting.has(workspaceId)) {
+        storage.markNotices({ recipientUserId: ownerUserId,
+          marks: [{ noticeId, mark: "dismissed" }], nowMs: nowMs() });
+        excluded.delete(workspaceId);
+      }
+    }).catch((error: unknown) => options.onError("tell owners which workspaces wait for server capacity", error));
+    return all.slice(0, AUTOMATION_SERVER_MAX_WORKSPACES);
+  }
+
   const replicas = await (options.startReplicas ?? startAutomationReplicas)({
     ...options.replicas,
     storage,
     nowMs,
-    // The workspaces the server hosts, and those whose live-shared records it claims.
-    wanted: () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? [])])],
+    wanted: wantedWorkspaces,
     onChanged: replicaChanged,
     onEngineEvent: engineEvent,
     onPulled: (workspaceId, paths) => {
@@ -732,6 +804,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         follow(ws);
         // A live claim whose change may have reached the relay now.
         if (ws.adapter.waiting()) ws.executor.notifyClaimed();
+        const metadata = options.datasetHost?.automations.metadata(ws.replica.workspaceId);
+        if (metadata !== ws.datasetMetadata) {
+          ws.datasetMetadata = metadata;
+          ws.executor.datasetsChanged();
+        }
       }
       for (const check of [...waiters]) check();
     });
@@ -739,8 +816,27 @@ export async function startAutomationServer(options: AutomationServerOptions) {
 
   // The live host claims a live-shared record's change when it accepts its frame.
   const stopLiveEvents = options.live?.onEvent(engineEvent) ?? (() => undefined);
+  const stopDatasetClaims = options.datasetHost?.observeAutomationClaims((workspaceId, failed) => {
+    const ws = hosted.get(workspaceId);
+    if (ws) { ws.executor.notifyClaimed(); if (failed) ws.executor.failuresChanged(); }
+  });
 
   return {
+    async pressDataset(auth: Extract<AppBackendAuth, { kind: "named" }>, input: DatasetServerPress, signal: AbortSignal) {
+      if (!options.datasetHost) throw notFound();
+      return options.datasetHost.automations.press(auth, input.datasetId, signal, async describe => {
+        const ws = hosted.get(auth.workspaceId);
+        if (!ws || ws.closed) {
+          if (allWantedWorkspaces().includes(auth.workspaceId)) throw new RelayError("conflict", "Your server is starting this workspace's automations. Try again.", 503);
+          throw notFound();
+        }
+        if (ws.replica.pulledHead < storage.automationWorkspaceLogHead(auth.workspaceId)) await ws.replica.sync(signal);
+        signal.throwIfAborted();
+        if (ws.closed || ws.replica.signal.aborted) throw notFound();
+        await nameOf(ws, auth.userId).catch(() => null);
+        return ws.executor.pressDataset({ ...input, pressedBy: auth.userId }, describe, () => undefined);
+      });
+    },
     /** Whether this server's copies of workspaces keep failing to open or sync. */
     get unavailable(): boolean {
       return unavailable;
@@ -749,9 +845,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       closed = true;
       stopWatching();
       stopLiveEvents();
+      stopDatasetClaims?.();
       scheduler.dispose();
       for (const ws of [...hosted.values()]) await close(ws);
       await replicas.close();
+      await capacityReporting;
       await evaluator.close();
     },
   };
