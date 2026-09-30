@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -193,7 +193,7 @@ test("shared, native, fixture, config, and unknown inputs select all packages", 
   for (const path of [
     "package.json", "apps/removed/package.json", "packages/sdk/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs", ".gitignore",
     "tsconfig.base.json", "packages/sdk/tsconfig.json", "apps/desktop/vitest.config.ts", "apps/desktop/.env.production",
-    "scripts/verification/verify.mjs", "tools/rust-engine-program/ydoc-replay-fixtures.json", ".github/workflows/pr-checks.yml",
+    "scripts/verification/verify.mjs", "scripts/verification/verification-matrix.test.mjs", "scripts/verification/ordered-delivery-fixture.test.mjs", "scripts/self-host-health.test.mjs", "tools/self-host/health.mjs", "tools/rust-engine-program/ydoc-replay-fixtures.json", ".github/workflows/pr-checks.yml",
     "crates/dohc-engine-domain/tests/fixtures/collection-field-values.json", "vendor/yrs/src/lib.rs", ".cargo/config.toml", "Cargo.lock", "rust-toolchain.toml",
     "examples/fundraiser/backend.ts", "examples/stock-orders/frontend.tsx", "examples/trip-poll/main.tsx", "patches/example.patch",
     "docker-compose.self-host.yml", ".env.self-host.example", ".dockerignore", "apps/desktop/scripts/stage-plugin-tools.mjs", "apps/removed/src/index.ts", "unclassified/input.ts",
@@ -249,4 +249,15 @@ test("current workspace literal cross-package inputs are covered", () => {
     .filter(path => /\.(?:[cm]?[jt]sx?|css|json)$/u.test(path) && packages.some(pkg => path.startsWith(pkg.path + "/")));
   const files = paths.map(path => ({ path, source: readFileSync(resolve(root, path), "utf8") }));
   assert.deepEqual(uncoveredWorkspaceInputs(files, packages), []);
+});
+
+test("canonical repository checks include every script contract except the Docker proof", () => {
+  const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const listed = new Set([...manifest.scripts["test:repo"].matchAll(/[^\s]+\.test\.mjs/gu),
+    ...manifest.scripts["test:repo:source"].matchAll(/[^\s]+\.test\.mjs/gu)].map(([path]) => path));
+  const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs"]);
+  for (const file of globSync(["scripts/**/*.test.mjs", "tools/**/*.test.mjs"], { cwd: root })) {
+    const path = file.replaceAll("\\", "/");
+    assert.ok(listed.has(path) || optIn.has(path), `Missing canonical repository contract: ${path}`);
+  }
 });
