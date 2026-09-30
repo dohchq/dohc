@@ -5876,7 +5876,13 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
         .call(RequestContext::unbounded(), seed_request)
         .await
         .expect("seed lost-ack replay");
-    assert_eq!(retried_seed.result, seed_result.result);
+    assert_eq!(retried_seed.result["seq"], seed_result.result["seq"]);
+    assert_eq!(
+        retried_seed.result["lineageClaimId"],
+        seed_result.result["lineageClaimId"]
+    );
+    assert_eq!(seed_result.result["deduped"], json!(false));
+    assert_eq!(retried_seed.result["deduped"], json!(true));
     call(
         &transport,
         &handle,
