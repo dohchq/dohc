@@ -301,7 +301,7 @@ body {
   -webkit-user-drag: none;
 }
 
-.app-chrome :is(button, [role="button"], [role="tab"], [role="treeitem"]):not(:disabled) {
+.app-chrome :is(button, [role="button"], [role="tab"], [role="treeitem"]):not(:disabled, [aria-disabled="true"]) {
   cursor: pointer;
 }
 

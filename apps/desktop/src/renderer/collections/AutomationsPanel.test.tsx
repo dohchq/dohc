@@ -998,8 +998,8 @@ describe("a schedule's next run", () => {
     { installId: "me", kind: "computer", label: "DESKTOP-1", lastSeenMs: NOW, thisComputer: true },
     { installId: "laptop", kind: "computer", label: "Ice's laptop", lastSeenMs: NOW - 86_400_000, thisComputer: false },
   ] satisfies ScheduleHostComputer[];
-  const relay = (hostInstallId: string | null, handoverFrom: string | null = null): ScheduleHostResult =>
-    ({ kind: "relay", generation: 3, hostInstallId, handoverFrom, computers });
+  const relay = (hostInstallId: string | null, handoverFrom: string | null = null, listed: ScheduleHostComputer[] = computers): ScheduleHostResult =>
+    ({ kind: "relay", generation: 3, hostInstallId, handoverFrom, computers: listed });
 
   // Only Date is fake: the panel's timer and the test's waits run on real time.
   afterEach(() => {
@@ -1087,6 +1087,44 @@ describe("a schedule's next run", () => {
     act(() => hostChanged("ws-1"));
     await waitFor(() => expect(screen.getAllByText(tomorrow)).toHaveLength(2));
     expect(screen.queryByTestId("schedule-host-missing")).toBeNull();
+  });
+
+  it("names this server as where schedules run, and follows its handover to a computer", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const server = { installId: "server", kind: "server", label: "My dohc server", lastSeenMs: NOW, thisComputer: false } as const;
+    const { bridge, hostChanged } = makeBridge(read([summary(daily)]));
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("server", null, [server, ...computers]));
+    render(<Panel />);
+    expect(await screen.findByText(`${tomorrow} on this server`)).toBeTruthy();
+
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("me", "server", [server, ...computers]));
+    act(() => hostChanged("ws-1"));
+    const handover = await screen.findByTestId("schedule-host-handover");
+    expect(within(handover).getByText("Schedules wait for this server to hand over.")).toBeTruthy();
+  });
+
+  it("says when the server named to run schedules does not run automations, and opens the setting that chooses a computer", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { bridge } = makeBridge(read([summary(daily)]));
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("server"));
+    const onOpenScheduleSettings = vi.fn();
+    render(<Panel onOpenScheduleSettings={onOpenScheduleSettings} />);
+    const note = await screen.findByTestId("schedule-host-missing");
+    expect(within(note).getByText("This server does not run automations.")).toBeTruthy();
+    expect(screen.queryByText(/Next run/)).toBeNull();
+    await userEvent.click(within(note).getByRole("button", { name: "Choose a computer" }));
+    expect(onOpenScheduleSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows no next run while a server that runs no automations still hands over to a computer", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { bridge } = makeBridge(read([summary(daily)]));
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("laptop", "server"));
+    render(<Panel />);
+    const note = await screen.findByTestId("schedule-host-missing");
+    expect(within(note).getByText("This server does not run automations.")).toBeTruthy();
+    expect(screen.queryByTestId("schedule-host-handover")).toBeNull();
+    expect(screen.queryByText(/Next run/)).toBeNull();
   });
 
   it("says offline that dohc could not check, keeps the computer it last named, and checks again", async () => {

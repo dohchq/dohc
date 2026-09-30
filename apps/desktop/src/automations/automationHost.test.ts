@@ -12,6 +12,7 @@ import {
   HANDOVER_READ_MAX_MS,
   HOST_FRESH_MS,
   hostOfAnswer,
+  refusalOfAnswer,
   automationHostGeneration,
   isAutomationHost,
   relayUnreachable,
@@ -557,6 +558,17 @@ describe("host answers and labels", () => {
     expect(of([server, { ...laptop, extra: 1 }])).toEqual([server, laptop]);
     expect(of([{ ...laptop, kind: undefined }])).toBeUndefined();
     expect(of([{ ...laptop, kind: "phone" }])).toBeUndefined();
+  });
+
+  it("takes the relay's reason for refusing the server, and no other refusal", () => {
+    const refused = (error: string, status = 400) => refusalOfAnswer({ status, body: { ok: false, error, code: "bad_request" } });
+    const full = "This server is running automations for as many workspaces as it can. Choose one of your computers.";
+    const off = "This server does not run automations.";
+    expect(refused(full)).toBe(full);
+    expect(refused(off)).toBe(off);
+    expect(refused("installId is not one of this workspace's computers")).toBeUndefined();
+    expect(refused(off, 409)).toBeUndefined();
+    expect(refusalOfAnswer({ status: 400, body: undefined })).toBeUndefined();
   });
 
   it("tells a relay that did not answer from a failure", () => {

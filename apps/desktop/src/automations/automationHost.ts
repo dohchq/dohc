@@ -1,6 +1,8 @@
 import {
   AUTOMATION_COMPUTER_LABEL_MAX_CHARS,
   AUTOMATION_INSTALL_ID_MAX_CHARS,
+  AUTOMATION_SERVER_FULL,
+  AUTOMATION_SERVER_OFF,
   isNoticeLine,
   type RelayAutomationComputer,
   type RelayAutomationHost,
@@ -161,6 +163,16 @@ export function hostOfAnswer(answer: { status: number; body: unknown }): RelayAu
   const { ok, host } = body as { ok?: unknown; host?: unknown };
   if (ok !== true) return undefined;
   return host === null ? null : isHost(host) ? host : undefined;
+}
+
+/**
+ * Why the relay refused to make the server the host, in the words settings
+ * show; undefined for any other answer.
+ */
+export function refusalOfAnswer(answer: { status: number; body: unknown }): string | undefined {
+  if (answer.status !== 400 || !answer.body || typeof answer.body !== "object") return undefined;
+  const { error } = answer.body as { error?: unknown };
+  return error === AUTOMATION_SERVER_OFF || error === AUTOMATION_SERVER_FULL ? error : undefined;
 }
 
 /** The owner's computers from a relay answer, or undefined when the answer is not one. */

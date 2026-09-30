@@ -1,7 +1,9 @@
 import {
   AUTOMATION_COMPUTERS_PER_WORKSPACE,
+  AUTOMATION_SERVER_FULL,
   AUTOMATION_SERVER_INSTALL_ID,
   AUTOMATION_SERVER_MAX_WORKSPACES,
+  AUTOMATION_SERVER_OFF,
   type RelayAutomationComputer,
   type RelayAutomationHost,
   type RelayAutomationHostState,
@@ -462,9 +464,9 @@ export function chooseAutomationHost(
     const host = readHost(storage, workspaceId);
     requireGeneration(host, input.generation);
     if (installId === AUTOMATION_SERVER_INSTALL_ID) {
-      if (!input.server) throw badRequest("This server does not run automations.");
+      if (!input.server) throw badRequest(AUTOMATION_SERVER_OFF);
       if (!serverHasRoom(storage, workspaceId)) {
-        throw badRequest("This server is running automations for as many workspaces as it can.");
+        throw badRequest(AUTOMATION_SERVER_FULL);
       }
     } else {
       const known = storage.db.prepare(
@@ -575,7 +577,7 @@ export function takeOverAutomationHost(
     requireGeneration(host, input.generation);
     if (!host?.handoverFrom) throw relayError("conflict");
     if (host.installId === AUTOMATION_SERVER_INSTALL_ID && !input.server) {
-      throw badRequest("This server does not run automations.");
+      throw badRequest(AUTOMATION_SERVER_OFF);
     }
     writeHost(storage, input.workspaceId, {
       installId: host.installId,

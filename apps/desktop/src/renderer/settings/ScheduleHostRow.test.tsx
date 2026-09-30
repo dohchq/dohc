@@ -2,22 +2,24 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DohcDesktopBridge, ScheduleHostResult } from "../../ipc/bridgeContract";
+import type { DohcDesktopBridge, ScheduleHostComputer, ScheduleHostResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { ScheduleHostRow } from "./ScheduleHostRow";
 
 const SEP_20 = new Date(2026, 8, 20, 12).getTime();
 const SEP_25 = new Date(2026, 8, 25, 12).getTime();
 
+const computers: ScheduleHostComputer[] = [
+  { installId: "desk", kind: "computer", label: "Ice's desktop", lastSeenMs: SEP_25, thisComputer: true },
+  { installId: "laptop", kind: "computer", label: "Ice's laptop", lastSeenMs: SEP_20, thisComputer: false },
+];
+
 const relay = (overrides: Partial<Extract<ScheduleHostResult, { kind: "relay" }>> = {}): ScheduleHostResult => ({
   kind: "relay",
   generation: 3,
   hostInstallId: "laptop",
   handoverFrom: null,
-  computers: [
-    { installId: "desk", kind: "computer", label: "Ice's desktop", lastSeenMs: SEP_25, thisComputer: true },
-    { installId: "laptop", kind: "computer", label: "Ice's laptop", lastSeenMs: SEP_20, thisComputer: false },
-  ],
+  computers,
   ...overrides,
 });
 
@@ -166,6 +168,100 @@ describe("Schedules run on", () => {
     await userEvent.click(cancel);
     await vi.waitFor(() =>
       expect(document.activeElement).toBe(within(waiting).getByRole("button", { name: "Take over now" })));
+  });
+
+  it("heads the list with the server by its name, and shows it running when it is the host", async () => {
+    const server = { installId: "server", kind: "server", label: "My dohc server", lastSeenMs: SEP_25, thisComputer: false } as const;
+    const chooseScheduleHost = vi.fn(async () => relay({ generation: 4, hostInstallId: "desk", handoverFrom: "server", computers: [server, ...computers] }));
+    install({ readScheduleHost: vi.fn(async () => relay({ hostInstallId: "server", computers: [server, ...computers] })), chooseScheduleHost });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    const row = await screen.findByTestId("schedule-host-server");
+    const buttons = within(screen.getByRole("group", { name: "Schedules run on" })).getAllByRole("button");
+    expect(buttons[0]).toBe(row);
+    expect(row.textContent).toBe("This server (My dohc server)");
+    expect(row.getAttribute("aria-pressed")).toBe("true");
+    expect(row.tabIndex).toBe(0);
+
+    await userEvent.click(screen.getByTestId("schedule-host-desk"));
+    expect(chooseScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws", installId: "desk", generation: 3 });
+    const waiting = await screen.findByTestId("schedule-host-handover");
+    expect(waiting.textContent).toContain("Waiting for this server to hand over.");
+    await userEvent.click(within(waiting).getByRole("button", { name: "Take over now" }));
+    expect(within(waiting).getByRole("alert").textContent).toBe("If this server has not stopped, a run can repeat.");
+  });
+
+  it("calls the server by that name alone when it has no other", async () => {
+    const server = { installId: "server", kind: "server", label: "This server", lastSeenMs: SEP_25, thisComputer: false } as const;
+    install({ readScheduleHost: vi.fn(async () => relay({ computers: [server, ...computers] })) });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    expect((await screen.findByTestId("schedule-host-server")).textContent).toBe("This server");
+  });
+
+  it("says the server does not run automations when the record still names it, and lets the owner choose a computer", async () => {
+    const chooseScheduleHost = vi.fn(async () => relay({ generation: 4, hostInstallId: "desk" }));
+    install({ readScheduleHost: vi.fn(async () => relay({ hostInstallId: "server" })), chooseScheduleHost });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    expect((await screen.findByTestId("schedule-host-server-off")).textContent).toBe("This server does not run automations.");
+    expect(screen.queryByTestId("schedule-host-server")).toBeNull();
+    expect(screen.getByTestId("schedule-host-desk").getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByTestId("schedule-host-laptop").getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByTestId("schedule-host-handover")).toBeNull();
+    await userEvent.click(screen.getByTestId("schedule-host-desk"));
+    expect(chooseScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws", installId: "desk", generation: 3 });
+    expect((await screen.findByTestId("schedule-host-desk")).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByTestId("schedule-host-server-off")).toBeNull();
+  });
+
+  it("shows the computer that was handing over to a server that runs no automations as the one that runs schedules", async () => {
+    install({ readScheduleHost: vi.fn(async () => relay({ hostInstallId: "server", handoverFrom: "laptop" })) });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    expect((await screen.findByTestId("schedule-host-laptop")).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByTestId("schedule-host-handover")).toBeNull();
+    // A computer runs the schedules, so nothing needs the owner.
+    expect(screen.queryByTestId("schedule-host-server-off")).toBeNull();
+  });
+
+  it("lets the owner start the computer a server that runs no automations was handing over to", async () => {
+    const chooseScheduleHost = vi.fn(async () => relay({ generation: 4, hostInstallId: "laptop" }));
+    install({ readScheduleHost: vi.fn(async () => relay({ hostInstallId: "laptop", handoverFrom: "server" })), chooseScheduleHost });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    const laptop = await screen.findByTestId("schedule-host-laptop");
+    expect(laptop.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByTestId("schedule-host-handover")).toBeNull();
+    expect(screen.getByTestId("schedule-host-server-off")).toBeTruthy();
+    await userEvent.click(laptop);
+    expect(chooseScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws", installId: "laptop", generation: 3 });
+    expect((await screen.findByTestId("schedule-host-laptop")).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("says why the server cannot take a workspace's schedules", async () => {
+    const onError = vi.fn();
+    const server = { installId: "server", kind: "server", label: "This server", lastSeenMs: SEP_25, thisComputer: false } as const;
+    install({
+      readScheduleHost: vi.fn(async () => relay({ computers: [server, ...computers] })),
+      chooseScheduleHost: vi.fn(async () => { throw new Error("This server is running automations for as many workspaces as it can. Choose one of your computers."); }),
+    });
+    render(<ScheduleHostRow workspaceId="ws" onError={onError} />);
+    await userEvent.click(await screen.findByTestId("schedule-host-server"));
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("This server is running automations for as many workspaces as it can. Choose one of your computers."));
+    expect(screen.getByTestId("schedule-host-laptop").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("keeps focus on the computer while the choice is out, and takes no second choice", async () => {
+    const answer = deferred<ScheduleHostResult>();
+    const chooseScheduleHost = vi.fn(() => answer.promise);
+    install({ readScheduleHost: vi.fn(async () => relay()), chooseScheduleHost });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    const desk = await screen.findByTestId("schedule-host-desk");
+    desk.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(desk.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(desk);
+    await userEvent.keyboard("{Enter}");
+    expect(chooseScheduleHost).toHaveBeenCalledTimes(1);
+    await act(async () => answer.resolve(relay({ generation: 4, hostInstallId: "desk", handoverFrom: "laptop" })));
+    expect(document.activeElement).toBe(desk);
+    expect(desk.getAttribute("aria-disabled")).toBe("false");
   });
 
   it("gives the list one tab stop and moves between computers with the arrows, Home, and End", async () => {
