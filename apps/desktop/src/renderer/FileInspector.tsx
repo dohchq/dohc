@@ -37,6 +37,7 @@ import {
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
+import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { SecondaryButton } from "./ui/controls";
 import type { ExcalidrawPresenceFactory } from "./collab/excalidrawPresence";
@@ -552,6 +553,11 @@ export const FileInspector = memo(function FileInspector(
     kind: liveDocumentKind ?? undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
+  });
+  useAuthorCapacityNotice({
+    workspaceId: props.workspaceId, path: props.path,
+    authorCapacity: engine.authorCapacity, saveState: engine.saveState,
+    reportError: props.onButtonError, retry: retryEngineOpen,
   });
   // Derived, never stored. #565 keys the hook's outcome to the request that
   // asked for it, so a refusal for the version the user just left cannot repaint

@@ -60,7 +60,7 @@ it("offers Stop and restore only for a change a person the owner shared with, or
   expect(screen.queryByTestId("engine-diff-stop-and-restore")).toBeNull();
   cleanup();
   const named: WorkspaceEngineMomentDetail = {protected: false, moment: {...base, path: "docs/collection.yaml",
-    author: {kind: "named", userId: "user_ana", grantId: "grant-1", grantGeneration: 1},
+    authors: [{kind: "named", userId: "user_ana", grantId: "grant-1", grantGeneration: 1}],
     payload: {before: null, after: {...text, path: "docs/collection.yaml"}}}};
   const {moment} = await open(named);
   expect(moment.namedAuthor).toEqual({userId: "user_ana", label: "Someone you shared with"});
@@ -68,7 +68,7 @@ it("offers Stop and restore only for a change a person the owner shared with, or
   expect(stopAndRestore).toHaveBeenCalledWith({target: {kind: "person", userId: "user_ana"}, label: "Someone you shared with"});
   cleanup();
   const linked: WorkspaceEngineMomentDetail = {protected: false, moment: {...base, path: "docs/collection.yaml",
-    author: {kind: "link", grantId: "grant-link", grantGeneration: 2, principalId: "holder"},
+    authors: [{kind: "link", grantId: "grant-link", grantGeneration: 2, principalId: "holder"}],
     payload: {before: null, after: {...text, path: "docs/collection.yaml"}}}};
   await open(linked);
   fireEvent.click(screen.getByTestId("engine-diff-stop-and-restore"));

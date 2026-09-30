@@ -149,7 +149,7 @@ describe("versioned result decoder rejection", () => {
 
   it("accepts a link author only with its grant, integer generation, and principal", () => {
     const author = { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" };
-    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author })?.author).toEqual(author);
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })?.authors).toEqual([author]);
     for (const malformed of [
       { kind: "link", grantId: "grant", grantGeneration: 2 },
       { ...author, grantGeneration: 1.5 },
@@ -157,7 +157,7 @@ describe("versioned result decoder rejection", () => {
       { ...author, displayName: "Ana" },
     ]) {
       expect(() =>
-        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author: malformed }),
+        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [malformed] }),
       ).toThrow(ProtocolShapeError);
     }
   });

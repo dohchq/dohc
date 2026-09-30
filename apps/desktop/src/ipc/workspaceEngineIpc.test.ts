@@ -344,7 +344,7 @@ describe("workspace engine IPC registrations", () => {
       moments: ["person-local", "user-pat"].map((onBehalfOf, index) => ({
         id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
-        author: { kind: "agent", agentId: "agent", onBehalfOf },
+        authors: [{ kind: "agent", agentId: "agent", onBehalfOf }],
       })),
       nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
     });
@@ -358,7 +358,7 @@ describe("workspace engine IPC registrations", () => {
       moment: {
         id: "detail", workspaceId: "workspace", versionId: "main", objectId: "object",
         path: "notes/a.md", recordedAtMs: 1, operation: "write", metadata: { origin: "local-file" },
-        author: { kind: "agent", agentId: "agent", onBehalfOf: "person-local" },
+        authors: [{ kind: "agent", agentId: "agent", onBehalfOf: "person-local" }],
         payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
       },
     });

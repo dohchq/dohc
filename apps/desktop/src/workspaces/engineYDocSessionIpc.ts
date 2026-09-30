@@ -78,7 +78,7 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
 };
 export interface EngineYDocSessionCapture {
-  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number) => void}): Promise<EngineYDocSessionProvider>;
+  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, authorCapacity?: boolean) => void}): Promise<EngineYDocSessionProvider>;
 }
 
 interface EngineYDocWorkspace {
@@ -118,6 +118,7 @@ interface EngineYDocSessionIpcOptions {
 }
 
 interface SessionEvent {
+  authorCapacity?: boolean;
   state: EngineYDocSaveStateName;
   seq: number;
 }
@@ -561,12 +562,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           provider = await capture.openYDocSession({
             path: canonicalPath,
             contentKind: documentKind,
-            onSaveState: (state, token) => {
+            onSaveState: (state, token, authorCapacity) => {
               const seq =
                 state === "settling"
                   ? noteSettleStart(saveSeq, token)
                   : noteSettleOutcome(saveSeq, token);
-              publish(() => signals.emit({ state, seq }));
+              publish(() => signals.emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}) }));
             },
             onRemoteUpdate: (update) => {
               publish(() => signals.remoteUpdate(update));

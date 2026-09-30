@@ -185,6 +185,18 @@ const openPayload = {
 };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("preserves author capacity refusal on the owned session's save event", async () => {
+    const h = harness(providerSession());
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+    h.capturedOpen()?.onSaveState?.("error", 1, true);
+    expect(sender.sent).toContainEqual({
+      channel: CHANNELS.engineYDocSaveState,
+      payload: {sessionId: openPayload.sessionId, state: "error", seq: 0, authorCapacity: true},
+    });
+    await h.ipc.shutdown();
+  });
+
   it("routes shared Markdown through the named provider and pauses when that host stops", async () => {
     let live = true;
     const shared = Object.assign(providerSession(), {liveWritable: () => live});

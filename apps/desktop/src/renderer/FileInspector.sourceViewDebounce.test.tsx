@@ -40,6 +40,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     versionId: "version-1",
     saveState: "saved",
     saveError: null,
+    authorCapacity: false,
     notInVersion: false,
     documentUnavailable: false,
   liveHostUnavailable: false,

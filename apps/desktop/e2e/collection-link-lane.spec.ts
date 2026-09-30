@@ -137,7 +137,7 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
     const direct = (await ownerLog(relay)).filter((op) => op.originId === `relay:collection-file:${link.grantId}`);
     expect(direct.map((op) => op.payload.path)).toEqual([SCHEMA_PATH, AUTOMATIONS_PATH]);
     for (const op of direct) {
-      expect(op.payload.author).toEqual({ kind: "link", grantId: link.grantId, grantGeneration: 1, principalId: expect.any(String) });
+      expect((op.payload.authors as unknown[])[0]).toEqual({ kind: "link", grantId: link.grantId, grantGeneration: 1, principalId: expect.any(String) });
     }
 
     // --- The owner's disk has both, and History names the link --------------

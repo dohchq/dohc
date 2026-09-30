@@ -1096,7 +1096,7 @@ describe("direct writes through an Edit share link", () => {
     const [moment, ...rest] = await r.owner.directMoments();
     expect(rest).toEqual([]);
     expect(moment!.originId).toBe(`relay:collection-file:${LINK_GRANT}`);
-    const author = moment!.payload.author as Record<string, unknown>;
+    const author = (moment!.payload.authors as unknown[])[0] as Record<string, unknown>;
     expect(author).toEqual({ kind: "link", grantId: LINK_GRANT, grantGeneration: 1, principalId: expect.any(String) });
     expect(moment!.payload).toMatchObject({ payloadAfterBlobSha256: sha256(one), payloadAfterByteLength: bytes(one) });
     expect(Buffer.from(r.storage.getBlob(WORKSPACE, sha256(one))!).toString()).toBe(one);

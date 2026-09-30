@@ -2445,15 +2445,18 @@ describe("YdocLiveAdapter", () => {
     );
   });
 
-  it("evicts once the resend clears the debt the refusal left", async () => {
+  it.each([
+    {code: "OVERLOADED" as const, message: "engine-store-busy"},
+    {code: "LIMIT_EXCEEDED" as const, message: "ydoc-author-capacity"},
+  ])("evicts once resend clears $message debt", async ({code, message}) => {
     // The narrowness guard for the refusal above. A debt that can be paid is
     // paid, and then the evict proceeds — otherwise the orphan this exit
     // exists for would be wedged by a refusal that has already cleared.
     const engine = seedPlaintextEngine();
     const busy = new DaemonRefusalError(
       {
-        code: "OVERLOADED",
-        message: "engine-store-busy",
+        code,
+        message,
         retry: "afterBackoff",
       },
       new Error("daemon response"),

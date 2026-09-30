@@ -1510,8 +1510,8 @@ describe("sync relay handler", () => {
         (effect) => effect.payloadSha256,
       ),
     ).toEqual([
-      "8b196309f6d6a69295119febd37fa5d090b09df28d4faff97a238735729ddcd8",
-      "a605f5800e5591dd9700a75790bebf15de053df6158ec2433258e479ac034ab0",
+      "6565626bd98b1ba635e6261f86f333829436bcb19b8953632aedc23f93862da6",
+      "a640c8eb7e29218c60ae210ab4fc66a792ae1b89582cb019a0e2177139398e2b",
     ]);
   });
 

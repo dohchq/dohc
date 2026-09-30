@@ -48,6 +48,7 @@ const engineDocState: UseEngineDoc = {
   versionId: null,
   saveState: "saved",
   saveError: null,
+    authorCapacity: false,
   notInVersion: false,
   documentUnavailable: false,
   liveHostUnavailable: false,

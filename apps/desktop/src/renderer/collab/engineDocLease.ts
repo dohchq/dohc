@@ -324,6 +324,7 @@ export type EngineDocLeaseSnapshot = {
   outcome: EngineDocOpenOutcome | null;
   saveState: EngineDocSaveState;
   saveError: string | null;
+  authorCapacity: boolean;
   deletion: {
     token: number;
     draftId: number | null;
@@ -365,6 +366,7 @@ function emptyLeaseSnapshot(requestKey: string): EngineDocLeaseSnapshot {
     outcome: null,
     saveState: "saved",
     saveError: null,
+    authorCapacity: false,
     deletion: null,
     readOnlyTransition: null,
     permanentFailure: null,
@@ -499,9 +501,10 @@ function createEngineDocSession(
   const reportSaveState = (
     state: EngineDocSaveState,
     error: string | null = null,
+    authorCapacity = false,
   ): void => {
     saveStateRef.current = state;
-    publish((current) => ({ ...current, saveState: state, saveError: error }));
+    publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
   };
 
   const onDeliveryPendingChange = (pending: boolean): void => {
@@ -968,7 +971,7 @@ function createEngineDocSession(
       return;
     }
     if (event.state === "error" || event.state === "changed-on-disk") {
-      reportSaveState(event.state);
+      reportSaveState(event.state, event.authorCapacity ? "This file has too many pending authors. Try saving again." : null, event.authorCapacity);
       return;
     }
     if (event.state === "settling") {

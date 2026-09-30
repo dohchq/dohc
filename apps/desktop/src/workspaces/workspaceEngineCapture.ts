@@ -45,6 +45,7 @@ import {
   isFileLockedRefusal,
   isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
+  isYdocAuthorCapacityRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocObjectChangedRefusal,
   isYdocUnsettledCloseRefusal,
@@ -524,7 +525,7 @@ export interface WorkspaceEngineCapture {
     // disk is therefore behind the editor. A failed settle used to reach
     // nothing at all — the doc kept reading "Saved" over a stale (or empty)
     // file, which is silent data loss.
-    onSaveState?: (state: EngineYDocSaveState, token: number) => void;
+    onSaveState?: (state: EngineYDocSaveState, token: number, authorCapacity?: boolean) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
@@ -3600,9 +3601,10 @@ export function createWorkspaceEngineCapture(
         const reportSaveState = (
           state: EngineYDocSaveState,
           token: number,
+          authorCapacity?: boolean,
         ): void => {
           try {
-            input.onSaveState?.(state, token);
+            input.onSaveState?.(state, token, authorCapacity);
           } catch {
             // Observer boundary: a renderer-facing status hook must never
             // re-enter the session or wedge the settle chain.
@@ -3844,7 +3846,7 @@ export function createWorkspaceEngineCapture(
           if (!(error instanceof YdocOwnerDraftPendingError)) {
             onError(`ydoc settle of ${input.path}`, error);
           }
-          reportSaveState(settleFailureSaveState(error), token);
+          reportSaveState(settleFailureSaveState(error), token, hasRefusalInCauseChain(error, isYdocAuthorCapacityRefusal));
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({

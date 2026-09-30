@@ -1500,7 +1500,7 @@ describe("createCaptureLiveStores", () => {
   it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(
     "rejects corrupt author provenance returned by %s",
     async (method) => {
-      const corruptMoment = { ...moment, authors: [{ kind: "agent", agentId: "agent" }, { corrupt: true }] as const };
+      const corruptMoment = { ...moment, authors: [{ kind: "agent", agentId: "agent" }, { corrupt: true }] };
       const client = clientFor(async (request) => ({
         id: request.id,
         result:

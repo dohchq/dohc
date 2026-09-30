@@ -62,8 +62,7 @@ function engineMomentBaseForIpc(
   >,
   names: EngineMomentAuthorNames,
 ) {
-  // The record names one author. A moment with several waits for History's
-  // author list.
+  // Keep every author in IPC. Existing display fields name singleton authors.
   const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
   const agentAuthorName = author?.kind === "agent" ? names.agent(author) : undefined;
   return {
@@ -73,6 +72,7 @@ function engineMomentBaseForIpc(
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
     origin: moment.metadata.origin,
+    ...(moment.authors !== undefined ? { authors: moment.authors } : {}),
     ...(agentAuthorName !== undefined
       ? { agentAuthorName }
       : {}),
