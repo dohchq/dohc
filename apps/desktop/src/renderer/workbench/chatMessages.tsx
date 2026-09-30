@@ -68,12 +68,14 @@ export function chatAuthorLabel(
 //      failure is reported on its own, and always says the write saved.
 //   4. A listing changes only its own cell, and only when no newer toggle
 //      followed it. When the listing renames the viewer, the rows it
-//      attributes to the new name take it, and so do the viewer's pending
-//      rows in cells the listing attributes to the new name. Peers and
-//      other accounts keep theirs.
+//      attributes to the new name take it. Pending rows take it only when
+//      the old name was an alias: no row in the listing keeps the old name,
+//      and the listing attributes the pending row's cell to the new one.
+//      Peers and other accounts keep theirs.
 // Paints and errors go to the visit that chose the intent, gated by its
-// liveness token even inside a queued setter. A return to the thread takes
-// the cell over with a fresh rollback snapshot.
+// liveness token even inside a queued setter. A visit is the liveness ref
+// and its value together, since two mounts can count from the same number.
+// A return to the thread takes the cell over with a fresh rollback snapshot.
 export interface PendingReactionCell {
   // The newest toggle's context and liveness token: where paints and errors go.
   owner: ReactionToggleContext;
@@ -106,6 +108,10 @@ export interface ReactionToggleContext {
 }
 
 const OPTIMISTIC_REACTION = "optimistic:";
+
+function sameVisit(cell: PendingReactionCell, owner: ReactionToggleContext, token: number) {
+  return cell.owner.liveToken === owner.liveToken && cell.token === token;
+}
 
 // Replace the rows `matches` selects, in place. New rows go last; restored
 // rows go back where they were.
@@ -149,7 +155,7 @@ export function runReactionToggle(
   };
   // A return to the thread painted fresh rows, so the rollback snapshot
   // starts over. The write chain keeps its order.
-  if (cell.token !== token) cell.confirmed = null;
+  if (!sameVisit(cell, ctx, token)) cell.confirmed = null;
   cell.owner = ctx;
   cell.token = token;
   cell.viewer = ctx.viewerAuthorId;
@@ -198,34 +204,41 @@ export function runReactionToggle(
         if (!ownerLive()) return;
         const rows = result.reactions.filter(inCell);
         const viewer = result.viewerAuthorId;
-        // The listing renamed the viewer. A row follows it when the listing
-        // attributes that row to the new name, or a pending row when the
-        // listing attributes its cell to the new name. Peers and other
-        // accounts keep theirs.
+        // The listing renamed the viewer. A row it attributes to the new name
+        // takes it. A pending row takes it only when the old name was an
+        // alias: no row keeps the old name, and the listing attributes the
+        // pending row's cell to the new one. Peers and other accounts keep
+        // theirs.
         const canonical = new Map(result.reactions.map((row) => [row.reactionId, row.authorId]));
-        const renamedCells = new Set(
-          result.reactions
-            .filter((row) => row.authorId === viewer)
-            .map((row) => keyOf(row.messageId, row.emoji)),
+        const aliased =
+          viewer !== previous && !result.reactions.some((row) => row.authorId === previous);
+        const aliasCells = new Set(
+          aliased
+            ? result.reactions
+                .filter((row) => row.authorId === viewer)
+                .map((row) => keyOf(row.messageId, row.emoji))
+            : [],
         );
         const renamed = (row: ChatReactionRecord): ChatReactionRecord =>
           row.authorId === previous &&
           (canonical.get(row.reactionId) === viewer ||
             (row.reactionId.startsWith(OPTIMISTIC_REACTION) &&
-              renamedCells.has(keyOf(row.messageId, row.emoji))))
+              aliasCells.has(keyOf(row.messageId, row.emoji))))
             ? { ...row, authorId: viewer }
             : row;
-        if (viewer !== previous) {
-          for (const [key, other] of pending) {
-            if (other.viewer !== previous || !renamedCells.has(key)) continue;
-            other.viewer = viewer;
-            other.confirmed = other.confirmed?.map(renamed) ?? null;
-          }
-        }
         owner.setReactions((current) => {
           if (!ownerLive()) return current;
           const next = replaceRows(current, inCell, rows);
-          return viewer === previous ? next : next.map(renamed);
+          if (viewer === previous) return next;
+          // Pending cells change here, in updater order, so a paint or
+          // rollback queued before this still finds its rows under the old
+          // name. A second strict-mode run finds nothing left to rename.
+          for (const [key, other] of pending) {
+            if (other.viewer !== previous || !aliasCells.has(key)) continue;
+            other.viewer = viewer;
+            other.confirmed = other.confirmed?.map(renamed) ?? null;
+          }
+          return next.map(renamed);
         });
         owner.setViewerAuthorId((current) => (ownerLive() ? viewer : current));
       },
@@ -254,17 +267,21 @@ export function runReactionToggle(
   function write(state: "added" | "removed") {
     cell.writing = true;
     // The visit that chose this intent sees its rollback and error.
-    const { owner, token: ownerToken } = cell;
+    const { owner, token: ownerToken, viewer } = cell;
     const ownerLive = () => ownerToken === owner.liveToken.current;
     void bridge()
       .setChatReaction({ workspaceId, threadId, messageId, emoji, state })
       .then(
         () => {
           // The server holds this intent now. Only the listing names the
-          // viewer: this write's own result can carry a removed alias.
+          // viewer: this write's own result can carry a removed alias. The
+          // intent becomes the snapshot only for the person who chose it; a
+          // return under another account keeps its own fresh snapshot.
           cell.acked = true;
-          cell.confirmed = rowsFor(state);
-          cell.confirmedAt = Number.POSITIVE_INFINITY;
+          if (sameVisit(cell, owner, ownerToken) || cell.viewer === viewer) {
+            cell.confirmed = rowsFor(state);
+            cell.confirmedAt = Number.POSITIVE_INFINITY;
+          }
         },
         (error: unknown) => {
           if (!ownerLive()) return;

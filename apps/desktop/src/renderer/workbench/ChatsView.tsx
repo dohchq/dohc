@@ -4552,6 +4552,7 @@ export function ChatsView(props: {
             onError={props.onError}
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
+            pendingReactions={pendingReactions}
           />
         ) : (
         <PostFeedList

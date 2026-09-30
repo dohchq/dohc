@@ -1,5 +1,5 @@
 import { ArrowDown } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import type {
   ChatChannelRecord,
   ChatDecisionRecord,
@@ -43,6 +43,9 @@ export function ChatLane(props: {
   onThreadRead?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
+  // The host's reaction writes in flight. It outlives this lane, so a write
+  // chosen before leaving the group still goes before one chosen after.
+  pendingReactions: MutableRefObject<Map<string, PendingReactionCell>>;
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
@@ -61,10 +64,9 @@ export function ChatLane(props: {
   const loadSequence = useRef(0);
   const onThreadRead = useRef(props.onThreadRead);
   onThreadRead.current = props.onThreadRead;
-  const pendingReactions = useRef(new Map<string, PendingReactionCell>());
   const listRef = useRef<ChatMessageListHandle | null>(null);
   const paintedRevision = useRef<PaintedLane | null>(null);
-  const { workspaceId, onError } = props;
+  const { workspaceId, onError, pendingReactions } = props;
   const channelId = props.channel.id;
 
   const markRead = useCallback((painted: PaintedLane) => {
@@ -284,7 +286,7 @@ export function ChatLane(props: {
             input,
           ),
       }
-    : undefined, [threadId, reactions, viewerAuthorId, props.locked, workspaceId, onError]);
+    : undefined, [threadId, reactions, viewerAuthorId, props.locked, workspaceId, onError, pendingReactions]);
 
   const decisionsByMessage = useMemo(() => new Map(decisions.map(decision => [decision.messageId, decision])), [decisions]);
   const renderMessageFooter = useCallback((message: ChatMessageRecord) => {
