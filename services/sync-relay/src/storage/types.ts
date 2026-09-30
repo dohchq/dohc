@@ -596,6 +596,14 @@ export interface SyncRelayStorage {
   takeOverAutomationHost(input: import("./automationHosts").AutomationHostTakeOverInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   readAutomationGroupHandover(input: import("./automationHosts").AutomationGroupHandoverInput): import("./automationHosts").AutomationGroupHandover;
   authorizeLinkCollectionWrite(input: Parameters<typeof import("./collectionWrites").authorizeLinkCollectionWrite>[1]): import("../shareAuthorization").AuthorizedShareAction;
+  joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
+  unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
+  listAutomationWorkspaces(): import("./automationWorkspaces").AutomationWorkspace[];
+  forgetAutomationWorkspace(input: { workspaceId: string; incarnation: number }): void;
+  forgetAutomationWorkspaces(): void;
+  currentAutomationWorkspace(workspaceId: string): import("./automationWorkspaces").AutomationWorkspace | null;
+  serverHostedWorkspaces(): string[];
+  automationWorkspaceLogHead(workspaceId: string): number;
   commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
   readOwnerCollectionWrites(input: import("./ownerCollectionWrites").OwnerCollectionWritesInput): import("./ownerCollectionWrites").OwnerCollectionWritesPage;
   recordAutomationPress(input: import("./automationPresses").RecordAutomationPressInput): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;

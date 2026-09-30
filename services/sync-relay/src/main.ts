@@ -53,6 +53,7 @@ import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
+import {authorizeServiceHostReplication} from "./serviceHostCredential";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
@@ -276,7 +277,11 @@ const resolveAccountActor: ResolveActor = testAuthSeam
 
 const resolveActor = resolveAccountActor;
 const serviceReplication = selfHostedLive && deployment && linkKey
-  ? createServiceHostReplication({storage, key: Buffer.from(linkKey), namespace: deployment.history.namespace}) : undefined;
+  ? (() => {
+      const credential = {key: Buffer.from(linkKey), namespace: deployment.history.namespace};
+      return createServiceHostReplication({storage, prefix: "dohc-service-v1.",
+        authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input})});
+    })() : undefined;
 
 function createTestActorResolver(): ResolveActor {
   return (request, workspaceId) => {
