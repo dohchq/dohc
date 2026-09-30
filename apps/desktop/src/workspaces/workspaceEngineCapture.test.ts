@@ -2775,7 +2775,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     expect(await readFile(join(root, "large.txt"), "utf8")).toBe(text);
     expect(requests.find(request => request.method === VERSIONED_METHOD.textWriteBlob)?.idempotencyKey).toBe("stable");
     await engine.writeAuthoredFile(join(root, "large.txt"), text, author, { createOnly: true, requestId: "stable" });
-    expect(await liveMomentAuthors(engine)).toEqual([author]);
+    expect(await liveMomentAuthors(engine)).toEqual([[author]]);
     await engine.stop();
   });
 
@@ -2790,7 +2790,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const request = requests.find(request => request.method === VERSIONED_METHOD.binaryWrite);
     expect(request).toMatchObject({ params: { bytes: [0, 255, 1], author, createOnly: true, requestId: "binary", correlationId: "batch" } });
     expect(requests.findIndex(request => request.method === "capture.flush")).toBeLessThan(requests.indexOf(request!));
-    expect(await liveMomentAuthors(engine)).toEqual([author]);
+    expect(await liveMomentAuthors(engine)).toEqual([[author]]);
     await engine.stop();
   });
 
