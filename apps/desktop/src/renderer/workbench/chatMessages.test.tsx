@@ -900,6 +900,10 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
     const reopened = you({ reactionId: "r-reopened" });
     h.ctx.setReactions([reopened]);
     toggle(h, "removed");
+    // The new remove waits for the old one. The old write never landed, so
+    // the server still holds what the fresh listing painted, and the old
+    // visit's rejection is nobody's to show.
+    oldWrite.reject(new TypeError("offline"));
     await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
     expect(h.reactions).toEqual([reopened]);
   });
@@ -911,6 +915,139 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
     h.liveToken.current += 1;
     h.flush();
     expect(h.reactions).toEqual([peer]);
+  });
+
+  it("orders an old visit's queued writes before the newest visit's intent", async () => {
+    const h = harness();
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    bridgeMock.listChatReactions.mockResolvedValue(listing([you()]));
+    toggle(h, "added");
+    toggle(h, "removed");
+    h.liveToken.current += 1;
+    h.ctx.setReactions([]);
+    toggle(h, "added");
+    expect(writes).toHaveLength(1);
+    writes[0]!.resolve(undefined);
+    await waitFor(() => expect(writes.length).toBeGreaterThanOrEqual(2));
+    writes[1]!.resolve(undefined);
+    await waitFor(() => expect(bridgeMock.setChatReaction.mock.lastCall?.[0].state).toBe("added"));
+    writes[2]?.resolve(undefined);
+    await waitFor(() => expect(h.ctx.pendingReactions.current.size).toBe(0));
+    expect(h.mineOn("👍")).toBe(true);
+  });
+
+  it("keeps untouched viewer reactions aligned when a listing normalizes identity", async () => {
+    const other = you({ reactionId: "r-other", messageId: "m2" });
+    const h = harness([other]);
+    bridgeMock.setChatReaction.mockResolvedValue(undefined);
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [you({ authorId: "you@normalized" }), { ...other, authorId: "you@normalized" }],
+      viewerAuthorId: "you@normalized",
+    });
+    toggle(h, "added");
+    await waitFor(() => expect(h.viewerAuthorId).toBe("you@normalized"));
+    expect(h.reactions).toContainEqual({ ...other, authorId: "you@normalized" });
+  });
+
+  it("renames a pending cell's rows and rollback snapshot with the viewer, without duplicates", async () => {
+    const mine = you({ reactionId: "r-mine", messageId: "m2" });
+    const h = harness([mine]);
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [you({ authorId: "you@normalized" }), { ...mine, authorId: "you@normalized" }],
+      viewerAuthorId: "you@normalized",
+    });
+    toggle(h, "added", { messageId: "m1", emoji: "👍" });
+    toggle(h, "removed", { messageId: "m2", emoji: "👍" });
+    // The first cell's listing lands while the second cell's remove is
+    // still in flight, and it renames the viewer.
+    writes[0]!.resolve(undefined);
+    await waitFor(() => expect(h.viewerAuthorId).toBe("you@normalized"));
+    expect(h.reactions).toEqual([you({ authorId: "you@normalized" })]);
+    // The remove is rejected: the row comes back under the new name, once.
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    expect(h.reactions).toEqual([
+      { ...mine, authorId: "you@normalized" },
+      you({ authorId: "you@normalized" }),
+    ]);
+  });
+
+  it("always says the write saved when reload fails with words for a person", async () => {
+    const h = harness();
+    bridgeMock.setChatReaction.mockResolvedValue(undefined);
+    bridgeMock.listChatReactions.mockRejectedValue(new Error("The chat thread is no longer available."));
+    toggle(h, "added");
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    expect(h.onError.mock.calls[0]![0]).toContain("Your reaction was saved");
+    expect(h.mineOn("👍")).toBe(true);
+  });
+
+  it("routes reused message IDs to their own workspace while another workspace is pending", async () => {
+    const old = harness();
+    const next = harness();
+    next.ctx.workspaceId = "ws-next";
+    next.ctx.pendingReactions = old.ctx.pendingReactions;
+    next.ctx.liveToken = old.ctx.liveToken;
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    bridgeMock.listChatReactions.mockResolvedValue(listing([you()]));
+    toggle(old, "added");
+    old.liveToken.current += 1;
+    toggle(next, "added");
+    writes[0]!.resolve(undefined);
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(bridgeMock.setChatReaction.mock.calls[1]![0].workspaceId).toBe("ws-next");
+    writes[1]!.resolve(undefined);
+    await waitFor(() => expect(old.ctx.pendingReactions.current.size).toBe(0));
+  });
+
+  it("keeps a different feed thread's pending rollback under its own viewer identity", async () => {
+    const first = harness();
+    const second = harness();
+    second.ctx.threadId = "thread-2";
+    second.ctx.pendingReactions = first.ctx.pendingReactions;
+    second.ctx.liveToken = first.ctx.liveToken;
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [you({ authorId: "you@normalized" })],
+      viewerAuthorId: "you@normalized",
+    });
+    toggle(first, "added");
+    toggle(second, "added", { messageId: "m2", emoji: "👍" });
+    toggle(second, "removed", { messageId: "m2", emoji: "👍" });
+    writes[0]!.resolve(undefined);
+    await waitFor(() => expect(first.viewerAuthorId).toBe("you@normalized"));
+    // The second thread's add lands, but its queued remove does not.
+    bridgeMock.listChatReactions.mockReturnValue(deferred<Listing>().promise);
+    writes[1]!.resolve(undefined);
+    await waitFor(() => expect(writes).toHaveLength(3));
+    writes[2]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(second.onError).toHaveBeenCalledOnce());
+    expect(second.viewerAuthorId).toBe("you@x");
+    expect(second.reactions).toHaveLength(1);
+    expect(second.reactions[0]!.authorId).toBe(second.viewerAuthorId);
+  });
+
+  it("does not rename a previous account's pending row when canonical rows retain that account", async () => {
+    const oldRow = you({ reactionId: "r-old-account", messageId: "m3" });
+    const h = harness([oldRow]);
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    const lists = controlled<Listing>(bridgeMock.listChatReactions);
+    toggle(h, "added", { messageId: "m1", emoji: "👍" });
+    toggle(h, "added", { messageId: "m2", emoji: "👍" });
+    writes[0]!.resolve(undefined);
+    await waitFor(() => expect(lists).toHaveLength(1));
+    lists[0]!.resolve({
+      reactions: [you({ authorId: "next-account" }), you({ messageId: "m2" }), oldRow],
+      viewerAuthorId: "next-account",
+    });
+    await waitFor(() => expect(h.viewerAuthorId).toBe("next-account"));
+    expect(h.reactions.find((row) => row.messageId === "m2")?.authorId).toBe("you@x");
+    expect(h.reactions).toContainEqual(oldRow);
+    writes[1]!.resolve(undefined);
+    await waitFor(() => expect(lists).toHaveLength(2));
+    lists[1]!.resolve({ reactions: [you({ messageId: "m2" })], viewerAuthorId: "next-account" });
+    await waitFor(() => expect(h.ctx.pendingReactions.current.size).toBe(0));
   });
 
   it("adopts only its own cell from the listing, so another cell's pending write survives", async () => {

@@ -6,6 +6,7 @@ import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time
 import { ChatAvatar } from "./ChatAvatar";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
+import { withErrorWords } from "../../ipc/errorWords";
 import { Database, File, FileText, Image, SmilePlus, Send } from "lucide-react";
 import {
   memo,
@@ -55,24 +56,30 @@ export function chatAuthorLabel(
 // once, writes it, then adopts that cell from the canonical listing. A cell
 // keeps one pending entry from its first toggle until its last write and
 // listing settle, and that entry gives these guarantees:
-//   1. Writes on one cell go to the server in the order the person chose. A
-//      toggle during a write paints at once and waits; only the newest
-//      waiting intent is sent, after the write in flight settles.
+//   1. Writes on one cell reach the server in the order the person chose,
+//      even across leaving and returning to the thread. A toggle during a
+//      write paints at once and waits; only the newest waiting intent is
+//      sent, after the write in flight settles.
 //   2. A rejected write restores the rows the server is known to hold: the
 //      viewer's rows before the first toggle, or the newest acknowledged
 //      intent. A newer waiting intent keeps its paint instead. Peers, other
 //      emoji, and other messages are never touched.
 //   3. An acknowledged write stays painted when its listing fails. That read
-//      failure is reported on its own, never as a failed write.
+//      failure is reported on its own, and always says the write saved.
 //   4. A listing changes only its own cell, and only when no newer toggle
-//      followed it, so it never erases another cell's pending state or a
-//      newer intent on its own.
-// Every repaint and error is also gated by the caller's liveness token, so a
-// thread switch discards stale state, even inside a queued setter, and a
-// cell opened during an earlier visit to the thread is left behind.
+//      followed it. When the listing renames the viewer, the rows it
+//      attributes to the new name take it, and so do the viewer's pending
+//      rows in cells the listing attributes to the new name. Peers and
+//      other accounts keep theirs.
+// Paints and errors go to the visit that chose the intent, gated by its
+// liveness token even inside a queued setter. A return to the thread takes
+// the cell over with a fresh rollback snapshot.
 export interface PendingReactionCell {
-  // The liveness token this cell opened under.
+  // The newest toggle's context and liveness token: where paints and errors go.
+  owner: ReactionToggleContext;
   token: number;
+  // The name this cell's viewer rows are painted under.
+  viewer: string;
   // Counts toggles. A listing paints only when no newer toggle followed it.
   seq: number;
   writing: boolean;
@@ -91,12 +98,14 @@ export interface ReactionToggleContext {
   threadId: string;
   viewerAuthorId: string;
   liveToken: MutableRefObject<number>;
-  // One entry per (message, emoji) cell with a write in flight.
+  // One entry per (message, emoji) cell with a write or listing in flight.
   pendingReactions: MutableRefObject<Map<string, PendingReactionCell>>;
   setReactions: Dispatch<SetStateAction<ChatReactionRecord[]>>;
   setViewerAuthorId: Dispatch<SetStateAction<string>>;
   onError: (message: string, cause?: unknown) => void;
 }
+
+const OPTIMISTIC_REACTION = "optimistic:";
 
 // Replace the rows `matches` selects, in place. New rows go last; restored
 // rows go back where they were.
@@ -115,42 +124,57 @@ export function runReactionToggle(
   ctx: ReactionToggleContext,
   input: { messageId: string; emoji: string; nextState: "added" | "removed" },
 ): void {
-  const { workspaceId, threadId, viewerAuthorId } = ctx;
-  if (viewerAuthorId === "") return;
+  if (ctx.viewerAuthorId === "") return;
+  const { workspaceId, threadId } = ctx;
   const { messageId, emoji } = input;
   const token = ctx.liveToken.current;
   const live = () => token === ctx.liveToken.current;
+
+  // The engine scopes message ids to a workspace, and one map can serve
+  // several threads. NUL-joined so a message id that ends with the emoji (or
+  // vice versa) can't alias another cell's key.
+  const keyOf = (id: string, glyph: string) => [workspaceId, threadId, id, glyph].join("\u0000");
+  const cellKey = keyOf(messageId, emoji);
+  const pending = ctx.pendingReactions.current;
+  const cell: PendingReactionCell = pending.get(cellKey) ?? {
+    owner: ctx,
+    token,
+    viewer: ctx.viewerAuthorId,
+    seq: 0,
+    writing: false,
+    queued: null,
+    acked: false,
+    confirmed: null,
+    confirmedAt: 0,
+  };
+  // A return to the thread painted fresh rows, so the rollback snapshot
+  // starts over. The write chain keeps its order.
+  if (cell.token !== token) cell.confirmed = null;
+  cell.owner = ctx;
+  cell.token = token;
+  cell.viewer = ctx.viewerAuthorId;
+  cell.seq += 1;
+  pending.set(cellKey, cell);
+  const owns = () => pending.get(cellKey) === cell;
+
   const inCell = (reaction: ChatReactionRecord) =>
     reaction.messageId === messageId && reaction.emoji === emoji;
   const isViewerRow = (reaction: ChatReactionRecord) =>
-    inCell(reaction) && reaction.authorId === viewerAuthorId;
+    inCell(reaction) && reaction.authorId === cell.viewer;
   const rowsFor = (state: "added" | "removed"): ChatReactionRecord[] =>
     state === "added"
       ? [
           {
-            reactionId: `optimistic:${messageId}:${emoji}:${viewerAuthorId}`,
+            reactionId: `${OPTIMISTIC_REACTION}${messageId}:${emoji}:${cell.viewer}`,
             messageId,
             threadId,
             emoji,
-            authorId: viewerAuthorId,
+            authorId: cell.viewer,
             authorKind: "human",
-            authorDisplayName: viewerAuthorId,
+            authorDisplayName: cell.viewer,
           },
         ]
       : [];
-
-  // NUL-joined so a message id that ends with the emoji (or vice versa) can't
-  // alias another cell's key.
-  const cellKey = `${messageId}\u0000${emoji}`;
-  const pending = ctx.pendingReactions.current;
-  const found = pending.get(cellKey);
-  const cell: PendingReactionCell =
-    found?.token === token
-      ? found
-      : { token, seq: 0, writing: false, queued: null, acked: false, confirmed: null, confirmedAt: 0 };
-  cell.seq += 1;
-  pending.set(cellKey, cell);
-  const owns = () => pending.get(cellKey) === cell;
 
   ctx.setReactions((current) => {
     if (!live()) return current;
@@ -164,23 +188,54 @@ export function runReactionToggle(
 
   function list() {
     const at = cell.seq;
+    const { owner, token: ownerToken, viewer: previous } = cell;
+    const ownerLive = () => ownerToken === owner.liveToken.current;
     void bridge().listChatReactions({ workspaceId, threadId }).then(
       (result) => {
         // A newer toggle's write lists again.
-        if (cell.seq !== at) return;
-        if (owns()) pending.delete(cellKey);
-        if (!live()) return;
+        if (cell.seq !== at || !owns()) return;
+        pending.delete(cellKey);
+        if (!ownerLive()) return;
         const rows = result.reactions.filter(inCell);
-        ctx.setReactions((current) => (live() ? replaceRows(current, inCell, rows) : current));
-        ctx.setViewerAuthorId((current) => (live() ? result.viewerAuthorId : current));
+        const viewer = result.viewerAuthorId;
+        // The listing renamed the viewer. A row follows it when the listing
+        // attributes that row to the new name, or a pending row when the
+        // listing attributes its cell to the new name. Peers and other
+        // accounts keep theirs.
+        const canonical = new Map(result.reactions.map((row) => [row.reactionId, row.authorId]));
+        const renamedCells = new Set(
+          result.reactions
+            .filter((row) => row.authorId === viewer)
+            .map((row) => keyOf(row.messageId, row.emoji)),
+        );
+        const renamed = (row: ChatReactionRecord): ChatReactionRecord =>
+          row.authorId === previous &&
+          (canonical.get(row.reactionId) === viewer ||
+            (row.reactionId.startsWith(OPTIMISTIC_REACTION) &&
+              renamedCells.has(keyOf(row.messageId, row.emoji))))
+            ? { ...row, authorId: viewer }
+            : row;
+        if (viewer !== previous) {
+          for (const [key, other] of pending) {
+            if (other.viewer !== previous || !renamedCells.has(key)) continue;
+            other.viewer = viewer;
+            other.confirmed = other.confirmed?.map(renamed) ?? null;
+          }
+        }
+        owner.setReactions((current) => {
+          if (!ownerLive()) return current;
+          const next = replaceRows(current, inCell, rows);
+          return viewer === previous ? next : next.map(renamed);
+        });
+        owner.setViewerAuthorId((current) => (ownerLive() ? viewer : current));
       },
       (error: unknown) => {
         // The write landed, so the painted change stays.
-        if (cell.seq !== at) return;
-        if (owns()) pending.delete(cellKey);
-        if (!live()) return;
-        ctx.onError(
-          ipcErrorMessage(error, "Your reaction was saved, but dohc could not reload reactions."),
+        if (cell.seq !== at || !owns()) return;
+        pending.delete(cellKey);
+        if (!ownerLive()) return;
+        owner.onError(
+          withErrorWords("Your reaction was saved, but dohc could not reload reactions.", error),
           error,
         );
       },
@@ -192,12 +247,15 @@ export function runReactionToggle(
     const next = cell.queued;
     cell.queued = null;
     if (next) write(next);
-    else if (cell.acked) list();
+    else if (cell.acked && cell.token === cell.owner.liveToken.current) list();
     else if (owns()) pending.delete(cellKey);
   }
 
   function write(state: "added" | "removed") {
     cell.writing = true;
+    // The visit that chose this intent sees its rollback and error.
+    const { owner, token: ownerToken } = cell;
+    const ownerLive = () => ownerToken === owner.liveToken.current;
     void bridge()
       .setChatReaction({ workspaceId, threadId, messageId, emoji, state })
       .then(
@@ -209,19 +267,22 @@ export function runReactionToggle(
           cell.confirmedAt = Number.POSITIVE_INFINITY;
         },
         (error: unknown) => {
-          if (!live()) return;
+          if (!ownerLive()) return;
           // With no newer intent waiting, the cell shows what the server holds.
           if (cell.queued === null) {
-            ctx.setReactions((current) =>
-              live() ? replaceRows(current, isViewerRow, cell.confirmed ?? [], cell.confirmedAt) : current,
+            owner.setReactions((current) =>
+              ownerLive()
+                ? replaceRows(current, isViewerRow, cell.confirmed ?? [], cell.confirmedAt)
+                : current,
             );
           }
-          ctx.onError(ipcErrorMessage(error, "Could not update that reaction."), error);
+          owner.onError(ipcErrorMessage(error, "Could not update that reaction."), error);
         },
       )
       .then(settle);
   }
 
+  // A newer intent replaces the one waiting: the server only needs the last.
   if (cell.writing) cell.queued = input.nextState;
   else write(input.nextState);
 }

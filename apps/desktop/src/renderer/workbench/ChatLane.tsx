@@ -151,7 +151,6 @@ export function ChatLane(props: {
     setViewerAuthorId("");
     setFirstUnreadMessageId(null);
     setAtEnd(true);
-    pendingReactions.current.clear();
     paintedRevision.current = null;
     setLoading(true);
     return () => { token.current += 1; };
