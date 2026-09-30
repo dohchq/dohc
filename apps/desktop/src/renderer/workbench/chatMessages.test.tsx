@@ -928,11 +928,10 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
     toggle(h, "added");
     expect(writes).toHaveLength(1);
     writes[0]!.resolve(undefined);
-    await waitFor(() => expect(writes.length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(writes).toHaveLength(2));
     writes[1]!.resolve(undefined);
-    await waitFor(() => expect(bridgeMock.setChatReaction.mock.lastCall?.[0].state).toBe("added"));
-    writes[2]?.resolve(undefined);
     await waitFor(() => expect(h.ctx.pendingReactions.current.size).toBe(0));
+    expect(bridgeMock.setChatReaction.mock.calls.map(([payload]) => payload.state)).toEqual(["added", "added"]);
     expect(h.mineOn("👍")).toBe(true);
   });
 
@@ -1213,6 +1212,133 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
     await waitFor(() => expect(h.onError).toHaveBeenCalledTimes(2));
     h.flush();
     expect(h.reactions).toEqual([currentRow]);
+    expect(h.ctx.pendingReactions.current.size).toBe(0);
+  });
+
+  it("removes a failed old-account paint when the new account's intent was already queued", async () => {
+    const currentRow = you({ reactionId: "r-current", authorId: "next-account" });
+    const h = harness([currentRow], { deferSetters: true });
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    toggle(h, "added");
+    h.flush();
+    h.ctx.setViewerAuthorId("next-account");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "removed" });
+    h.flush();
+    writes[0]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(writes).toHaveLength(2));
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledTimes(2));
+    h.flush();
+    expect(h.reactions).toEqual([currentRow]);
+    expect(h.ctx.pendingReactions.current.size).toBe(0);
+  });
+
+  it("keeps an earlier accepted write when returning to the exact same account through another account", async () => {
+    const h = harness();
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    bridgeMock.listChatReactions.mockRejectedValue(new TypeError("offline"));
+    toggle(h, "added");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "added" });
+    // The returning account's fresh listing predates the pending add.
+    h.ctx.setReactions([]);
+    toggle(h, "removed");
+    writes[0]!.resolve(undefined);
+    await waitFor(() => expect(writes).toHaveLength(2));
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledTimes(2));
+    expect(h.mineOn("👍")).toBe(true);
+    expect(h.onError.mock.calls[1]![0]).toContain("Your reaction was saved");
+  });
+
+  it("does not capture a failed optimistic row as confirmed when the same account returns without a reload", async () => {
+    const h = harness();
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    toggle(h, "added");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "added" });
+    // Partial reaction listings can change the viewer without reloading this
+    // cell, so its first optimistic add is still painted when A returns.
+    toggle(h, "removed");
+    writes[0]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(writes).toHaveLength(2));
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledTimes(2));
+    expect(h.reactions.some((row) => row.authorId === "you@x")).toBe(false);
+    expect(h.reactions).toEqual([]);
+    expect(h.ctx.pendingReactions.current.size).toBe(0);
+  });
+
+  it("remembers a noncurrent account's accepted write when that account later returns", async () => {
+    const h = harness();
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    bridgeMock.listChatReactions.mockRejectedValue(new TypeError("offline"));
+    toggle(h, "added");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "added" });
+    writes[0]!.resolve(undefined);
+    await waitFor(() => expect(writes).toHaveLength(2));
+    // A's add is accepted while B owns the cell, before A returns.
+    toggle(h, "removed");
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(writes).toHaveLength(3));
+    writes[2]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledTimes(3));
+    expect(h.reactions).toHaveLength(1);
+    expect(h.reactions[0]!.authorId).toBe("you@x");
+    expect(h.mineOn("👍")).toBe(true);
+    expect(h.onError.mock.calls[2]![0]).toContain("Your reaction was saved");
+    expect(h.ctx.pendingReactions.current.size).toBe(0);
+  });
+
+  it("refreshes a remembered account's rollback baseline on a new visit", async () => {
+    const h = harness();
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    toggle(h, "added");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "added" });
+    h.liveToken.current += 1;
+    const reopened = you({ reactionId: "r-reopened" });
+    h.ctx.setReactions([reopened]);
+    toggle(h, "removed");
+    writes[0]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(writes).toHaveLength(2));
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    expect(h.reactions).toEqual([reopened]);
+    expect(h.ctx.pendingReactions.current.size).toBe(0);
+  });
+
+  it("preserves another account's fresh canonical row when its old queued intent is superseded on return", async () => {
+    const h = harness();
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    toggle(h, "added");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "added" });
+    h.liveToken.current += 1;
+    const reopened = you({ reactionId: "r-reopened" });
+    const peer = you({ reactionId: "r-peer-reopened", authorId: "next-account" });
+    h.ctx.setReactions([reopened, peer]);
+    toggle(h, "removed");
+    writes[0]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(writes).toHaveLength(2));
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    expect(h.reactions).toEqual([reopened, peer]);
+    expect(h.ctx.pendingReactions.current.size).toBe(0);
+  });
+
+  it("refreshes all remembered accounts from the returned visit before another account toggles", async () => {
+    const h = harness();
+    const writes = controlled<undefined>(bridgeMock.setChatReaction);
+    toggle(h, "added");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "added" });
+    h.liveToken.current += 1;
+    const reopened = you({ reactionId: "r-reopened" });
+    const peer = you({ reactionId: "r-peer-reopened", authorId: "next-account" });
+    h.ctx.setReactions([reopened, peer]);
+    toggle(h, "removed");
+    runReactionToggle({ ...h.ctx, viewerAuthorId: "next-account" }, { messageId: "m1", emoji: "👍", nextState: "removed" });
+    writes[0]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(writes).toHaveLength(2));
+    writes[1]!.reject(new TypeError("offline"));
+    await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+    expect(h.reactions).toEqual([reopened, peer]);
     expect(h.ctx.pendingReactions.current.size).toBe(0);
   });
 

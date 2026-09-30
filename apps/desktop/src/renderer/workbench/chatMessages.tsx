@@ -79,8 +79,10 @@ export function chatAuthorLabel(
 // A return to the thread, or another account on the same cell, takes the
 // cell over with a fresh rollback snapshot. Every write, paint, and rollback
 // holds the person it was made for, so a later takeover cannot lend a
-// queued rollback another account's name or snapshot. Renames run inside
-// functional updaters, in queue order.
+// queued rollback another account's name or snapshot. Two people are the
+// same when their exact canonical names match or a listing proved the
+// alias, never by sharing a visit. Renames run inside functional updaters,
+// in queue order.
 
 // The person a cell's viewer rows belong to, and the rows the server is
 // known to hold for them. A listing with stable-id proof renames the person
@@ -99,6 +101,10 @@ export interface PendingReactionCell {
   owner: ReactionToggleContext;
   token: number;
   author: ReactionAuthor;
+  // Everyone who toggled during this chain, the current person included. A
+  // person who returns keeps the rows the chain already knows the server
+  // holds for them, rather than reading a painted row as server truth.
+  people: ReactionAuthor[];
   // Counts toggles. A listing paints only when no newer toggle followed it.
   seq: number;
   writing: boolean;
@@ -163,28 +169,42 @@ export function runReactionToggle(
   const keyOf = (id: string, glyph: string) => `${scopeKey}${id}\u0000${glyph}`;
   const cellKey = keyOf(messageId, emoji);
   const pending = ctx.pendingReactions.current;
-  const newAuthor = (): ReactionAuthor => ({
+  const newPerson: ReactionAuthor = {
     name: ctx.viewerAuthorId,
     alias: null,
     confirmed: null,
     confirmedAt: 0,
-  });
+  };
   const cell: PendingReactionCell = pending.get(cellKey) ?? {
     owner: ctx,
     token,
-    author: newAuthor(),
+    author: newPerson,
+    people: [newPerson],
     seq: 0,
     writing: false,
     queued: null,
     ackedBy: null,
     rollback: null,
   };
-  // Another account gets its own person and snapshot; a rollback already
-  // queued keeps the person it was made for. The same person returning to
-  // the thread painted fresh rows, so their snapshot starts over. The write
-  // chain keeps its order either way.
-  if (!isNamed(cell.author, ctx.viewerAuthorId)) cell.author = newAuthor();
-  else if (!sameVisit(cell, ctx, token)) cell.author.confirmed = null;
+  const returned = !sameVisit(cell, ctx, token);
+  // Another account's waiting intent is dropped by this toggle, so their
+  // rows return to what the server holds for them. That paint belongs to
+  // the visit it happened in: a return painted fresh rows without it.
+  const superseded =
+    cell.queued !== null && !returned && !isNamed(cell.author, ctx.viewerAuthorId)
+      ? cell.author
+      : null;
+  // Another account takes the cell with its own person and snapshot: the one
+  // this chain already knows, or a new one. A rollback already queued keeps
+  // the person it was made for. A return to the thread painted fresh rows,
+  // so everyone this chain knows starts their snapshot over from those rows
+  // when they next toggle. The write chain keeps its order either way.
+  if (!isNamed(cell.author, ctx.viewerAuthorId)) {
+    const known = cell.people.find((person) => isNamed(person, ctx.viewerAuthorId));
+    cell.author = known ?? newPerson;
+    if (!known) cell.people.push(newPerson);
+  }
+  if (returned) for (const person of cell.people) person.confirmed = null;
   const author = cell.author;
   cell.owner = ctx;
   cell.token = token;
@@ -214,12 +234,15 @@ export function runReactionToggle(
 
   ctx.setReactions((current) => {
     if (!live()) return current;
+    const rows = superseded
+      ? replaceRows(current, rowsOf(superseded), superseded.confirmed ?? [], superseded.confirmedAt)
+      : current;
     // Before the first pending toggle, the painted rows are the server's.
     if (author.confirmed === null) {
-      author.confirmed = current.filter(rowsOf(author));
-      author.confirmedAt = Math.max(0, current.findIndex(rowsOf(author)));
+      author.confirmed = rows.filter(rowsOf(author));
+      author.confirmedAt = Math.max(0, rows.findIndex(rowsOf(author)));
     }
-    return replaceRows(current, rowsOf(author), rowsFor(input.nextState, author));
+    return replaceRows(rows, rowsOf(author), rowsFor(input.nextState, author));
   });
 
   function list() {
@@ -251,8 +274,8 @@ export function runReactionToggle(
           // name is the same person is a row held under it whose stable id
           // the listing now attributes to the new one.
           const people = [...pending]
-            .filter(([key, other]) => key.startsWith(scopeKey) && other.author.name === previous)
-            .map(([, other]) => other.author);
+            .filter(([key]) => key.startsWith(scopeKey))
+            .flatMap(([, other]) => other.people.filter((person) => person.name === previous));
           aliased ??= [...current, ...people.flatMap((person) => person.confirmed ?? [])].some(
             (row) => row.authorId === previous && canonical.get(row.reactionId) === viewer,
           );
@@ -272,7 +295,7 @@ export function runReactionToggle(
         if (cell.seq !== at || !owns()) return;
         pending.delete(cellKey);
         if (!ownerLive()) return;
-        const saved = cell.ackedBy === cell.author;
+        const saved = cell.ackedBy !== null && isNamed(cell.author, cell.ackedBy.name);
         owner.onError(
           withErrorWords(
             saved
@@ -306,18 +329,22 @@ export function runReactionToggle(
         () => {
           // The server holds this intent now, for the person who sent it.
           // Only the listing names the viewer: this write's own result can
-          // carry a removed alias. Another account on the cell keeps its own
-          // snapshot.
+          // carry a removed alias. Everyone in the chain who is that person,
+          // by exact name or proven alias, takes it as their snapshot, even
+          // while another account owns the cell. Other accounts keep theirs.
           cell.ackedBy = person;
-          if (cell.author === person) {
-            person.confirmed = rowsFor(state, person);
-            person.confirmedAt = Number.POSITIVE_INFINITY;
+          for (const who of cell.people) {
+            if (!isNamed(who, person.name)) continue;
+            who.confirmed = rowsFor(state, who);
+            who.confirmedAt = Number.POSITIVE_INFINITY;
           }
         },
         (error: unknown) => {
           if (!ownerLive()) return;
-          // With no newer intent waiting, the cell shows what the server holds.
-          if (cell.queued === null) {
+          // This person's rows return to what the server holds, unless a
+          // newer intent of theirs is waiting to paint over them. Another
+          // person's waiting intent paints only that person's rows.
+          if (cell.queued === null || !isNamed(cell.author, person.name)) {
             const mark = {};
             cell.rollback = mark;
             owner.setReactions((current) => {
