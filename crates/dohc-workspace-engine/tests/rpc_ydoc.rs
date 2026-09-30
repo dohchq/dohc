@@ -5860,14 +5860,23 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
     let doc = Ydoc::wire();
     let seed_update = richdoc_update(&doc, "Original body.");
     let edit_update = richdoc_update(&doc, "Unsettled edit.");
-    call(
-        &transport,
-        &handle,
+    let mut seed_request = request(
         3,
         "ydoc.recordUpdate",
+        Some(handle.clone()),
         json!({ "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
-    )
-    .await;
+    );
+    seed_request.idempotency_key = Some("original-seed".into());
+    let seed_result = transport
+        .call(RequestContext::unbounded(), seed_request.clone())
+        .await
+        .expect("seed");
+    seed_request.id = 33;
+    let retried_seed = transport
+        .call(RequestContext::unbounded(), seed_request)
+        .await
+        .expect("seed lost-ack replay");
+    assert_eq!(retried_seed.result, seed_result.result);
     call(
         &transport,
         &handle,
@@ -5959,7 +5968,7 @@ async fn a_seed_declared_after_the_first_update_refuses() {
     )
     .await;
     assert_eq!(refused.code, ErrorCode::InvalidParams);
-    assert_eq!(refused.message, "seed-not-first-update");
+    assert_eq!(refused.message, "seed-onto-existing-lineage");
     call(
         &transport,
         &handle,
