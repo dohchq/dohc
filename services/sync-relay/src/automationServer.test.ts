@@ -5,7 +5,9 @@ import type { ReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
-import { createRunGate, SERVER_RUN_BURST, startAutomationServer, type ServerExecutor } from "./automationServer";
+import type { LiveClaimLedger } from "./automationLiveClaims";
+import { createRunGate, SERVER_RUN_BURST, startAutomationServer, type AutomationServerOptions, type ServerExecutor } from "./automationServer";
+import type { Event } from "@dohc/workspace-engine-client";
 import type { SyncRelayStorage } from "./storage";
 import {
   claimWorkspace, closeTestStorages, createShare, inspectDatabase, json, jsonBody, request, storagePath, testHandler, testStorage,
@@ -54,13 +56,14 @@ function fakeExecutor(
   const claims: Array<{ run: number[]; throughMs: number }> = [];
   const pressed: Array<{ pressId: string; pressedBy: string }> = [];
   let hostChanges = 0;
+  let drains = 0;
   const executor: ServerExecutor = {
     open: async () => {
       opened = true;
       options.onSchedulesChanged?.();
     },
     dispose: async () => undefined,
-    notifyClaimed: () => undefined,
+    notifyClaimed: () => { drains += 1; },
     failuresChanged: vi.fn(),
     handlePulledPaths: () => undefined,
     relayAnswered: () => undefined,
@@ -87,7 +90,7 @@ function fakeExecutor(
       return mark;
     },
   };
-  return { executor, options, claims, pressed, hostChanges: () => hostChanges, marksAsked: () => marksAsked };
+  return { executor, options, claims, pressed, hostChanges: () => hostChanges, marksAsked: () => marksAsked, drains: () => drains };
 }
 
 type Fake = ReturnType<typeof fakeExecutor>;
@@ -111,6 +114,8 @@ async function server(storage: SyncRelayStorage, h: ReturnType<typeof testHandle
   schedules?: ScheduledAutomation[];
   /** The copy's sync; succeeds at once unless a test says otherwise. */
   sync?: () => Promise<void>;
+  live?: AutomationServerOptions["live"];
+  client?: EngineClient;
 } = {}) {
   const marks = input.marks ?? new Map();
   const executors: Fake[] = [];
@@ -132,6 +137,7 @@ async function server(storage: SyncRelayStorage, h: ReturnType<typeof testHandle
       hooks = options;
       return { replica: (id) => open.get(id), reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
     },
+    ...(input.live ? { live: input.live } : {}),
     createExecutor: (options) => {
       const fake = fakeExecutor(options, marks, input.engine, input.schedules);
       executors.push(fake);
@@ -143,12 +149,14 @@ async function server(storage: SyncRelayStorage, h: ReturnType<typeof testHandle
     run, errors, marks,
     /** What the replicas module reports to the server. */
     replicaHooks: () => hooks!,
+    /** What the replicas module is asked to keep. */
+    wanted: () => hooks!.wanted(),
     /** The replicas module opened this server's copy of the workspace. */
     async openReplica(): Promise<Fake> {
       const signal = new AbortController().signal;
       open.set(WORKSPACE, {
         workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: input.incarnation ?? 1, startedAtMs: input.startedAtMs ?? at(7),
-        root: "unused", metadataDir: "unused", client: {} as unknown as EngineClient, workspace: "handle", signal,
+        root: "unused", metadataDir: "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal,
         nextRequestId: () => 1, sync: input.sync ?? (async () => undefined),
       });
       hooks!.onChanged?.(WORKSPACE);
@@ -523,6 +531,74 @@ describe("a server that pushes its copy of a workspace", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("a server whose live host claims live-shared records", () => {
+  it("posts a failure notice when an old live claim has no replication coordinate", async () => {
+    const { storage, h } = await relay();
+    let pending = true;
+    let failed: { claimId: string; state: "done" | "failed"; error?: string } | null = null;
+    const claim = {
+      claimId: "legacy-live", automationId: PRESSED, trigger: { historyId: 7 },
+      change: { kind: "changed" as const, authorOriginId: "ana", actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
+      recordId: "record", collectionPath: "Tasks", depth: 0, state: "running" as const, attempts: 1, run: 1,
+      createdAtMs: 1, updatedAtMs: 1,
+    };
+    const ledger: LiveClaimLedger = {
+      incarnation: "host", engine: {
+        subscribeAutomation: async () => ({ subscribed: true }),
+        unsubscribeAutomation: async () => ({ unsubscribed: true }),
+        retryAutomationClaim: async () => { throw new Error("Unexpected retry"); },
+        releaseAutomationClaim: async () => { throw new Error("Unexpected release"); },
+        claimNextAutomation: async () => { if (!pending) return null; pending = false; return claim; },
+        settleAutomationClaim: async input => { failed = input; return { ...claim, ...input }; },
+        listAutomationFailures: async () => ({ failures: failed ? [{ automationId: PRESSED, claimId: claim.claimId, chainStopped: false, error: failed.error!, updatedAtMs: 1, generation: 1 }] : [] }),
+        getAutomationClaim: async () => ({ claim: null }),
+      pruneAutomationHistory: async () => ({ pruned: 0, more: false }),
+      listAutomationClaims: async () => ({ claims: failed ? [{ ...claim, ...failed }] : [], next: null }),
+      } as LiveClaimLedger["engine"],
+    };
+    const client = { sendRequest: async (request: { id: number; method: string }) => {
+      if (request.method === "automations.claimNext") return { id: request.id, result: null };
+      if (request.method === "automations.failures") return { id: request.id, result: { failures: [] } };
+      if (request.method === "automations.listClaims") return { id: request.id, result: { claims: [] } };
+      throw new Error(`Unexpected ${request.method}`);
+    } } as unknown as EngineClient;
+    const s = await server(storage, h, { client, live: {
+      ledger: () => ledger, workspaces: () => [WORKSPACE], onEvent: () => () => {},
+    } });
+    const fake = await s.openReplica();
+    expect(await fake.options.withEngine(engine => engine.claimNextAutomation({ automationIdPrefix: "collection:" }))).toBeNull();
+    expect(fake.executor.failuresChanged).toHaveBeenCalledOnce();
+    const failures = await fake.options.withEngine(engine => engine.listAutomationFailures());
+    expect(failures?.failures).toHaveLength(1);
+    await fake.options.reportFailure({
+      failure: { ...failures!.failures[0]!, datasetInstance: null, neverStarted: false }, name: "Pay", collectionPath: "Tasks", startedBy: null, replaces: null,
+    });
+    expect(notices(storage, OWNER)).toEqual([expect.objectContaining({
+      kind: "automation-failed", title: 'Automation "Pay" failed',
+      body: "This automation could not run because the live host did not record which change triggered it. Update your dohc server, then change the record again. It ran on My dohc server.",
+    })]);
+  });
+
+  it("keeps a copy of a workspace it does not host, and drains when the live host claims a change there", async () => {
+    clock = at(8);
+    const { storage, h } = await relay();
+    const handlers = new Set<(event: Event) => void>();
+    const s = await server(storage, h, { live: {
+      ledger: () => null,
+      workspaces: () => [WORKSPACE],
+      onEvent: (handler) => { handlers.add(handler); return () => { handlers.delete(handler); }; },
+    } });
+    expect(s.wanted(), "no host record names the server, but a live-shared record needs its automations").toEqual([WORKSPACE]);
+    const fake = await s.openReplica();
+    expect(await fake.options.groupHost(), "it runs no schedules or Group triggers there").toBeNull();
+    const before = fake.drains();
+    for (const handler of handlers) handler({ name: "automation.claimed", payload: { workspaceId: WORKSPACE, state: "pending", run: 1 } } as unknown as Event);
+    expect(fake.drains()).toBe(before + 1);
+    await s.run.close();
+    expect(handlers.size, "closing stops listening").toBe(0);
   });
 });
 

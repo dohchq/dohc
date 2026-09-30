@@ -36,7 +36,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean}
     const controller = new AbortController(); let stopped = false;
     const close = vi.fn(async () => {if (!stopped) {stopped = true; live--; controller.abort();}}), ready = vi.fn(() => true);
     live++; peak = Math.max(peak, live); starts.push({config, close, ready, controller});
-    return {invalidated: controller.signal, close, isDocumentReady: ready} as never;
+    return {invalidated: controller.signal, close, isDocumentReady: ready, onEvent: () => () => undefined} as never;
   });
   const onError = vi.fn();
   const host = await startSelfHostedLiveHost({storage: f.storage, history, root: data, engineExecutable: process.execPath,
@@ -52,6 +52,16 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean}
   };
   return {...f, host, history, starts, startHost, input, add, waitStarted, onError, peak: () => peak};
 }
+
+it("names a workspace for automations only while a live-shared document sits in a Collection with automations", async () => {
+  const f = await fixture();
+  expect(f.host.automationWorkspaces(), "docs has no automations file").toEqual([]);
+  f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+    VALUES (?,'object-automations',2,'moment-automations','main','docs/automations.yaml',?,'text',1,1)`).run(scope.workspaceId, "c".repeat(64));
+  expect(f.host.automationWorkspaces()).toEqual([scope.workspaceId]);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
+  expect(f.host.automationWorkspaces(), "a document the host no longer holds").toEqual([]);
+});
 
 it("stays unavailable until retained documents have a running native host", async () => {
   const entered = deferred(), finish = deferred();

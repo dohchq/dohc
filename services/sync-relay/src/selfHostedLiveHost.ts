@@ -1,7 +1,8 @@
 import {createHash} from "node:crypto";
 import {mkdir, mkdtemp, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
-import {isAbsolute, join, resolve} from "node:path";
+import {isAbsolute, join, posix, resolve} from "node:path";
+import type {Event} from "@dohc/workspace-engine-client";
 import {tmpdir} from "node:os";
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import type {SyncRelayStorage} from "./storage";
@@ -42,6 +43,7 @@ export async function startSelfHostedLiveHost(options: {
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
   const lifetime = new AbortController();
+  const eventHandlers = new Set<(event: Event) => void>();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const valid = (row: ServiceHostEnrollment) => row.enabled && storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched" && storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
@@ -106,6 +108,7 @@ export async function startSelfHostedLiveHost(options: {
         signal.throwIfAborted();
         if (next !== selectionSignature(selection())) {schedule(); return;}
         current = await (options.startHost ?? startServiceLiveHost)({configPath, storage, history, frameChanges: options.frameChanges, signal});
+        current.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
         current.invalidated.addEventListener("abort", schedule, {once: true});
         signature = next; lastError = undefined; initialReconciliationComplete = true;
       } finally {await rm(temporary, {recursive: true, force: true});}
@@ -122,6 +125,26 @@ export async function startSelfHostedLiveHost(options: {
     get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
       (selectedDocuments && (!current || current.invalidated.aborted));},
     reconcile: schedule,
+    /** The claim ledger of a workspace whose live-shared documents this host holds, while it runs. */
+    automationLedger(workspaceId: string) {return current?.automationLedger(workspaceId) ?? null;},
+    /**
+     * The workspaces with a live-shared document this host holds in a folder
+     * that has an automations.yaml: the server runs those changes' automations.
+     */
+    automationWorkspaces(): string[] {
+      const found = new Set<string>();
+      for (const row of selection()) {
+        const folder = posix.dirname(row.path);
+        const file = folder === "." ? "automations.yaml" : `${folder}/automations.yaml`;
+        if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: file}) !== undefined) found.add(row.workspaceId);
+      }
+      return [...found];
+    },
+    /** The live host's engine events, across its restarts. */
+    onAutomationEvent(handler: (event: Event) => void): () => void {
+      eventHandlers.add(handler);
+      return () => { eventHandlers.delete(handler); };
+    },
     async close() {
       if (closing) return;
       closing = true; lifetime.abort(); stopWatching(); clearInterval(retry); clearTimeout(timer);

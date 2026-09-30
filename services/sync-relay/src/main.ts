@@ -627,6 +627,8 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
   readOwnerShares: relayApplication.readOwnerShares,
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   noticeLimiter: noticePostRateLimiter,
+  ...(selfHost ? {live: {ledger: (workspaceId: string) => selfHost.automationLedger(workspaceId),
+    workspaces: () => selfHost.automationWorkspaces(), onEvent: selfHost.onAutomationEvent}} : {}),
   onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
 }) : undefined;
 

@@ -32,11 +32,11 @@ import {
 import {
   AUTOMATION_CLAIMED_EVENT,
   decodeAutomationGroupHandover,
-  VersionedLiveAdapter,
   type Event,
   type JsonValue,
 } from "@dohc/workspace-engine-client";
 import { replicaAutomationChat, replicaChatStore, replicaNoticePoster, WAKE_ON_SERVER } from "./automationChatWrites";
+import { ServerClaimEngine, type LiveClaimLedger } from "./automationLiveClaims";
 import { replicaRecordEditContext, replicaRecordEngine } from "./automationRecordEdits";
 import { startAutomationReplicas, type AutomationReplica } from "./automationReplicas";
 import { RelayError } from "./errors";
@@ -98,6 +98,16 @@ export interface AutomationServerOptions {
   lookupUserDisplayName(userId: string): Promise<string | null> | string | null;
   /** The notice route's limiter, so the server and the owner's computers share one limit per person. */
   noticeLimiter: TokenBucketLimiter;
+  /**
+   * The live host, which claims the field changes of the live-shared records
+   * it holds. Absent where this server holds no live documents.
+   */
+  live?: {
+    ledger(workspaceId: string): LiveClaimLedger | null;
+    /** Workspaces with a live-shared record in a folder that has automations. */
+    workspaces(): readonly string[];
+    onEvent(handler: (event: Event) => void): () => void;
+  };
   onError(context: string, error: unknown): void;
   nowMs?(): number;
   clock?: SchedulerClock;
@@ -109,7 +119,8 @@ export interface AutomationServerOptions {
 /** One workspace this server runs, before its executor and press loop exist. */
 interface WorkspaceState {
   readonly replica: AutomationReplica;
-  readonly adapter: VersionedLiveAdapter;
+  /** The copy's engine, with the live host's claims beside its own. */
+  readonly adapter: ServerClaimEngine;
   /** The host record as the server last acted on it. */
   host: RelayAutomationHost | null;
   /** The host record the schedules started from, kept once the scheduler has its marks. */
@@ -588,14 +599,20 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   function open(replica: AutomationReplica): void {
     const state: WorkspaceState = {
       replica,
-      adapter: new class extends VersionedLiveAdapter {
-        override async claimNextAutomation(input: Parameters<VersionedLiveAdapter["claimNextAutomation"]>[0]) {
+      adapter: new class extends ServerClaimEngine {
+        override async claimNextAutomation(input: Parameters<ServerClaimEngine["claimNextAutomation"]>[0]) {
           const claim = await super.claimNextAutomation(input);
           const person = claim === null ? null : claimPerson(claim);
           if (person !== null) await nameOf(state, person).catch(() => null);
           return claim;
         }
-      }(replica.client, replica.workspace, { workspaceId: replica.workspaceId }),
+      }([replica.client, replica.workspace, { workspaceId: replica.workspaceId }], {
+        ledger: () => options.live?.ledger(replica.workspaceId) ?? null,
+        storage,
+        sync: () => replica.sync(),
+        onFailuresChanged: () => ws.executor.failuresChanged(),
+        onError: (context, error) => options.onError(`live claims in workspace "${replica.workspaceId}": ${context}`, error),
+      }),
       host: null,
       pendingStart: null,
       handingOver: false,
@@ -651,6 +668,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     scheduler.remove(ws.replica.workspaceId);
     ws.presses.stop();
     await ws.executor.dispose();
+    await ws.adapter.close();
     await ws.reporting.catch(() => undefined);
   }
 
@@ -681,7 +699,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     ...options.replicas,
     storage,
     nowMs,
-    wanted: () => storage.serverHostedWorkspaces(),
+    // The workspaces the server hosts, and those whose live-shared records it claims.
+    wanted: () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? [])])],
     onChanged: replicaChanged,
     onEngineEvent: engineEvent,
     onPulled: (workspaceId, paths) => {
@@ -709,10 +728,17 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     setImmediate(() => {
       following = false;
       if (closed) return;
-      for (const ws of hosted.values()) follow(ws);
+      for (const ws of hosted.values()) {
+        follow(ws);
+        // A live claim whose change may have reached the relay now.
+        if (ws.adapter.waiting()) ws.executor.notifyClaimed();
+      }
       for (const check of [...waiters]) check();
     });
   });
+
+  // The live host claims a live-shared record's change when it accepts its frame.
+  const stopLiveEvents = options.live?.onEvent(engineEvent) ?? (() => undefined);
 
   return {
     /** Whether this server's copies of workspaces keep failing to open or sync. */
@@ -722,6 +748,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     async close(): Promise<void> {
       closed = true;
       stopWatching();
+      stopLiveEvents();
       scheduler.dispose();
       for (const ws of [...hosted.values()]) await close(ws);
       await replicas.close();
