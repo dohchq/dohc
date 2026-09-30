@@ -42,10 +42,11 @@ export interface StopAndRestoreSession {
   key: number;
 }
 
-/** Runs of automations a person or link wrote that stop and restore undid, and the changes they left. */
+/** Runs of automations a person or link wrote that stop and restore undid, the fields on records gone from their Collection, and the other changes they left. */
 interface RunTotals {
   runsUndone: number;
-  runChangesKept: number;
+  fieldsMissing: number;
+  otherKept: number;
 }
 
 /** What the dialog last showed for a target: its outcome, and whether it was undone. */
@@ -84,12 +85,13 @@ export function useStopAndRestore(workspaceId: string) {
        * earlier one undid, and Undo puts back only files, so these add up.
        */
       runs: (forWorkspace: string, target: StopAndRestoreTarget): RunTotals =>
-        runs.current.get(id(forWorkspace, target)) ?? { runsUndone: 0, runChangesKept: 0 },
+        runs.current.get(id(forWorkspace, target)) ?? { runsUndone: 0, fieldsMissing: 0, otherKept: 0 },
       addRuns: (forWorkspace: string, target: StopAndRestoreTarget, more: RunTotals): RunTotals => {
-        const before = runs.current.get(id(forWorkspace, target)) ?? { runsUndone: 0, runChangesKept: 0 };
+        const before = runs.current.get(id(forWorkspace, target)) ?? { runsUndone: 0, fieldsMissing: 0, otherKept: 0 };
         const after = {
           runsUndone: before.runsUndone + more.runsUndone,
-          runChangesKept: before.runChangesKept + more.runChangesKept,
+          fieldsMissing: before.fieldsMissing + more.fieldsMissing,
+          otherKept: before.otherKept + more.otherKept,
         };
         runs.current.set(id(forWorkspace, target), after);
         return after;
@@ -110,6 +112,10 @@ export function useStopAndRestore(workspaceId: string) {
 }
 
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+
+/** The changes runs kept other than fields; `runChangesKept` includes both field counts. */
+const otherKept = (result: Restored): number => result.runChangesKept - result.fieldsKept - result.fieldsMissing;
+
 // The owner's links in pages of 1,000; the dialog reads this many at most.
 const MAX_LINK_PAGES = 5;
 
@@ -218,8 +224,17 @@ export function StopAndRestoreDialog({
     }
     // Kept even when the dialog closed meanwhile, so a later try shows them.
     receipts.set(workspaceId, chosen.target, [...receipts.get(workspaceId, chosen.target), ...result.restored]);
-    const totals = receipts.addRuns(workspaceId, chosen.target, result);
-    const outcome = { result: { ...result, restored: receipts.get(workspaceId, chosen.target), ...totals }, undone: false };
+    // Each try reports every field its runs keep now, but counts missing fields and other changes only for the runs it undid.
+    const totals = receipts.addRuns(workspaceId, chosen.target, {
+      runsUndone: result.runsUndone, fieldsMissing: result.fieldsMissing, otherKept: otherKept(result),
+    });
+    const outcome = {
+      result: {
+        ...result, restored: receipts.get(workspaceId, chosen.target), runsUndone: totals.runsUndone, fieldsMissing: totals.fieldsMissing,
+        runChangesKept: totals.otherKept + result.fieldsKept + totals.fieldsMissing,
+      },
+      undone: false,
+    };
     receipts.show(workspaceId, chosen.target, outcome);
     onRestored();
     if (result.errorMessage !== null) {
@@ -236,12 +251,14 @@ export function StopAndRestoreDialog({
     receipts.set(workspaceId, chosen.target, []);
     onRestored();
     const last = receipts.shown(workspaceId, chosen.target);
+    const runs = receipts.runs(workspaceId, chosen.target);
     const outcome = {
       result: last
         ? { ...last.result, restored }
         : {
-            status: "restored" as const, restored, review: [], runsLeft: 0, ...receipts.runs(workspaceId, chosen.target),
-            fieldsKept: 0, fieldsMissing: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null,
+            status: "restored" as const, restored, review: [], runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
+            runChangesKept: runs.otherKept + runs.fieldsMissing,
+            fieldsKept: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null,
           },
       undone: true,
     };
@@ -349,6 +366,8 @@ function Outcome({ words, result, undone, onOpenFile }: {
   onOpenFile(path: string): void;
 }) {
   const files = plural(result.restored.length, "file", "files");
+  const fields = result.fieldsKept + result.fieldsMissing;
+  const other = otherKept(result);
   return (
     <div className="mt-3 space-y-3" data-testid="stop-and-restore-outcome">
       <p className="m-0 text-[13px] text-ink">{undone ? words.undone(files) : words.stopped(files)}</p>
@@ -360,19 +379,6 @@ function Outcome({ words, result, undone, onOpenFile }: {
           dohc could not undo {plural(result.runsLeft, "run", "runs")} of {words.wrote}. Undo each from its Collection's run history.
         </p>
       ) : null}
-      {result.runChangesKept > 0 ? (
-        <p className="m-0 text-[13px] text-muted">
-          {plural(result.runChangesKept, "change", "changes")} from those runs stay as they are. Undo cannot reverse them, or someone changed them since.
-        </p>
-      ) : null}
-      {result.sendsMessages ? (
-        <p className="m-0 text-[13px] text-muted">Messages and notices from {words.wrote} stay sent.</p>
-      ) : null}
-      {result.wroteAutomations ? (
-        <p className="m-0 text-[13px] text-muted">
-          Runs on your other computers are not undone here. Undo them from the run history on each computer.
-        </p>
-      ) : null}
       {result.fieldsKept > 0 ? (
         <p className="m-0 text-[13px] text-muted">
           {plural(result.fieldsKept, "field", "fields")} kept a later value. Restore them from each record's History.
@@ -381,6 +387,19 @@ function Outcome({ words, result, undone, onOpenFile }: {
       {result.fieldsMissing > 0 ? (
         <p className="m-0 text-[13px] text-muted">
           {plural(result.fieldsMissing, "field was", "fields were")} on records no longer in their Collection.
+        </p>
+      ) : null}
+      {other > 0 ? (
+        <p className="m-0 text-[13px] text-muted">
+          Undo left {fields > 0 ? plural(other, "other change", "other changes") : plural(other, "change", "changes")} from those runs. Check each Collection's run history.
+        </p>
+      ) : null}
+      {result.sendsMessages ? (
+        <p className="m-0 text-[13px] text-muted">Messages and notices from {words.wrote} stay sent.</p>
+      ) : null}
+      {result.wroteAutomations ? (
+        <p className="m-0 text-[13px] text-muted">
+          Runs on your other computers are not undone here. Undo them from the run history on each computer.
         </p>
       ) : null}
       {result.review.length > 0 ? (
