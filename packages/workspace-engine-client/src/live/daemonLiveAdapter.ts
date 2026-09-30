@@ -233,6 +233,18 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error);
 }
 
+// A record rejected for its input was not admitted. Session loss and capacity
+// still need recovery, so exclude them before treating a reply as definitive.
+export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
+  return isIdempotencyKeyReuseRefusal(error) || (
+    error instanceof DaemonRefusalError &&
+    (error.wireCode === "INVALID_PARAMS" || error.wireCode === "LIMIT_EXCEEDED") &&
+    !isTransientEngineRefusal(error) &&
+    !isDaemonReconnectError(error) &&
+    !isYdocSessionNotFoundRefusal(error)
+  );
+}
+
 // The store refusals the desktop names and recovers from. Each is the
 // storage crate's `code()` for the variant.
 const ENGINE_STORE_REFUSALS = [

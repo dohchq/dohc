@@ -2755,10 +2755,10 @@ describe("engine Y.Doc event boundaries", () => {
   it("reject a missing field, a bad sessionId, and a non-Uint8Array update", () => {
     const update = new Uint8Array([1]);
     for (const bad of [
-      { update, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111" },
-      { sessionId: "s", update: [1, 2, 3], lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111" },
-      { sessionId: "s", update: update.buffer, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111" },
-      { sessionId: "", update, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111" },
+      { update, lineageGeneration: 1 },
+      { sessionId: "s", update: [1, 2, 3], lineageGeneration: 1 },
+      { sessionId: "s", update: update.buffer, lineageGeneration: 1 },
+      { sessionId: "", update, lineageGeneration: 1 },
       { sessionId: "s", update, lineageGeneration: 0 },
       null,
       [{ sessionId: "s", update }],
@@ -2770,7 +2770,7 @@ describe("engine Y.Doc event boundaries", () => {
   it("reject an empty or over-bound update", () => {
     for (const update of [new Uint8Array(0), new Uint8Array(ENGINE_YDOC_UPDATE_MAX_BYTES + 1)]) {
       expect(
-        EngineYDocRemoteUpdateEvent.safeParse({ sessionId: "s", update, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111" })
+        EngineYDocRemoteUpdateEvent.safeParse({ sessionId: "s", update, lineageGeneration: 1 })
           .success,
       ).toBe(false);
     }

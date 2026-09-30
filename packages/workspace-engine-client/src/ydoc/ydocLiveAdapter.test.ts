@@ -5316,6 +5316,40 @@ it("notifies durable owner observers only after commit and preserves lost-respon
 
 
 describe("immutable original-record recovery", () => {
+  it("does not pull a later queued original ahead of its own send during resend", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const methods: string[] = [];
+    let holdFirst = false;
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        methods.push(request.method);
+        if (request.method === YDOC_METHOD.recordUpdate && holdFirst) {
+          holdFirst = false;
+          entered.resolve();
+          await release.promise;
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    methods.length = 0;
+    holdFirst = true;
+    const first = session.applyLocalTextEdit({ root: "plainText", index: 3, insert: "d" });
+    await entered.promise;
+    const resend = session.resendMissingState();
+    const later = session.applyLocalTextEdit({ root: "plainText", index: 4, insert: "e" });
+    release.resolve();
+    await Promise.all([first, resend, later]);
+    expect(methods.filter(method => method === YDOC_METHOD.recordUpdate)).toHaveLength(2);
+    expect(methods).not.toContain(YDOC_METHOD.resync);
+    expect(session.doc.getText("plainText").toString()).toBe("abcde");
+    await session.close();
+    adapter.dispose();
+  });
+
   it("retries a lost acknowledgement with the same bytes, ID and author snapshot", async () => {
     const engine = seedPlaintextEngine("abc");
     const attempts: Request[] = [];

@@ -1353,6 +1353,23 @@ it("retries a lost keyed acknowledgement with the original record and no second 
   await session.close({ settle: false });
 });
 
+it("drops a definitively refused caller-confirmed original so later typing can settle", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  nextRecordRefusal = wireRefusal("invalid-change-attribution");
+  await expect(keyedWrite(session, "Refused write.")).rejects.toThrow("invalid-change-attribution");
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused write.");
+  expect(requests.filter(request => request.idempotencyKey === "claim/1/0")).toHaveLength(1);
+
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Later typing.");
+  await session.settleNow();
+  const content = await readFile(join(root, PATH), "utf8");
+  expect(content).toContain("Later typing.");
+  expect(content).not.toContain("Refused write.");
+  await session.close({ settle: false });
+  editor.destroy();
+});
+
 it("records a keyed deletion with its original ID", async () => {
   const session = await capture.openYDocSession({
     path: PATH,

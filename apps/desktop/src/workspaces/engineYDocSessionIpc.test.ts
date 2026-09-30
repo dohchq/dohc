@@ -421,7 +421,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const edit = (seq: number) => h.ipc.applyUpdate(sender, {
       sessionId: openPayload.sessionId,
       update: new Uint8Array([seq]),
-      lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
+      lineageGeneration: 1, requestId: `11111111-1111-4111-8111-${seq.toString().padStart(12, "0")}`,
       seq,
     });
     edit(4);

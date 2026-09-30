@@ -43,7 +43,7 @@ import {
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
-  isIdempotencyKeyReuseRefusal,
+  isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocAuthorCapacityRefusal,
   isYdocRemoteUpdatesPendingRefusal,
@@ -2555,7 +2555,7 @@ export function createWorkspaceEngineCapture(
           // The failed generation still holds this doc, and keeps it until
           // something replaces the generation.
           if (isLineageChangedCause(error)) throw error;
-          const refused = isIdempotencyKeyReuseRefusal(error);
+          const refused = hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal);
           if (refused) pendingRecords.delete(record);
           const retired = canonicalDoc === doc ? null : doc;
           try {
@@ -2566,7 +2566,10 @@ export function createWorkspaceEngineCapture(
             // The session's own failure, reported as one. The write's result
             // is still the engine's answer when it gave one.
             onError(`Y.Doc rebind of ${input.path}`, rebindError);
-            if (isIdempotencyKeyReuseRefusal(rebindError)) throw rebindError;
+            if (hasRefusalInCauseChain(rebindError, isYdocUpdateAdmissionRefusal)) {
+              pendingRecords.delete(record);
+              throw rebindError;
+            }
             throw refused ? error : keyedWriteUncertain(error);
           }
           // Its generation was replaced, so nothing reads this doc now.
@@ -2710,7 +2713,7 @@ export function createWorkspaceEngineCapture(
             await applyKeyedUpdate(update, capturedOptions, armed, record);
             pendingRecords.delete(record);
           } catch (error) {
-            if (hasRefusalInCauseChain(error, isIdempotencyKeyReuseRefusal)) pendingRecords.delete(record);
+            if (hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) pendingRecords.delete(record);
             throw error;
           }
           return true;

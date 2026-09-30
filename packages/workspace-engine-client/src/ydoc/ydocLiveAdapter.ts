@@ -10,6 +10,7 @@ import {
   DaemonRefusalError,
   isDaemonReconnectError,
   isIdempotencyKeyReuseRefusal,
+  isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
@@ -771,9 +772,8 @@ export class YdocAdapterSession {
       try {
         return await this.requestRecordUpdate(record);
       } catch (refusal) {
-        // Recovery would resend this content under the same key, which the
-        // engine refuses again. The caller must hear the refusal itself.
-        if (isIdempotencyKeyReuseRefusal(refusal)) throw refusal;
+        // Recovery cannot repair a definite refusal of this original input.
+        if (isYdocUpdateAdmissionRefusal(refusal)) throw refusal;
         try {
           return await this.recoverCanonicalState(record);
         } catch (recoveryFailure) {
@@ -864,10 +864,11 @@ export class YdocAdapterSession {
 
   resendMissingState(): Promise<void> {
     if (!this.missingLocalState) return Promise.resolve();
+    const originals = [...this.pendingRecords];
     const operation = this.recordChain.then(async () => {
       this.assertRecordable();
-      if (this.pendingRecords.size === 0) return;
-      const records = [...this.pendingRecords];
+      const records = originals.filter(record => this.pendingRecords.has(record));
+      if (records.length === 0) return;
       await this.mergeRecoveryState();
       for (const record of records) {
         await this.requestRecordUpdate(record);
