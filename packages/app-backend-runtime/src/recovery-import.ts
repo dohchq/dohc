@@ -120,7 +120,7 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
   let closed = false, worker: PersistentAppBackend | undefined, workerDirectory: string | undefined;
   const abort = () => { void worker?.abort("Recovery validation cancelled.").catch(() => {}); };
   options.signal?.addEventListener("abort", abort);
-  const dispose = async () => { if (closed) return; closed = true; options.signal?.removeEventListener("abort", abort); await worker?.close(); index.close(); await rm(work, { recursive: true, force: true }); await staged.dispose(); };
+  const dispose = async () => { if (closed) return; closed = true; options.signal?.removeEventListener("abort", abort); await worker?.close(); if (index.isTransaction) index.exec("ROLLBACK"); index.close(); await rm(work, { recursive: true, force: true }); await staged.dispose(); };
   const maxRecords = recoveryInteger(options.maxRecords ?? 1_000_000, 1), maxEvent = recoveryInteger(options.maxEventBytes ?? 16 * CHUNK, 1, 128 * CHUNK);
   let count = 0, frameCount = 0, attemptBytes = 0, catalog: RecoveryCatalog | undefined, currentCheckpoint: JournalExportRecord | undefined, previous: DatasetCursor | null = null;
   const rawMetadata = (body: RecoveryMetadata) => index.prepare("INSERT INTO metadata(body) VALUES(?)").run(JSON.stringify(body));
@@ -226,10 +226,12 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
   try {
     const history = staged.files.find(f => f.entry.kind === "history"), checkpoint = staged.files.find(f => f.entry.kind === "checkpoint");
     if (!history || !checkpoint) fail("required recovery entries are missing.");
+    index.exec("BEGIN");
     await parseFile(history.path, true);
     if (!catalog || !currentCheckpoint) fail("current catalog or checkpoint missing.");
     await addJournal(currentCheckpoint, { path: checkpoint.path, offset: 0, byteLength: checkpoint.entry.byteLength });
     for (const file of staged.files.filter(f => f.entry.kind === "events")) await parseFile(file.path, false);
+    index.exec("COMMIT");
     if (!previous || !equalRecoveryCursor(previous, staged.manifest.cursor)) fail("history does not reach the pinned head.");
     if (index.prepare("SELECT hash FROM catalogs EXCEPT SELECT hash FROM used_catalogs").get()) fail("unreferenced approved artifact revision.");
     const original = getCatalog(staged.manifest.cursor.approvedRevisionHash);
