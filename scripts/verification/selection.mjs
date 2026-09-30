@@ -16,9 +16,12 @@ const testInputs = {
   "@dohc/sync-relay": ["@dohc/share-web", "@dohc/desktop"],
   "@dohc/workspace-api": ["@dohc/workspace-postgres"],
 };
-// Desktop changes affect these compatibility tests, not the storage-only suite.
-// Changes within Y.Doc projection or its other inputs still run every test.
+// External consumers can select compatibility files. A production change in
+// the consumer or an input without a file map still selects its complete suite.
 const externalTestFiles = {
+  "@dohc/desktop": {
+    "@dohc/site": ["src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"],
+  },
   "@dohc/ydoc-projection": {
     "@dohc/desktop": ["src/liveRestoreDrain.test.ts", "src/ownerDesktopTransport.test.ts"],
   },
@@ -68,13 +71,15 @@ function result(selected, affected, full, reason) {
       testFiles[name] = [...new Set(inputs.flatMap(input => externalTestFiles[name][input]))].sort();
     }
   }
+  const desktopScripts = selected.has("@dohc/desktop") && !testFiles["@dohc/desktop"];
   const proofs = {
     accounts: selected.has("@dohc/workspace-api"),
     selfHostNative: selected.has("@dohc/share-web"),
-    desktop: selected.has("@dohc/desktop"),
+    desktop: desktopScripts,
   };
   return {
-    packages: [...selected].sort(), affected: [...affected].sort(), full, reason, proofs, testFiles,
+    packages: [...selected].sort(), affected: [...affected].sort(), full, reason, proofs, testFiles, desktopScripts,
+    repository: full ? "full" : "source",
     needs: {
       postgres: proofs.desktop || proofs.selfHostNative || [...selected].some(name => databasePackages.has(name)),
       engine: proofs.desktop || proofs.selfHostNative,

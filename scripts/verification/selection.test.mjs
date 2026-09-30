@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,13 +25,47 @@ test("workspace discovery follows declared globs, exclusions, and nested package
   assert.ok(packages.some(pkg => pkg.name === "@dohc/yrs-interop-scripts" && pkg.path === "crates/yrs-interop/scripts"));
 });
 
-test("site changes select desktop tests without inventing a desktop production change", () => {
+test("site changes select renderer compatibility without native preparation or desktop proofs", () => {
   const plan = select(["apps/site/src/ProductDemo.tsx"]);
   assert.equal(plan.full, false);
+  assert.equal(plan.repository, "source");
   assert.deepEqual(plan.affected, ["@dohc/site"]);
   assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/site"]);
-  assert.deepEqual(plan.proofs, { accounts: false, selfHostNative: false, desktop: true });
-  assert.deepEqual(plan.needs, { postgres: true, engine: true, desktop: true });
+  assert.deepEqual(plan.testFiles, {"@dohc/desktop": [
+    "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx",
+  ]});
+  for (const file of plan.testFiles["@dohc/desktop"]) assert.ok(existsSync(join(root, "apps/desktop", file)), file);
+  assert.equal(plan.desktopScripts, false);
+  assert.deepEqual(plan.proofs, { accounts: false, selfHostNative: false, desktop: false });
+  assert.deepEqual(plan.needs, { postgres: false, engine: false, desktop: false });
+});
+
+test("other desktop inputs override the site's compatibility-only selection", () => {
+  const site = "apps/site/src/ProductDemo.tsx";
+  for (const input of ["services/workspace-api/src/main.ts", "packages/workspace-postgres/src/db/migrations/0001_better_auth.sql",
+    "services/share-web/src/server.ts", "apps/desktop/src/renderer/Toolbar.tsx", "apps/desktop/src/testSetup.ts",
+    "apps/desktop/src/testGlobalSetup.ts", "apps/desktop/src/workspaces/testTemp.ts", "apps/desktop/vitest.config.ts",
+    "packages/brand/src/index.ts", "pnpm-lock.yaml", "unknown/input.ts"]) {
+    const plan = select([site, input]);
+    assert.equal(plan.testFiles["@dohc/desktop"], undefined, input);
+    assert.equal(plan.desktopScripts, true, input);
+    assert.equal(plan.proofs.desktop, true, input);
+    assert.deepEqual(plan.needs, {postgres: true, engine: true, desktop: true}, input);
+  }
+  const full = select([site], {full: true});
+  assert.deepEqual(full.testFiles, {});
+  assert.equal(full.desktopScripts, true);
+  assert.equal(full.proofs.desktop, true);
+});
+
+test("new site imports cannot escape the selected desktop compatibility files", () => {
+  const source = 'import "../../../../site/src/ProductDemo";';
+  for (const path of ["apps/desktop/src/renderer/workbench/new.test.tsx", "apps/desktop/src/renderer/workbench/new.tsx"]) {
+    assert.deepEqual(uncoveredWorkspaceInputs([{path, source}], packages).map(finding => finding.path), [path]);
+  }
+  for (const name of ["ChatLane", "ProductDemo"]) {
+    assert.deepEqual(uncoveredWorkspaceInputs([{path: `apps/desktop/src/renderer/workbench/${name}.test.tsx`, source}], packages), []);
+  }
 });
 
 test("desktop changes cover the site consumer and native delivery test inputs", () => {
@@ -39,6 +73,7 @@ test("desktop changes cover the site consumer and native delivery test inputs", 
   assert.deepEqual(plan.affected, ["@dohc/desktop", "@dohc/site"]);
   assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/share-web", "@dohc/site", "@dohc/sync-relay", "@dohc/ydoc-projection"]);
   assert.deepEqual(plan.proofs, { accounts: false, selfHostNative: true, desktop: true });
+  assert.equal(plan.desktopScripts, true);
   assert.deepEqual(plan.testFiles, {"@dohc/ydoc-projection": ["src/liveRestoreDrain.test.ts", "src/ownerDesktopTransport.test.ts"]});
 });
 
@@ -112,6 +147,7 @@ test("shared, native, fixture, config, and unknown inputs select all packages", 
   ]) {
     const plan = select([path]);
     assert.equal(plan.full, true, path);
+    assert.equal(plan.repository, "full", path);
     assert.deepEqual(plan.packages, packages.map(pkg => pkg.name).sort(), path);
     assert.deepEqual(plan.proofs, { accounts: true, selfHostNative: true, desktop: true }, path);
   }
@@ -121,8 +157,10 @@ test("full mode overrides an empty diff and ordinary empty selection stays empty
   const empty = select([]);
   assert.deepEqual(empty.packages, []);
   assert.deepEqual(empty.needs, { postgres: false, engine: false, desktop: false });
+  assert.equal(empty.desktopScripts, false);
   const full = select([], { full: true });
   assert.equal(full.full, true);
+  assert.equal(full.repository, "full");
   assert.deepEqual(full.packages, packages.map(pkg => pkg.name).sort());
 });
 

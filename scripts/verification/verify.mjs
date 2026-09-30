@@ -255,7 +255,7 @@ export async function verify(args) {
         // Keep package groups under this owner so cancellation finishes their
         // escalation before database cleanup, without a competing parent timer.
         await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
-          () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages, testFiles: javascript.testFiles,
+          () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages, testFiles: javascript.testFiles, repository: javascript.repository, desktopScripts: javascript.desktopScripts,
             beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled) }));
         if (proofs.selfHostNative) {
           const nativeOutput = join(output, "self-host-native");
