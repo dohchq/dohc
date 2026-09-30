@@ -1,7 +1,7 @@
 import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { actorFromSession, createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
-import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
+import { createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
+import { actorFromSession, createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
 import type { EmailMessage } from "./smtp";
 
 // Runs against the live dev Postgres (same requirement as workspace-postgres

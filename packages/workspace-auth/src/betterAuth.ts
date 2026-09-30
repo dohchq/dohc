@@ -1,4 +1,3 @@
-import type { Actor } from "@dohc/workspace-contracts";
 import { betterAuth } from "better-auth";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
@@ -129,13 +128,3 @@ async function unavailableEmail(_message: Parameters<SendEmail>[0]): Promise<voi
 }
 
 export type WorkspaceAuth = ReturnType<typeof createWorkspaceAuth>;
-
-// Maps a validated Better Auth session to the Actor shape every downstream
-// authz check (assertWorkspaceMember etc.) already consumes — identity is
-// derived SERVER-side from the session token, never from client-supplied ids.
-export function actorFromSession(
-  session: { user: { id: string } },
-  workspaceId: string,
-): Actor {
-  return { userId: session.user.id, workspaceId };
-}
