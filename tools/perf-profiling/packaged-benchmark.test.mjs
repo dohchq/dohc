@@ -2,17 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs } from './packaged-benchmark-options.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
+import { compareSummaries, DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
+import { automationCases, automationFixtureDigest, automationOf, busyShare, classifyOutcome, cpuByKind, DATASET_NAME, datasetAutomationDefinition, datasetListRequest, datasetRowValues, datasetSetupRequest, DEFAULT_LIMITS,
+  documentAutomationFiles, documentValues, journalBytes, observeAutomationRun, outcomeTexts, peakByKind, readDocumentCase, readRunJournal, TRIGGER,
+  verifyCase, waitForQuiet, WIDE_SET } from './packaged-collection-automations.mjs';
+import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
 
 // A jsdom window with a fake clock. Frames and timers only advance through step() and frame().
 function fakePage(t, html) {
@@ -693,4 +699,393 @@ test('summary reports each surface scenario from its own runs and keeps unobserv
   assert.equal(summary.soak.length, 1);
   assert.deepEqual(summary.soak[0].kinds.renderer, { processCounts: [1], workingSetBytes: { first: 400, last: 440, max: 450, delta: 40 }, privateBytes: { first: 200, last: 220, max: 225, delta: 20 } });
   assert.deepEqual([summary.soak[0].cycles, summary.soak[0].elapsedMs, summary.soak[0].cycleDurationMs.max, summary.soak[0].searchQuery], [2, 120000, 55000, 'Performance']);
+});
+
+const loadYaml = createRequire(new URL('../../apps/desktop/package.json', import.meta.url))('js-yaml').load;
+const caseNamed = (cases, name) => cases.find(spec => spec.name === name);
+
+test('automation limits default to the current ones and belong to the collection scenario', () => {
+  const collection = [...required, '--scenario', 'collection'];
+  assert.deepEqual([parseOptions(collection).findCap, parseOptions(collection).writeCap], [DEFAULT_LIMITS.findCap, DEFAULT_LIMITS.writeCap]);
+  assert.deepEqual([50, 200], [DEFAULT_LIMITS.findCap, DEFAULT_LIMITS.writeCap]);
+  const candidate = parseOptions([...collection, '--find-cap', '500', '--write-cap', '1000']);
+  assert.deepEqual([candidate.findCap, candidate.writeCap], [500, 1000]);
+  for (const extra of [['--find-cap', '500'], ['--scenario', 'soak', '--write-cap', '10'], ['--scenario', 'collection', '--find-cap', '0'], ['--scenario', 'collection', '--write-cap', '1.5']]) {
+    assert.throws(() => parseOptions([...required, ...extra]), JSON.stringify(extra));
+  }
+});
+
+test('automation cases expect the package limits to refuse only the cases over them', () => {
+  const cases = automationCases(DEFAULT_LIMITS);
+  assert.deepEqual(cases.map(spec => [spec.name, spec.expected]), [['baseline', 'done'], ['find-500', 'refused'], ['five-finds', 'refused'], ['set-then-find', 'done'],
+    ['add-then-find', 'done'], ['find-at-cap', 'done'], ['find-over-cap', 'refused'], ['wide', 'done'], ['baseline-typing', 'done'], ['find-500-typing', 'refused']]);
+  assert.deepEqual(automationCases({ findCap: 500, writeCap: 1000 }).filter(spec => spec.expected === 'refused').map(spec => spec.name), ['find-over-cap']);
+  assert.deepEqual(cases.map(spec => spec.seed.length), [50, 500, 300, 40, 10, 50, 51, 50, 50, 500]);
+  assert.deepEqual(cases.filter(spec => spec.contention).map(spec => spec.name), ['baseline-typing', 'find-500-typing']);
+  // Five Finds of 100 records each, so their 1,000 assignments count records in two Finds twice.
+  const five = caseNamed(cases, 'five-finds');
+  assert.deepEqual([1, 2, 3, 4, 5].map(k => five.seed.filter(record => record[`F${k}`]).length), [100, 100, 100, 100, 100]);
+  assert.ok(five.seed.every(record => [1, 2].includes([1, 2, 3, 4, 5].filter(k => record[`F${k}`]).length)));
+  assert.equal(five.steps.length, 10);
+  const baseline = caseNamed(cases, 'baseline');
+  assert.deepEqual(baseline.seed[0], { Name: 'baseline 1', Case: 'baseline', N: 1 });
+  assert.equal(baseline.matches * Object.keys(baseline.steps[1].set).length, baseline.assignments);
+});
+
+test('automation fixtures are deterministic, sort the trigger first, and pre-mint unique ids', () => {
+  const cases = automationCases(DEFAULT_LIMITS);
+  const files = documentAutomationFiles(cases);
+  assert.deepEqual(documentAutomationFiles(automationCases(DEFAULT_LIMITS)), files);
+  assert.deepEqual(files.slice(0, 3).map(file => file.path), ['automation-bench/collection.yaml', 'automation-bench/automations.yaml', TRIGGER.document.path]);
+  const records = files.filter(file => file.path.endsWith('.md'));
+  assert.equal(records.length, 1 + cases.reduce((sum, spec) => sum + spec.seed.length, 0));
+  assert.equal(records.map(file => file.path).sort()[0], TRIGGER.document.path);
+  const ids = records.map(file => file.content.match(/^id: (\S+)$/m)[1]);
+  assert.ok(ids.every(id => /^rec_[a-z2-7]{26}$/.test(id)));
+  assert.equal(new Set(ids).size, ids.length);
+  const setup = datasetSetupRequest(cases, 'workspace');
+  assert.deepEqual(datasetSetupRequest(automationCases(DEFAULT_LIMITS), 'workspace'), setup);
+  const keys = setup.records.map(record => record[setup.idFieldId]);
+  assert.equal(keys.length, records.length);
+  assert.equal(new Set(keys).size, keys.length);
+  assert.deepEqual([keys[0], [...keys].sort()[0]], [TRIGGER.dataset.id, TRIGGER.dataset.id]);
+  // The Explorer's Collections section lists a dataset by its table's name, which the harness clicks.
+  assert.deepEqual(datasetAutomationDefinition(cases).tables.map(table => table.name), [DATASET_NAME]);
+  assert.equal(automationFixtureDigest(cases), automationFixtureDigest(automationCases(DEFAULT_LIMITS)));
+  // A case's digest changes only when its own records, steps, or expected outcome do.
+  const candidate = automationCases({ findCap: 500, writeCap: 1000 });
+  assert.equal(caseNamed(candidate, 'baseline').fixtureSha256, caseNamed(cases, 'baseline').fixtureSha256);
+  for (const name of ['find-500', 'find-at-cap']) assert.notEqual(caseNamed(candidate, name).fixtureSha256, caseNamed(cases, name).fixtureSha256);
+  assert.equal(new Set(cases.map(spec => spec.fixtureSha256)).size, cases.length);
+  assert.notEqual(automationFixtureDigest(cases), automationFixtureDigest(automationCases({ findCap: 500, writeCap: 1000 })));
+});
+
+// The JS gate builds @dohc/app-backend-runtime before its tests; the executor's plan imports it.
+test('automation fixtures pass the product contracts for automations, schemas, and datasets', () => {
+  const tsx = pathToFileURL(createRequire(new URL('../../packages/cli/package.json', import.meta.url)).resolve('tsx')).href;
+  const checked = spawnSync(process.execPath, ['--import', tsx, 'tools/perf-profiling/check-automation-fixtures.mts'], { encoding: 'utf8', timeout: 120_000 });
+  assert.equal(checked.status, 0, checked.stderr);
+  assert.deepEqual(JSON.parse(checked.stdout.trim().split(/\r?\n/).at(-1)), { problems: [] });
+});
+
+test('document records read back from frontmatter and the verifier tells step visibility apart', async t => {
+  const cases = automationCases(DEFAULT_LIMITS);
+  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-docs-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'automation-bench'));
+  for (const file of documentAutomationFiles(cases)) await writeFile(join(root, file.path), file.content);
+  const staged = caseNamed(cases, 'set-then-find');
+  const read = await readDocumentCase(root, staged, loadYaml);
+  assert.equal(read.length, 40);
+  // A case reads its own seeded files and the records its runs created, never another file.
+  await writeFile(join(root, 'automation-bench', 'Added.md'), '---\nCase: "find-500"\nN: 501\n---\n');
+  await writeFile(join(root, 'automation-bench', 'Other.md'), '---\nCase: "find-500"\nN: 502\n---\n');
+  await writeFile(join(root, 'automation-bench', 'find-500-typing-0001.md'), '---\nCase: "find-500"\nN: 999\n---\n');
+  const fiveHundred = caseNamed(cases, 'find-500');
+  assert.deepEqual((await readDocumentCase(root, fiveHundred, loadYaml, ['automation-bench/Added.md'])).map(record => record.N).filter(n => n > 500), [501]);
+  await rm(join(root, 'automation-bench', 'find-500-0001.md'));
+  assert.deepEqual(verifyCase(fiveHundred, 'refused', await readDocumentCase(root, fiveHundred, loadYaml)).problems, ['N 1 is missing']);
+  assert.deepEqual(verifyCase(staged, 'refused', read), { ok: true, visibility: null, problems: [], problemCount: 0 });
+  assert.equal(documentValues('no frontmatter', loadYaml), null);
+  for (const visibility of ['run-start', 'stepwise']) {
+    const { records } = staged.expect(staged.seed, visibility);
+    assert.deepEqual([verifyCase(staged, 'done', records).ok, verifyCase(staged, 'done', records).visibility], [true, visibility]);
+  }
+  const unchanged = verifyCase(staged, 'done', staged.seed);
+  assert.equal(unchanged.ok, false);
+  assert.match(unchanged.problems[0], /^N 1 Stage is "stf-a", expected "stf-b"$/);
+  const added = caseNamed(cases, 'add-then-find');
+  const { records, added: [record] } = added.expect(added.seed, 'stepwise');
+  assert.equal(verifyCase(added, 'done', [...records, record]).visibility, 'stepwise');
+  assert.deepEqual(verifyCase(added, 'done', records).problems, ['N 11 is missing']);
+  assert.deepEqual(verifyCase(added, 'refused', [...added.seed, record]).problems, ['N 11 was not expected']);
+  assert.deepEqual(verifyCase(added, 'refused', [added.seed[0], ...added.seed]).problems, ['N 1 appears twice']);
+  const wide = caseNamed(cases, 'wide');
+  const problem = verifyCase(wide, 'done', wide.seed).problems[0];
+  assert.ok(problem.startsWith('N 1 C is null, expected 2') || problem.includes('Notes'), problem);
+  assert.ok(verifyCase(wide, 'done', wide.seed).problems.every(text => text.length < 140));
+  assert.equal(wide.expect(wide.seed).records[0].Notes, WIDE_SET);
+});
+
+test('dataset rows map back to field names and a list asks for one case', () => {
+  const cases = automationCases(DEFAULT_LIMITS);
+  const setup = datasetSetupRequest(cases, 'workspace');
+  const request = datasetListRequest({ datasetId: setup.definition.datasetId, revision: 3, revisionSha256: 'b'.repeat(64) }, 'workspace', 'wide');
+  assert.deepEqual([request.mode, request.revision, request.filters.length, request.filters[0].value], ['list', 3, 1, 'wide']);
+  assert.deepEqual([setup.datasetPath, request.datasetPath], ['automation-data/dataset.json', 'automation-data/dataset.json']);
+  const [trigger, first] = setup.records;
+  const { [setup.idFieldId]: id, ...values } = first;
+  const row = datasetRowValues({ id, version: 1, values });
+  assert.deepEqual(row, { Name: 'baseline 1', Case: 'baseline', N: 1, A: null, B: null, C: null, D: null, Stage: null, Seen: null, F1: null, F2: null, F3: null, F4: null, F5: null, Hit: null, Last: null, Notes: null });
+  assert.equal(datasetRowValues({ values: trigger }).Name, 'Trigger');
+});
+
+test('settle text counts only a limit refusal as refused', () => {
+  const failed = text => classifyOutcome({ outcome: 'failed', text });
+  assert.equal(failed('find-500 did not finish. A Find matched more than 50 records. Narrow its condition, then try again.'), 'refused');
+  assert.equal(failed('x did not finish. This run would change more than 200 fields. Narrow its Find steps.'), 'refused');
+  assert.equal(failed('x did not finish. This run would change more data than dohc can save for it.'), 'refused');
+  assert.equal(failed('x did not finish. dohc cannot find the Collection automation-bench.'), 'failed');
+  assert.equal(failed(undefined), 'failed');
+  assert.equal(classifyOutcome({ outcome: 'done', text: 'Ran x on Trigger' }), 'done');
+  const baseline = outcomeTexts('baseline', 'Trigger');
+  assert.deepEqual(baseline.done, ['Ran baseline on Trigger']);
+  // A case's words never match another case's settle text.
+  const typing = Object.values(outcomeTexts('baseline-typing', 'Trigger')).flat();
+  assert.ok(Object.values(baseline).flat().every(phrase => typing.every(text => !text.includes(phrase))));
+});
+
+test('run journal reads saved headers and progress, and a refused run leaves none', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-journal-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const automation = automationOf('document', 'baseline');
+  assert.deepEqual(automation, { collectionPath: 'automation-bench', name: 'bench-baseline' });
+  assert.deepEqual(await readRunJournal(root, automation), []);
+  assert.deepEqual(await journalBytes(root, automation), { headerBytes: 0, progressBytes: 0 });
+  // The engine names the Collection by an object id, so the folder and id come from the saved header.
+  const runs = join(root, '.dohc', 'automations', 'runs');
+  const elsewhere = join(runs, 'f0');
+  await mkdir(elsewhere, { recursive: true });
+  await writeFile(join(elsewhere, 'run-x.json'), JSON.stringify({ automationId: 'collection:object-b#bench-baseline', collections: [{ collectionId: 'object-b', path: 'automation-data' }] }));
+  // A header caught mid-rewrite reads as partial JSON; the lookup skips it instead of stopping the run.
+  await writeFile(join(elsewhere, 'run-partial.json'), '{"automationId": "collection:obj');
+  assert.deepEqual(await journalBytes(root, automation), { headerBytes: 0, progressBytes: 0 });
+  const folder = join(runs, 'f1');
+  await mkdir(folder, { recursive: true });
+  const automationId = 'collection:object-a#bench-baseline';
+  const header = JSON.stringify({ version: 2, claimId: 'c1', automationId, collections: [{ collectionId: 'object-a', path: 'automation-bench' }], startedAtMs: 1000, finishedAtMs: 1600, plan: null, outcome: { state: 'done' } });
+  const progress = [{ kind: 'created', ordinal: 0, recordId: 'r', path: 'p' },
+    { kind: 'effect', ordinal: 1, writes: [{ kind: 'field', field: 'A' }, { kind: 'field', field: 'B' }, { kind: 'created', recordId: 'r', path: 'p' }] },
+    { kind: 'effect', ordinal: 2, writes: [{ kind: 'dataset-edit', fields: [{}, {}, {}] }, { kind: 'dataset-created' }] }].map(line => `${JSON.stringify(line)}\n`).join('');
+  await writeFile(join(folder, 'run-c1.json'), header);
+  await writeFile(join(folder, 'run-c1.progress.jsonl'), progress);
+  await writeFile(join(folder, 'other.json'), JSON.stringify({ automationId: 'collection:elsewhere#x', startedAtMs: 0 }));
+  const [run, ...others] = await readRunJournal(root, automation);
+  assert.deepEqual(others, []);
+  assert.deepEqual(run, { claimId: 'c1', startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' }, headerBytes: Buffer.byteLength(header),
+    progressBytes: Buffer.byteLength(progress), progressLines: 3, fieldWrites: 5, created: 2, createdPaths: ['p'] });
+  const bytes = await journalBytes(root, automation);
+  assert.equal(bytes.progressBytes, Buffer.byteLength(progress));
+  assert.ok(bytes.headerBytes > Buffer.byteLength(header));
+});
+
+const proc = (pid, name, cpuMs, workingSetBytes = 0, commandLine = 'dohc.exe') => ({ pid, name, commandLine, createdAt: `t${pid}`, cpuMs, workingSetBytes, privateBytes: workingSetBytes / 2 });
+test('process accounting splits CPU and peaks by kind', () => {
+  const before = { completedAtMs: 1000, processes: [proc(1, 'dohc.exe', 100, 10), proc(2, 'dohc-workspace-engine.exe', 50, 20), proc(3, 'dohc.exe', 10, 30, 'dohc.exe --type=renderer'), proc(9, 'dohc.exe', 5, 1, 'dohc.exe --type=utility')] };
+  const after = { completedAtMs: 3000, processes: [proc(1, 'dohc.exe', 130, 40), proc(2, 'dohc-workspace-engine.exe', 80, 10), proc(3, 'dohc.exe', 60, 30, 'dohc.exe --type=renderer'), proc(4, 'dohc.exe', 7, 5, 'dohc.exe --type=renderer')] };
+  assert.deepEqual(cpuByKind(before, after, 1), { main: 30, engine: 30, renderer: 57 });
+  assert.equal(busyShare(before, after, 1), 60 / 2000);
+  assert.deepEqual(peakByKind([before, after], 1), { main: { workingSetBytes: 40, privateBytes: 20 }, engine: { workingSetBytes: 20, privateBytes: 10 },
+    renderer: { workingSetBytes: 35, privateBytes: 17.5 }, utility: { workingSetBytes: 1, privateBytes: 0.5 } });
+});
+
+test('quiet wait needs consecutive quiet intervals and gives up at its deadline', async () => {
+  let at = 0;
+  const snapshotAt = cpuMs => ({ completedAtMs: (at += 1000), processes: [proc(1, 'dohc.exe', cpuMs)] });
+  const cumulative = [0, 500, 500, 1300, 1300, 1300, 1300];
+  const samples = [];
+  const quiet = await waitForQuiet({ appPid: 1, sample: async () => { const next = snapshotAt(cumulative[samples.length]); samples.push(next); return next; } });
+  // Busy, quiet, busy, quiet, quiet, quiet: the third quiet interval in a row ends the wait.
+  assert.equal(samples.length, 7);
+  assert.equal(quiet.snapshot, samples[6]);
+  assert.equal(quiet.busyShare, 0);
+  let cpu = 0;
+  await assert.rejects(waitForQuiet({ appPid: 1, timeoutMs: 50, sample: async () => snapshotAt((cpu += 1000)) }), /did not settle within 50ms: main and engine used 100% of a core/);
+  const controller = new AbortController();
+  controller.abort(Error('stop waiting'));
+  await assert.rejects(waitForQuiet({ appPid: 1, signal: controller.signal, sample: async () => snapshotAt((cpu += 1000)) }), /stop waiting/);
+});
+
+const automationHtml = '<main><button aria-label="baseline for Trigger"><span>baseline</span></button><button aria-label="other for Trigger">other</button><div id="cells"></div><div data-testid="notice-toasts" id="toasts"></div></main>';
+test('automation observer times a press on its own button to the painted settle text', async t => {
+  const p = fakePage(t, automationHtml);
+  const toasts = p.document.getElementById('toasts');
+  const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
+  const press = selector => p.document.querySelector(selector).dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+  toasts.insertAdjacentHTML('beforeend', '<div>Ran baseline on Trigger</div>');
+  await mutations();
+  press('[aria-label="other for Trigger"]');
+  toasts.insertAdjacentHTML('beforeend', '<div>Ran baseline on Trigger</div>');
+  await mutations();
+  assert.equal(p.frames.size, 0, 'text before the press, or after a press on another button, is not this run');
+  p.step();
+  press('[aria-label="baseline for Trigger"] span');
+  p.step();
+  // Text outside the toast stack and Notices, such as a table cell, is not a settle.
+  p.document.getElementById('cells').insertAdjacentHTML('beforeend', '<div>Ran baseline on Trigger</div>');
+  await mutations();
+  assert.equal(p.frames.size, 0);
+  toasts.insertAdjacentHTML('beforeend', '<div role="status">Ran baseline on Trigger</div>');
+  await mutations();
+  p.frame();
+  const observed = await pending;
+  assert.deepEqual([observed.outcome, observed.text, observed.triggerMs, observed.matchedMs, observed.paintedMs, observed.triggerTrusted], ['done', 'Ran baseline on Trigger', 60, 110, 126, false]);
+  assert.equal(observed.installedMs, 10);
+  assert.ok(Number.isFinite(observed.installedEpochMs));
+  assert.equal(observed.longTasks.length, 0);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+
+test('automation observer reads changed text and rejects a run that never settles', async t => {
+  const p = fakePage(t, `${automationHtml}<div data-testid="notice-center"><p id="notice">Waiting</p></div>`);
+  const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
+  p.document.querySelector('[aria-label="baseline for Trigger"]').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+  p.document.getElementById('notice').firstChild.data = 'baseline did not finish. A Find matched more than 50 records.';
+  await mutations();
+  p.frame();
+  const failed = await pending;
+  assert.deepEqual([failed.outcome, classifyOutcome(failed)], ['failed', 'refused']);
+  const silent = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 120 });
+  const rejected = assert.rejects(silent, /baseline for Trigger did not settle within 120ms/);
+  p.step(); p.step(); p.step();
+  await rejected;
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+
+test('summary reports automation cases per kind and keeps missing measurements missing', async () => {
+  const sample = (start, inputToNextPaintMs) => ({ start, dispatchToTwoRafMs: 20, inputToNextPaintMs });
+  const row = (name, fields) => ({ name, expected: 'done', outcome: 'done', pass: true, visibility: null, verification: { ok: true, settledOnDiskObservedMs: 300 },
+    triggerToSettledPaintedMs: 900, startMs: 400, runMs: 450, journal: { headerPeakBytesSampled: 8000, runs: [{ headerBytes: 700, progressBytes: 5000, fieldWrites: 200, created: 0 }] },
+    cpuMs: { main: 300, engine: 200, renderer: 50 }, peakBytes: { main: { privateBytes: 1e8 } }, longTasks: [{ duration: 60 }, { duration: 80 }], typing: null, ...fields });
+  const refused = row('find-500', { expected: 'refused', outcome: 'refused', startMs: null, runMs: null, journal: { headerPeakBytesSampled: 0, runs: [] } });
+  const summary = await summarize({ label: 'baseline', status: 'failed', settings: {}, limits: [], runs: [
+    { index: 1, collectionAutomations: { findCap: 50, writeCap: 200, fixtureSha256: 'f', document: { cases: [row('baseline'), refused] },
+      dataset: { cases: [row('baseline-typing', { pass: false, typing: { samplesDuringRun: 2, samples: [sample(1, 24), sample(2, null), sample(3, 99)] } })] } } },
+    { index: 2 },
+  ] });
+  const automations = summary.collectionAutomations;
+  assert.deepEqual([automations.findCap, automations.writeCap, automations.fixtureSha256], [[50], [200], ['f']]);
+  assert.deepEqual(automations.document.baseline.triggerToSettledPaintedMs, { count: 1, p50: 900, p95: 900, max: 900 });
+  assert.deepEqual([automations.document.baseline.longTaskCount.max, automations.document.baseline.longTaskTotalMs.max, automations.document.baseline.fieldWrites], [2, 140, [200]]);
+  assert.deepEqual(automations.document['find-500'].startMs, { count: 0, p50: null, p95: null, max: null });
+  assert.deepEqual([automations.document['find-500'].outcomes, automations.document['find-500'].fieldWrites, automations.document['find-500'].runMs.count], [['refused'], [], 0]);
+  assert.deepEqual([automations.dataset['baseline-typing'].failures, automations.dataset['baseline-typing'].typingDuringRun.samplesDuringRun], [1, 2]);
+  assert.deepEqual(automations.dataset['baseline-typing'].typingDuringRun.inputToNextPaintReportedOnlyMs, { count: 1, p50: 24, p95: 24, max: 24 });
+  assert.equal(automations.document.baseline.typingDuringRun, null);
+  assert.equal((await summarize({ label: 'baseline', status: 'complete', settings: {}, limits: [], runs: [{ index: 1 }] })).collectionAutomations, null);
+});
+
+// A fake executeCli: it records each call and answers as the desktop CLI server does.
+const fakeCli = calls => `import { appendFileSync } from 'node:fs';
+const ok = body => ({ exitCode: 0, stdout: JSON.stringify({ schemaVersion: 1, ...body }), stderr: '' });
+export async function executeCli({ argv }) {
+  const [, , verb, text] = argv;
+  const body = JSON.parse(text);
+  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv: argv.slice(0, 3), body, cwd: process.cwd(), stateDir: process.env.DOHC_STATE_DIR }) + '\\n');
+  if (verb === 'create') return ok({ kind: 'approved', revision: { datasetId: body.definition.datasetId, revision: 1, revisionSha256: 'a'.repeat(64) } });
+  if (body.input.values) {
+    if (body.input.values.key === 'refuse') return ok({ kind: 'refused', code: 'not_unique', message: 'A record already uses this value.' });
+    if (body.input.values.key === 'fail') return { exitCode: 1, stdout: '', stderr: 'dohc: the app did not answer' };
+    return ok({ kind: 'invoked', result: { id: body.input.values.key, version: 1 }, revision: 2, replayed: false });
+  }
+  return ok({ kind: 'invoked', result: body.input.after ? { rows: [{ id: 'b' }], nextCursor: null } : { rows: [{ id: 'a' }], nextCursor: { id: 'a', value: 'a' } }, revision: 2, replayed: false });
+}
+`;
+test('dataset CLI script creates, seeds, and lists through executeCli, and fails on a CLI error', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dohc-dataset-cli-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const calls = join(root, 'calls.jsonl');
+  const cliModule = join(root, 'fake-cli.mjs');
+  await writeFile(cliModule, fakeCli(calls));
+  const script = resolve('tools/perf-profiling/dataset-cli.mjs');
+  const request = async (name, body) => { const path = join(root, `${name}.json`); await writeFile(path, JSON.stringify({ cliModule, workspaceId: 'w', ...body })); return path; };
+  const runScript = path => spawnSync(process.execPath, [script, path], { cwd: root, env: { ...process.env, DOHC_STATE_DIR: 'profile' }, encoding: 'utf8', timeout: 60_000 });
+  const setup = runScript(await request('setup', { mode: 'setup', datasetPath: 'data/dataset.json', definition: { datasetId: 'd' }, createOperationId: 'create', idFieldId: 'key', records: [{ key: 'one' }, { key: 'two' }] }));
+  assert.equal(setup.status, 0, setup.stderr);
+  const seeded = JSON.parse(setup.stdout.trim().split(/\r?\n/).at(-1));
+  assert.deepEqual([seeded.datasetId, seeded.revision, seeded.revisionSha256, seeded.records], ['d', 1, 'a'.repeat(64), 2]);
+  assert.ok(Number.isFinite(seeded.seedingObservedMs));
+  const listed = runScript(await request('list', { mode: 'list', datasetPath: 'data/dataset.json', datasetId: 'd', revision: 1, revisionSha256: 'a'.repeat(64), operationId: 'list', filters: [{ fieldId: 'case', value: 'x' }] }));
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.deepEqual(JSON.parse(listed.stdout.trim()), { rows: [{ id: 'a' }, { id: 'b' }] });
+  const recorded = (await readFile(calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(recorded.map(call => call.argv), [...Array(5)].map((_, index) => ['--json', 'dataset', index === 0 ? 'create' : 'invoke']));
+  assert.deepEqual(recorded.slice(1, 3).map(call => [call.body.idempotencyKey, call.body.operationId, call.body.revision]), [['seed:one', 'create', 1], ['seed:two', 'create', 1]]);
+  const [first, second] = recorded.slice(3).map(call => call.body);
+  assert.deepEqual([first.input, second.input.after], [{ limit: 100, filters: [{ fieldId: 'case', value: 'x' }] }, { id: 'a', value: 'a' }]);
+  assert.match(first.idempotencyKey, /^list:[0-9a-f-]{36}:0$/);
+  assert.equal(second.idempotencyKey, first.idempotencyKey.replace(/0$/, '1'));
+  assert.ok(recorded.every(call => call.stateDir === 'profile' && resolve(call.cwd) === resolve(root)));
+  // The CLI names a dataset by its dataset.json path and refuses a body that still carries datasetId.
+  assert.ok(recorded.slice(1).every(call => call.body.datasetPath === 'data/dataset.json' && call.body.expectedDatasetId === 'd' && !('datasetId' in call.body)));
+  for (const [key, message] of [['refuse', /refused: not_unique/], ['fail', /the app did not answer/]]) {
+    const failed = runScript(await request(key, { mode: 'setup', definition: { datasetId: 'd' }, createOperationId: 'create', idFieldId: 'key', records: [{ key }] }));
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, message);
+  }
+  assert.equal(spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 60_000 }).status, 2);
+});
+
+test('dataset CLI runs in an owned job that stops what it started when it fails', { skip: process.platform !== 'win32' }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dohc-dataset-owned-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const pidFile = join(root, 'descendant.pid');
+  const cliModule = join(root, 'fake-cli.mjs');
+  // The CLI starts a process that outlives it, then fails, as a crashed CLI worker would leave one.
+  await writeFile(cliModule, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
+export async function executeCli() {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+  child.unref();
+  writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+  return { exitCode: 1, stdout: '', stderr: 'dohc: failed after starting a worker' };
+}
+`);
+  const requestPath = join(root, 'setup.json');
+  await writeFile(requestPath, JSON.stringify({ cliModule, workspaceId: 'w', mode: 'setup', definition: {}, records: [] }));
+  await assert.rejects(runOwnedCommand(process.execPath, [resolve('tools/perf-profiling/dataset-cli.mjs'), requestPath], { cwd: root, timeoutMs: 60_000, quietStdout: true, log: join(root, 'setup.log') }), /failed \(1\)/);
+  const descendant = Number(await readFile(pidFile, 'utf8'));
+  const deadline = performance.now() + 30_000;
+  let alive = true;
+  while (alive && performance.now() < deadline) {
+    try { process.kill(descendant, 0); await delay(50); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; alive = false; }
+  }
+  assert.equal(alive, false, 'the job must stop the process the CLI started');
+});
+
+const receipt = ({ status = 'complete', open = [100, 110, 120], typed = [20, 22, 24], settled = [800, 900, 1000], fixture = 'f1', failures = 0, findCap = 50 } = {}) => ({
+  label: 'baseline', status, settings: { scenario: 'collection', runCount: 3, keystrokes: 30, fixtureFiles: 2, records: 500, findCap, writeCap: 200 }, limits: [],
+  runs: open.map((openMs, index) => ({ index: index + 1,
+    collection: { records: 500, indexedWaitObservedMs: 10, clickToRowsPaintedMs: openMs, rowsRendered: 20, loadedRecords: 100 },
+    typing: [{ name: 'small.md', supported: true, longTasks: [], samples: [{ dispatchToTwoRafMs: typed[index], inputToNextPaintMs: null }] }],
+    collectionAutomations: { findCap, writeCap: 200, fixtureSha256: 'all', dataset: { cases: [] }, document: { cases: [
+      { name: 'baseline', fixtureSha256: fixture, expected: 'done', outcome: 'done', pass: index >= failures, verification: { ok: true }, triggerToSettledPaintedMs: settled[index], longTasks: [],
+        typing: { samplesDuringRun: 1, samples: [{ dispatchToTwoRafMs: typed[index] }] } },
+    ] } } })),
+});
+const compared = async (baseline, candidate, margin) => compareSummaries(await summarize(receipt(baseline)), await summarize(receipt(candidate)), margin);
+
+test('comparison passes within the margin and fails a p95 past it', async () => {
+  assert.deepEqual(DEFAULT_MARGIN, { percent: 10, floorMs: 17 });
+  const same = await compared({}, {});
+  assert.equal(same.pass, true, same.problems.join('; '));
+  assert.deepEqual(same.checks.map(check => [check.metric, check.verdict]), [['collection open to rows painted', 'pass'], ['typing small.md dispatch to two frames', 'pass'],
+    ['typing large.md dispatch to two frames', 'unmeasured'], ['document baseline press to settled', 'pass'], ['document baseline typing during the run', 'pass']]);
+  // 1,000 ms plus 10% allows 1,100; 24 ms plus the 17 ms floor allows 41.
+  assert.equal((await compared({}, { settled: [800, 900, 1100] })).pass, true);
+  const slower = await compared({}, { settled: [800, 900, 1101], typed: [20, 22, 42] });
+  assert.equal(slower.pass, false);
+  assert.deepEqual(slower.problems, ['typing small.md dispatch to two frames: regressed', 'document baseline press to settled: regressed', 'document baseline typing during the run: regressed']);
+  assert.equal((await compared({}, { settled: [800, 900, 1101] }, { percent: 20, floorMs: 17 })).pass, true);
+  assert.deepEqual((await compared({}, { open: [100, 110, 138] })).problems, ['collection open to rows painted: regressed']);
+});
+
+test('comparison checks a case whose fixture changed only within the candidate, and refuses mismatched receipts', async () => {
+  const other = await compared({}, { fixture: 'f2', settled: [5000, 6000, 7000], findCap: 500 });
+  assert.equal(other.pass, true, other.problems.join('; '));
+  assert.deepEqual(other.cases, [{ kind: 'document', name: 'baseline', compared: false, outcomes: ['done'] }]);
+  assert.equal(other.checks.some(check => check.metric.startsWith('document baseline')), false);
+  const failed = await compared({}, { fixture: 'f2', failures: 1, status: 'failed' });
+  assert.deepEqual(failed.problems, ['The candidate receipt is failed, not complete.', "The candidate's document baseline case failed its checks in 1 of 3 runs."]);
+  const baseline = await summarize(receipt());
+  const candidate = await summarize(receipt());
+  candidate.settings = { ...candidate.settings, keystrokes: 10 };
+  delete candidate.collectionAutomations.document.baseline;
+  candidate.typing['small.md'].dispatchToTwoRafObservedMs = { count: 0, p50: null, p95: null, max: null };
+  assert.deepEqual(compareSummaries(baseline, candidate).problems, ['The receipts differ in keystrokes.', 'typing small.md dispatch to two frames: missing', 'document baseline: missing']);
+  // A receipt from before per-case digests cannot pass as comparable.
+  const old = receipt({ settled: [5000, 6000, 7000] });
+  for (const run of old.runs) delete run.collectionAutomations.document.cases[0].fixtureSha256;
+  const undigested = await summarize(old);
+  assert.deepEqual(compareSummaries(undigested, await summarize(receipt())).problems, ['The document baseline case has no single fixture digest in both receipts.']);
 });
