@@ -4536,11 +4536,11 @@ fn copy_seed_blobs(source: &EngineStore, target: &mut EngineStore) {
                 .collect::<Result<_, _>>()
         })
         .unwrap();
-    for bytes in binary {
-        target.put_binary_blob(&bytes).unwrap();
-    }
     target
         .write_with(&NoFaults, |tx| {
+            for bytes in binary {
+                dohc_engine_storage::blob::put_binary_blob(tx, &bytes)?;
+            }
             for (sha, text) in text {
                 tx.execute(
                     "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",

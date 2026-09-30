@@ -221,6 +221,7 @@ it("rejects tampered or duplicate retained submission metadata before installati
     throw Error("Missing attempt metadata");
   });
   await expect(validateDatasetRecovery({staged: duplicate, authorize: f.authorize})).rejects.toThrow(/UNIQUE/);
+  await expect(readdir(duplicate.directory)).rejects.toThrow();
 });
 it("requires trusted local recovery and explicit stopped-host acknowledgement for an active backup", async () => {
   const f = await fixture(); f.add("first");

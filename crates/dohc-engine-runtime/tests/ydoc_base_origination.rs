@@ -60,6 +60,10 @@ impl LoggedOp {
 /// The ops this machine originated (`imported = 0`), in relay order.
 fn local_ops(db: &Path) -> Vec<LoggedOp> {
     let store = EngineStore::open(db, 9_100).expect("open store");
+    read_local_ops(&store)
+}
+
+fn read_local_ops(store: &EngineStore) -> Vec<LoggedOp> {
     store
         .read_with(|conn| {
             let mut stmt = conn.prepare(
@@ -84,7 +88,12 @@ fn local_ops(db: &Path) -> Vec<LoggedOp> {
 }
 
 fn local_ydoc_ops(db: &Path) -> Vec<LoggedOp> {
-    local_ops(db)
+    let store = EngineStore::open(db, 9_100).expect("open store");
+    read_local_ydoc_ops(&store)
+}
+
+fn read_local_ydoc_ops(store: &EngineStore) -> Vec<LoggedOp> {
+    read_local_ops(store)
         .into_iter()
         .filter(|op| op.op_kind == "ydoc.update")
         .collect()
@@ -94,6 +103,10 @@ fn local_ydoc_ops(db: &Path) -> Vec<LoggedOp> {
 /// property of the lineage, not of one machine's outbox.
 fn base_ops_in_log(db: &Path) -> i64 {
     let store = EngineStore::open(db, 9_101).expect("open store");
+    read_base_ops_in_log(&store)
+}
+
+fn read_base_ops_in_log(store: &EngineStore) -> i64 {
     store
         .read_with(|conn| {
             conn.query_row(
@@ -108,8 +121,7 @@ fn base_ops_in_log(db: &Path) -> i64 {
 }
 
 /// Durable CRDT rows for one lineage: `(updates, snapshots)`.
-fn lineage_rows(db: &Path, key: &DocKey) -> (i64, i64) {
-    let store = EngineStore::open(db, 9_105).expect("open store");
+fn read_lineage_rows(store: &EngineStore, key: &DocKey) -> (i64, i64) {
     store
         .read_with(|conn| {
             let count = |table: &str| -> Result<i64, rusqlite::Error> {
@@ -142,7 +154,11 @@ fn deferred_rows(store: &EngineStore, key: &DocKey) -> i64 {
 
 fn marker_state(db: &Path, key: &DocKey) -> (Regime, bool) {
     let store = EngineStore::open(db, 9_102).expect("open store");
-    let marker = dohc_engine_collab::read_marker(&store, key)
+    read_marker_state(&store, key)
+}
+
+fn read_marker_state(store: &EngineStore, key: &DocKey) -> (Regime, bool) {
+    let marker = dohc_engine_collab::read_marker(store, key)
         .expect("read marker")
         .expect("marker exists");
     (
@@ -292,6 +308,10 @@ fn enable_sync(db: &Path, workspace_id: &str) {
 
 fn blob_bytes(db: &Path, sha: &str) -> Vec<u8> {
     let store = EngineStore::open(db, 9_104).expect("open store");
+    read_blob_bytes(&store, sha)
+}
+
+fn read_blob_bytes(store: &EngineStore, sha: &str) -> Vec<u8> {
     store
         .get_binary_blob(sha)
         .expect("read blob")
@@ -353,7 +373,7 @@ fn seed_collection_replica(db: &Path, workspace_id: &str, object_id: &str, path:
 /// `path`. The blobs travel first, exactly as `push_workspace` uploads them
 /// before the log ops that reference them.
 fn replay_into_clean_peer(
-    source_db: &Path,
+    source: &EngineStore,
     ops: &[LoggedOp],
     workspace_id: &str,
     path: &str,
@@ -377,7 +397,7 @@ fn replay_into_clean_peer(
     );
     let first_origin_seq = ops.first().map_or(0, |op| op.origin_seq);
     for op in ops {
-        let bytes = blob_bytes(source_db, &op.blob_sha());
+        let bytes = read_blob_bytes(source, &op.blob_sha());
         peer.put_binary_blob(&bytes).expect("peer blob");
         let envelope = ReplicationEnvelope {
             workspace_id: workspace_id.to_owned(),
@@ -518,8 +538,9 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
         .await
         .expect("capture agent edit");
     supervisor.close(&source_db).expect("close source actor");
+    let source_store = EngineStore::open(&source_db, 9_107).expect("reopen source for assertions");
 
-    let ops = local_ydoc_ops(&source_db);
+    let ops = read_local_ydoc_ops(&source_store);
     assert_eq!(ops.len(), 2, "capture produces one base and one edit");
     assert_eq!(
         ops[1].payload["actorOriginId"],
@@ -529,7 +550,7 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
     let first_origin_seq = ops[0].origin_seq;
     let mut peer = EngineStore::open(&peer_db, 300).expect("open peer store");
     for op in &ops {
-        let bytes = blob_bytes(&source_db, &op.blob_sha());
+        let bytes = read_blob_bytes(&source_store, &op.blob_sha());
         peer.put_binary_blob(&bytes).expect("copy Y.Doc blob");
         let envelope = ReplicationEnvelope {
             workspace_id: WS.to_owned(),
@@ -769,15 +790,16 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
         .await
         .expect("second update");
     supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
 
-    let ops = local_ydoc_ops(&db);
+    let ops = read_local_ydoc_ops(&store);
     assert_eq!(ops.len(), 2, "base once, then deltas");
     assert!(ops[0].is_base());
     assert!(!ops[1].is_base(), "a claimed lineage never re-emits a base");
-    assert_eq!(base_ops_in_log(&db), 1);
+    assert_eq!(read_base_ops_in_log(&store), 1);
 
     assert_eq!(
-        replay_into_clean_peer(&db, &ops, WS, PATH),
+        replay_into_clean_peer(&store, &ops, WS, PATH),
         "hello world",
         "a peer with no file and no prior state reconstructs the document"
     );
@@ -851,8 +873,9 @@ async fn a_journaled_delta_names_the_exact_stored_update_blob() {
         .await
         .expect("second update");
     supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
 
-    let ops = local_ydoc_ops(&db);
+    let ops = read_local_ydoc_ops(&store);
     let delta = ops
         .iter()
         .find(|op| !op.is_base())
@@ -863,7 +886,6 @@ async fn a_journaled_delta_names_the_exact_stored_update_blob() {
         "the journal payload names the digest of exactly the appended bytes"
     );
 
-    let store = EngineStore::open(&db, 9_107).expect("open store");
     let logged_sha: String = store
         .read_with(|conn| {
             conn.query_row(
@@ -884,7 +906,7 @@ async fn a_journaled_delta_names_the_exact_stored_update_blob() {
         "the update log row records the same digest"
     );
     assert_eq!(
-        blob_bytes(&db, &expected_sha),
+        read_blob_bytes(&store, &expected_sha),
         second,
         "the blob store holds the exact appended bytes under that address"
     );
@@ -1212,13 +1234,14 @@ async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &s
         assert_eq!(append.sharing_declined, None);
     }
     supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
 
     assert!(
-        local_ydoc_ops(&db).is_empty(),
+        read_local_ydoc_ops(&store).is_empty(),
         "a private workspace journals no replication op"
     );
     assert_eq!(
-        marker_state(&db, &key),
+        read_marker_state(&store, &key),
         (Regime::LocalOnly, false),
         "and its lineage stays prunable local-only"
     );
@@ -1381,16 +1404,17 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
         .await
         .expect("post-promotion edit");
     supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
 
-    let ops = local_ydoc_ops(&db);
+    let ops = read_local_ydoc_ops(&store);
     assert_eq!(ops.len(), 2, "promotion originates one base, then deltas");
     assert!(ops[0].is_base());
     assert!(!ops[1].is_base());
-    assert_eq!(base_ops_in_log(&db), 1);
-    assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
+    assert_eq!(read_base_ops_in_log(&store), 1);
+    assert_eq!(read_marker_state(&store, &key), (Regime::Replicated, true));
 
     assert_eq!(
-        replay_into_clean_peer(&db, &ops, WS, PATH),
+        replay_into_clean_peer(&store, &ops, WS, PATH),
         "alpha beta gamma",
         "the promoted base carries the rows the lineage held before promotion, \
          and later deltas still apply to it"
@@ -2700,15 +2724,20 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
         .await
         .expect("close the session");
     supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
 
-    let (updates, snapshots) = lineage_rows(&db, &key);
+    let (updates, snapshots) = read_lineage_rows(&store, &key);
     assert!(
         updates > 0 || snapshots > 0,
         "a replicated close compacts and KEEPS the lineage; it must never prune \
          the base a peer bootstraps from (updates={updates}, snapshots={snapshots})"
     );
-    assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
-    assert_eq!(base_ops_in_log(&db), 1, "and close emits no second base");
+    assert_eq!(read_marker_state(&store, &key), (Regime::Replicated, true));
+    assert_eq!(
+        read_base_ops_in_log(&store),
+        1,
+        "and close emits no second base"
+    );
 }
 
 // Enrolment leaves an open lineage to its session. Closing that session
@@ -2813,10 +2842,11 @@ async fn closing_an_open_lineage_after_enrolment_claims_it_once_the_file_holds_i
         .await
         .expect("clean close");
     supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
 
-    assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
+    assert_eq!(read_marker_state(&store, &key), (Regime::Replicated, true));
     assert_eq!(
-        base_ops_in_log(&db),
+        read_base_ops_in_log(&store),
         1,
         "the clean close claims the lineage once"
     );
@@ -3261,6 +3291,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
         .await
         .expect("the promoting edit is accepted, not rolled back");
     supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
 
     // The decline says WHY. It used to be `Ok(None)` — the same answer
     // origination gives for "already claimed", "this workspace does not
@@ -3296,11 +3327,11 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     }
 
     assert!(
-        local_ydoc_ops(&db).is_empty(),
+        read_local_ydoc_ops(&store).is_empty(),
         "an oversize lineage journals nothing rather than half a base"
     );
     assert_eq!(
-        marker_state(&db, &key),
+        read_marker_state(&store, &key),
         (Regime::LocalOnly, false),
         "and it stays local-only, with markdown as its artifact"
     );
@@ -3382,20 +3413,25 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
         .await
         .expect("the promoting edit is accepted");
     supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
 
     assert_eq!(
-        marker_state(&db, &key),
+        read_marker_state(&store, &key),
         (Regime::Replicated, true),
         "a document this size must promote to a shared lineage"
     );
-    assert_eq!(base_ops_in_log(&db), 1, "and journal exactly one base");
+    assert_eq!(
+        read_base_ops_in_log(&store),
+        1,
+        "and journal exactly one base"
+    );
 
-    let ops = local_ydoc_ops(&db);
+    let ops = read_local_ydoc_ops(&store);
     let base = ops
         .iter()
         .find(|op| op.is_base())
         .expect("the base op is journaled");
-    let bytes = blob_bytes(&db, &base.blob_sha());
+    let bytes = read_blob_bytes(&store, &base.blob_sha());
     assert!(
         bytes.len() > 5 * 1024 * 1024,
         "the base is genuinely past the old cap ({} bytes)",
