@@ -2177,12 +2177,12 @@ describe("YdocLiveAdapter", () => {
   // `refusals` counts recordUpdate attempts, and one edit costs two of them:
   // the write, then `recoverCanonicalState`'s replay. So 2 is the smallest
   // number that gets past the adapter's own recovery and reaches the ladder.
-  async function openAgainstABusyJournal(text: string, refusals: number) {
+  async function openAgainstABusyJournal(text: string, refusals: number, authorCapacity = false) {
     const engine = seedPlaintextEngine();
     const busy = new DaemonRefusalError(
       {
-        code: "OVERLOADED",
-        message: "engine-store-busy",
+        code: authorCapacity ? "LIMIT_EXCEEDED" : "OVERLOADED",
+        message: authorCapacity ? "ydoc-author-capacity" : "engine-store-busy",
         retry: "afterBackoff",
       },
       new Error("daemon response"),
@@ -2202,6 +2202,7 @@ describe("YdocLiveAdapter", () => {
       },
     };
     const settled: YdocSettleResult[] = [];
+    const settleErrors: unknown[] = [];
     const scheduler = settleScheduler();
     const provider = await openEngineYdocProviderSession({
       transport,
@@ -2211,7 +2212,7 @@ describe("YdocLiveAdapter", () => {
       contentKind: "plaintext",
       settleDebounceMs: 100,
       onRemoteUpdate: () => undefined,
-      onSettleError: () => undefined,
+      onSettleError: (error) => settleErrors.push(error),
       onSettled: (result) => {
         settled.push(result);
       },
@@ -2221,8 +2222,27 @@ describe("YdocLiveAdapter", () => {
       body.insert(0, text);
     });
     const journaled = provider.applyLocalUpdate(update);
-    return { provider, busy, settled, scheduler, journaled, methods };
+    return { provider, busy, settled, settleErrors, scheduler, journaled, methods };
   }
+
+
+  it("surfaces a persistent record capacity refusal through the settle error observer", async () => {
+    const { provider, busy, settled, settleErrors, scheduler, journaled } =
+      await openAgainstABusyJournal("typed while authors were full", 3, true);
+    await expect(journaled).rejects.toBe(busy);
+    expect(settleErrors).toEqual([]);
+    scheduler.fire();
+    await drain();
+    expect(settleErrors).toEqual([busy]);
+    expect(settled).toEqual([]);
+    expect(provider.doc.getText("plainText").toString()).toContain("typed while authors were full");
+    expect(scheduler.armed).toHaveLength(1);
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.content).toContain("typed while authors were full");
+    await provider.close({settle: false});
+  });
 
   it("sends the engine the state a busy journal write left it missing", async () => {
     // The journal write happens once, at applyLocalUpdate, and

@@ -6,6 +6,7 @@ afterEach(closeTestStorages);
 
 const RELAY_ORIGIN_PREFIXES = [SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX];
 const RELAY_AUTHORS = [
+  {kind: "human", humanId: "forged", onBehalfOf: "owner"},
   {kind: "public", principalId: "forged", grantId: "grant"},
   {kind: "named", userId: "forged", grantId: "grant", grantGeneration: 1},
   {kind: "link", grantId: "grant", grantGeneration: 1, principalId: "forged"},
@@ -37,8 +38,8 @@ describe("client log provenance", () => {
       expect(() => assertClientLogProvenance("device", [{opKind: "moment.append", payload: {authors: [agent, author]}}])).toThrow();
     }
   });
-  it("keeps neutral, person, and agent moments writable", () => {
-    expect(() => assertClientLogProvenance("device", [{opKind: "moment.append", payload: {}}, {opKind: "moment.append", payload: {authors: [{kind: "human", humanId: "ana"}, {kind: "agent", agentId: "agent", onBehalfOf: "owner"}]}}])).not.toThrow();
+  it("keeps neutral, agent, and automation moments writable", () => {
+    expect(() => assertClientLogProvenance("device", [{opKind: "moment.append", payload: {}}, {opKind: "moment.append", payload: {authors: [{kind: "automation", automationId: "collection:Tasks#stamp", depth: 1}, {kind: "agent", agentId: "agent", onBehalfOf: "owner"}]}}])).not.toThrow();
   });
   it("enforces the reservation and author boundary on owner and recipient uploads", async () => {
     const storage = await testStorage();

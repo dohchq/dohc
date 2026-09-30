@@ -19,7 +19,7 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
 // A client's moment names no author, or its own agent or automation. Only
 // the relay mints the others (public, named, and link), under these origins,
 // so an author kind a client may not stamp is refused whatever it is.
-const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation", "human"]);
+const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation"]);
 
 export function assertClientLogProvenance(originId: string, rawOps: unknown[]): void {
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
