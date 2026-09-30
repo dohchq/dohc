@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { getConfig } from "@testing-library/dom";
 import { describe, expect, it, vi } from "vitest";
 
@@ -35,7 +35,7 @@ describe("apps/desktop vitest setup", () => {
         await context.close();
       }
     `], {
-      cwd: fileURLToPath(new URL("../", import.meta.url)),
+      cwd: resolve(import.meta.dirname, ".."),
       encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, VITEST_MAX_WORKERS: "" },
     });
