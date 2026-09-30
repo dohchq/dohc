@@ -11,8 +11,7 @@ const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4
 const require = createRequire(import.meta.url);
 const PURE_INSPECTOR_TEST = "src/renderer/FileInspector.test.tsx";
 
-// e2e/ runs under Playwright (playwright.config.ts), never vitest.
-export default defineConfig({
+const common = {
   // Source-backed examples outside this package use the same React instance as their desktop tests.
   resolve: { alias: {
     react: dirname(require.resolve("react/package.json")),
@@ -20,30 +19,6 @@ export default defineConfig({
   } },
   test: {
     css: { include: [/[?&]raw(?:&|$)/] },
-    projects: [
-      {
-        extends: true,
-        test: {
-          name: "desktop",
-          include: ["src/**/*.test.{ts,tsx}"],
-          exclude: [...configDefaults.exclude, PURE_INSPECTOR_TEST],
-          // Renderer hit testing and waits, plus scratch-directory cleanup.
-          setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
-          globalSetup: ["./src/testGlobalSetup.ts"],
-        },
-      },
-      {
-        extends: true,
-        test: {
-          name: "file-inspector-helpers",
-          include: [PURE_INSPECTOR_TEST],
-          environment: "node",
-          setupFiles: [],
-          globalSetup: [],
-        },
-      },
-    ],
-    maxWorkers: WORKER_CAP,
     // A loaded machine stretches honest work: on a 24-process load the slowest
     // share-code test took 1.73 s and site-runner tests took up to 2.3 s.
     // vitest.setup.ts gives Testing Library waits 10 s to match.
@@ -58,5 +33,38 @@ export default defineConfig({
     // renderer tests using localStorage (theme.test.ts) fail. Disable node's
     // copy in the test workers; jsdom's localStorage takes over.
     execArgv: ["--no-experimental-webstorage"],
+  },
+};
+
+// e2e/ runs under Playwright (playwright.config.ts), never vitest.
+export default defineConfig({
+  ...common,
+  test: {
+    ...common.test,
+    // Keep the cap global so --maxWorkers also controls each inline project.
+    maxWorkers: WORKER_CAP,
+    projects: [
+      {
+        ...common,
+        test: {
+          ...common.test,
+          name: "desktop",
+          include: ["src/**/*.test.{ts,tsx}"],
+          exclude: [...configDefaults.exclude, PURE_INSPECTOR_TEST],
+          // Renderer hit testing and waits, plus scratch-directory cleanup.
+          setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
+          globalSetup: ["./src/testGlobalSetup.ts"],
+        },
+      },
+      {
+        ...common,
+        test: {
+          ...common.test,
+          name: "file-inspector-helpers",
+          include: [PURE_INSPECTOR_TEST],
+          environment: "node",
+        },
+      },
+    ],
   },
 });

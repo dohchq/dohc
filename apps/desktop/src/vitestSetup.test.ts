@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { getConfig } from "@testing-library/dom";
 import { describe, expect, it, vi } from "vitest";
 
@@ -17,6 +19,32 @@ import { describe, expect, it, vi } from "vitest";
 // Setup files run per test file, so the method being present here is the same
 // registration that puts it in every other file.
 describe("apps/desktop vitest setup", () => {
+  it("honors an explicit CLI worker limit in every resolved project", () => {
+    const output = execFileSync(process.execPath, ["--input-type=module", "--eval", `
+      import { createVitest, parseCLI } from "vitest/node";
+      const { options } = parseCLI("vitest run --maxWorkers=1");
+      const context = await createVitest("test", {
+        ...options, config: "./vitest.config.ts", watch: false,
+      });
+      try {
+        console.log(JSON.stringify(context.projects.map(project => ({
+          name: project.name,
+          maxWorkers: project.config.maxWorkers ?? context.config.maxWorkers,
+        }))));
+      } finally {
+        await context.close();
+      }
+    `], {
+      cwd: fileURLToPath(new URL("../", import.meta.url)),
+      encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, VITEST_MAX_WORKERS: "" },
+    });
+    expect(JSON.parse(output.trim().split(/\r?\n/u).at(-1)!)).toEqual([
+      { name: "desktop", maxWorkers: 1 },
+      { name: "file-inspector-helpers", maxWorkers: 1 },
+    ]);
+  });
+
   it("is registered, so jsdom has the document.elementFromPoint ProseMirror calls", () => {
     expect(typeof document.elementFromPoint).toBe("function");
   });
