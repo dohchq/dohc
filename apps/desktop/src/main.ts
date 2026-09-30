@@ -5263,6 +5263,9 @@ function registerIpcHandlers(): void {
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     namedAuthorLabel: (workspaceId, author) => rosterAuthorLabel(findWorkspace(workspaceId)?.shareRoster, author),
     automationAuthor, notifyRenderer,
+    // A shared view keeps no runs: its automations run on the owner's computer.
+    automationRunOnThisComputer: async (workspaceId, automationId, claimId) =>
+      !sharedViewOf(workspaceId) && (await collectionAutomationsOf(workspaceId)?.hasRun(automationId, claimId) ?? false),
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),

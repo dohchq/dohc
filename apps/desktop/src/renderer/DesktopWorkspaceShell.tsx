@@ -2344,13 +2344,14 @@ export function DesktopWorkspaceShell(props: {
   // the ⚡ panel on its runs, at the run it names. The page takes the ask once and clears it; the
   // counter keeps rising after a clear, so each ask is new to the panel.
   const [automationFocus, setAutomationFocus] = useState<
-    { collectionPath: string; automationId: string; run: string | null; seq: number } | null
+    { collectionPath: string; automationId: string; run: string | null; name: string | null; seq: number } | null
   >(null);
   const automationFocusSeq = useRef(0);
   // Main finds the Collection by its id, so a Collection that moved still
   // opens. Resolves to a sentence for the notice's row when it cannot open.
   const openAutomation = useCallback(
-    async (automationId: string, run: string | null): Promise<string | null> => {
+    // `name` is how the asker already names the automation, for the panel's title before its file is read.
+    async (automationId: string, run: string | null, name: string | null = null): Promise<string | null> => {
       const owner = workspaceId;
       const found = await bridge().findAutomationCollection({ workspaceId: owner, automationId });
       if (workspaceIdRef.current !== owner) return null;
@@ -2361,6 +2362,7 @@ export function DesktopWorkspaceShell(props: {
         collectionPath: found.collectionPath,
         automationId,
         run,
+        name,
         seq: automationFocusSeq.current,
       });
       return null;
@@ -5391,6 +5393,7 @@ export function DesktopWorkspaceShell(props: {
                 knownMarkdownFiles={markdownWikilinkFiles}
                 onButtonError={reportShellError}
                 onButtonNotice={showSuccessNotice}
+                onOpenAutomationRun={openAutomation}
                 readOnly={
                   (!!shareView && !shareViewDocumentsWritable) ||
                   isMountedSharePath(tabPath)

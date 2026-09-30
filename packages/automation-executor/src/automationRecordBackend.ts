@@ -171,8 +171,10 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     key: { claimId: claim.claimId, hash: state.keySeed },
     ...(origin.kind === "dataset" && !origin.generated ? { recordKeys: ["id"] } : {}),
   };
+  // Record history names the automation as it was called when it ran, and opens this run.
   const author: ChangeAuthor = { kind: "automation", automationId: claim.automationId, depth: claim.depth + 1,
-    ...(source.writeAuthorId === null ? {} : { onBehalfOf: source.writeAuthorId }) };
+    ...(source.writeAuthorId === null ? {} : { onBehalfOf: source.writeAuthorId }),
+    run: { claimId: claim.claimId, automationName: automation.name } };
   const ordered = new Map(stepsInOrder(automation).map(({ ordinal, step }) => [ordinal, step]));
   const pathOf = (ordinal: number) => inventory.destinations.get(ordinal) ?? collection.path;
   const association = (path: string) => {

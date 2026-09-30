@@ -65,6 +65,7 @@ const results = {
         onBehalfOf: "local",
         depth: 0,
         recordedAtMs: 20,
+        automationRun: null,
       },
     ],
   },

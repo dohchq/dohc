@@ -851,7 +851,7 @@ describe("Collection automations", () => {
     ]);
     // Nobody is known to have made the change, so the run's writes name nobody.
     expect(w.journaled[0]).toMatchObject({ actorOriginId: "collection:Tasks#stamp" });
-    expect(w.journaled[0]?.attribution).toEqual({ actorKind: "automation", depth: 1 });
+    expect(w.journaled[0]?.attribution).toEqual({ actorKind: "automation", depth: 1, run: { claimId: claim.claimId, automationName: "Stamp" } });
   });
 
   it("gives a record change's person to formulas and to the run's own writes", async () => {
@@ -874,11 +874,12 @@ describe("Collection automations", () => {
     for (const claim of claims) await w.settledClaim(claim);
     expect(claims.map((claim) => claim.state)).toEqual(["done", "done", "done", "done"]);
     expect([typed, byAgent, byFile].map((record) => w.fieldsOf(record).Note)).toEqual(["Ice", "Ice", "nobody"]);
+    const run = (index: number) => ({ claimId: claims[index]!.claimId, automationName: "Note" });
     expect(w.journaled.map((entry) => entry.attribution)).toEqual([
-      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1 },
-      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1 },
-      { actorKind: "automation", depth: 1 },
-      { actorKind: "automation", onBehalfOf: "user-ana", depth: 1 },
+      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1, run: run(0) },
+      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1, run: run(1) },
+      { actorKind: "automation", depth: 1, run: run(2) },
+      { actorKind: "automation", onBehalfOf: "user-ana", depth: 1, run: run(3) },
     ]);
   });
 
@@ -1447,6 +1448,7 @@ describe("Collection automations", () => {
     // record's claim carries the automation and never triggers itself.
     expect(w.authored).toEqual([{ path: added.path, author: {
       kind: "automation", automationId: "collection:Tasks#sweep", depth: 1,
+      run: { claimId: claim.claimId, automationName: "Sweep" },
     } }]);
     const [run] = (await w.executor.runs("collection:Tasks#sweep")).runs;
     expect(run!.writes).toContainEqual({ kind: "field", recordId: sibling.id, path: sibling.path, field: "Points", before: 5, after: 10 });
@@ -4165,7 +4167,7 @@ describe("Collection automations that a Group message starts", () => {
     expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
     // The record it adds is made for the message's author, so its claims name them.
     expect(w.authored.map((entry) => entry.author)).toEqual([
-      { kind: "automation", automationId: "collection:Tasks#task", onBehalfOf: "user-ana", depth: 1 },
+      { kind: "automation", automationId: "collection:Tasks#task", onBehalfOf: "user-ana", depth: 1, run: { claimId: claim.claimId, automationName: "Add a task" } },
     ]);
   });
 
