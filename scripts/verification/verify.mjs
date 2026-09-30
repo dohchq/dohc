@@ -21,10 +21,13 @@ export function desktopProofCommand(args, { platform = process.platform, env = p
     : command;
 }
 
-function treeState() {
-  return readTreeState(
+function createTreeReader() {
+  let headLogPath = null;
+  try { headLogPath = resolve(repoRoot, git(["rev-parse", "--git-path", "logs/HEAD"])); } catch {}
+  // The checkout stays in place during a run; its log can still disappear.
+  return () => readTreeState(
     (command) => { try { return git(command.split(" ").slice(1)); } catch { return null; } },
-    () => { try { return existsSync(resolve(repoRoot, git(["rev-parse", "--git-path", "logs/HEAD"]))); } catch { return null; } },
+    () => headLogPath === null ? null : existsSync(headLogPath),
   );
 }
 function passedSpecTitles(suites = []) {
@@ -155,6 +158,7 @@ export async function verify(args) {
     return { baseCommit, files, workflow, requiredGates, gates, javascript };
   }
   if (mode === "plan") { const {baseCommit, files, gates, javascript} = selection(); console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2)); return; }
+  const treeState = createTreeReader();
   const output = join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
   const report = { version: 1, mode, scope: job ?? "all", full, root: repoRoot, base, ...total, steps: [], timings: [], treeReadings: [], output, verdict: "RUNNING" };
