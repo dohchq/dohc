@@ -1314,6 +1314,38 @@ it("refuses a reused idempotency key with other content, and none of that conten
   await session.close({ settle: false });
 });
 
+it("reports exactly one notice when local typing reuses a key with other content", async () => {
+  const notices = vi.fn();
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onEditRefused: notices,
+  });
+  await keyedWrite(session, "First attempt.");
+  await session.settleNow();
+
+  const editor = new Y.Doc();
+  Y.applyUpdate(editor, Y.encodeStateAsUpdate(session.doc));
+  const before = Y.encodeStateVector(editor);
+  typeIntoBody(editor, "Refused typing.");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+  await session.settleNow();
+
+  expect(captureErrors).toEqual([`Y.Doc local update of ${PATH}`]);
+  expect(notices).toHaveBeenCalledTimes(1);
+  expect(notices).toHaveBeenCalledWith("claim/1/0", expect.stringContaining("Use Save copy"));
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused typing.");
+  expect(journalMarkdown()).not.toContain("Refused typing.");
+  expect(await readFile(join(root, PATH), "utf8")).not.toContain("Refused typing.");
+  await session.settleNow();
+  await session.close({ settle: false });
+  expect(captureErrors).toHaveLength(1);
+  expect(notices).toHaveBeenCalledTimes(1);
+  editor.destroy();
+});
+
 it("refuses a reused key that a busy store first turned away, and never resends it without the key", async () => {
   const session = await capture.openYDocSession({
     path: PATH,

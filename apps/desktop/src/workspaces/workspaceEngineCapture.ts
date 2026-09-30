@@ -2115,6 +2115,7 @@ export function createWorkspaceEngineCapture(
     type PendingRecord = {
       readonly update: Uint8Array;
       readonly options: NonNullable<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]>;
+      readonly editorVisible: boolean;
       acknowledged: boolean;
       sent: boolean;
       uncertainFailures: number;
@@ -2147,15 +2148,20 @@ export function createWorkspaceEngineCapture(
       if (record.refusal !== null) return;
       record.refusal = { error };
       const refusedUpdates = [record.update];
+      const refusedEditorRecords = record.editorVisible ? [record] : [];
       let later = false;
       for (const pending of pendingRecords) {
         if (pending === record) { later = true; continue; }
         if (!later || !refusedUpdates.some(update => ydocUpdateDependsOn(pending.update, update))) continue;
         pending.refusal = { error };
         refusedUpdates.push(pending.update);
+        if (pending.editorVisible) refusedEditorRecords.push(pending);
         removePendingRecord(pending);
       }
       removePendingRecord(record);
+      // Caller-confirmed writes report their own refusal. Only lost editor
+      // content, including dependent typing, needs a notice and recovery copy.
+      if (refusedEditorRecords.length === 0) return;
       const reason = error instanceof Error ? error.message : "";
       const explanation = reason.includes("pending-edits-limit")
         ? "Too many edits are waiting to save."
@@ -2168,10 +2174,10 @@ export function createWorkspaceEngineCapture(
             : unanswered
               ? "No answer after three attempts."
               : "dohc refused this edit.";
-      const what = refusedUpdates.length > 1 ? "edits" : "an edit";
+      const what = refusedEditorRecords.length > 1 ? "edits" : "an edit";
       const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices. Use Save copy on this file's recovery row.`;
       onError(`Y.Doc local update of ${input.path}`, new Error(message, { cause: error }));
-      input.onEditRefused?.(record.options.idempotencyKey ?? "", message);
+      input.onEditRefused?.(refusedEditorRecords[0]!.options.idempotencyKey ?? "", message);
     };
     const recordUpdateFailure = (record: PendingRecord, error: unknown): boolean => {
       if (isTransientEngineCause(error) || isUpdateBackoffCause(error)) {
@@ -2921,7 +2927,7 @@ export function createWorkspaceEngineCapture(
         // immutable original as the only main-side retained byte array.
         const update = confirmRecording ? new Uint8Array(decidedUpdate) : decidedUpdate;
         const record: PendingRecord = {
-          update, options: capturedOptions,
+          update, options: capturedOptions, editorVisible: !keyed,
           acknowledged: false, sent: false, uncertainFailures: 0,
           lastUncertainFailureAt: null, unanswered: null, refusal: null,
         };
@@ -3086,6 +3092,7 @@ export function createWorkspaceEngineCapture(
           const record: PendingRecord = {
             update, options: { ...structuredClone(applyOptions ?? {}),
               idempotencyKey: applyOptions?.idempotencyKey ?? createId() },
+            editorVisible: true,
             acknowledged: false, sent: false, uncertainFailures: 0,
             lastUncertainFailureAt: null, unanswered: null, refusal: null,
           };

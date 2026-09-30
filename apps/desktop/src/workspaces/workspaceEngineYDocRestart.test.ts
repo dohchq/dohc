@@ -2745,13 +2745,15 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
   expect((await session.settleNow()).content).toBe("Saved independent");
   expect(fixture.state.applyRefusals).toHaveLength(0);
   expect(fixture.state.journalKeys).toEqual(["independent"]);
-  expect(notices).toHaveBeenCalledTimes(1);
-  expect(notices.mock.calls[0]?.[0]).toBe("refused");
-  expect(notices.mock.calls[0]?.[1]).toContain("No answer after three attempts.");
-  expect(notices.mock.calls[0]?.[1]).not.toContain("dohc refused");
+  expect(notices).toHaveBeenCalledTimes(confirmed ? 0 : 1);
+  if (!confirmed) {
+    expect(notices.mock.calls[0]?.[0]).toBe("refused");
+    expect(notices.mock.calls[0]?.[1]).toContain("No answer after three attempts.");
+    expect(notices.mock.calls[0]?.[1]).not.toContain("dohc refused");
+  }
   expect(replacements).toHaveBeenCalled();
   await session.settleNow();
-  expect(notices).toHaveBeenCalledTimes(1);
+  expect(notices).toHaveBeenCalledTimes(confirmed ? 0 : 1);
   await session.close({ settle: false }); await capture.stop();
 });
 
@@ -2803,6 +2805,43 @@ it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s rep
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
   expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit." : "No answer after three attempts.");
   expect(fixture.state.journalKeys).toContain("other-client");
+  mirror.destroy(); await session.close({ settle: false }); await capture.stop();
+});
+
+it("reports dependent typing when a caller-confirmed original is refused during replay", async () => {
+  const fixture = await daemonDeathCapture("dohc-ydoc-caller-dependent-", "ydoc-caller-dependent");
+  const notices = vi.fn();
+  const errors = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-caller-dependent", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: errors,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: () => undefined, onEditRefused: notices,
+  });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, session.initialUpdate);
+  const original = keyedUpdate(mirror, "Caller write");
+  fixture.state.daemonAlive = false;
+  await expect(session.applyDecidedLocalUpdate(() => original, undefined, { idempotencyKey: "caller" }))
+    .rejects.toThrow("may have been recorded");
+  Y.applyUpdate(mirror, original);
+  session.applyLocalUpdate(keyedUpdate(mirror, " dependent typing"), undefined, { idempotencyKey: "typing" });
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  fixture.state.daemonAlive = true;
+  fixture.state.applyRefusals.push(new DaemonRefusalError({
+    code: "INVALID_PARAMS", message: "future-update-refusal", retry: "no",
+  }, undefined));
+  errors.mockClear();
+
+  expect((await session.settleNow()).content).toBe("");
+  expect(fixture.state.journalKeys).toEqual([]);
+  expect(notices).toHaveBeenCalledTimes(1);
+  expect(notices).toHaveBeenCalledWith("typing", expect.stringContaining("Use Save copy"));
+  expect(errors).toHaveBeenCalledTimes(1);
+  await session.settleNow();
+  expect(notices).toHaveBeenCalledTimes(1);
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
 });
 
@@ -2865,11 +2904,11 @@ it.each([
       if (replay) fixture.state.daemonAlive = false;
       else fixture.state.applyRefusals.push(refusal);
       const failedBytes = keyedUpdate(mirror, "refused");
-      Y.applyUpdate(mirror, failedBytes);
       if (confirmed) {
         await expect(session.applyDecidedLocalUpdate(() => failedBytes, undefined,
           { idempotencyKey: "refused-record" })).rejects.toThrow();
       } else {
+        Y.applyUpdate(mirror, failedBytes);
         session.applyLocalUpdate(failedBytes);
         if (!replay) typeInto(mirror, session, "dependent");
       }
@@ -2879,14 +2918,16 @@ it.each([
         fixture.state.applyRefusals.push(refusal);
       }
       await session.settleNow();
-      expect(notices).toHaveLength(1);
-      expect(notices[0]).toContain('dohc could not save an edit to "note.md"');
-      expect(notices[0]).not.toContain(reason);
-      expect(setAside.some(text => text.includes("refused"))).toBe(true);
+      expect(notices).toHaveLength(confirmed ? 0 : 1);
+      if (!confirmed) {
+        expect(notices[0]).toContain('dohc could not save an edit to "note.md"');
+        expect(notices[0]).not.toContain(reason);
+      }
+      expect(setAside.some(text => text.includes("refused"))).toBe(!confirmed);
       typeInto(mirror, session, "later");
       expect((await session.settleNow()).content).toBe("Saved later");
       expect(session.doc.getText("plainText").toString()).toBe("Saved later");
-      expect(notices).toHaveLength(1);
+      expect(notices).toHaveLength(confirmed ? 0 : 1);
       mirror.destroy();
       await session.close({ settle: false });
       await capture.stop();
