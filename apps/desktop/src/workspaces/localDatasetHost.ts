@@ -189,8 +189,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   }
   let supervisor: Awaited<ReturnType<typeof createDatasetSupervisor>> | undefined;
   try {
-    db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;
-      CREATE TABLE IF NOT EXISTS local_dataset_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),workspace_id TEXT NOT NULL) STRICT;
+    db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;");
+    transaction(() => {
+      db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),workspace_id TEXT NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS local_dataset_budget(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bytes INTEGER NOT NULL CHECK(bytes>=0)) STRICT;
       CREATE TABLE IF NOT EXISTS local_dataset_usage(dataset_id TEXT PRIMARY KEY,bytes INTEGER NOT NULL CHECK(bytes>=0)) STRICT;
       CREATE TABLE IF NOT EXISTS local_dataset_files(
@@ -199,7 +200,6 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         attached_revision INTEGER,storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
         PRIMARY KEY(workspace_id,dataset_id,file_id),UNIQUE(workspace_id,dataset_id,key)) STRICT;
       CREATE TABLE IF NOT EXISTS local_dataset_recovery_files(import_id TEXT NOT NULL,workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,file_id TEXT NOT NULL,key TEXT NOT NULL,metadata TEXT NOT NULL,content BLOB NOT NULL,created_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL,attached_revision INTEGER NOT NULL,storage_bytes INTEGER NOT NULL,PRIMARY KEY(import_id,file_id)) STRICT;`);
-    transaction(() => {
       db.prepare("INSERT OR IGNORE INTO local_dataset_identity VALUES(1,?)").run(workspaceId);
       if (db.prepare("SELECT workspace_id FROM local_dataset_identity WHERE singleton=1").get()!.workspace_id !== workspaceId) throw new Error("This Collection store belongs to another workspace.");
       db.prepare("INSERT OR IGNORE INTO local_dataset_budget VALUES(1,0)").run();
