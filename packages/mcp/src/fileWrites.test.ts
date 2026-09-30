@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
-import { createApp, FILE_WRITE_UNAVAILABLE_REASON, importData, writeWorkspaceFile, type ToolContext } from "./tools";
+import {
+  createApp, deleteWorkspacePath, FILE_DELETE_UNAVAILABLE_REASON, FILE_MOVE_UNAVAILABLE_REASON, FILE_WRITE_UNAVAILABLE_REASON,
+  importData, moveWorkspacePath, writeWorkspaceFile, type ToolContext,
+} from "./tools";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -68,5 +71,32 @@ describe("MCP authored file writes", () => {
     expect(request).toHaveBeenCalledOnce();
     expect(request.mock.calls[0]?.[0]).toMatchObject({ verb: "fileWrite", args: { agent: "Client", files: [{ path: "people.sqlite", createOnly: true }] } });
     expect(await readdir(ctx.root)).toEqual(["source.csv"]);
+  });
+});
+
+describe("MCP authored moves and deletes", () => {
+  it("refuses a missing endpoint and leaves the file where it was", async () => {
+    const ctx = await context();
+    await writeFile(join(ctx.root, "note.txt"), "original");
+    expect(await moveWorkspacePath(ctx, { fromPath: "note.txt", toPath: "moved.txt" })).toEqual({ ok: false, reason: FILE_MOVE_UNAVAILABLE_REASON });
+    expect(await deleteWorkspacePath(ctx, { path: "note.txt" })).toEqual({ ok: false, reason: FILE_DELETE_UNAVAILABLE_REASON });
+    expect(await readdir(ctx.root)).toEqual(["note.txt"]);
+  });
+
+  it("sends each change once under the agent's name and passes the desktop's refusal and partial delete through", async () => {
+    const ctx = await context();
+    await mkdir(join(ctx.root, "notes"));
+    const moved = { ok: false, reason: "History cannot record notes/.env. Choose a path with no secret files and none that files.toml excludes.", path: "notes" };
+    const deleted = { ok: false, reason: "History could not record the delete of notes/b.txt.", path: "notes/b.txt", deleted: ["notes/a.txt"] };
+    const request = vi.fn<NonNullable<ToolContext["request"]>>(async sent => sent.verb === "fileMove" ? moved : deleted);
+    ctx.request = request;
+    expect(await moveWorkspacePath(ctx, { fromPath: "notes", toPath: "archive/notes", overwrite: true }, "Client")).toEqual(moved);
+    expect(await deleteWorkspacePath(ctx, { path: "notes" })).toEqual(deleted);
+    expect(request.mock.calls.map(([sent]) => sent)).toMatchObject([
+      { verb: "fileMove", args: { actor: "agent", agent: "Client", fromPath: "notes", toPath: "archive/notes", overwrite: true, requestId: expect.any(String) } },
+      { verb: "fileDelete", args: { actor: "agent", path: "notes", requestId: expect.any(String) } },
+    ]);
+    expect(request.mock.calls[1]?.[0].args).not.toHaveProperty("agent", expect.anything());
+    expect(await readdir(ctx.root)).toEqual(["notes"]);
   });
 });

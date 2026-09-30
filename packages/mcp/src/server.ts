@@ -318,7 +318,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file/folder. History records this change without your agent name.",
+        "Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. With overwrite, History records the destination's delete, and it goes to the system trash, or stays in the workspace's .dohc/trash when the system refuses. A failed move puts everything back it can. `deleted` lists the files History then records as deleted: replaced destination files it could not restore, and moved files that something new kept from both paths. Each stays in the workspace's .dohc/trash, and Restore in History brings it back.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -326,20 +326,20 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         summary: z.string().max(500).optional(),
       },
     },
-    async (args) => text(await moveWorkspacePath(ctx, args)),
+    async (args) => text(await moveWorkspacePath(ctx, args, agentName())),
   );
 
   registerWrite(
     "dohc_delete_path",
     {
       description:
-        "Delete a visible workspace file/folder by moving it to dohc's recoverable trash. History records this delete without your agent name.",
+        "Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. The file or folder also goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),
       },
     },
-    async (args) => text(await deleteWorkspacePath(ctx, args)),
+    async (args) => text(await deleteWorkspacePath(ctx, args, agentName())),
   );
 
   server.registerTool(

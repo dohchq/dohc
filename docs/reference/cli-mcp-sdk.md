@@ -183,7 +183,7 @@ Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the 
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file/folder. History records this change without your agent name.
+Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. With overwrite, History records the destination's delete, and it goes to the system trash, or stays in the workspace's .dohc/trash when the system refuses. A failed move puts everything back it can. `deleted` lists the files History then records as deleted: replaced destination files it could not restore, and moved files that something new kept from both paths. Each stays in the workspace's .dohc/trash, and Restore in History brings it back.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -192,18 +192,18 @@ Changes the workspace, so a shared view does not offer it.
 - `overwrite`: `boolean`
 - `summary`: `string`
 
-Returns `{ ok: true, fromPath, toPath }`.
+Returns `{ ok: true, fromPath, toPath }`. Uses the desktop `fileMove` verb. On failure: `{ ok: false, reason, path?, deleted? }`. `deleted` lists files History records as deleted after the failed move: replaced destination files it could not restore, and moved files it could not put at either path. They stay in the workspace's .dohc/trash.
 
 ### `dohc_delete_path`
 
-Delete a visible workspace file/folder by moving it to dohc's recoverable trash. History records this delete without your agent name.
+Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. The file or folder also goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `path`: `string`. Required.
 - `summary`: `string`
 
-Returns `{ ok: true, path, trashed: true }`.
+Returns `{ ok: true, path, trashed: true }`. Uses the desktop `fileDelete` verb. On failure: `{ ok: false, reason, deleted?, path? }`. `deleted` lists the files a folder delete already deleted before History refused `path`.
 
 ### `dohc_detect_apps`
 
