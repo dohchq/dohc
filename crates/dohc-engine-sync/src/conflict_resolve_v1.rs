@@ -7050,7 +7050,7 @@ mod tests {
             MAX_PAYLOAD_JSON_BYTES - built.validated.encoded_payload_bytes
         );
         assert_eq!(built.validated.encoded_payload_bytes, 218_319);
-        assert_eq!(shadow_sizes, [216_040, 208_719]);
+        assert_eq!(shadow_sizes, [216_043, 208_722]);
         assert_eq!(
             MAX_PAYLOAD_JSON_BYTES - built.validated.encoded_payload_bytes,
             43_825

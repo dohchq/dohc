@@ -1601,7 +1601,7 @@ pub(super) fn ydoc_open_state_on_store(
         doc_cache.remove(&key);
         let cleared = store.write_with(&NoFaults, |tx| {
             dohc_engine_collab::author_coverage::reset_in(tx, &key, false)
-                .map_err(|error| StorageError::persist_public(error))?;
+                .map_err(StorageError::persist_public)?;
             tx.execute(
                 "DELETE FROM ydoc_updates                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                 params![key.workspace_id, key.version_id, key.object_id],

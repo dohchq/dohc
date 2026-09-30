@@ -44,7 +44,7 @@ pub async fn call(
             request(id, method, Some(handle.clone()), params),
         )
         .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+        .unwrap_or_else(|error| panic!("{method} request {id} failed: {error:?}"))
         .result
 }
 

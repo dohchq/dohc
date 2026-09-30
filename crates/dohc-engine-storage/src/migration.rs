@@ -3203,7 +3203,7 @@ mod tests {
         let dir = tempdir();
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
-        let before = BASELINE_MIGRATIONS.len() - 1;
+        let before = migration_index("v2-materialization-text-blobs");
         assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 24);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at, kind) VALUES ('before-upgrade', 'fingerprint', 7, 3, 'versioned')", []).unwrap();
@@ -3408,6 +3408,13 @@ mod tests {
             .position(|migration| migration.id == "v2-ydoc-live-edit-authors")
             .expect("the live edit author migration ships");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'Main', 'main', 1);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES ('ws', 'object', 1);
+             INSERT INTO blobs (sha256, byte_length, text) VALUES ('sha', 1, 'x');",
+        ).unwrap();
         let agent = r#"{"kind":"agent","agentId":"runner","onBehalfOf":"local"}"#;
         for (order, author) in [(1, Some(agent)), (2, None)] {
             conn.execute(
