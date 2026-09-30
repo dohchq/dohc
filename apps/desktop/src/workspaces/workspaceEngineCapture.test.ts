@@ -258,16 +258,16 @@ function failableLoopback(match: (request: Request) => boolean = () => true): {
   return { loopback, state };
 }
 
-// The daemon-path equivalent of readEngineMomentAuthors: the author each
-// recorded moment carries, oldest first, with null for actor-neutral.
+// The authors each recorded moment carries, oldest first, with null for
+// actor-neutral.
 async function liveMomentAuthors(
   engine: WorkspaceEngineCapture,
-): Promise<Array<MomentAuthor | null>> {
+): Promise<Array<MomentAuthor[] | null>> {
   const page = await engine.listMoments({ limit: 500 });
   return [...page.moments]
     .reverse()
     .filter((moment) => !moment.protected)
-    .map((moment) => moment.author ?? null);
+    .map((moment) => moment.authors ?? null);
 }
 
 describe("workspaceEngineCapture batch capture", () => {
@@ -1016,7 +1016,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     await store.renameTextFile({workspaceId:WORKSPACE_ID,versionId:"main",fromPath:created.snapshot.path,toPath:"responses/moved.md",metadata:{origin:"api"}});
     await write(root,"responses/moved.md","response");
@@ -1049,7 +1049,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     await write(root,"responses/accepted-a.md","response");
     const engine=capture(root,{store,rustEngineSessions:sessions});
@@ -1071,7 +1071,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
     const engine=capture(root,{store,rustEngineSessions:sessions});
@@ -1105,7 +1105,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     await store.renameTextFile({workspaceId:WORKSPACE_ID,versionId:"main",fromPath:created.snapshot.path,toPath:"responses/moved.md",metadata:{origin:"api"}});
     await write(root,"responses/moved.md","response");
@@ -1132,7 +1132,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const getMoment=store.getMoment.bind(store);
     vi.spyOn(store,"getMoment").mockImplementation(async input=>{
       const moment=await getMoment(input);
-      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+      return moment?.id===created.moment.id?{...moment,authors:[{kind:"public",principalId:"public-a",grantId:"grant"}]}:moment;
     });
     expect(await engine.undoAcceptedAppResponse(selection)).toEqual({status:"conflict"});
     expect(await readFile(join(root,created.snapshot.path),"utf8")).toBe("disk edit");
@@ -2738,7 +2738,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     await engine.writeAuthoredTextFile(join(root, "output.txt"), "Written by an agent\n", author);
 
     expect(await readFile(join(root, "output.txt"), "utf8")).toBe("Written by an agent\n");
-    expect(await liveMomentAuthors(engine)).toEqual([author]);
+    expect(await liveMomentAuthors(engine)).toEqual([[author]]);
     await engine.stop();
   });
 
@@ -2757,7 +2757,7 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     await engine.writeAuthoredTextFile(target, "version: 1\nautomations: []\n", author, { expectedContentHash: hash("version: 1\n") });
     expect(await readFile(target, "utf8")).toBe("version: 1\nautomations: []\n");
-    expect(await liveMomentAuthors(engine)).toContainEqual(author);
+    expect(await liveMomentAuthors(engine)).toContainEqual([author]);
     await engine.stop();
   });
 

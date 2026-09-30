@@ -12,17 +12,28 @@ describe("moment author results", () => {
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },
+    { kind: "human", humanId: "ada" },
   ])("keeps a $kind author without a declared principal", (author) => {
-    const result = {
-      changes: [{
-        id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
-        path: "tasks/a.md", versionId: "main", fileCount: 1, author,
-      }],
-      count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
-    };
+    const result = momentsResult([author]);
     expect(parseCliResult("moments", result)).toEqual(result);
   });
+
+  it("keeps every author of a change and refuses an empty list", () => {
+    const result = momentsResult([{ kind: "human", humanId: "ada" }, { kind: "agent", agentId: "agent" }]);
+    expect(parseCliResult("moments", result)).toEqual(result);
+    expect(() => parseCliResult("moments", momentsResult([]))).toThrow();
+  });
 });
+
+function momentsResult(authors: unknown[]) {
+  return {
+    changes: [{
+      id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
+      path: "tasks/a.md", versionId: "main", fileCount: 1, authors,
+    }],
+    count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
+  };
+}
 
 function request(verb: string, args: Record<string, unknown>) {
   return {

@@ -32,8 +32,11 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[]): 
     const op = raw as Record<string, unknown>;
     if (op.opKind !== "moment.append") continue;
     const payload = op.payload as Record<string, unknown> | null;
-    const author = payload?.author as Record<string, unknown> | null;
-    if (author?.kind === "public" || author?.kind === "named") throw relayError("authorship_mismatch");
+    const authors = payload?.authors;
+    if (Array.isArray(authors) && authors.some((author: unknown) => {
+      const kind = (author as Record<string, unknown> | null)?.kind;
+      return kind === "public" || kind === "named";
+    })) throw relayError("authorship_mismatch");
   }
 }
 

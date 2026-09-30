@@ -478,7 +478,7 @@ function rawChatMessage(
 function rawMomentSummary(
   moment: Pick<
     VersionedTextMomentSummary,
-    "id" | "recordedAtMs" | "operation" | "path" | "versionId" | "metadata" | "author"
+    "id" | "recordedAtMs" | "operation" | "path" | "versionId" | "metadata" | "authors"
   >,
   includeFiles: boolean,
 ) {
@@ -489,7 +489,7 @@ function rawMomentSummary(
     operation: moment.operation,
     path: moment.path,
     versionId: moment.versionId,
-    ...(moment.author ? { author: moment.author } : {}),
+    ...(moment.authors ? { authors: moment.authors } : {}),
     fileCount: 1 as const,
     ...(includeFiles
       ? { files: [{ path: moment.path, operation: moment.operation }] }

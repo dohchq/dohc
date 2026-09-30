@@ -234,7 +234,7 @@ describe("direct writes to a Collection's own files", () => {
       payloadAfterContentKind: "text",
       beforePresent: "present",
       beforeLatestMomentId: r.owner.moments.get(`${PACKING}/collection.yaml`),
-      author: { kind: "named", userId: RECIPIENT, grantId: r.grantId, grantGeneration: 1 },
+      authors: [{ kind: "named", userId: RECIPIENT, grantId: r.grantId, grantGeneration: 1 }],
     });
     expect(JSON.stringify(moment!.payload)).not.toContain("@");
   });
@@ -513,7 +513,7 @@ describe("round 1 of review", () => {
           momentId: "forged", versionId: "main", objectId: "object-forged", path: "trip/forged.md", recordedAtMs: 1,
           operation: "write", payloadBeforeBlobSha256: null, payloadBeforePath: null,
           payloadAfterBlobSha256: sha256("forged"), payloadAfterPath: "trip/forged.md", payloadAfterContentKind: "text",
-          metadata: { origin: "user" }, beforePresent: "null", ...(author ? { author } : {}),
+          metadata: { origin: "user" }, beforePresent: "null", ...(author ? { authors: [author] } : {}),
         },
       }],
     })));

@@ -2569,6 +2569,25 @@ CREATE INDEX materialization_displacements_state
     ON materialization_displacements(state, job_id);
 ";
 
+/// Live edits keep their authors. A moment's `author_json` becomes a list
+/// with one entry per author, so each stored single author becomes a list of
+/// one; NULL stays NULL. A lineage's creator author is a moment author list
+/// too. `pending_authors_json` holds the authors of updates compaction folded
+/// before a settle covered them. `settle_prior_update_seq` holds the
+/// boundary one unresolved settle replaced: -1 when that boundary was NULL,
+/// and NULL when no settle is unresolved.
+const V2_YDOC_LIVE_EDIT_AUTHORS_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN pending_authors_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(pending_authors_json) AND json_type(pending_authors_json) = 'array');
+ALTER TABLE ydoc_docs ADD COLUMN settle_prior_update_seq INTEGER
+    CHECK (settle_prior_update_seq IS NULL OR settle_prior_update_seq >= -1);
+UPDATE moments SET author_json = json_array(json(author_json))
+    WHERE author_json IS NOT NULL AND json_valid(author_json)
+      AND json_type(author_json) = 'object';
+UPDATE ydoc_docs SET creator_author_json = json_array(json(creator_author_json))
+    WHERE creator_author_json IS NOT NULL AND json_type(creator_author_json) = 'object';
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2687,6 +2706,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 20,
         id: "v2-materialization-displacements",
         sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
+        sets_user_version: None,
+    },
+    // Ordinals 21 to 24 are reserved by other changes.
+    Migration {
+        ordinal: 25,
+        id: "v2-ydoc-live-edit-authors",
+        sql: V2_YDOC_LIVE_EDIT_AUTHORS_DDL,
         sets_user_version: None,
     },
 ];
@@ -3026,6 +3052,10 @@ mod tests {
                 "v2-materialization-displacements",
                 "2887eaf2ca3af9e0361b7dce143eddaf80e94c60dfaf46bcb2b29443c735a36b",
             ),
+            (
+                "v2-ydoc-live-edit-authors",
+                "f4fdc3aed10824852d0ecbf3ad16b8510dcc78fff91b5b508c3d036570b6788f",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3092,6 +3122,72 @@ mod tests {
             conn.execute("UPDATE sync_identity SET claim_state='unexpected'", [])
                 .is_err()
         );
+    }
+
+    /// A stored single author becomes a list of one, NULL history stays NULL,
+    /// and every lineage starts with no pending authors and no unresolved
+    /// settle.
+    #[test]
+    fn live_edit_author_migration_turns_single_authors_into_lists() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-ydoc-live-edit-authors")
+            .expect("the live edit author migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let agent = r#"{"kind":"agent","agentId":"runner","onBehalfOf":"local"}"#;
+        for (order, author) in [(1, Some(agent)), (2, None)] {
+            conn.execute(
+                "INSERT INTO moments (workspace_id, moment_order, moment_id, version_id, \
+                     object_id, path, recorded_at_ms, operation, after_blob_sha256, \
+                     before_present, metadata_origin, author_json) \
+                 VALUES ('ws', ?1, 'moment-' || ?1, 'main', 'object', 'a.md', 1, 'write', \
+                         'sha', 0, 'api', ?2)",
+                rusqlite::params![order, author],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO ydoc_docs (workspace_id, version_id, object_id, updated_at_ms, \
+                 creator_author_json) VALUES ('ws', 'main', 'object', 1, ?1)",
+            [agent],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+
+        let authors: Vec<Option<String>> = conn
+            .prepare("SELECT author_json FROM moments ORDER BY moment_order")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let list = format!("[{agent}]");
+        assert_eq!(authors, vec![Some(list.clone()), None]);
+        let doc: (Option<String>, String, Option<i64>) = conn
+            .query_row(
+                "SELECT creator_author_json, pending_authors_json, settle_prior_update_seq \
+                 FROM ydoc_docs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(doc, (Some(list), "[]".to_owned(), None));
+        assert!(
+            conn.execute("UPDATE ydoc_docs SET pending_authors_json = '{}'", [])
+                .is_err(),
+            "pending authors are a list"
+        );
+        assert!(
+            conn.execute("UPDATE ydoc_docs SET settle_prior_update_seq = -2", [])
+                .is_err(),
+            "-1 is the only sentinel"
+        );
+        conn.execute("UPDATE ydoc_docs SET settle_prior_update_seq = -1", [])
+            .expect("-1 records a prior NULL boundary");
     }
 
     /// The shipped list is well-formed. `validate_migration_order` runs before

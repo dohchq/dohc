@@ -1373,28 +1373,41 @@ pub(crate) fn validate_moment_metadata(
             observed_bytes: author_json.len(),
         });
     }
-    let Ok(author) = serde_json::from_str::<serde_json::Value>(author_json) else {
-        return Ok(());
-    };
-    let Some(author) = author.as_object() else {
-        return Ok(());
-    };
-    for field in [
-        "agentId",
-        "onBehalfOf",
-        "agentRunId",
-        "principalId",
-        "grantId",
-    ] {
-        let Some(value) = author.get(field).and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if value.len() > MAX_AUTHOR_FIELD_BYTES {
-            return Err(DomainError::PayloadTooLarge {
-                constraint: "MAX_AUTHOR_FIELD_BYTES",
-                limit_bytes: MAX_AUTHOR_FIELD_BYTES,
-                observed_bytes: value.len(),
+    // A moment records its authors as a nonempty list of objects; a moment
+    // that names none records NULL.
+    let authors = match serde_json::from_str::<serde_json::Value>(author_json) {
+        Ok(serde_json::Value::Array(authors)) if !authors.is_empty() => authors,
+        _ => {
+            return Err(DomainError::InvalidInput {
+                reason: "moment authors must be a nonempty list",
             });
+        }
+    };
+    for author in &authors {
+        let Some(author) = author.as_object() else {
+            return Err(DomainError::InvalidInput {
+                reason: "moment authors must be a nonempty list",
+            });
+        };
+        for field in [
+            "agentId",
+            "automationId",
+            "humanId",
+            "onBehalfOf",
+            "agentRunId",
+            "principalId",
+            "grantId",
+        ] {
+            let Some(value) = author.get(field).and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if value.len() > MAX_AUTHOR_FIELD_BYTES {
+                return Err(DomainError::PayloadTooLarge {
+                    constraint: "MAX_AUTHOR_FIELD_BYTES",
+                    limit_bytes: MAX_AUTHOR_FIELD_BYTES,
+                    observed_bytes: value.len(),
+                });
+            }
         }
     }
     Ok(())

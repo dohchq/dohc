@@ -15,7 +15,7 @@ use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 use crate::collections::{
     ChangeActorKind, CollectionFieldChangeFact, CollectionRecordApplyFacts,
     CollectionRecordLifecycle, CollectionRecordLifecycleKind, field_fact_value,
-    indexed_record_fields, moment_author_attribution, parent_path,
+    indexed_record_fields, moment_author_attribution, moment_author_depth, parent_path,
 };
 use crate::error::DomainError;
 use dohc_engine_storage::{
@@ -2161,8 +2161,8 @@ fn moment_is_local(
     .map_err(DomainError::sql_corrupt)
 }
 
-/// A moment's author as a claim names it, with the chain depth it declared
-/// ([`moment_author_attribution`]).
+/// A moment's author as a claim names it ([`moment_author_attribution`]),
+/// with the deepest chain its authors declared ([`moment_author_depth`]).
 fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (AutomationChange, u32) {
     let (author_origin_id, attribution) = moment_author_attribution(author_json);
     let change = AutomationChange {
@@ -2175,10 +2175,7 @@ fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (Auto
             .as_ref()
             .and_then(|attribution| attribution.on_behalf_of.clone()),
     };
-    (
-        change,
-        attribution.map_or(0, |attribution| attribution.depth),
-    )
+    (change, moment_author_depth(author_json))
 }
 
 /// Whether any automation wants removed records, so reconcile reads a

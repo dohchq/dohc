@@ -310,7 +310,7 @@ mod tests {
             text: "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nBody".into(),
             moment_id: "created".into(), metadata_origin: "api".into(),
             metadata_summary: None, metadata_correlation_id: None,
-            author_json: Some(r#"{"kind":"automation","automationId":"collection:tasks#create","onBehalfOf":"local","depth":2}"#.into()),
+            author_json: Some(r#"[{"kind":"automation","automationId":"collection:tasks#create","onBehalfOf":"local","depth":2}]"#.into()),
             now_ms: 2, request_id: Some("create-request".into()),
         }
     }

@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod author_coverage;
 pub mod canonical_json;
 mod doc_cache;
 pub mod durable;

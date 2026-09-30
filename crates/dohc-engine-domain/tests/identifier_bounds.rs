@@ -136,11 +136,11 @@ fn moment_metadata_bounds_clear_measured_agent_identifiers_and_report_overruns()
 
     input.metadata_summary = None;
     input.author_json = Some(
-        serde_json::json!({
+        serde_json::json!([{
             "kind": "agent",
             "agentId": "a".repeat(MAX_AUTHOR_FIELD_BYTES + 1),
             "onBehalfOf": "local",
-        })
+        }])
         .to_string(),
     );
     let error = VersionedTextStore::new(&mut store)
@@ -199,7 +199,7 @@ fn an_over_large_author_json_is_refused_with_its_measurements() {
             .as_str()
             .is_some_and(|field| field.len() < MAX_AUTHOR_FIELD_BYTES)
     }));
-    let author_json = serde_json::Value::Object(author).to_string();
+    let author_json = serde_json::json!([author]).to_string();
     assert!(author_json.len() > MAX_AUTHOR_JSON_BYTES);
 
     let scratch = ScratchDir::new().expect("scratch");

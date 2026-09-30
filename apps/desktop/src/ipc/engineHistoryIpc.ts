@@ -17,7 +17,7 @@ import type {
 import { ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 
-type MomentAuthor = NonNullable<VersionedTextMomentSummary["author"]>;
+type MomentAuthor = NonNullable<VersionedTextMomentSummary["authors"]>[number];
 
 // Main supplies how an author reads. An agent follows the display-name rule
 // the chat rail uses (onBehalfOf "local" -> the cloud email or "You";
@@ -58,11 +58,14 @@ export async function listEngineMomentsForIpc(
 function engineMomentBaseForIpc(
   moment: Pick<
     WorkspaceEngineMomentSummary,
-    "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata" | "author"
+    "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata" | "authors"
   >,
   names: EngineMomentAuthorNames,
 ) {
-  const agentAuthorName = moment.author?.kind === "agent" ? names.agent(moment.author) : undefined;
+  // The record names one author. A moment with several waits for History's
+  // author list.
+  const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
+  const agentAuthorName = author?.kind === "agent" ? names.agent(author) : undefined;
   return {
     id: moment.id,
     versionId: moment.versionId,
@@ -73,10 +76,10 @@ function engineMomentBaseForIpc(
     ...(agentAuthorName !== undefined
       ? { agentAuthorName }
       : {}),
-    ...(moment.author?.kind === "public" ? { publicAuthor: moment.author } : {}),
-    ...automationAuthorOf(moment.author, names),
-    ...(moment.author?.kind === "named"
-      ? { namedAuthor: { userId: moment.author.userId, label: names.named(moment.author) } }
+    ...(author?.kind === "public" ? { publicAuthor: author } : {}),
+    ...automationAuthorOf(author, names),
+    ...(author?.kind === "named"
+      ? { namedAuthor: { userId: author.userId, label: names.named(author) } }
       : {}),
     ...(moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }

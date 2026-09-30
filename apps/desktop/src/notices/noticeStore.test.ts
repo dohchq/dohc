@@ -1182,7 +1182,7 @@ describe("automation notices reach the people involved", () => {
       id, workspaceId: WORKSPACE, versionId: "main", objectId: "object-1", path: PATH, recordedAtMs: 1, operation: "write",
       payload: { before: before === null ? null : { path: PATH, text: before }, after: { path: PATH, text: after } },
       metadata: { origin: "local-file" },
-      ...(author ? { author } : {}),
+      ...(author ? { authors: [author] } : {}),
     });
     const ana: MomentAuthor = { kind: "named", userId: "ana", grantId: "grant-0", grantGeneration: 1 };
     const dohc: MomentAuthor = { kind: "automation", automationId: AUTOMATION, depth: 1 };

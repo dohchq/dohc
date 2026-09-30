@@ -3034,7 +3034,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         // `invalid-metadata` for a malformed author, exactly as the daemon
         // refuses the request before mutating anything.
         const author = this.validatedAuthorValue(params);
-        return author === undefined ? {} : { author };
+        return author === undefined ? {} : { authors: [author] };
       })(),
     };
   }
@@ -3076,7 +3076,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: after.metadataOrigin,
       // Supplied through `metadata` by the write paths that carry one (see
       // momentMetadataFields); absent means actor-neutral, never undefined.
-      author: (metadata.author as MomentRecord["author"] | undefined) ?? null,
+      authors: (metadata.authors as MomentRecord["authors"] | undefined) ?? null,
       syncRecordOnly: false,
       afterText,
       afterByteLength:

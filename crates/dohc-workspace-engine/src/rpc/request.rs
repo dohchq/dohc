@@ -123,6 +123,7 @@ pub(super) fn validated_origin(origin: Option<&str>) -> Result<String, WireError
     }
 }
 
+/// A write declares one author; the moment records it as a list of one.
 pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>, WireError> {
     let Some(value) = author else {
         return Ok(None);
@@ -170,9 +171,7 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
     if !valid {
         return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
     }
-    serde_json::to_string(&value)
-        .map(Some)
-        .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-metadata"))
+    Ok(Some(dohc_engine_domain::moment_author_list_json(value)))
 }
 
 pub(super) fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
@@ -238,7 +237,11 @@ mod tests {
     #[test]
     fn an_agent_author_may_name_a_bounded_chain_depth() {
         let agent = json!({"kind": "agent", "agentId": "runner", "onBehalfOf": "local"});
-        assert!(validated_author(Some(&agent)).is_ok());
+        assert_eq!(
+            validated_author(Some(&agent)).expect("a valid agent"),
+            Some(json!([agent]).to_string()),
+            "the moment records a list of one"
+        );
         let mut woken = agent.clone();
         woken["depth"] = json!(3);
         assert!(validated_author(Some(&woken)).is_ok());

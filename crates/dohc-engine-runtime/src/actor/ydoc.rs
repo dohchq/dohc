@@ -2015,6 +2015,10 @@ pub(super) fn ydoc_record_update_on_store(
             let lineage_claim_id = dohc_engine_collab::read_marker(store, key)?
                 .and_then(|marker| marker.lineage_claim_id);
             Ok(YdocAppend {
+                settlement_requested: store.read_with(|conn| {
+                    dohc_engine_collab::author_coverage::reserved_in(conn, key)
+                        .map(|authors| authors.len() >= dohc_engine_collab::author_coverage::SETTLE_AUTHOR_THRESHOLD)
+                })?,
                 outcome,
                 sharing_declined,
                 lineage_claim_id,
@@ -2025,25 +2029,6 @@ pub(super) fn ydoc_record_update_on_store(
     }
 }
 
-/// Who created a lineage: the author its first update declared, kept on the
-/// lineage so compaction cannot fold it away. The settle that creates the
-/// lineage's file records it, so a record an automation creates in a
-/// document session is added as that automation's change, at its depth.
-fn lineage_creator_json(
-    tx: &rusqlite::Transaction<'_>,
-    key: &DocKey,
-) -> Result<Option<String>, dohc_engine_domain::DomainError> {
-    tx.query_row(
-        "SELECT creator_author_json FROM ydoc_docs \
-         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-        params![key.workspace_id, key.version_id, key.object_id],
-        |row| row.get(0),
-    )
-    .optional()
-    .map(Option::flatten)
-    .map_err(|error| dohc_engine_domain::DomainError::Storage(StorageError::corrupt_public(error)))
-}
-
 /// One recorded Y.Doc append, and what its origination attempt decided.
 ///
 /// The append itself is [`AppendOutcome`]. `sharing_declined` is `Some` only
@@ -2052,6 +2037,8 @@ fn lineage_creator_json(
 /// originate stay silent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YdocAppend {
+    /// The service queues settlement after recording releases the store writer.
+    pub settlement_requested: bool,
     pub outcome: AppendOutcome,
     pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
     pub lineage_claim_id: Option<String>,
@@ -2133,7 +2120,7 @@ fn record_file_holds_head(
     }
     let recorded = store.write_with(faults, |tx| {
         tx.execute(
-            "UPDATE ydoc_docs SET settled_update_seq = head_update_seq \
+            "UPDATE ydoc_docs SET settled_update_seq = head_update_seq, pending_authors_json='[]' \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![key.workspace_id, key.version_id, key.object_id],
         )
@@ -2144,6 +2131,37 @@ fn record_file_holds_head(
         return Err(RuntimeError::OperationCrashed);
     }
     Ok(())
+}
+
+fn reconcile_author_coverage(
+    store: &mut EngineStore,
+    key: &DocKey,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<bool, RuntimeError> {
+    let unresolved: bool = store.read_with(|conn| {
+        conn.query_row("SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs \
+            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0))
+            .optional().map(|value| value.unwrap_or(false)).map_err(StorageError::persist_public)
+    })?;
+    if !unresolved { return Ok(true); }
+    match store.write_with(faults, |tx| dohc_engine_collab::author_coverage::reconcile_in(tx, key, now_ms))? {
+        TxnOutcome::Committed(resolved) => Ok(resolved),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn compensate_author_coverage(
+    store: &mut EngineStore,
+    key: &DocKey,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    match store.write_with(faults, |tx| dohc_engine_collab::author_coverage::compensate_in(tx, key, now_ms))? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
 }
 
 fn ydoc_settle_disk_preimage(
@@ -2369,6 +2387,7 @@ pub(super) fn ydoc_settle_on_store(
             }
         }
     }
+    reconcile_author_coverage(store, key, now_ms, faults)?;
     let cold_doc;
     let doc = match store.read_with(|conn| doc_cache.doc_for_consumer(conn, key))? {
         Some(cached) => cached,
@@ -2515,7 +2534,9 @@ pub(super) fn ydoc_settle_on_store(
                 }
             };
             match replay_outcome {
-                JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
+                JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
+                    reconcile_author_coverage(store, key, now_ms, faults)?;
+                }
                 JobOutcome::Blocked => {
                     // Disk did not move and the committed marker still
                     // describes the durable pending job. Preserve it so the
@@ -2526,26 +2547,15 @@ pub(super) fn ydoc_settle_on_store(
                 }
                 JobOutcome::Conflict | JobOutcome::Superseded => {
                     self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
-                    // The disk moved past the prior settle before its job
-                    // replayed: last_settled_sha no longer describes a
-                    // materialized artifact. NULL it so close(settle:false)
-                    // refuses UnsettledClose instead of pruning.
-                    let cleared = store.write_with(faults, |tx| {
-                        tx.execute(
-                            "UPDATE ydoc_docs SET last_settled_sha = NULL, settled_update_seq = NULL, updated_at_ms = ?4                              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                            params![key.workspace_id, key.version_id, key.object_id, now_ms],
-                        )
-                        .map_err(StorageError::persist_public)?;
-                        Ok::<_, StorageError>(())
-                    })?;
-                    if matches!(cleared, TxnOutcome::Crashed { .. }) {
-                        return Err(RuntimeError::OperationCrashed);
-                    }
+                    compensate_author_coverage(store, key, now_ms, faults)?;
                     return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
                 }
                 JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
             }
         }
+    }
+    if !reconcile_author_coverage(store, key, now_ms, faults)? {
+        return Err(DomainError::InvalidInput { reason: "settlement-materialization-pending" }.into());
     }
     let projected_sha = dohc_engine_storage::hex_sha256(
         settled_content_override
@@ -2577,7 +2587,7 @@ pub(super) fn ydoc_settle_on_store(
     // differs. Answer with the current head instead (its pending job, if
     // any, was replayed above).
     if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
-        == Some(projected_sha.as_str())
+        == Some(projected_sha.as_str()) || probe_sha.as_deref() == Some(projected_sha.as_str())
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
         if matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
@@ -2723,13 +2733,9 @@ pub(super) fn ydoc_settle_on_store(
             "moment-ydoc-{}",
             dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
         );
-        // A settle that creates the file is the lineage creator's change.
-        // One that edits an existing file names no author, as before.
-        let author_json = if current.snapshot.is_none() {
-            lineage_creator_json(tx, key)?
-        } else {
-            None
-        };
+        let author_json = dohc_engine_collab::author_coverage::interval_in(tx, key, i64::MAX)
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?
+            .moment_json();
         let result = write_projected_text_in_tx(
             tx,
             ProjectedWriteText {
@@ -2760,33 +2766,13 @@ pub(super) fn ydoc_settle_on_store(
             .map_err(search_domain)?;
         }
         enqueue_write(tx, &result, preimage, "ydoc")?;
-        // The settle marker commits atomically with the moment: a crash can
-        // never leave a minted settlement moment whose lineage still reads
-        // as unsettled (which would force a non-idempotent re-settle — the
-        // moment fingerprint includes the per-open session_id). The prior
-        // marker values ride along so a materialization conflict below can
-        // compensate — an errored settle must not leave a marker that lets
-        // close(settle:false) prune the CRDT with no artifact on disk.
-        //
-        // settle_seq namespace: the daemon settle path owns this column and
-        // writes moment_order into it; collab settle()'s +1 generation
-        // counter is never invoked on daemon-settled lineages (C1 has no
-        // collab-settle caller). The close guard reads last_settled_sha only.
-        let prior_marker: (i64, Option<String>) = tx
-            .query_row(
-                "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                params![key.workspace_id, key.version_id, key.object_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|error| {
-                dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
-            })?;
+        // Coverage and the unresolved attempt commit with the moment and job.
         // The projection was taken from the doc at the current head, and this
         // actor is the store's only writer, so the head has not moved since.
         tx.execute(
             "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, \
-             settled_update_seq = head_update_seq \
+             settle_prior_update_seq=COALESCE(settled_update_seq,-1), \
+             settled_update_seq = head_update_seq, pending_authors_json='[]' \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
                 key.workspace_id,
@@ -2826,9 +2812,9 @@ pub(super) fn ydoc_settle_on_store(
                 result.deduped,
             )?;
         }
-        Ok((result, prior_marker))
+        Ok(result)
     })?;
-    let (write, prior_marker) = match outcome {
+    let write = match outcome {
         TxnOutcome::Committed(write) => write,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
@@ -2882,7 +2868,6 @@ pub(super) fn ydoc_settle_on_store(
             // retry through the idempotent no-op branch, which replays the
             // pending job. Only the in-memory suppression identity is
             // retracted; the no-op replay re-records it before the replace.
-            let _ = prior_marker;
             self_writes.retract(
                 &key.workspace_id,
                 &write.snapshot.path,
@@ -2893,7 +2878,9 @@ pub(super) fn ydoc_settle_on_store(
     };
     let mut materialized = true;
     match job_outcome {
-        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
+        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
+            reconcile_author_coverage(store, key, now_ms, faults)?;
+        }
         JobOutcome::Blocked => {
             // This is the same crash-consistent state as dying after the
             // marker/job commit: the write is durably pending and will land
@@ -2904,32 +2891,7 @@ pub(super) fn ydoc_settle_on_store(
             materialized = false;
         }
         JobOutcome::Conflict | JobOutcome::Superseded => {
-            // The target changed on disk and the job left it untouched: this
-            // settle failed, so the marker committed above must not stand —
-            // it would let close(settle:false) pass the settled check and
-            // prune the CRDT while the artifact was never materialized.
-            // (A crash before this compensation is the pending-job case: the
-            // job itself is durable and drains on reopen.)
-            let compensated = store.write_with(faults, |tx| {
-                tx.execute(
-                    "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, \
-                     settled_update_seq = NULL, updated_at_ms = ?6 \
-                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                    params![
-                        key.workspace_id,
-                        key.version_id,
-                        key.object_id,
-                        prior_marker.0,
-                        prior_marker.1,
-                        now_ms,
-                    ],
-                )
-                .map_err(StorageError::persist_public)?;
-                Ok::<_, StorageError>(())
-            })?;
-            if matches!(compensated, TxnOutcome::Crashed { .. }) {
-                return Err(RuntimeError::OperationCrashed);
-            }
+            compensate_author_coverage(store, key, now_ms, faults)?;
             self_writes.retract(
                 &key.workspace_id,
                 &write.snapshot.path,
@@ -3074,6 +3036,7 @@ fn ydoc_close_session_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    reconcile_author_coverage(store, key, now_ms, faults)?;
     // Close is a lineage reset (the local-only branch prunes to the bare
     // marker — a head-rewind the cache's tuple probe cannot see if the same
     // head coordinates are later re-appended). Remove before any branch so

@@ -20,6 +20,12 @@ pub enum CollabError {
     #[error("configured Y.Doc byte budget exceeded")]
     ConfiguredByteBudgetExceeded,
 
+    #[error("This file has too many pending authors. Retry saving the file, then try the edit again.")]
+    AuthorCapacity,
+
+    #[error("This edit's author details exceed the supported size. Shorten the author details and try again.")]
+    AuthorEntryTooLarge,
+
     /// The update is valid Yjs v1 data, but one of its structural edit
     /// boundaries lands inside a multi-unit Unicode scalar. Yjs can represent
     /// that UTF-16 boundary while Rust strings cannot, so replay would diverge.
@@ -233,6 +239,8 @@ impl CollabError {
             CollabError::InvalidSuccessorBase { .. } => "invalid-successor-base",
             CollabError::LineageIncomplete { .. } => "lineage-incomplete",
             CollabError::LeaseHeld => "lease-held",
+            CollabError::AuthorCapacity => "ydoc-author-capacity",
+            CollabError::AuthorEntryTooLarge => "ydoc-author-entry-too-large",
             CollabError::NoMarker => "no-marker",
             CollabError::MissingDependencies => "ydoc-missing-remote-dependencies",
             CollabError::ObjectAliasCollision => "object-alias-collision",

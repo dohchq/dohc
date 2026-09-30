@@ -1236,6 +1236,7 @@ pub fn maybe_compact(
             ],
         )
         .map_err(map_sql)?;
+        crate::author_coverage::fold_in(tx, key, up_to)?;
         // Prune folded updates and superseded nonzero snapshots. Seq 0 proves
         // the exact base identity and state vector during successor replay.
         let pruned = tx
@@ -2308,6 +2309,17 @@ pub fn local_close_is_covered(
     marker: &Marker,
     authoritative_projection: Option<&CloseProjection>,
 ) -> Result<bool, CollabError> {
+    let author_coverage_resolved: bool = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT settle_prior_update_seq IS NULL FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, Option<bool>>(0),
+        ).map(|value| value.unwrap_or(false)).map_err(map_sql)
+    })?;
+    if !author_coverage_resolved || !store.read_with(|conn| crate::author_coverage::interval_in(conn, key, i64::MAX))?.is_empty() {
+        return Ok(false);
+    }
     if marker.head_update_seq > 0 {
         let content_sha = match authoritative_projection {
             Some(projection) => projection.sha256.clone(),
@@ -2408,6 +2420,9 @@ pub fn close_session(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CloseOutcome>, CollabError> {
+    if let TxnOutcome::Crashed { committed } = store.write_with(faults, |tx| crate::author_coverage::reconcile_in(tx, key, now_ms))? {
+        return Ok(TxnOutcome::Crashed { committed });
+    }
     let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime == Regime::Replicated || persist_closed_state {
         // Force a compaction (threshold 0) so the lineage is a single snapshot +
@@ -2871,6 +2886,7 @@ pub(crate) fn append_row(
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<i64, CollabError> {
+    crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let (head, _, _) = head_of(conn, key)?;
     let seq = head + 1;
     conn.execute(

@@ -576,6 +576,11 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     depth: z.number().int().positive().optional(),
   }).strict(),
   z.object({
+    kind: z.literal("human"),
+    humanId: z.string().min(1),
+    onBehalfOf: z.string().min(1).optional(),
+  }).strict(),
+  z.object({
     kind: z.literal("public"),
     principalId: z.string().min(1),
     grantId: z.string().min(1),
@@ -602,7 +607,7 @@ const rawMomentSummarySchema = z
     operation: rawMomentOperationSchema,
     path: z.string().min(1),
     versionId: z.string().min(1),
-    author: rawMomentAuthorSchema.optional(),
+    authors: z.array(rawMomentAuthorSchema).min(1).optional(),
     fileCount: z.literal(1),
     files: z.array(rawMomentFileSchema).optional(),
   })

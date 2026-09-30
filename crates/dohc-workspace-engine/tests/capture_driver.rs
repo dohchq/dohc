@@ -501,7 +501,8 @@ async fn open_capture_author_stamps_the_startup_baseline() {
     .expect("valid author json");
 
     assert_eq!(
-        captured_author, author,
+        captured_author,
+        json!([author]),
         "initializing CaptureDriver with None makes this actor-neutral."
     );
 }

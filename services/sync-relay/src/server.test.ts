@@ -125,7 +125,7 @@ function conflictResolveFixture(workspaceId = "workspace-a"): ConflictResolveFix
         ? Buffer.byteLength(contents.result)
         : Buffer.byteLength(contents.current),
     metadata,
-    author: null,
+    authors: null,
     beforePresent,
     beforeObjectId: beforePresent === "present" ? "object-a" : null,
     beforeVersionId: beforePresent === "present" ? "main" : null,
@@ -272,7 +272,7 @@ function compactConflictResolveFixture(
     payloadAfterContentKind: current.contentKind,
     payloadAfterByteLength: current.byteLength,
     metadata,
-    author: canonicalAuthor,
+    authors: [canonicalAuthor],
     beforePresent: "present",
     beforeObjectId: current.objectId,
     beforeVersionId: "main",
@@ -303,7 +303,7 @@ function compactConflictResolveFixture(
     payloadAfterContentKind: result.contentKind,
     payloadAfterByteLength: result.byteLength,
     metadata,
-    author: canonicalAuthor,
+    authors: [canonicalAuthor],
     beforePresent: "null",
     beforeObjectId: null,
     beforeVersionId: null,
@@ -415,12 +415,12 @@ function worstValidCanonicalMoment(momentId: string): Record<string, unknown> {
     payloadAfterContentKind: "text",
     payloadAfterByteLength: 1,
     metadata,
-    author: {
+    authors: [{
       kind: "agent",
       agentId: authorField,
       onBehalfOf: authorField,
       agentRunId: authorField,
-    },
+    }],
     beforePresent: "present",
     beforeObjectId: identifier,
     beforeVersionId: identifier,
@@ -1454,15 +1454,15 @@ describe("sync relay handler", () => {
   it("proves that two worst-valid canonical moment effects cannot fit the relay payload cap", () => {
     const first = worstValidCanonicalMoment('"'.repeat(512));
     const second = worstValidCanonicalMoment(`\\${'"'.repeat(511)}`);
-    expect(Buffer.byteLength(JSON.stringify(first), "utf8")).toBe(216_935);
-    expect(Buffer.byteLength(JSON.stringify(second), "utf8")).toBe(216_935);
+    expect(Buffer.byteLength(JSON.stringify(first), "utf8")).toBe(216_938);
+    expect(Buffer.byteLength(JSON.stringify(second), "utf8")).toBe(216_938);
     const payload = structuredClone(conflictResolveFixture().payload);
     payload.effects = [
       { opKind: "moment.append", payload: first },
       { opKind: "moment.append", payload: second },
     ];
     const observedBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
-    expect(observedBytes).toBe(435_942);
+    expect(observedBytes).toBe(435_948);
     expect(observedBytes).toBeGreaterThan(MAX_PAYLOAD_JSON_BYTES);
   });
 

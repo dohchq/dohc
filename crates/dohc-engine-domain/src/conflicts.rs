@@ -2577,7 +2577,7 @@ mod tests {
             {
                 let mut changed = input.clone();
                 changed.author_json = Some(
-                    r#"{"kind":"agent","agentId":"agent-1","onBehalfOf":"user-1"}"#.to_owned(),
+                    r#"[{"kind":"agent","agentId":"agent-1","onBehalfOf":"user-1"}]"#.to_owned(),
                 );
                 changed
             },

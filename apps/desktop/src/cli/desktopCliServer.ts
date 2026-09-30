@@ -355,7 +355,7 @@ export function createDesktopCliServer<State>(
               ? { byteLength: moment.byteLength }
               : {}),
             metadata: moment.metadata,
-            ...(moment.author ? { author: moment.author } : {}),
+            ...(moment.authors ? { authors: moment.authors } : {}),
             momentOrder: moment.momentOrder,
           }));
       },

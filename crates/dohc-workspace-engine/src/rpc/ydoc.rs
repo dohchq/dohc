@@ -1118,6 +1118,9 @@ impl EngineService {
             let actor = open.actor.clone();
             let now = now_ms()?;
             let token = cancellation.token();
+            let settle_open = Arc::clone(&open);
+            let settle_writes = Arc::new(self.self_writes.scoped(&open.root));
+            let settle_events = self.events.clone();
             let record_task = tokio::spawn(async move {
                 let _serial = serial;
                 let outcome = actor
@@ -1144,6 +1147,33 @@ impl EngineService {
                 {
                     session.first_update_pending = false;
                     session.lineage_claim_id = append.lineage_claim_id.clone();
+                }
+                if outcome.as_ref().is_ok_and(|append| append.settlement_requested) {
+                    tokio::spawn(async move {
+                        let _serial = settle_open.session_ops.lock().await;
+                        let pending = lock(&sessions).get(&session_id).map(|session| (
+                            session.key.clone(), session.path.clone(), session.content_kind,
+                            session.lineage_claim_id.clone(), session.open_head_sha.clone(),
+                            session.restore_generation,
+                        ));
+                        let Some((key, path, kind, lineage, head, restore)) = pending else { return; };
+                        match settle_open.actor.ydoc_settle(
+                            settle_open.root.clone(), key, path, kind, lineage, head,
+                            session_id.clone(), settle_writes, now, Arc::new(NoFaults),
+                            tokio_util::sync::CancellationToken::new(), restore,
+                        ).await {
+                            Ok(dohc_engine_runtime::YdocSettleOutcome::Settled(settled)) => {
+                                if settled.collection_reconcile_required { settle_open.request_collection_reconcile(); }
+                                if let Some(session) = lock(&sessions).get_mut(&session_id) {
+                                    session.last_settled_sha = Some(settled.sha256.clone());
+                                }
+                            }
+                            Ok(dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { record_facts }) => {
+                                for facts in &record_facts { emit_record_events(&settle_events, &settle_open.workspace_id, facts); }
+                            }
+                            Err(error) => eprintln!("engine: queued author coverage settlement failed: {error}"),
+                        }
+                    });
                 }
                 outcome
             });

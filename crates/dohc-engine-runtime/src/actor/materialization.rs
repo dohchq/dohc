@@ -533,6 +533,7 @@ pub(super) fn replay_pending_materializations(
             faults,
         },
     )?;
+    reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
     let jobs = store.list_pending_materialization_jobs()?;
     (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
@@ -783,16 +784,12 @@ pub(super) fn replay_pending_materializations(
                                     .map_err(StorageError::corrupt_public)
                             })?;
                         if let Some((workspace_id, version_id, object_id)) = coords {
-                            store.write_with(&NoFaults, |transaction| {
-                                transaction
-                                    .execute(
-                                        "UPDATE ydoc_docs SET last_settled_sha = NULL, \
-                                         settled_update_seq = NULL, updated_at_ms = ?4 \
-                                         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                                        params![workspace_id, version_id, object_id, now_ms],
-                                    )
-                                    .map_err(StorageError::persist_public)?;
-                                Ok::<_, StorageError>(())
+                            store.write_with(faults, |transaction| {
+                                dohc_engine_collab::author_coverage::compensate_in(
+                                    transaction,
+                                    &dohc_engine_collab::DocKey { workspace_id, version_id, object_id },
+                                    now_ms,
+                                )
                             })?;
                         }
                     }
@@ -800,6 +797,7 @@ pub(super) fn replay_pending_materializations(
                 Ok(JobOutcome::Crashed(_)) | Err(_) => summary.failed += 1,
             }
         }
+        reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
         Ok(summary)
     })()
 }
@@ -967,4 +965,22 @@ mod rollback_identity_tests {
             "a non-rollback job takes the ordinary replay path."
         );
     }
+}
+
+fn reconcile_settlement_attempts(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    let unresolved: bool = store.read_with(|conn| {
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND settle_prior_update_seq IS NOT NULL)",
+            [workspace_id], |row| row.get(0)).map_err(StorageError::persist_public)
+    })?;
+    if unresolved && matches!(store.write_with(faults, |tx| {
+        dohc_engine_collab::author_coverage::reconcile_workspace_in(tx, workspace_id, now_ms)
+    })?, dohc_engine_storage::TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    Ok(())
 }

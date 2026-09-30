@@ -499,12 +499,12 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: Some(
-                    serde_json::json!({
+                    serde_json::json!([{
                         "kind": "agent",
                         "agentId": AGENT,
                         "onBehalfOf": "local",
                         "agentRunId": "run-capture-replication",
-                    })
+                    }])
                     .to_string(),
                 ),
                 now_ms: 200,

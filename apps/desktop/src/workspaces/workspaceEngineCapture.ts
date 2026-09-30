@@ -254,7 +254,7 @@ export interface WorkspaceEngineMomentSummary {
   contentKind?: "text" | "binary";
   byteLength?: number;
   metadata: MomentMetadata;
-  author?: MomentAuthor;
+  authors?: MomentAuthor[];
   momentOrder: number;
   protected: boolean;
 }
@@ -5786,11 +5786,11 @@ export function createWorkspaceEngineCapture(
         const engine=await engineStore(), versionId=await activeVersionIdOf(engine);
         if(versionId!==input.versionId)return {status:"conflict" as const};
         await engine.flushCapture?.();
-        const creation=await engine.getMoment({workspaceId,momentId:input.momentId});
+        const creation=await engine.getMoment({workspaceId,momentId:input.momentId}), creator=creation?.authors?.length===1?creation.authors[0]:undefined;
         if(!creation || creation.workspaceId!==workspaceId || creation.objectId!==input.objectId || creation.versionId!==versionId ||
             creation.operation!=="write" || creation.syncRecordOnly || creation.payload.before!==null ||
             creation.path!==input.path || creation.path!==`${input.collectionPath}/${input.acceptanceId}.md` ||
-            creation.author?.kind!=="public" || creation.author.principalId!==input.publicPrincipalId || creation.author.grantId!==input.grantId) return {status:"conflict" as const};
+            creator?.kind!=="public" || creator.principalId!==input.publicPrincipalId || creator.grantId!==input.grantId) return {status:"conflict" as const};
         let page=await engine.listMoments({workspaceId,versionId,objectId:input.objectId,limit:100});
         const lastKnownPath=page.moments[0]?.path??input.path;
         let previous=page.moments.find(moment=>moment.operation==="delete" && moment.metadata.correlationId===input.requestId);

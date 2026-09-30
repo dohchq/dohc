@@ -3495,7 +3495,7 @@ async fn named_recipient_automations_write_shows_its_author_in_history() {
             "payloadAfterContentKind": "text",
             "payloadAfterByteLength": text.len(),
             "metadata": { "origin": "sync" },
-            "author": author,
+            "authors": [author],
         }),
     };
     let applied = apply_replication_envelope(
@@ -3535,7 +3535,7 @@ async fn named_recipient_automations_write_shows_its_author_in_history() {
         json!({ "momentId": MOMENT }),
     )
     .await;
-    assert_eq!(moment["author"], author);
+    assert_eq!(moment["authors"], json!([author]));
     let page = call(
         &transport,
         &handle,
@@ -3550,7 +3550,7 @@ async fn named_recipient_automations_write_shows_its_author_in_history() {
         .iter()
         .find(|row| row["momentId"] == MOMENT)
         .expect("named moment in History");
-    assert_eq!(listed["author"], author);
+    assert_eq!(listed["authors"], json!([author]));
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
 }
 
@@ -3614,7 +3614,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
             "payloadAfterContentKind": "text",
             "payloadAfterByteLength": text.len(),
             "metadata": { "origin": "sync" },
-            "author": author,
+            "authors": [author],
         }),
     };
     let connection = rusqlite::Connection::open(&db).expect("seed replication connection");
@@ -3819,7 +3819,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         json!({ "momentId": MOMENT }),
     )
     .await;
-    assert_eq!(original["author"], author);
+    assert_eq!(original["authors"], json!([author]));
     assert_eq!(original["afterText"], text);
     call(&transport, &handle, 63, "workspace.close", json!({})).await;
     drop(transport);
@@ -3863,7 +3863,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         hex_sha256(settled.as_bytes())
     );
     assert!(
-        adoption["author"].is_null(),
+        adoption["authors"].is_null(),
         "owner settlement must not impersonate the public voter"
     );
     let mut retry = EngineStore::open(&db, 3).expect("retry store");

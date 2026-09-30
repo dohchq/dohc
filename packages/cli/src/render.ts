@@ -125,8 +125,10 @@ function renderExport(result: ExportResult): string {
 
 function renderMoments(result: CliResultByVerb["moments"]): string {
   const lines = result.changes.map((change) => {
-    const author = change.author?.kind === "agent" ? ` · agent ${change.author.agentId}` : "";
-    return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${author}`;
+    const agents = (change.authors ?? [])
+      .map((author) => (author.kind === "agent" ? ` · agent ${author.agentId}` : ""))
+      .join("");
+    return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${agents}`;
   });
   if (result.hasMore) lines.push(`${result.totalAvailable - result.count} more; raise --limit to list them`);
   return lines.join("\n");

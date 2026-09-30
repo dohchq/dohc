@@ -426,12 +426,12 @@ fn an_automation_authored_creation_keeps_the_self_skip_and_the_depth_cap() {
     subscribe(&mut store, "collection:tasks#other", 5);
     seed_collection(&mut store);
     let author = |depth: u32| {
-        json!({
+        json!([{
             "kind": "automation",
             "automationId": LIFECYCLE,
             "onBehalfOf": "user:ice",
             "depth": depth,
-        })
+        }])
         .to_string()
     };
     write_as(

@@ -197,9 +197,9 @@ describe("desktop CLI workspace context", () => {
       id: "moment", versionId: "version", objectId: "object", path: "notes.md",
       recordedAtMs: 20, operation: "write", metadata: { origin: "api" },
       momentOrder: 3, protected: false, byteLength: 0, contentKind: "text",
-      author: { kind: "agent", agentId: "agent", onBehalfOf: "owner" },
+      authors: [{ kind: "agent", agentId: "agent", onBehalfOf: "owner" }],
     };
-    const { byteLength: _bytes, contentKind: _kind, author: _author, ...plain } = moment;
+    const { byteLength: _bytes, contentKind: _kind, authors: _authors, ...plain } = moment;
     f.capture.listMoments.mockResolvedValue({ moments: [moment, { ...plain, id: "plain" },
       { ...moment, id: "protected", protected: true }, { ...moment, id: "objectless", objectId: "" }],
       nextBeforeMomentOrder: null, latestMomentOrder: 3, activeVersionId: "version", protectedTruncated: false });

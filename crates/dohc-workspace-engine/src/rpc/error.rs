@@ -157,6 +157,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         return WireError::new(ErrorCode::Internal, message);
     }
     match &error {
+        RuntimeError::Collab(refused @ (CollabError::AuthorCapacity | CollabError::AuthorEntryTooLarge)) => {
+            return WireError::new(ErrorCode::LimitExceeded, refused.to_string());
+        }
         RuntimeError::Collab(refused @ CollabError::FrontmatterEditRefused) => {
             return WireError::new(ErrorCode::InvalidParams, refused.to_string());
         }
@@ -408,7 +411,7 @@ fn map_domain(error: DomainError) -> WireError {
 
 fn map_collab_code(error: CollabError) -> ErrorCode {
     match error {
-        CollabError::ConfiguredByteBudgetExceeded => ErrorCode::LimitExceeded,
+        CollabError::ConfiguredByteBudgetExceeded | CollabError::AuthorCapacity | CollabError::AuthorEntryTooLarge => ErrorCode::LimitExceeded,
         CollabError::Corrupt { .. } | CollabError::Storage(_) => ErrorCode::Internal,
         CollabError::MalformedUpdate { .. }
         | CollabError::FrontmatterEditRefused

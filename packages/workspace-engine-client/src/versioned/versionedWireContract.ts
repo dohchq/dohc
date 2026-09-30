@@ -632,15 +632,23 @@ const AutomationAuthorSchema = mutableStruct({
   onBehalfOf: Schema.optionalKey(Schema.String),
   depth: Schema.Int,
 });
+const HumanAuthorSchema = mutableStruct({
+  kind: Schema.Literal("human"),
+  humanId: Schema.String,
+  onBehalfOf: Schema.optionalKey(Schema.String),
+});
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
-const MomentAuthorSchema = Schema.NullOr(
-  Schema.Union([
-    AgentAuthorSchema,
-    PublicAuthorSchema,
-    NamedAuthorSchema,
-    AutomationAuthorSchema,
-    CorruptAuthorSchema,
-  ]),
+const MomentAuthorsSchema = Schema.NullOr(
+  Schema.mutable(Schema.Array(
+    Schema.Union([
+      AgentAuthorSchema,
+      HumanAuthorSchema,
+      PublicAuthorSchema,
+      NamedAuthorSchema,
+      AutomationAuthorSchema,
+      CorruptAuthorSchema,
+    ]),
+  )),
 );
 
 const MomentRecordSchema = mutableStruct({
@@ -662,7 +670,7 @@ const MomentRecordSchema = mutableStruct({
   metadataOrigin: Schema.String,
   metadataSummary: Schema.optionalKey(NullableString),
   metadataCorrelationId: Schema.optionalKey(NullableString),
-  author: MomentAuthorSchema,
+  authors: MomentAuthorsSchema,
   syncRecordOnly: Schema.Boolean,
   afterText: NullableString,
   afterByteLength: NullableInt,
