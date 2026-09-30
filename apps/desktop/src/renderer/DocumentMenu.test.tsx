@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DocumentMenu, FEEDBACK_MS } from "./DocumentMenu";
@@ -509,41 +509,42 @@ describe("DocumentMenu", () => {
   // too, and that timer closes the menu after a confirmation. A retry started
   // inside the window had the menu shut under it while it was still pending.
   it("cannot be closed by a previous result's timer once a new attempt starts", async () => {
-    const user = userEvent.setup();
-    renderMenu();
-    stubClipboard();
+    vi.useFakeTimers();
+    try {
+      renderMenu();
+      stubClipboard();
 
-    await user.click(screen.getByTestId("document-menu-trigger"));
-    const written = nextClipboardWrite();
-    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
-    expect(await written).toBe(MARKDOWN);
-    await act(async () => {});
-    expect(screen.getByText("Copied")).toBeTruthy();
+      fireEvent.click(screen.getByTestId("document-menu-trigger"));
+      const written = nextClipboardWrite();
+      fireEvent.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      expect(await written).toBe(MARKDOWN);
+      await act(async () => {});
+      expect(screen.getByText("Copied")).toBeTruthy();
 
-    // A second copy, inside that confirmation's window. It does not settle.
-    const retry = deferredWrite();
-    writeText.mockImplementationOnce(() => retry.promise);
-    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
-    await act(async () => {});
+      // A second copy, inside that confirmation's window. It does not settle.
+      const retry = deferredWrite();
+      writeText.mockImplementationOnce(() => retry.promise);
+      fireEvent.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await act(async () => {});
 
-    // The one wall-clock wait in this file, and it is safe in the direction
-    // that matters: the timer under test was armed before this wait started,
-    // so a slow machine gives it more chances to fire, never fewer. With it
-    // cancelled there is no timer left to wait for at all.
-    //
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, FEEDBACK_MS * 2));
-    });
-    expect(screen.queryByRole("menu"), "leave the previous timer running -> it closes the menu on behalf of an attempt that is over, while this one is still waiting on the clipboard.").not.toBeNull();
-    expect(
-      screen.getByTestId("document-menu-item-copy-markdown").textContent,
-    ).toBe("Copy as Markdown");
+      // Pass the previous confirmation's deadline while the retry is pending.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FEEDBACK_MS * 2);
+      });
+      expect(screen.queryByRole("menu"), "leave the previous timer running -> it closes the menu on behalf of an attempt that is over, while this one is still waiting on the clipboard.").not.toBeNull();
+      expect(
+        screen.getByTestId("document-menu-item-copy-markdown").textContent,
+      ).toBe("Copy as Markdown");
 
-    await act(async () => {
-      retry.resolve();
-      await retry.promise;
-    });
-    expect(screen.getByText("Copied")).toBeTruthy();
+      await act(async () => {
+        retry.resolve();
+        await retry.promise;
+      });
+      expect(screen.getByText("Copied")).toBeTruthy();
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
   });
 
   // codex r23: NULL is the refusal this menu expects; a throw is not. The

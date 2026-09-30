@@ -12,6 +12,9 @@ import { generateDatasetFormSources } from "./datasetFormGenerator";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { compileClosedApp } from "./closedAppCompiler";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./localAppLaunch";
+import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+
+const compileFixture = createDatasetFixtureCompiler();
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -34,7 +37,7 @@ afterEach(async () => {
 const sourceAdapter = (files: Map<string, string>) => sourceCaptureAdapter(files);
 async function fixture(agentRun?: () => LocalDatasetAgent | null) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-dataset-app-")); roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
   const generated = generateDatasetSources(definition);
   const files = new Map(Object.entries(generated.files)); files.set("data/dataset.json", JSON.stringify(definition));
   files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{

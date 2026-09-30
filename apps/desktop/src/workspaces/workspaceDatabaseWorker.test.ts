@@ -31,7 +31,7 @@ import {
   createWorkspaceDatabaseWorkerOwner,
   type WorkspaceDatabaseWorkerOwner,
 } from "./workspaceDatabaseWorker";
-import { createTestScratch } from "./testTemp";
+import { createSuiteTestScratchSync, createTestScratch } from "./testTemp";
 
 interface SeedStatement {
   run(...params: unknown[]): unknown;
@@ -170,6 +170,16 @@ function seedPagedDatabase(path: string, rows: number, wide: boolean): void {
   } finally {
     db.close();
   }
+}
+
+let wideDatabaseSeed: string | undefined;
+async function copyWideDatabaseSeed(path: string): Promise<void> {
+  if (!wideDatabaseSeed) {
+    const seed = join(createSuiteTestScratchSync("dohc-db-worker-seed-"), "wide.sqlite");
+    seedPagedDatabase(seed, 1000, true);
+    wideDatabaseSeed = seed;
+  }
+  await copyFile(wideDatabaseSeed, path);
 }
 
 function operation(
@@ -359,7 +369,7 @@ describe("workspace database worker", () => {
   it("surfaces a crash for the active request and lazily restarts on the next request", async () => {
     const root = await createTestScratch("dohc-db-worker-crash-");
     const databasePath = join(root, "large.sqlite");
-    seedPagedDatabase(databasePath, 1000, true);
+    await copyWideDatabaseSeed(databasePath);
     const workers: Worker[] = [];
     const started = Promise.withResolvers<void>();
     const databaseWorker = owner({
@@ -451,7 +461,7 @@ describe("workspace database worker", () => {
     const rowBoundPath = join(root, "rows.sqlite");
     const byteBoundPath = join(root, "bytes.sqlite");
     seedPagedDatabase(rowBoundPath, 1205, false);
-    seedPagedDatabase(byteBoundPath, 1000, true);
+    await copyWideDatabaseSeed(byteBoundPath);
     const databaseWorker = owner();
 
     const snapshot = await databaseWorker.readPath({
@@ -484,7 +494,7 @@ describe("workspace database worker", () => {
     const root = await createTestScratch("dohc-db-worker-cancel-");
     const largePath = join(root, "large.sqlite");
     const editPath = join(root, "data.sqlite");
-    seedPagedDatabase(largePath, 1000, true);
+    await copyWideDatabaseSeed(largePath);
     seedDatabase(editPath);
     const paths = editPaths(root);
     const databaseWorker = owner();
@@ -519,7 +529,7 @@ describe("workspace database worker", () => {
     const largePath = join(root, "large.sqlite");
     const databasePath = join(root, "data.sqlite");
     const projectionPath = join(root, "projection.sqlite");
-    seedPagedDatabase(largePath, 1000, true);
+    await copyWideDatabaseSeed(largePath);
     seedDatabase(databasePath);
     await link(databasePath, projectionPath);
     const prepared = await prepareWorkspaceFileRead(root, "data.sqlite");
@@ -589,7 +599,7 @@ describe("workspace database worker", () => {
   it("keeps the event loop responsive after a large read starts", async () => {
     const root = await createTestScratch("dohc-db-worker-responsive-");
     const databasePath = join(root, "large.sqlite");
-    seedPagedDatabase(databasePath, 1000, true);
+    await copyWideDatabaseSeed(databasePath);
     const started = Promise.withResolvers<void>();
     let readSettled = false;
     const databaseWorker = owner({

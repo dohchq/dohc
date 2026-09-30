@@ -11,6 +11,11 @@ import {
   createRealDaemonWorkspaceSessions,
 } from "./realDaemonWorkspaceSessions";
 
+let sourceInventory: ReturnType<typeof testSources> | undefined;
+function desktopTestSources(): ReturnType<typeof testSources> {
+  return sourceInventory ??= testSources(fileURLToPath(new URL("../..", import.meta.url)));
+}
+
 describe("real daemon workspace sessions", () => {
   it("gives every workspace open the shared real-daemon test deadline", async () => {
     const rootPath = await createTestScratch("dohc-real-daemon-sessions-");
@@ -113,9 +118,8 @@ describe("real daemon workspace sessions", () => {
   });
 
   it("keeps real-daemon suites on the shared session factory", () => {
-    const desktopRoot = fileURLToPath(new URL("../..", import.meta.url));
     const sessionConstructor = ["new", "EngineWorkspaceSessions("].join(" ");
-    const offenders = testSources(desktopRoot)
+    const offenders = desktopTestSources()
       .filter(({ path, source }) => {
         const normalized = path.replaceAll("\\", "/");
         return (
@@ -134,8 +138,7 @@ describe("real daemon workspace sessions", () => {
   });
 
   it("starts real-daemon suites on the shared lifecycle factory", () => {
-    const desktopRoot = fileURLToPath(new URL("../..", import.meta.url));
-    const offenders = testSources(desktopRoot)
+    const offenders = desktopTestSources()
       .map(({ path, source }) => ({ path: path.replaceAll("\\", "/"), source }))
       .filter(({ path, source }) =>
         path !== FACTORY_PATH &&
