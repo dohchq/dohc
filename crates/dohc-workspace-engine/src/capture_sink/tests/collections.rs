@@ -607,7 +607,10 @@ proptest! {
             sink.reconcile_collections().expect("seeded adoption pass");
         }
 
-        let original_binding = collection_record(&db, "tasks/generated.md");
+        let original_binding = {
+            let store = EngineStore::open_read_only(&db).expect("read adopted binding");
+            collection_record_from_store(&store, "tasks/generated.md")
+        };
         if case.id_collision_copy
             && let Some((Some(original_id), state)) = original_binding.as_ref()
             && state == "adopted"
@@ -625,7 +628,17 @@ proptest! {
             seed_captured_richdoc_lineage(&sink, "tasks/generated-copy.md");
             sink.reconcile_collections().expect("adopt generated copy");
 
-            let copy_id = adopted_record_id(&db, "tasks/generated-copy.md");
+            let (copy_id, copy_stored) = {
+                let mut store = EngineStore::open_read_only(&db).expect("read adopted copy");
+                let (copy_id, state) = collection_record_from_store(&store, "tasks/generated-copy.md")
+                    .expect("record binding");
+                assert_eq!(state, "adopted");
+                let copy_id = copy_id.expect("adopted record id");
+                assert!(is_record_id(&copy_id), "WP1 record id format");
+                let copy_stored = snapshot_from_store(&mut store, "tasks/generated-copy.md")
+                    .expect("generated copy snapshot");
+                (copy_id, copy_stored)
+            };
             prop_assert_ne!(copy_id.as_str(), original_id.as_str());
             let id_line = format!("id: {original_id}{}", case.line_ending);
             let replacement = format!("id: {copy_id}{}", case.line_ending);
@@ -635,8 +648,6 @@ proptest! {
                 scratch.path().join("tasks/generated-copy.md"),
             )
             .expect("read adopted generated copy");
-            let copy_stored = snapshot(&db, "tasks/generated-copy.md")
-                .expect("generated copy snapshot");
             prop_assert_eq!(copy_disk.as_str(), expected_copy.as_str());
             prop_assert_eq!(copy_stored.text.as_str(), expected_copy.as_str());
             let original_after_copy =
