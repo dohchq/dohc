@@ -521,7 +521,7 @@ where
         };
         crate::hex_sha256(
             format!(
-                "ydoc-record-v4{sep}{restore_generation:?}{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
+                "ydoc-record-v5{sep}{restore_generation:?}{sep}{is_seed}{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}{sep}{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
@@ -531,6 +531,7 @@ where
                     LineageGuard::Expect(None) => "unclaimed".to_owned(),
                     LineageGuard::Expect(Some(claim)) => format!("claim:{claim}"),
                 },
+                dohc_engine_domain::moment_author_json(actor_origin_id, attribution).unwrap_or_default(),
                 sep = char::from(0),
             )
             .as_bytes(),
