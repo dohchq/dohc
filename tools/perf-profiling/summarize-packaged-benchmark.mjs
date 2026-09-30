@@ -86,7 +86,7 @@ function automationSummary(runs) {
       const during = typed.flatMap(t => t.samples.slice(0, t.samplesDuringRun));
       summary[kind][name] = {
         fixtureSha256: unique(rows.map(c => c.fixtureSha256)), expected: unique(rows.map(c => c.expected)), outcomes: unique(rows.map(c => c.outcome)), visibility: unique(rows.map(c => c.visibility)),
-        failures: rows.filter(c => !c.pass).length, runs: rows.length,
+        failures: rows.filter(c => !c.pass).length, runs: rows.length, contention: typed.length > 0,
         triggerToSettledPaintedMs: stats(rows.map(c => c.triggerToSettledPaintedMs)), startMs: stats(rows.map(c => c.startMs)), runMs: stats(rows.map(c => c.runMs)),
         settledOnDiskObservedMs: stats(rows.map(c => c.verification?.settledOnDiskObservedMs)),
         headerPeakBytesSampled: stats(rows.map(c => c.journal?.headerPeakBytesSampled)),

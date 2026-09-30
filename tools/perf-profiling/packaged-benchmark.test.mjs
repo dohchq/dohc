@@ -412,11 +412,13 @@ test('surface scenarios parse with their own sizes and defaults', () => {
   for (const scenario of ['go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
     const options = parseOptions([...required, '--scenario', scenario, '--files', '5000']);
     assert.deepEqual([options.scenario, options.soakMinutes, options.chatMessages, options.records], [scenario, 10, 200, 500]);
+    assert.equal(options.runCount, scenario === 'collection' ? 5 : 3);
   }
   assert.equal(parseOptions([...required, '--scenario', 'go-to', '--files', '4243']).fixtureFiles, 4243);
   assert.equal(parseOptions([...required, '--scenario', 'soak', '--soak-minutes', '3', '--profile-renderer', 'true']).soakMinutes, 3);
   assert.equal(parseOptions([...required, '--scenario', 'chat-history', '--chat-messages', '2']).chatMessages, 2);
   assert.equal(parseOptions([...required, '--scenario', 'collection', '--records', '1']).records, 1);
+  assert.equal(parseOptions([...required, '--scenario', 'collection', '--runs', '3']).runCount, 3);
 });
 
 test('evidence directory is exclusive even for concurrent starts', async t => {
@@ -962,6 +964,8 @@ test('summary reports automation cases per kind and keeps missing measurements m
   assert.deepEqual([automations.dataset['baseline-typing'].failures, automations.dataset['baseline-typing'].typingDuringRun.samplesDuringRun], [1, 2]);
   assert.deepEqual(automations.dataset['baseline-typing'].typingDuringRun.inputToNextPaintReportedOnlyMs, { count: 1, p50: 24, p95: 24, max: 24 });
   assert.equal(automations.document.baseline.typingDuringRun, null);
+  assert.equal(automations.document.baseline.contention, false);
+  assert.equal(automations.dataset['baseline-typing'].contention, true);
   assert.equal((await summarize({ label: 'baseline', status: 'complete', settings: {}, limits: [], runs: [{ index: 1 }] })).collectionAutomations, null);
 });
 
@@ -1043,40 +1047,103 @@ export async function executeCli() {
   assert.equal(alive, false, 'the job must stop the process the CLI started');
 });
 
-const receipt = ({ status = 'complete', open = [100, 110, 120], typed = [20, 22, 24], settled = [800, 900, 1000], fixture = 'f1', failures = 0, findCap = 50 } = {}) => ({
-  label: 'baseline', status, settings: { scenario: 'collection', runCount: 3, keystrokes: 30, fixtureFiles: 2, records: 500, findCap, writeCap: 200 }, limits: [],
+const receipt = ({ status = 'complete', open = [100, 105, 110, 115, 120], typed = [20, 21, 22, 23, 24], settled = [800, 850, 900, 950, 1000], fixture = 'f1', failures = 0, findCap = 50, contention = false } = {}) => ({
+  label: 'baseline', status, settings: { scenario: 'collection', runCount: open.length, keystrokes: 30, fixtureFiles: 2, records: 500, findCap, writeCap: 200 }, limits: [],
   runs: open.map((openMs, index) => ({ index: index + 1,
     collection: { records: 500, indexedWaitObservedMs: 10, clickToRowsPaintedMs: openMs, rowsRendered: 20, loadedRecords: 100 },
     typing: [{ name: 'small.md', supported: true, longTasks: [], samples: [{ dispatchToTwoRafMs: typed[index], inputToNextPaintMs: null }] }],
     collectionAutomations: { findCap, writeCap: 200, fixtureSha256: 'all', dataset: { cases: [] }, document: { cases: [
-      { name: 'baseline', fixtureSha256: fixture, expected: 'done', outcome: 'done', pass: index >= failures, verification: { ok: true }, triggerToSettledPaintedMs: settled[index], longTasks: [],
-        typing: { samplesDuringRun: 1, samples: [{ dispatchToTwoRafMs: typed[index] }] } },
+      { name: contention ? 'baseline-typing' : 'baseline', fixtureSha256: fixture, expected: 'done', outcome: 'done', pass: index >= failures, verification: { ok: true }, triggerToSettledPaintedMs: settled[index], longTasks: [],
+        typing: contention ? { samplesDuringRun: 1, samples: [{ dispatchToTwoRafMs: typed[index] }] } : null },
     ] } } })),
 });
 const compared = async (baseline, candidate, margin) => compareSummaries(await summarize(receipt(baseline)), await summarize(receipt(candidate)), margin);
 
-test('comparison passes within the margin and fails a p95 past it', async () => {
-  assert.deepEqual(DEFAULT_MARGIN, { percent: 10, floorMs: 17 });
+test('automation comparison uses the median at 25% despite a slower p95', async () => {
+  assert.deepEqual(DEFAULT_MARGIN, { percent: 10, automationPercent: 25, floorMs: 17 });
   const same = await compared({}, {});
   assert.equal(same.pass, true, same.problems.join('; '));
   assert.deepEqual(same.checks.map(check => [check.metric, check.verdict]), [['collection open to rows painted', 'pass'], ['typing small.md dispatch to two frames', 'pass'],
-    ['typing large.md dispatch to two frames', 'unmeasured'], ['document baseline press to settled', 'pass'], ['document baseline typing during the run', 'pass']]);
-  // 1,000 ms plus 10% allows 1,100; 24 ms plus the 17 ms floor allows 41.
-  assert.equal((await compared({}, { settled: [800, 900, 1100] })).pass, true);
-  const slower = await compared({}, { settled: [800, 900, 1101], typed: [20, 22, 42] });
+    ['typing large.md dispatch to two frames', 'unmeasured'], ['document baseline press to settled', 'pass']]);
+  const outlier = await compared({}, { settled: [800, 900, 1100, 1200, 5000] });
+  assert.equal(outlier.pass, true, outlier.problems.join('; '));
+  assert.deepEqual(outlier.checks.at(-1), { metric: 'document baseline press to settled', baselineP50: 900, candidateP50: 1100, limit: 1125, verdict: 'pass' });
+  assert.equal((await compared({}, { settled: [800, 900, 1125, 1200, 5000] })).pass, true);
+  const slower = await compared({}, { settled: [800, 900, 1126, 1200, 5000] });
   assert.equal(slower.pass, false);
-  assert.deepEqual(slower.problems, ['typing small.md dispatch to two frames: regressed', 'document baseline press to settled: regressed', 'document baseline typing during the run: regressed']);
-  assert.equal((await compared({}, { settled: [800, 900, 1101] }, { percent: 20, floorMs: 17 })).pass, true);
-  assert.deepEqual((await compared({}, { open: [100, 110, 138] })).problems, ['collection open to rows painted: regressed']);
+  assert.deepEqual(slower.problems, ['document baseline press to settled: regressed']);
+  assert.deepEqual((await compared({}, { settled: [800, 900, 1126, 1200, 5000] }, { percent: 20, floorMs: 17 })).problems, ['document baseline press to settled: regressed']);
+  assert.equal((await compared({}, { settled: [800, 900, 1126, 1200, 5000] }, { ...DEFAULT_MARGIN, automationPercent: 30 })).pass, true);
+  assert.equal((await compared({ settled: [10, 10, 10, 10, 10] }, { settled: [27, 27, 27, 27, 27] })).pass, true);
+  assert.equal((await compared({ settled: [10, 10, 10, 10, 10] }, { settled: [28, 28, 28, 28, 28] })).pass, false);
+});
+
+test('Collection open and typing keep p95 at 10% or the 17 ms floor', async () => {
+  assert.equal((await compared({}, { open: [100, 105, 110, 115, 137], typed: [20, 21, 22, 23, 41] })).pass, true);
+  assert.deepEqual((await compared({}, { open: [100, 105, 110, 115, 138], typed: [20, 21, 22, 23, 42] })).problems,
+    ['collection open to rows painted: regressed', 'typing small.md dispatch to two frames: regressed']);
+  const baseline = { open: [200, 200, 200, 200, 200], typed: [200, 200, 200, 200, 200] };
+  const candidate = { open: [200, 200, 200, 200, 221], typed: [200, 200, 200, 200, 221] };
+  const slower = await compared(baseline, candidate);
+  assert.deepEqual(slower.checks.slice(0, 2).map(row => [row.baselineP95, row.candidateP95, row.limit, row.verdict]), [[200, 221, 220, 'regressed'], [200, 221, 220, 'regressed']]);
+  assert.equal((await compared(baseline, candidate, { ...DEFAULT_MARGIN, percent: 20 })).pass, true);
+});
+
+test('automation cases need five actual runs on each side', async () => {
+  for (const side of ['baseline', 'candidate']) {
+    const before = receipt(), after = receipt();
+    (side === 'baseline' ? before : after).runs.at(-1).collectionAutomations.document.cases = [];
+    const result = compareSummaries(await summarize(before), await summarize(after));
+    assert.equal(result.pass, false);
+    assert.deepEqual(result.problems, [`Automation cases need at least 5 runs on each side; the fewest recorded are baseline: ${side === 'baseline' ? 4 : 5}, candidate: ${side === 'candidate' ? 4 : 5}.`]);
+    assert.equal(result.checks.at(-1).verdict, 'insufficient-runs');
+  }
+  const three = { open: [100, 110, 120], typed: [20, 22, 24], settled: [800, 900, 5000] };
+  const result = await compared(three, { ...three, settled: [800, 6000, 7000] });
+  assert.deepEqual(result.problems, ['Automation cases need at least 5 runs on each side; the fewest recorded are baseline: 3, candidate: 3.']);
+});
+
+test('contention press-to-settled is reported while typing during the run still gates', async () => {
+  const result = await compared({ contention: true }, { contention: true, settled: [5000, 6000, 7000, 8000, 9000] });
+  assert.equal(result.pass, true, result.problems.join('; '));
+  assert.equal(result.checks.find(row => row.metric.endsWith('press to settled')).verdict, 'reported');
+  const baseline = await summarize(receipt({ contention: true, typed: [200, 200, 200, 200, 200] }));
+  const candidate = await summarize(receipt({ contention: true, typed: [200, 200, 200, 200, 221] }));
+  // Isolate the contention samples from typing on its own.
+  candidate.typing = baseline.typing;
+  assert.deepEqual(compareSummaries(baseline, candidate).problems, ['document baseline-typing typing during the run: regressed']);
+  candidate.collectionAutomations.document['baseline-typing'].triggerToSettledPaintedMs = { count: 0, p50: null, p95: null, max: null };
+  assert.ok(compareSummaries(baseline, candidate).problems.includes('document baseline-typing press to settled: missing'));
+});
+
+test('comparison CLI records and applies the automation margin independently', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-compare-cli-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const baseline = join(root, 'baseline'), candidate = join(root, 'candidate');
+  await mkdir(baseline); await mkdir(candidate);
+  await writeFile(join(baseline, 'result.json'), JSON.stringify(receipt()));
+  await writeFile(join(candidate, 'result.json'), JSON.stringify(receipt({ settled: [800, 900, 1126, 1200, 5000] })));
+  const run = flags => spawnSync(process.execPath, ['tools/perf-profiling/compare-packaged-benchmark.mjs', baseline, candidate, ...flags], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(run([]).status, 1);
+  const passed = run(['--automation-margin-percent', '30', '--margin-percent', '11', '--floor-ms', '18']);
+  assert.equal(passed.status, 0, passed.stderr);
+  const comparison = JSON.parse(await readFile(join(candidate, 'comparison.json'), 'utf8'));
+  assert.deepEqual(comparison.margin, { percent: 11, automationPercent: 30, floorMs: 18 });
+  assert.equal(comparison.pass, true);
+  for (const value of ['-1', 'NaN', 'Infinity']) {
+    const invalid = run(['--automation-margin-percent', value]);
+    assert.equal(invalid.status, 1);
+    assert.match(invalid.stderr, /--automation-margin-percent needs a number of at least 0/);
+  }
 });
 
 test('comparison checks a case whose fixture changed only within the candidate, and refuses mismatched receipts', async () => {
-  const other = await compared({}, { fixture: 'f2', settled: [5000, 6000, 7000], findCap: 500 });
+  const other = await compared({}, { fixture: 'f2', settled: [5000, 6000, 7000, 8000, 9000], findCap: 500 });
   assert.equal(other.pass, true, other.problems.join('; '));
   assert.deepEqual(other.cases, [{ kind: 'document', name: 'baseline', compared: false, outcomes: ['done'] }]);
   assert.equal(other.checks.some(check => check.metric.startsWith('document baseline')), false);
   const failed = await compared({}, { fixture: 'f2', failures: 1, status: 'failed' });
-  assert.deepEqual(failed.problems, ['The candidate receipt is failed, not complete.', "The candidate's document baseline case failed its checks in 1 of 3 runs."]);
+  assert.deepEqual(failed.problems, ['The candidate receipt is failed, not complete.', "The candidate's document baseline case failed its checks in 1 of 5 runs."]);
   const baseline = await summarize(receipt());
   const candidate = await summarize(receipt());
   candidate.settings = { ...candidate.settings, keystrokes: 10 };
@@ -1084,7 +1151,7 @@ test('comparison checks a case whose fixture changed only within the candidate, 
   candidate.typing['small.md'].dispatchToTwoRafObservedMs = { count: 0, p50: null, p95: null, max: null };
   assert.deepEqual(compareSummaries(baseline, candidate).problems, ['The receipts differ in keystrokes.', 'typing small.md dispatch to two frames: missing', 'document baseline: missing']);
   // A receipt from before per-case digests cannot pass as comparable.
-  const old = receipt({ settled: [5000, 6000, 7000] });
+  const old = receipt({ settled: [5000, 6000, 7000, 8000, 9000] });
   for (const run of old.runs) delete run.collectionAutomations.document.cases[0].fixtureSha256;
   const undigested = await summarize(old);
   assert.deepEqual(compareSummaries(undigested, await summarize(receipt())).problems, ['The document baseline case has no single fixture digest in both receipts.']);
