@@ -537,17 +537,18 @@ async function world(options: {
   const withdrawnFailures: Array<{ claimId: string; generation: number }> = [];
   const switchedOff: AutomationSwitchedOff[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
+  const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = async (signal, work) => {
+    await options.withRecordWrites?.(signal, events);
+    return await work(collectionRecordWrites(desktopRecordEditContext({
+      capture, workspaceRoot: root, signal,
+      withAdapter: async (read) => await read(engine),
+      onCaptureSettled: (listener) => { if (failures.capture > 0) { failures.capture--; throw Error("capture offline"); } settleListeners.add(listener); return () => settleListeners.delete(listener); },
+    })));
+  };
   // A new executor over the same engine, files, and saved runs, as after a restart.
   const makeExecutor = (extra: Partial<CollectionAutomationsOptions> = {}) => new CollectionAutomations({
     withEngine: async (work) => await work(engine),
-    withRecordWrites: async (signal, work) => {
-      await options.withRecordWrites?.(signal, events);
-      return await work(collectionRecordWrites(desktopRecordEditContext({
-        capture, workspaceRoot: root, signal,
-        withAdapter: async (read) => await read(engine),
-        onCaptureSettled: (listener) => { if (failures.capture > 0) { failures.capture--; throw Error("capture offline"); } settleListeners.add(listener); return () => settleListeners.delete(listener); },
-      })));
-    },
+    withRecordWrites: recordWrites,
     readText: async (path) => {
       const hook = beforeRead;
       beforeRead = null;
@@ -617,6 +618,8 @@ async function world(options: {
     withDatasetHost: async () => null,
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
     ...extra,
+    // Undo writes through the same seam as the runs, as it does on a desktop.
+    withUndoWrites: extra.withUndoWrites ?? extra.withRecordWrites ?? recordWrites,
   });
   const executor = makeExecutor();
 
@@ -2301,10 +2304,74 @@ describe("Collection automations", () => {
     expect(w.journaled.at(-1)).toMatchObject({ path: task.path, attribution: { actorKind: "human" } });
     expect(w.journaled.at(-1)!.actorOriginId).toBeUndefined();
 
+    // Note kept a later value, so Undo can try it again, and keeps it again.
     const [run] = (await w.executor.runs("collection:Tasks#stamp")).runs;
-    expect(run).toMatchObject({ state: "done", undone: true, chainStopped: false });
+    expect(run).toMatchObject({ state: "done", undone: false, chainStopped: false });
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, trash))
+      .resolves.toEqual({ status: "undone", reverted: 0, removed: 0, deleted: 0, keptChanged: 0, gone: 0, changedSince: 1, missing: 0, kept: 0, irreversible: 0, actions: 0, actionsReversed: 0 });
+    expect(trashed).toEqual([added!.path]);
+    task.doc.getMap("frontmatter").set("Note", "done");
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, trash))
+      .resolves.toMatchObject({ status: "undone", reverted: 1, changedSince: 0 });
+    expect(w.fieldsOf(task).Note).toBe("old");
+    expect(((await w.executor.runs("collection:Tasks#stamp")).runs)[0]).toMatchObject({ undone: true });
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, trash))
       .resolves.toEqual({ status: "refused", reason: "You already undid this run." });
+  });
+
+  it("tries a claim's kept fields with its runs not yet undone", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    task.doc.getMap("frontmatter").set("Note", "theirs");
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, async () => undefined))
+      .resolves.toMatchObject({ status: "undone", changedSince: 1 });
+    // Another run of the claim, not undone yet, as after Try again under a
+    // new definition, that wrote the same field again.
+    const [run] = (await w.baseStore.runsOf("collection:Tasks#stamp", claim.claimId)).runs;
+    const note = run!.applied.flatMap(({ writes }) => writes).find((write) => write.kind === "field" && write.field === "Note");
+    if (note?.kind !== "field") throw new Error("expected the run to write Note");
+    await w.baseStore.save({
+      ...run!, keySeed: `${run!.keySeed}-again`, startedAtMs: run!.startedAtMs + 1, undo: null, undoKept: [], created: [],
+      applied: [{ ordinal: 0, writes: [{ ...note, before: "done", after: "again" }] }],
+    });
+    // Both keep Note, which counts once.
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, async () => undefined))
+      .resolves.toMatchObject({ status: "undone", reverted: 0, changedSince: 1 });
+    task.doc.getMap("frontmatter").set("Note", "again");
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, async () => undefined))
+      .resolves.toMatchObject({ status: "undone", reverted: 1, changedSince: 0 });
+    expect(w.fieldsOf(task).Note).toBe("old");
+  });
+
+  it("puts back a field Undo kept once the run written after it is undone", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const first = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    const second = w.claim("collection:Tasks#stamp", task);
+    w.executor.notifyClaimed();
+    await w.settledClaim(second);
+    expect(w.fieldsOf(task).Count).toBe(4);
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const definitions = [{ collectionPath: "Tasks", id: "stamp", definitionHash: file.automations[0]!.definitionHash }];
+
+    // The older run first, as when the newer ran on another computer: Count holds the newer run's value.
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: first.claimId, deletes: null }, async () => undefined))
+      .resolves.toMatchObject({ status: "undone", changedSince: 1 });
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 4, Note: "old" });
+    await w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: second.claimId, deletes: null }, async () => undefined);
+    expect(w.fieldsOf(task).Count).toBe(3);
+    // A later pass tries only the kept field, and puts it back.
+    await expect(w.executor.undoRunsOf(definitions, async () => undefined, true))
+      .resolves.toEqual({ undone: 0, left: 0, reverted: 1, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
+    await expect(w.executor.undoRunsOf(definitions, async () => undefined, true))
+      .resolves.toEqual({ undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
   });
 
   it("undoes every finished run of the definitions a stopped person wrote, and no other", async () => {
@@ -2322,14 +2389,14 @@ describe("Collection automations", () => {
     const hash = file.automations[0]!.definitionHash;
 
     await expect(w.executor.undoRunsOf([{ collectionPath: "Tasks", id: "stamp", definitionHash: "0000000000000000" }], async () => undefined))
-      .resolves.toEqual({ undone: 0, left: 0, kept: 0, errorMessage: null });
+      .resolves.toEqual({ undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
     expect(w.fieldsOf(task).Count).toBe(4);
     await expect(w.executor.undoRunsOf([{ collectionPath: "Tasks", id: "stamp", definitionHash: hash }], async () => undefined))
-      .resolves.toEqual({ undone: 2, left: 0, kept: 0, errorMessage: null });
+      .resolves.toMatchObject({ undone: 2, left: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
     // Runs already undone are passed over.
     await expect(w.executor.undoRunsOf([{ collectionPath: "Tasks", id: "stamp", definitionHash: hash }], async () => undefined))
-      .resolves.toEqual({ undone: 0, left: 0, kept: 0, errorMessage: null });
+      .resolves.toEqual({ undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
   });
 
   it("will not run a failed run again after someone undid what it changed", async () => {
@@ -2488,7 +2555,7 @@ describe("Collection automations", () => {
     await expect(w.executor.undoRunsOf(
       [{ collectionPath: "Tasks", id: "stamp", definitionHash: second.automations[0]!.definitionHash }],
       async () => undefined,
-    )).resolves.toEqual({ undone: 1, left: 0, kept: 0, errorMessage: null });
+    )).resolves.toMatchObject({ undone: 1, left: 0, keptFields: [], otherKept: 0, errorMessage: null });
     expect(w.fieldsOf(task).Count).toBe(3);
     expect(second.automations[0]!.definitionHash).not.toBe(firstHash);
   });

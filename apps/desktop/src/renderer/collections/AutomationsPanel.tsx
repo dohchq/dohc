@@ -589,7 +589,7 @@ export function AutomationsPanel(props: {
   }, [props.closeAsk]);
 
   const requestRetry = useCallback(
-    (target: { automationId: string; claimId: string }, startOver: boolean) =>
+    (target: { automationId: string; claimId: string; onServer: boolean }, startOver: boolean) =>
       bridge().retryCollectionAutomation({ workspaceId, ...target, startOver }),
     [workspaceId],
   );
@@ -706,7 +706,7 @@ export function AutomationsPanel(props: {
   const allow = (automationId: string, definitionHash: string, step: string, seq: number) => {
     const epoch = scope.current();
     void bridge()
-      .confirmCollectionAutomationStep({ workspaceId, automationId, definitionHash, step, seq })
+      .confirmCollectionAutomationStep({ workspaceId, automationId, definitionHash, step, seq, onServer: false })
       .then(() => {
         if (scope.isCurrent(epoch)) void load();
       })

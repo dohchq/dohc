@@ -327,7 +327,7 @@ export async function savedRunOf(
 /** A new run's record, before anything of it is saved. */
 export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, nowMs: number): StoredRun {
   return {
-    version: 7,
+    version: 8,
     claimId: claim.claimId,
     automationId: claim.automationId,
     definitionHash: definitionHash(automation),
@@ -346,6 +346,7 @@ export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">,
     rules: null,
     superseded: false,
     undo: null,
+    undoKept: [],
     settled: false,
     outcome: null,
   };

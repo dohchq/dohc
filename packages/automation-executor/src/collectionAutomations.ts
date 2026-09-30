@@ -82,6 +82,7 @@ import { automationInventory, type AutomationInventory } from "./automationInven
 import { AutomationRunWait } from "./automationRunWait";
 import { automationUndoReach, undoAutomationRuns } from "./automationUndo";
 import {
+  undoCollectionAutomationRuns,
   type CollectionAutomationUndone,
 } from "./collectionAutomationUndo";
 import {
@@ -283,6 +284,8 @@ export interface CollectionAutomationsOptions {
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withEngine<T>(work: (engine: CollectionAutomationEngine) => Promise<T>): Promise<T | null>;
   withRecordWrites: CollectionAutomationRunDependencies["withRecordWrites"];
+  /** Undo's record writes, which are the edits of the person who asked for it. */
+  withUndoWrites: CollectionAutomationRunDependencies["withRecordWrites"];
   /** A workspace text file, or null when it does not exist. */
   readText(relativePath: string): Promise<
     { text: string; truncated: false; contentHash: string } | { text: string; truncated: true; contentHash: null } | null
@@ -727,6 +730,18 @@ type DatasetUndoChecked =
   | { collection: ReachCollection; covers: StoredRun[]; calls: DatasetUndoCall[] }
   | Extract<CollectionAutomationUndo, { status: "confirm" | "refused" }>;
 
+function documentUndoKept(runs: readonly StoredRun[]) {
+  const datasetRecords = new Set(runs.flatMap((run) => [
+    ...run.applied.flatMap(({ writes }) => writes.flatMap((write) => write.kind === "dataset-edit"
+      ? [JSON.stringify([write.rules.datasetId, write.tableId, write.recordId])] : [])),
+    ...run.steps.flatMap(({ effects }) => effects.flatMap((effect) => effect.kind === "dataset-edit"
+      ? [JSON.stringify([effect.rules.datasetId, effect.tableId, effect.target.recordId])] : [])),
+  ]));
+  return [...new Map(runs.flatMap((run) => run.undoKept).filter((kept) => !datasetRecords.has(kept.recordId))
+    .map((kept) => [JSON.stringify([kept.recordId, kept.field]), kept])).values()];
+}
+
+const DATASET_UNDO_KEPT = "dohc kept the fields someone changed after this run. Restore them from each record's History.";
 const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a moment.";
 
 /**
@@ -2320,7 +2335,7 @@ export class CollectionAutomations {
         trigger: claim.trigger,
         definitionChanged: hash !== null && live.some((run) => run.definitionHash !== hash),
         ...stopOf(claim),
-        undone: stored.length > 0 && stored.every((run) => run.undo === "done"),
+        undone: stored.length > 0 && stored.every((run) => run.undo === "done" && run.undoKept.length === 0),
       },
     };
   }
@@ -2866,9 +2881,6 @@ export class CollectionAutomations {
       if (unreadable) {
         return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/automations, so it undid nothing." };
       }
-      if (runs.length > 0 && runs.every((run) => run.undo === "done")) {
-        return { status: "refused", reason: "You already undid this run." };
-      }
       const hasDatasets = runs.some((run) => run.steps.some((step) => step.effects.some((effect) => "rules" in effect)) ||
         run.applied.some((entry) => entry.writes.some((write) => "rules" in write)));
       if (parsed === null) return { status: "refused", reason: LOST_COLLECTION_ERROR };
@@ -2895,8 +2907,16 @@ export class CollectionAutomations {
       if (denied && !denied.allowed) return { status: "refused", reason: denied.reason };
       // Every run of the claim changed records, one a person started over
       // under a newer definition too. One whose Undo stopped part way is
-      // undone again: what is already back stays as it is.
+      // undone again: what is already back stays as it is. Once every run
+      // is undone, Undo tries again only the fields it kept.
       const pending = runs.filter((run) => run.undo !== "done");
+      const kept = pending.length === 0 ? runs.filter((run) => run.undoKept.length > 0) : [];
+      if (runs.length > 0 && pending.length === 0 && kept.length === 0) {
+        return { status: "refused", reason: "You already undid this run." };
+      }
+      // A dataset's Undo replays the receipts of what it sent, so it cannot try a kept field again.
+      if (kept.length > 0 && documentUndoKept(runs).length === 0) return { status: "refused", reason: DATASET_UNDO_KEPT };
+      if (kept.length > 0) return { status: "undone", ...(await this.undoKeptFields(kept, trash)).undone };
       // Kept with the claim's newest run, whichever runs are saved undone.
       const newest = () => runs.reduce((latest, run) => (run.startedAtMs > latest.startedAtMs ? run : latest));
       // Dataset Undo checks everything before anything below is saved or
@@ -2921,7 +2941,7 @@ export class CollectionAutomations {
         holder.undoCalls.push(...checked.calls);
       }
       const reverse = (host: DatasetUndoHost | null) => undoAutomationRuns({
-        withReads: (work) => this.withLiveEngine(work), withRecordWrites: this.options.withRecordWrites,
+        withReads: (work) => this.withLiveEngine(work), withRecordWrites: this.options.withUndoWrites,
         trash, collectionPathOf: (id) => this.collectionPathOf(id),
       }, host, collectionNamed(parsed.collectionPath), async () => {
         const roster = await this.options.cachedRoster();
@@ -2933,11 +2953,35 @@ export class CollectionAutomations {
       }, this.runAbort.signal);
       const undone = hasDatasets ? await this.withLiveHost(reverse, true) : await reverse(null);
       if (undone === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
-      for (const run of pending) await this.options.store.updateState(run, { undo: "done" });
-      return { status: "undone", ...undone };
+      const { undone: result, keptFields } = undone;
+      // The combined chain above includes earlier undone runs. Save its
+      // remaining fields on every run so a later retry uses that same chain.
+      for (const run of runs) await this.options.store.updateState(run, { undo: "done", undoKept: keptFields });
+      return { status: "undone", ...result };
     } finally {
       this.changing.delete(input.claimId);
     }
+  }
+
+  /** Undo again, for runs already undone, of only the fields it kept. */
+  private async undoKeptFields(
+    runs: readonly StoredRun[],
+    trash: (path: string) => Promise<void>,
+  ): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
+    const only = documentUndoKept(runs);
+    const documentKeys = new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field])));
+    const datasetKept = [...new Map(runs.flatMap((run) => run.undoKept).filter((kept) => !documentKeys.has(JSON.stringify([kept.recordId, kept.field])))
+      .map((kept) => [JSON.stringify([kept.recordId, kept.field]), kept])).values()];
+    const { undone, keptFields } = await undoCollectionAutomationRuns({
+      withReads: (work) => this.withLiveEngine(work),
+      withRecordWrites: this.options.withUndoWrites,
+      trash,
+      collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
+    }, runs, this.runAbort.signal, only);
+    keptFields.push(...datasetKept);
+    undone.changedSince += datasetKept.length;
+    for (const run of runs) await this.options.store.updateState(run, { undoKept: keptFields });
+    return { undone, keptFields };
   }
 
   /**
@@ -2987,58 +3031,79 @@ export class CollectionAutomations {
    * history under one of these definitions, as Undo on each would, newest
    * first as run history lists them, so each field goes back in turn. A
    * claim's runs under other definitions stay. `left` counts the runs Undo
-   * refused, such as one still running. `kept` counts the changes undone
-   * runs made that stay as they are: dataset records and actions Undo cannot
-   * reverse, and fields someone changed since or whose record is gone.
-   * A failure part way stops there and answers what went before, with it.
-   * Each definition names its automation by the Collection its file was in
-   * and its id there.
+   * refused, such as one still running. Fields a run kept because they
+   * changed since are tried again; with `again`, only those are, so a pass
+   * after the runs written on top of them were undone restores them.
+   * `reverted` and `missing` count fields. `keptFields` names, by hash,
+   * every field those runs still keep after the pass, so a field kept on
+   * two computers counts once.
+   * `otherKept` counts changes Undo cannot reverse. A failure returns partial counts.
    */
   async undoRunsOf(
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
     trash: (path: string) => Promise<void>,
-  ): Promise<{ undone: number; left: number; kept: number; errorMessage: string | null }> {
+    again = false,
+  ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null }> {
     const hashes = new Map<string, Set<string>>();
     for (const { collectionPath, id, definitionHash: hash } of definitions) {
       const automationId = await this.automationIdAt(collectionPath, id);
       if (automationId !== null) hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
     }
-    const result = { undone: 0, left: 0, kept: 0 };
+    const result = { undone: 0, left: 0, reverted: 0, missing: 0, otherKept: 0 };
+    const keptFields = new Set<string>();
     try {
-      await this.undoEachRun(hashes, trash, result);
+      await this.undoEachRun(hashes, trash, result, again, keptFields);
     } catch (error) {
-      return { ...result, errorMessage: error instanceof Error ? error.message : String(error) };
+      return { ...result, keptFields: [...keptFields], errorMessage: error instanceof Error ? error.message : String(error) };
     }
-    return { ...result, errorMessage: null };
+    return { ...result, keptFields: [...keptFields], errorMessage: null };
   }
 
   private async undoEachRun(
     hashes: ReadonlyMap<string, ReadonlySet<string>>,
     trash: (path: string) => Promise<void>,
-    result: { undone: number; left: number; kept: number },
+    result: { undone: number; left: number; reverted: number; missing: number; otherKept: number },
+    again: boolean,
+    keptFields: Set<string>,
   ): Promise<void> {
     for (const [automationId, wanted] of hashes) {
       // A dataset's runs are in its host's ledger, which may not be open yet.
       await this.indexAutomation(automationId);
       const listed = await this.everyClaim(automationId);
       if (listed === null) throw new Error("The workspace engine is not running.");
-      for (const claim of listed) {
-        const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs
-          .filter((run) => wanted.has(run.definitionHash));
-        if (runs.length === 0 || runs.every((run) => run.undo === "done")) continue;
-        const target = { automationId, claimId: claim.claimId };
-        let undone = await this.undo({ ...target, deletes: null }, trash, wanted);
-        // Records a run added are deleted only after a person reads the
-        // preview in its run history, so a run that would delete any is left.
-        if (undone.status === "confirm" && undone.preview.deletes + undone.preview.unchecked === 0) {
-          undone = await this.undo({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted);
+      try {
+        for (const claim of listed) {
+          const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs
+            .filter((run) => wanted.has(run.definitionHash));
+          const pending = runs.some((run) => run.undo !== "done");
+          const kept = documentUndoKept(runs).length > 0;
+          if (again ? pending || !kept : !pending && !kept) continue;
+          const target = { automationId, claimId: claim.claimId };
+          let undone = await this.undo({ ...target, deletes: null }, trash, wanted);
+          // Stop and restore leaves deletions for the person's confirmation in run history.
+          if (undone.status === "confirm" && undone.preview.deletes + undone.preview.unchecked === 0) {
+            undone = await this.undo({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted);
+          }
+          if (undone.status === "undone") {
+            if (pending) result.undone += 1;
+            result.reverted += undone.reverted;
+            result.missing += undone.missing;
+            if (pending) {
+              result.otherKept += undone.kept + undone.keptChanged + undone.irreversible + undone.actions;
+            }
+          } else if (!again) {
+            result.left += 1;
+          }
         }
-        if (undone.status !== "undone") {
-          result.left += 1;
-          continue;
+      } finally {
+        for (const claim of listed) {
+          for (const run of (await this.options.store.runsOf(automationId, claim.claimId)).runs) {
+            if (!wanted.has(run.definitionHash)) continue;
+            for (const { recordId, field } of run.undoKept) {
+              keptFields.add(createHash("sha256").update(JSON.stringify([recordId, field])).digest("hex").slice(0, 32));
+            }
+          }
         }
-        result.undone += 1;
-        result.kept += undone.kept + undone.keptChanged + undone.irreversible + undone.actions + undone.changedSince + undone.missing;
       }
     }
   }

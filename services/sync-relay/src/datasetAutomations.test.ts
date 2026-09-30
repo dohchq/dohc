@@ -140,6 +140,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
   const store = createAutomationRunStore(f.directory, async () => metadata);
   const executor = new CollectionAutomations({
     withEngine: async work => work(engine), withRecordWrites: async () => { throw Error("Unexpected document write"); },
+    withUndoWrites: async () => { throw Error("Unexpected document Undo"); },
     readText: async path => texts.has(path) ? { text: texts.get(path)!, truncated: false, contentHash: "a".repeat(64) } : null,
     writeText: async () => ({ status: "conflict" }), pathExists: async path => texts.has(path),
     roster: async () => roster(), cachedRoster: async () => roster(), personName: userId => userId,

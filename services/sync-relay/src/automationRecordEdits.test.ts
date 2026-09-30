@@ -8,6 +8,7 @@ import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { replicaRecordEditContext, type ReplicaRecordEngine } from "./automationRecordEdits";
 
 const AUTOMATION = { kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "owner", depth: 1 } as const;
+const ONLY = "This server writes records only for automations, and for the owner's Undo of their runs.";
 const RECORD = derivedRecordId("claim-1/0");
 const MAIN: VersionRecord = { id: "main", workspaceId: "workspace-trip", kind: "main", name: "Main", createdAtMs: 1 };
 
@@ -191,12 +192,27 @@ describe("an automation's record writes on this server's replica", () => {
     const context = replicaRecordEditContext(replica(), engine, new AbortController().signal);
     const person = { kind: "user", userId: "owner" } as const;
     await expect(context.createFile("Tasks/two.md", "---\n---\n", person))
-      .rejects.toThrow("This server writes records only for automations.");
+      .rejects.toThrow(ONLY);
     await expect(setCollectionRecordFields(context, { recordPath: "Tasks/one.md", fields: { Status: "Done" }, author: person }))
-      .rejects.toThrow("This server writes records only for automations.");
+      .rejects.toThrow(ONLY);
     expect(writes).toEqual([]);
     expect(journaled).toEqual([]);
     expect(files.get("Tasks/one.md")).toContain("Status: Doing");
+  });
+
+  it("lets the owner's Undo write a record's fields as a person, and nothing else", async () => {
+    const { engine, files, writes, journaled } = replicaEngine();
+    files.set("Tasks/one.md", `---\nid: ${RECORD}\nStatus: Done\n---\n`);
+    const context = replicaRecordEditContext(replica(), engine, new AbortController().signal, true);
+    const person = { kind: "user", userId: "local" } as const;
+    await expect(context.createFile("Tasks/two.md", "---\n---\n", person)).rejects.toThrow(ONLY);
+    // Undo's session takes no automation's writes.
+    await expect(context.createFile("Tasks/two.md", `---\nid: ${RECORD}\n---\n`, AUTOMATION)).rejects.toThrow(ONLY);
+    await expect(setCollectionRecordFields(context, { recordPath: "Tasks/one.md", fields: { Status: "Doing" }, author: AUTOMATION }))
+      .rejects.toThrow(ONLY);
+    await setCollectionRecordFields(context, { recordPath: "Tasks/one.md", fields: { Status: "Doing" }, author: person });
+    expect(writes).toEqual([]);
+    expect(journaled).toHaveLength(1);
   });
 
   it("writes and settles nothing more once its run ends", async () => {

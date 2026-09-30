@@ -140,7 +140,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     runs.set(key, { ...run, waiting: null });
     changed(key);
     try {
-      const result = await bridge().retryCollectionAutomation({ workspaceId, automationId: run.automationId, claimId: run.claimId, startOver: false });
+      const result = await bridge().retryCollectionAutomation({ workspaceId, automationId: run.automationId, claimId: run.claimId, startOver: false, onServer: false });
       if (closed || result.status === "queued") return;
       finish(key);
       const reason = result.status === "refused" ? result.reason : `${run.field} changed since it ran. Run it again from Automations.`;

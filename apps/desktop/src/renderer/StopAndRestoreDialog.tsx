@@ -241,7 +241,7 @@ export function StopAndRestoreDialog({
         ? { ...last.result, restored }
         : {
             status: "restored" as const, restored, review: [], runsLeft: 0, ...receipts.runs(workspaceId, chosen.target),
-            wroteAutomations: false, sendsMessages: false, errorMessage: null,
+            fieldsKept: 0, fieldsMissing: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null,
           },
       undone: true,
     };
@@ -371,6 +371,16 @@ function Outcome({ words, result, undone, onOpenFile }: {
       {result.wroteAutomations ? (
         <p className="m-0 text-[13px] text-muted">
           Runs on your other computers are not undone here. Undo them from the run history on each computer.
+        </p>
+      ) : null}
+      {result.fieldsKept > 0 ? (
+        <p className="m-0 text-[13px] text-muted">
+          {plural(result.fieldsKept, "field", "fields")} kept a later value. Restore them from each record's History.
+        </p>
+      ) : null}
+      {result.fieldsMissing > 0 ? (
+        <p className="m-0 text-[13px] text-muted">
+          {plural(result.fieldsMissing, "field was", "fields were")} on records no longer in their Collection.
         </p>
       ) : null}
       {result.review.length > 0 ? (

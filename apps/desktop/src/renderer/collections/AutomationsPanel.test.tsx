@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
   GetCollectionAutomationRunResult,
   ListCollectionAutomationRunsResult,
+  ListServerAutomationRunsResult,
   ListCollectionAutomationsResult,
   ListAutomationGroupsResult,
   ListAutomationPeopleResult,
@@ -79,7 +80,12 @@ const run = (overrides: Partial<Run>): Run => ({
   trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, ...overrides,
 });
 
-function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean; roundTripWrites?: boolean } = {}) {
+function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: {
+  holdsUnreadable?: boolean;
+  roundTripWrites?: boolean;
+  /** The server's runs; null when it has no copy of the workspace. */
+  serverRuns?: Run[] | null;
+} = {}) {
   let current = file;
   let holdsUnreadable = options.holdsUnreadable ?? false;
   const failureListeners: Array<(event: { workspaceId: string }) => void> = [];
@@ -109,6 +115,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     }),
     listCollectionAutomationRuns: vi.fn(async (_payload?: { before?: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs, next: null })),
     getCollectionAutomationRun: vi.fn(async (): Promise<GetCollectionAutomationRunResult> => ({ status: "missing" })),
+    listServerAutomationRuns: vi.fn(async (_payload?: { before?: string }): Promise<ListServerAutomationRunsResult> => ({ runs: options.serverRuns ?? null, next: null })),
     listAutomationHolds: vi.fn(async () => ({ holds: [], unreadable: holdsUnreadable })),
     resetAutomationHolds: vi.fn(async () => {
       holdsUnreadable = false;
@@ -391,7 +398,7 @@ describe("the ⚡ panel", () => {
     expect(row.textContent).toContain("A step can now change Budget. It stopped before because bob@dohc.test could not.");
     await userEvent.click(within(row).getByRole("button", { name: "Allow" }));
     expect(bridge.confirmCollectionAutomationStep).toHaveBeenCalledWith({
-      workspaceId: "ws-1", automationId: "collection:Tasks#nudge", definitionHash: "0123456789abcdef", step: "operation:invoices.edit", seq: 7,
+      workspaceId: "ws-1", automationId: "collection:Tasks#nudge", definitionHash: "0123456789abcdef", step: "operation:invoices.edit", seq: 7, onServer: false,
     });
   });
 
@@ -2152,7 +2159,7 @@ describe("an automation's runs", () => {
     bridge.getCollectionAutomationRun.mockResolvedValue({ status: "found", run: failed });
     render(<Panel focus={{ automationId: "collection:Tasks#gone", run: "atc_failed", seq: 1 }} />);
     const opened = await screen.findByTestId("automation-run-atc_failed");
-    expect(bridge.getCollectionAutomationRun).toHaveBeenCalledWith({ workspaceId: "ws-1", automationId: "collection:Tasks#gone", claimId: "atc_failed" });
+    expect(bridge.getCollectionAutomationRun).toHaveBeenCalledWith({ workspaceId: "ws-1", automationId: "collection:Tasks#gone", claimId: "atc_failed", onServer: false });
     expect(screen.getByTestId("automation-runs").firstElementChild).toBe(opened);
     expect(opened.getAttribute("aria-current")).toBe("true");
     // Its changes show without a click.
@@ -2176,7 +2183,7 @@ describe("an automation's runs", () => {
 
     await userEvent.click(within(failedRow).getByRole("button", { name: "Try again" }));
     expect(bridge.retryCollectionAutomation).toHaveBeenLastCalledWith({
-      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_failed", startOver: false,
+      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_failed", startOver: false, onServer: false,
     });
     expect((await screen.findByTestId("automation-start-over")).textContent).toContain(START_OVER_SENTENCE);
     await userEvent.click(screen.getByTestId("automation-start-over-confirm"));
@@ -2281,15 +2288,16 @@ describe("an automation's runs", () => {
 
     await userEvent.click(within(row).getByRole("button", { name: "Undo" }));
     expect(bridge.undoCollectionAutomationRun).toHaveBeenCalledWith({
-      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_failed", deletes: null,
+      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_failed", deletes: null, onServer: false,
     });
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid 1 change. 1 field changed since then."));
   });
 
-  it("says what Undo deletes and keeps before it runs, asks which delete to use, and sends that choice", async () => {
+  it.each([false, true])("confirms dataset deletes and sends the choice to the run's host (server: %s)", async (onServer) => {
     const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
     const added = (recordId: string) => ({ kind: "dataset-created" as const, rules, operationId: "create", tableId: "table-1", recordId, version: 1, deletes: ["delete", "archive"] });
-    const { bridge } = makeBridge(read([summary(stamp)]), [run({ writes: [added("invoice-2"), added("invoice-3")] })]);
+    const rows = [run({ writes: [added("invoice-2"), added("invoice-3")] })];
+    const { bridge } = makeBridge(read([summary(stamp)]), onServer ? [] : rows, { serverRuns: onServer ? rows : null });
     bridge.undoCollectionAutomationRun
       .mockResolvedValueOnce({ status: "confirm", preview: {
         deletes: 2, unchecked: 1, kept: 1, keptChanged: 1, gone: 1, reverts: 0, irreversible: 0, reverses: 1, actions: 0, token: "preview-1",
@@ -2299,7 +2307,7 @@ describe("an automation's runs", () => {
     const onNotice = vi.fn();
     const user = userEvent.setup();
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} onNotice={onNotice} />);
-    await user.click(within(await screen.findByTestId("automation-run-atc_1")).getByRole("button", { name: "Undo" }));
+    await user.click(within(await screen.findByTestId(`automation-run-${onServer ? "server-" : ""}atc_1`)).getByRole("button", { name: "Undo" }));
     const dialog = await screen.findByRole("dialog", { name: "Undo this run?" });
     expect([...dialog.querySelectorAll("p")].map((line) => line.textContent)).toEqual([
       "Undo will reverse 1 action.",
@@ -2316,12 +2324,82 @@ describe("an automation's runs", () => {
     await user.click(within(dialog).getByRole("radio", { name: "Archive" }));
     await user.click(confirm);
     expect(bridge.undoCollectionAutomationRun).toHaveBeenLastCalledWith({
-      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_1", deletes: { token: "preview-1", chosen: [{ key: "invoices-deletes", operationId: "archive" }] },
+      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_1", onServer, deletes: { token: "preview-1", chosen: [{ key: "invoices-deletes", operationId: "archive" }] },
     });
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith(
       "Deleted 1 added record. 1 added record stays because someone changed it. 1 added record was already gone.",
     ));
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("marks a run the server made, and runs its Try again and Undo on the server", async () => {
+    const onServer = run({ ...failed, claimId: "atc_server", createdAtMs: failed.createdAtMs + 1,
+      writes: [{ kind: "created", recordId: "rec_2", path: "Tasks/Pack.md" }] });
+    const { bridge } = makeBridge(read([summary(stamp, { lastRun: { state: "failed", atMs: Date.now() } })]), [failed], { serverRuns: [onServer] });
+    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({
+      status: "undone", reverted: 0, removed: 1, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0, deleted: 0, keptChanged: 0, gone: 0,
+    });
+    const onNotice = vi.fn();
+    render(<Panel onNotice={onNotice} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    const row = await screen.findByTestId("automation-run-server-atc_server");
+    expect(within(row).getByLabelText("Ran on your server")).toBeTruthy();
+    // Newest first, across this computer and the server.
+    expect(within(screen.getByTestId("automation-runs")).getAllByRole("listitem").map((item) => item.dataset.testid))
+      .toEqual(["automation-run-server-atc_server", "automation-run-atc_failed"]);
+    expect(within(screen.getByTestId("automation-run-atc_failed")).queryByLabelText("Ran on your server")).toBeNull();
+    await userEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryCollectionAutomation).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_server", startOver: false, onServer: true,
+    });
+    await userEvent.click(within(row).getByRole("button", { name: "Undo" }));
+    expect(bridge.undoCollectionAutomationRun).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_server", deletes: null, onServer: true,
+    });
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Deleted 1 added record. History can restore them."));
+  });
+
+  it("pages the server independently and keeps its older rows when the head refreshes", async () => {
+    const newest = run({ claimId: "server-new", createdAtMs: 30 });
+    const older = run({ claimId: "server-old", createdAtMs: 10 });
+    const { bridge, replaceFile } = makeBridge(read([summary(stamp)]), [run({ claimId: "local", createdAtMs: 20 })]);
+    bridge.listServerAutomationRuns.mockImplementation(async (input) => input?.before
+      ? { runs: [older], next: null } : { runs: [newest], next: "30:server-new" });
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Older runs" }));
+    expect(await screen.findByTestId("automation-run-server-server-old")).toBeTruthy();
+    expect(bridge.listServerAutomationRuns).toHaveBeenCalledWith({ workspaceId: "ws-1", automationId: "collection:Tasks#stamp", before: "30:server-new" });
+    expect(within(screen.getByTestId("automation-runs")).getAllByRole("listitem").map((row) => row.dataset.testid))
+      .toEqual(["automation-run-server-server-new", "automation-run-local", "automation-run-server-server-old"]);
+    replaceFile(read([summary(stamp)]));
+    await waitFor(() => expect(bridge.listServerAutomationRuns).toHaveBeenCalledTimes(3));
+    expect(screen.getByTestId("automation-run-server-server-old")).toBeTruthy();
+  });
+
+  it("never shows one automation's server runs under another", async () => {
+    const onServer = run({ ...failed, claimId: "atc_server" });
+    const { bridge } = makeBridge(read([summary(stamp), summary(nudge, { automationId: "collection:Tasks#nudge" })]), [], { serverRuns: [onServer] });
+    const { rerender } = render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    expect(await screen.findByTestId("automation-run-server-atc_server")).toBeTruthy();
+    bridge.listServerAutomationRuns.mockRejectedValue(new Error("Your server answered with 500."));
+    rerender(<Panel focus={{ automationId: "collection:Tasks#nudge", run: null, seq: 2 }} />);
+    expect(await screen.findByText("This automation has not run on this computer yet.")).toBeTruthy();
+    expect(screen.queryByTestId("automation-run-server-atc_server")).toBeNull();
+  });
+
+  it("says when the server has no runs either, and still shows this computer's runs when the server fails", async () => {
+    const { bridge } = makeBridge(read([summary(stamp, { lastRun: null })]), [], { serverRuns: [] });
+    const onError = vi.fn();
+    render(<Panel onError={onError} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    expect(await screen.findByText("This automation has not run on this computer or your server yet.")).toBeTruthy();
+    expect(onError).not.toHaveBeenCalled();
+    cleanup();
+    bridge.listCollectionAutomationRuns.mockResolvedValue({ status: "listed", runs: [failed], next: null });
+    bridge.listServerAutomationRuns.mockRejectedValue(new Error("Your server answered with 500."));
+    render(<Panel onError={onError} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 2 }} />);
+    expect(await screen.findByTestId("automation-run-atc_failed")).toBeTruthy();
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "dohc could not read this automation's runs on your server.", expect.any(Error), expect.any(Function),
+    ));
   });
 });
 

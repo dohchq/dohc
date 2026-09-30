@@ -23,6 +23,7 @@ import {
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
+import { createServerRuns } from "./automations/serverRuns";
 import { createPressWindows, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
@@ -219,6 +220,7 @@ import { createShareRosters, rosterAuthorLabel } from "./automations/shareRoster
 import { listRosterGrants } from "@dohc/automation-executor/roster-listing";
 import {
   CollectionAutomations,
+  type CollectionAutomationsOptions,
   type AutomationSwitchedOff,
   type CollectionAutomationRetry,
   type PressWaitReason,
@@ -2147,6 +2149,8 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.retryCloudSync(lease.state.activity, reason),
     ),
+  syncNow: (workspaceId: string): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.syncNow(lease.state.activity)),
   retryFailingCloudSyncs: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
       // Started inside the promise, so a workspace closing under the loop
@@ -3583,6 +3587,36 @@ const automationHosts = createAutomationHosts({
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
 });
 
+// The runs, Undo, and held steps of the owner's self-hosted server, through
+// the relay's owner routes. Only the owner's own session asks; any other
+// answers that the server has none to show.
+const serverRuns = createServerRuns(async (workspaceId, request) => {
+  const workspace = findWorkspace(workspaceId);
+  if (!workspace?.remote || workspace.shareView !== undefined) return null;
+  let credentials: CloudSessionCredentials;
+  try {
+    ({ credentials } = await remoteForWorkspace(workspace));
+  } catch {
+    // Signed out, or signed in to another account or server.
+    return null;
+  }
+  if (!credentials.relayUrl) return null;
+  const query = request.method === "GET" && request.query ? `?${new URLSearchParams(request.query).toString()}` : "";
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/automation-server/${request.action}${query}`,
+    request.method === "GET"
+      ? { method: "GET", signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS) }
+      : {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request.body),
+        signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+      },
+  );
+  return { status: response.status, body: await response.json().catch(() => undefined) };
+});
+
 // Which of the owner's computers runs a workspace's schedules, for settings
 // and the ⚡ panel, after a choose or take-over when one is given. This
 // computer acts on the answer at once.
@@ -3789,17 +3823,20 @@ function createCollectionAutomationsFor(
 ): CollectionAutomations {
   const { workspaceId, canonicalRootPath: rootPath, attachmentId } = binding;
   const workspace = { workspaceId, rootPath, attachmentId };
+  const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = (signal, work) =>
+    withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
+      if (operation.workspace.attachmentId !== attachmentId) {
+        throw new Error("This workspace was closed.");
+      }
+      const capture = activity.engineCaptureFor(workspaceId);
+      if (!capture) throw new Error(captureRefusal("Automations"));
+      return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
+    });
   return new CollectionAutomations({
     withEngine: (work) => withEngineAdapter(workspace, work),
-    withRecordWrites: (signal, work) =>
-      withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
-        if (operation.workspace.attachmentId !== attachmentId) {
-          throw new Error("This workspace was closed.");
-        }
-        const capture = activity.engineCaptureFor(workspaceId);
-        if (!capture) throw new Error(captureRefusal("Automations"));
-        return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
-      }),
+    // Each write names its author, so Undo writes as the person here the same way.
+    withRecordWrites: recordWrites,
+    withUndoWrites: recordWrites,
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
     writeText: async (path, text, expectedContentHash, automationId) => {
       const capture = activity.engineCaptureFor(workspaceId);
@@ -5553,6 +5590,8 @@ function registerIpcHandlers(): void {
     showItemInFolder: (path) => shell.showItemInFolder(path),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
     watchPress: (workspaceId, claimId, sender) => pressWindows.watch(workspaceId, claimId, sender, null),
+    serverRuns,
+    relayUnreachable,
   });
 
   pressNamedForCli = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
@@ -5634,11 +5673,13 @@ function registerIpcHandlers(): void {
     sharesChanged: shareRosters.sharesChanged,
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),
+    syncNow: (workspaceId) => activity.syncNow(workspaceId),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
     notifyRenderer,
     assertOriginalWorkspace: (workspace) => {
       if (shareViewIsPresent(workspace.shareView)) throw new Error("Only the original workspace has shares to stop.");
     },
+    serverRuns,
   });
 
   shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({

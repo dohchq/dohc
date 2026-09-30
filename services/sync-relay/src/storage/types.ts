@@ -613,6 +613,7 @@ export interface SyncRelayStorage {
   serverHostedWorkspaces(): string[];
   automationWorkspaceLogHead(workspaceId: string): number;
   automationWorkspaceInfo(workspaceId: string): { ownerUserId: string; everShared: boolean } | null;
+  restoreAutomationWorkspaceTimes(input: { workspaceId: string; incarnation: number; unwantedSinceMs: number; leftAtMs: number | null }): void;
   commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
   readOwnerCollectionWrites(input: import("./ownerCollectionWrites").OwnerCollectionWritesInput): import("./ownerCollectionWrites").OwnerCollectionWritesPage;
   recordAutomationPress(input: import("./automationPresses").RecordAutomationPressInput): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;

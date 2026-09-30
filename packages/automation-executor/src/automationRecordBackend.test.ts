@@ -225,7 +225,7 @@ describe("static steps across storage kinds", () => {
     const f = await fixture(source, target);
       expect(await f.run(automation(find("Target", target) + set(target, "found")))).toEqual({ kind: "done" });
       expect(target ? f.rows.get("Target-dataset")!.get("same")!.values.status : f.docs.get("Target/same")!.status).toBe("Closed");
-      expect((await f.undo()).reverted).toBe(1);
+      expect((await f.undo()).undone.reverted).toBe(1);
       expect(target ? f.rows.get("Target-dataset")!.get("same")!.values.status : f.docs.get("Target/same")!.status).toBe("Open");
   });
   it.each([[false, false], [false, true], [true, false], [true, true]])("Add then Set and Find from dataset=%s to dataset=%s", async (source, target) => {
@@ -233,14 +233,14 @@ describe("static steps across storage kinds", () => {
       expect(await f.run(automation(add("Target", target) + set(target, "added") + find("Target", target, "remaining") + set(target, "remaining", "Found")))).toEqual({ kind: "done" });
       const statuses = target ? [...f.rows.get("Target-dataset")!.values()].map((row) => row.values.status) : [...f.docs.values()].filter((doc) => doc.collection === "Target").map((doc) => doc.status);
       expect(statuses.sort()).toEqual(["Closed", "Found"]);
-      expect(await f.undo()).toMatchObject(target ? { deleted: 1 } : { removed: 1 });
+      expect((await f.undo()).undone).toMatchObject(target ? { deleted: 1 } : { removed: 1 });
   });
   it("keeps the same typed ID in two datasets separate", async () => {
     const f = await fixture();
       expect(await f.run(automation(find("Target", true) + set(true, "found", "First") + find("Other", true, "other") + set(true, "other", "Second")))).toEqual({ kind: "done" });
       expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("First");
       expect(f.rows.get("Other-dataset")!.get("same")!.values.status).toBe("Second");
-      expect((await f.undo()).reverted).toBe(2);
+      expect((await f.undo()).undone.reverted).toBe(2);
   });
   it.each([false, true])("Undo restores the person's edit between steps on dataset=%s", async (target) => {
     const f = await fixture(!target, target);
@@ -255,7 +255,7 @@ describe("static steps across storage kinds", () => {
     const f = await fixture(!target, target);
     f.hooks.beforeEffect = () => { f.hooks.beforeEffect = undefined; if (target) { const row = f.rows.get("Target-dataset")!.get("same")!; row.values.status = "Person"; row.version += 1; } else f.docs.get("Target/same")!.status = "Person"; };
       expect(await f.run(automation(find("Target", target) + set(target, "found")))).toEqual({ kind: "done" });
-      expect((await f.undo()).reverted).toBe(0);
+      expect((await f.undo()).undone.reverted).toBe(0);
       expect(target ? f.rows.get("Target-dataset")!.get("same")!.values.status : f.docs.get("Target/same")!.status).toBe("Person");
   });
   it("recovers a mixed run after commit before journal append, then undoes both kinds", async () => {
@@ -265,16 +265,16 @@ describe("static steps across storage kinds", () => {
       await expect(f.run(a)).rejects.toThrow("crash before journal append");
       expect(await f.run(a)).toEqual({ kind: "done" });
       expect(f.rows.get("Target-dataset")!.size).toBe(2);
-      expect(await f.undo()).toMatchObject({ removed: 1, deleted: 1 });
+      expect((await f.undo()).undone).toMatchObject({ removed: 1, deleted: 1 });
       expect(f.rows.get("Target-dataset")!.size).toBe(1);
   });
   it("Undo accounts for an unrecorded Add without creating an uncommitted one", async () => {
     const f = await fixture();
       f.hooks.crashAppend = true;
       await expect(f.run(automation(add("Target", true)))).rejects.toThrow();
-      expect((await f.undo()).deleted).toBe(0);
+      expect((await f.undo()).undone.deleted).toBe(0);
       expect(f.rows.get("Target-dataset")!.size).toBe(2);
-      expect((await f.undo()).deleted).toBe(0);
+      expect((await f.undo()).undone.deleted).toBe(0);
   });
   it("waits for a destination host and rejects changed rules on resume", async () => {
     const f = await fixture();
@@ -306,7 +306,7 @@ it("keeps numeric and text primary keys distinct through Find, Set and Undo", as
   rows.set("7", { id: "7", version: 1, values: { id: "7", status: "Open" } });
   expect(await f.run(automation(find("Target", true) + set(true, "found")))).toEqual({ kind: "done" });
   expect(f.calls.filter((call) => call.operationId === "edit").map((call) => (call.input as { id: JsonValue }).id)).toEqual([7, "7"]);
-  expect((await f.undo()).reverted).toBe(2);
+  expect((await f.undo()).undone.reverted).toBe(2);
   expect(rows.get(7)!.values.status).toBe("Open");
   expect(rows.get("7")!.values.status).toBe("Open");
 });
@@ -316,7 +316,7 @@ it("Undo leaves an Add that never committed absent", async () => {
   f.hooks.beforeEffect = () => { throw new Error("host stopped before commit"); };
   expect(await f.run(automation(add("Target", true)))).toMatchObject({ kind: "failed" });
   f.hooks.beforeEffect = undefined;
-  expect((await f.undo()).removed).toBe(0);
+  expect((await f.undo()).undone.removed).toBe(0);
   expect(f.rows.get("Target-dataset")!.size).toBe(1);
 });
 
@@ -324,7 +324,7 @@ it("Undo reverses a dataset edit that committed without its journal append", asy
   const f = await fixture();
   f.hooks.crashAppend = true;
   await expect(f.run(automation(find("Target", true) + set(true, "found")))).rejects.toThrow();
-  expect((await f.undo()).reverted).toBe(1);
+  expect((await f.undo()).undone.reverted).toBe(1);
   expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Open");
 });
 
@@ -401,7 +401,7 @@ it("follows a saved document Find binding after its Collection moves", async () 
   f.move("Target", "Moved");
   expect(await f.run(a)).toEqual({ kind: "done" });
   expect((await f.runs())[0]!.steps[0]!.destinations?.[0]?.path).toBe("Moved");
-  expect((await f.undo()).reverted).toBe(1);
+  expect((await f.undo()).undone.reverted).toBe(1);
   expect(target ? f.rows.get("Target-dataset")!.get("same")!.values.status : f.docs.get("Target/same")!.status).toBe("Open");
 });
 
@@ -412,7 +412,7 @@ it("waits when a document destination moves between effects, then checks its new
   const a = automation(find("Target", false) + set(false, "found", "First") + set(false, "found", "Last"));
   expect(await f.run(a)).toEqual({ kind: "wait", reason: "moved" });
   expect(await f.run(a)).toEqual({ kind: "done" });
-  expect((await f.undo()).reverted).toBe(1);
+  expect((await f.undo()).undone.reverted).toBe(1);
 });
 
 it.each([false, true])("mixed Undo restores an intervening edit when the final write lacks a journal entry on dataset=%s", async (target) => {
@@ -428,7 +428,7 @@ it.each([false, true])("mixed Undo restores an intervening edit when the final w
   };
   await expect(f.run(automation(add("Other", true, "other") + find("Target", target) + set(target, "found", "First") + set(target, "found", "Last")))).rejects.toThrow("crash before journal append");
   f.hooks.afterEffect = undefined;
-  expect(await f.undo()).toMatchObject({ reverted: 1, deleted: 1 });
+  expect((await f.undo()).undone).toMatchObject({ reverted: 1, deleted: 1 });
   expect(target ? f.rows.get("Target-dataset")!.get("same")!.values.status : f.docs.get("Target/same")!.status).toBe("Person");
 });
 
@@ -544,7 +544,7 @@ it("keeps an addition with no usable delete without requiring its preview read",
   const reach = await automationUndoReach(await f.runs(), f.dependencies.targets, f.dependencies.collectionPathOf,
     { roster, collection: { path: "Source", name: "Source" } }, f.host);
   expect(reach.filter((step) => step.kind === "dataset-operation")).toEqual([]);
-  expect(await f.undo()).toMatchObject({ kept: 1, deleted: 0 });
+  expect((await f.undo()).undone).toMatchObject({ kept: 1, deleted: 0 });
 });
 
 it("reverses actions in commit order despite a backwards clock, without inventing read reach", async () => {
@@ -609,7 +609,7 @@ it.each([[false, false], [false, true], [true, false], [true, true]])("keeps com
   approve();
   await expect(automationUndoReach(await f.runs(), f.dependencies.targets, f.dependencies.collectionPathOf,
     { roster, collection: { path: "Source", name: "Source" } }, f.host)).resolves.toEqual([]);
-  expect(await f.undo()).toMatchObject({ reverted: 1 });
+  expect((await f.undo()).undone).toMatchObject({ reverted: 1 });
   expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Open");
 });
 

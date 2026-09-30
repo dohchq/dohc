@@ -5,7 +5,7 @@ import { opensForLiveEditing } from "../OpenSharedView";
 import { useAutomationRetry } from "../collections/useAutomationRetry";
 import { workspaceName } from "../Titlebar";
 import { AUTOMATION_NOTICE_KINDS, type SentNotice } from "../workbench/NoticeCenter";
-import { sentNoticeFolder, sentNoticePlace } from "./sentNoticePlace";
+import { sentNoticeFolder, sentNoticePlace, serverRunOfNotice } from "./sentNoticePlace";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
 
 export const ACCESS_ENDED_NOTE =
@@ -66,6 +66,8 @@ export function useSentNoticeProps(input: {
           : sentNoticeFolder(notice) ??
             (place.kind === "workspace" ? place.mount ?? workspaceName(place.workspace) : null),
         openable: place.kind !== "none",
+        // Open takes a notice from another workspace there first.
+        retryable: serverRunOfNotice(notice)?.workspaceId === workspaceId,
       };
     },
     [workspaceId, workspaces],
@@ -94,9 +96,13 @@ export function useSentNoticeProps(input: {
     [account],
   );
   const requestRetry = useCallback(
-    (notice: NoticeRow, startOver: boolean) =>
-      bridge().retryAutomationNotice({ account, notice: sentNoticeRef(notice), startOver }),
-    [account],
+    (notice: NoticeRow, startOver: boolean) => {
+      const run = serverRunOfNotice(notice);
+      return run?.workspaceId === workspaceId
+        ? bridge().retryCollectionAutomation({ ...run, startOver, onServer: true })
+        : bridge().retryAutomationNotice({ account, notice: sentNoticeRef(notice), startOver });
+    },
+    [account, workspaceId],
   );
   const noticeRetry = useAutomationRetry({
     workspaceId,

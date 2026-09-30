@@ -143,6 +143,24 @@ export function unwantAutomationWorkspace(storage: StorageContext, input: { work
   });
 }
 
+/**
+ * An owner's action on a copy no condition needs is over: the row goes back
+ * to when it stopped being needed and when it left, so the action does not
+ * extend how long the copy is kept. Only the incarnation the action joined
+ * again, while nothing else needs it.
+ */
+export function restoreAutomationWorkspaceTimes(
+  storage: StorageContext,
+  input: { workspaceId: string; incarnation: number; unwantedSinceMs: number; leftAtMs: number | null },
+): void {
+  storage.tx(() => {
+    storage.db.prepare(
+      `UPDATE sync_relay_automation_workspaces SET unwanted_since_ms = ?, left_at_ms = ?
+       WHERE workspace_id = ? AND incarnation = ? AND unwanted_since_ms IS NULL AND left_at_ms IS NULL`,
+    ).run(input.unwantedSinceMs, input.leftAtMs, input.workspaceId, input.incarnation);
+  });
+}
+
 /** Every replica row, joined or left. */
 export function listAutomationWorkspaces(storage: StorageContext): AutomationWorkspace[] {
   return storage.readTx(() => storage.db.prepare("SELECT * FROM sync_relay_automation_workspaces ORDER BY workspace_id").all().map(rowOf));

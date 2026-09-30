@@ -54,6 +54,13 @@ import {
   parseAutomationHostAction,
   type AutomationHostRoute,
 } from "./automationHostRoutes";
+import {
+  createAutomationServerRoutes,
+  isAutomationServerPath,
+  parseAutomationServerAction,
+  type AutomationServerRoute,
+  type ServerRuns,
+} from "./automationServerRoutes";
 import { createWorkspaceBlobRoutes, type WorkspaceBlobRoute } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
@@ -171,11 +178,13 @@ export interface CreateSyncRelayHandlerOptions {
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
   // Posts of notices to other people, keyed by sender.
   noticePostRateLimiter?: TokenBucketLimiter;
-  // Changes to a workspace's automation host, keyed by owner.
+  // Changes to a workspace's automation host, and to the server's runs, keyed by owner.
   automationHostRateLimiter?: TokenBucketLimiter;
   // This server while it runs workspaces' automations; absent when it does not.
   automationServer?: AutomationServer;
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
+  // This server's runs, for their owners; undefined while it runs no automations.
+  serverRuns?: () => ServerRuns | undefined;
   // Button presses from shared views, per grant, and the host's answers, per owner.
   automationPressRateLimiters?: ReturnType<typeof createAutomationPressRateLimiters>;
   linkFreshnessPageSize?: number;
@@ -205,6 +214,7 @@ type SyncRelayRoute =
   | { route: "workspaces" }
   | NoticeRoute
   | AutomationHostRoute
+  | AutomationServerRoute
   | AutomationPressRoute
   | WorkspaceBlobRoute
   | WorkspaceReplicationRoute
@@ -288,6 +298,7 @@ export function createSyncRelayHandler({
   newLinkHandoffCode = () => mintLinkHandoffCode(),
   automationServer,
   pressDataset,
+  serverRuns = () => undefined,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
@@ -464,6 +475,7 @@ export function createSyncRelayHandler({
   const respondToAutomationHost = createAutomationHostRoutes(
     storage, nowMs, automationHostRateLimiter, automationServer ?? null,
   );
+  const respondToAutomationServer = createAutomationServerRoutes(storage, serverRuns, nowMs, automationHostRateLimiter);
   const automationPresses = createAutomationPressRoutes({
     storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
   });
@@ -867,6 +879,16 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await respondToAutomationHost(request, route, actor.userId);
       }
+      if (route.route === "automation-server") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToAutomationServer(request, route, actor.userId);
+      }
       if (route.route === "notices" || route.route === "notice-marks") {
         // Desktop and agent credentials only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
@@ -1204,6 +1226,11 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     const action = parseAutomationPressAction(parts[3]);
     if (!action) throw notFound();
     return { route: "automation-presses", workspaceId, action };
+  }
+  if (isAutomationServerPath(parts)) {
+    const action = parseAutomationServerAction(parts[3]);
+    if (!action) throw notFound();
+    return { route: "automation-server", workspaceId, action };
   }
   if (isAutomationHostPath(parts)) {
     const action = parseAutomationHostAction(parts[3]);

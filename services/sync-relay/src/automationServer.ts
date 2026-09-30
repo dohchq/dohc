@@ -31,6 +31,8 @@ import {
   NOTICE_BODY_MAX_CHARS,
   NOTICE_LIST_ROW_LIMIT,
   NOTICE_TITLE_MAX_CHARS,
+  SERVER_HOLD_NOTICE_PREFIX,
+  SERVER_RUN_FAILED_NOTICE_PREFIX,
   type RelayAutomationHost,
 } from "@dohc/workspace-contracts/relay";
 import {
@@ -43,6 +45,7 @@ import { replicaAutomationChat, replicaChatStore, replicaNoticePoster, WAKE_ON_S
 import { ServerClaimEngine, type LiveClaimLedger } from "./automationLiveClaims";
 import { replicaRecordEditContext, replicaRecordEngine } from "./automationRecordEdits";
 import { startAutomationReplicas, type AutomationReplica } from "./automationReplicas";
+import type { OwnerScope, ServerRuns } from "./automationServerRoutes";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { DatasetServerPress } from "./datasetAutomations";
 import type { AppBackendAuth } from "./appBackendAuthority";
@@ -86,6 +89,8 @@ const SYNC_FAILURES_REPORTED = 3;
 // long poll does.
 const PRESS_WAIT_MS = 25_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+// An owner's action on a copy the server keeps closed waits this long for it to open.
+const RETAINED_COPY_OPEN_MS = 30_000;
 
 /** What the server drives in each workspace's executor. CollectionAutomations satisfies it. */
 export type ServerExecutor = Pick<
@@ -93,6 +98,7 @@ export type ServerExecutor = Pick<
   | "open" | "dispose" | "notifyClaimed" | "handlePulledPaths" | "relayAnswered" | "groupMessagesArrived" | "hostChanged"
   | "releaseGroupSubscriptions" | "reachHandover" | "relayedClaim" | "pressRelayed" | "automationName"
   | "schedules" | "scheduleMarks" | "claimSchedule" | "failuresChanged" | "datasetsChanged" | "pressDataset" | "holds"
+  | "runs" | "listedRun" | "retry" | "undo" | "undoRunsOf" | "confirmReach"
 >;
 
 export interface AutomationServerOptions {
@@ -176,6 +182,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   const { storage, server } = options;
   const nowMs = options.nowMs ?? Date.now;
   const hosted = new Map<string, Hosted>();
+  // Copies owners' actions hold open, with how many actions still use each,
+  // and when a copy nothing else needed stopped being needed and left.
+  const visits = new Map<string, { actions: number; times: { incarnation: number; unwantedSinceMs: number; leftAtMs: number | null } | null }>();
+  // Actions waiting for a copy to open.
+  const copyWaiters = new Set<() => void>();
   const evaluator = createAutomationFormulaEvaluator();
   const gate = createRunGate({ nowMs, onWaiting: (workspaceId) => overBudget(workspaceId) });
   let unavailable = false;
@@ -394,7 +405,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       if (ws.closed) return;
       const current = new Set<string>();
       for (const held of holds) {
-        const noticeId = `automation-held:${sha256(ws.replica.workspaceId)}:${sha256(JSON.stringify([ws.replica.incarnation, held.automationId, held.definitionHash, held.step, held.recipient, held.seq]))}`;
+        const noticeId = `${SERVER_HOLD_NOTICE_PREFIX}${sha256(ws.replica.workspaceId)}:${sha256(JSON.stringify([ws.replica.incarnation, held.automationId, held.definitionHash, held.step, held.recipient, held.seq]))}`;
         current.add(noticeId);
         if (ws.holdNotices.has(noticeId)) continue;
         const step = held.operationName ? `Step "${held.operationName}"`
@@ -402,7 +413,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         await posterOf(ws)({
           noticeId, kind: "automation-failed",
           title: cutText(`Automation "${held.automationName}" is waiting`, NOTICE_TITLE_MAX_CHARS),
-          body: cutText(`${step} to ${held.action} "${held.target}" waits for someone who can edit it to allow it.`, NOTICE_BODY_MAX_CHARS),
+          // The owner's computers list the hold with Allow; this notice points there.
+          body: cutText(`${step} to ${held.action} "${held.target}" waits for you. Allow it in Notices, where it shows as waiting on your server.`, NOTICE_BODY_MAX_CHARS),
           target: { path: held.collectionPath, automation: held.automationId }, recipientUserId: ws.replica.ownerUserId,
         }, ws.replica.signal);
         ws.holdNotices.add(noticeId);
@@ -418,7 +430,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     storage.markNotices({
       recipientUserId: ws.replica.ownerUserId,
       marks: [{
-        noticeId: automationFailedNoticeId({ workspaceId: ws.replica.workspaceId, installId: AUTOMATION_SERVER_INSTALL_ID, failure }),
+        noticeId: automationFailedNoticeId({ workspaceId: ws.replica.workspaceId, installId: AUTOMATION_SERVER_INSTALL_ID, failure }).replace("automation-failed:", SERVER_RUN_FAILED_NOTICE_PREFIX),
         mark: "dismissed",
       }],
       installId: AUTOMATION_SERVER_INSTALL_ID,
@@ -507,6 +519,14 @@ export async function startAutomationServer(options: AutomationServerOptions) {
           syncSoon(ws);
         }
       },
+      // Only the owner's routes undo a run here, and Undo writes as that person.
+      withUndoWrites: async (signal, work) => {
+        try {
+          return await work(collectionRecordWrites(replicaRecordEditContext(replica, replicaRecordEngine(replica), signal, true)));
+        } finally {
+          syncSoon(ws);
+        }
+      },
       readText: async (path) => {
         const read = await readText(ws, path);
         return read === null ? null : read.truncated ? read : { text: read.text, truncated: false, contentHash: read.contentHash };
@@ -572,7 +592,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
           name: report.name,
           collectionPath: report.collectionPath,
         });
-        await posterOf(ws)({ ...notice, recipientUserId: ownerUserId }, replica.signal);
+        await posterOf(ws)({ ...notice, noticeId: notice.noticeId.replace("automation-failed:", SERVER_RUN_FAILED_NOTICE_PREFIX), recipientUserId: ownerUserId }, replica.signal);
         if (report.replaces !== null) withdrawFailure(ws, report.replaces);
       })(),
       withdrawFailure: async (failure) => withdrawFailure(ws, failure),
@@ -584,8 +604,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       hostCanRun: async () => true,
       personName: (userId) => ws.names.get(userId) ?? userId,
       wakeUnavailable: WAKE_ON_SERVER,
-      // Try again on a server run arrives through the owner's routes, not a person here.
-      mayRetryPress: async () => false,
+      // Only the owner's routes ask for Try again here.
+      mayRetryPress: async () => true,
       onPressSettled: (event) => self().presses.runSettled(event),
       onPressWaiting: () => undefined,
       holdForHost: () => hold(ws),
@@ -665,7 +685,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       syncTimer: undefined,
       reporting: Promise.resolve(),
       holdNotices: new Set(storage.readNoticeChanges({ recipientUserId: replica.ownerUserId, cursor: null, limit: NOTICE_LIST_ROW_LIMIT, nowMs: nowMs() })
-        .notices.filter(notice => notice.noticeId.startsWith(`automation-held:${sha256(replica.workspaceId)}:`) && notice.dismissedAtMs === null)
+        .notices.filter(notice => notice.noticeId.startsWith(`${SERVER_HOLD_NOTICE_PREFIX}${sha256(replica.workspaceId)}:`) && notice.dismissedAtMs === null)
         .map(notice => notice.noticeId)),
       names: new Map(),
     };
@@ -676,6 +696,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       presses: pressHost(state, () => ws),
     });
     hosted.set(replica.workspaceId, ws);
+    for (const check of [...copyWaiters]) check();
     // A write to the host record wakes the scheduler; it never asks on a timer.
     scheduler.add(replica.workspaceId, ws.executor, { ...hostSeam(state, () => ws), asksAgain: () => false });
     void ws.executor.open().then(() => { follow(ws); reportHolds(ws); if (options.datasetHost) ws.executor.failuresChanged(); }, (error: unknown) =>
@@ -740,6 +761,14 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   const excluded = new Map<string, { ownerUserId: string; noticeId: string }>();
   const allWantedWorkspaces = () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? []), ...(options.datasetHost?.automations.wantedWorkspaces() ?? [])])];
   function wantedWorkspaces(): string[] {
+    const running = runningWorkspaces();
+    // A copy an owner's action reopened stays open while the action runs,
+    // within the same cap as the copies the server runs. An admitted action
+    // keeps its place: a workspace that needs the server since waits for it.
+    const visiting = [...visits.keys()];
+    return [...new Set([...visiting, ...running])].slice(0, AUTOMATION_SERVER_MAX_WORKSPACES);
+  }
+  function runningWorkspaces(): string[] {
     const all = allWantedWorkspaces();
     const waiting = new Set(all.slice(AUTOMATION_SERVER_MAX_WORKSPACES));
     capacityReporting = capacityReporting.then(async () => {
@@ -816,6 +845,134 @@ export async function startAutomationServer(options: AutomationServerOptions) {
 
   // The live host claims a live-shared record's change when it accepts its frame.
   const stopLiveEvents = options.live?.onEvent(engineEvent) ?? (() => undefined);
+
+  /** The open copy of a workspace this owner owns, or notFound. The relay's records say who owns it now. */
+  function ownedCopy({ workspaceId, ownerUserId }: OwnerScope): Hosted {
+    const ws = hosted.get(workspaceId);
+    if (!ws || ws.closed || ws.replica.ownerUserId !== ownerUserId || !storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) {
+      throw notFound();
+    }
+    return ws;
+  }
+
+  /** Undo's delete of a record a run added: the file goes from the copy, and its History keeps it. */
+  function trashIn(ws: Hosted) {
+    return async (path: string) => {
+      const version = await ws.adapter.getActiveVersion({ workspaceId: ws.replica.workspaceId });
+      if (version === null) throw new Error("This server's copy of the workspace has no active version.");
+      await ws.adapter.deleteTextFile({
+        workspaceId: ws.replica.workspaceId, versionId: version.id, path, metadata: { origin: "api", summary: `Removed ${posix.basename(path)}` },
+      });
+      syncSoon(ws);
+    };
+  }
+
+  /**
+   * Runs `work` on the owner's copy of a workspace. A copy the server keeps
+   * after the workspace left it, for run history and Undo
+   * (AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS), opens again for the
+   * action. It runs no schedules, Group triggers or presses, since the host
+   * record names another host, and leaves again a day after the action.
+   */
+  async function withCopy<T>(scope: OwnerScope, work: (ws: Hosted) => Promise<T>): Promise<T> {
+    const { workspaceId, ownerUserId } = scope;
+    const kept = storage.listAutomationWorkspaces().find((row) => row.workspaceId === workspaceId);
+    if (kept?.ownerUserId !== ownerUserId || !storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) throw notFound();
+    const visit = visits.get(workspaceId);
+    if (visit === undefined && !copyIsOpen(workspaceId) &&
+      new Set([...allWantedWorkspaces().slice(0, AUTOMATION_SERVER_MAX_WORKSPACES), ...visits.keys()]).size >= AUTOMATION_SERVER_MAX_WORKSPACES) {
+      throw new RelayError("conflict", "Your server has as many workspaces open as it can. Try again later.", 503);
+    }
+    // Every action holds the copy open, one waiting to leave included, until
+    // it ends. Opening joins the copy again; its times go back afterwards.
+    visits.set(workspaceId, {
+      actions: (visit?.actions ?? 0) + 1,
+      times: visit ? visit.times : kept.unwantedSinceMs === null ? null
+        : { incarnation: kept.incarnation, unwantedSinceMs: kept.unwantedSinceMs, leftAtMs: kept.leftAtMs },
+    });
+    try {
+      replicas.reconcile();
+      await copyOpened(workspaceId);
+      return await work(ownedCopy(scope));
+    } finally {
+      const current = visits.get(workspaceId)!;
+      if (current.actions > 1) {
+        visits.set(workspaceId, { ...current, actions: current.actions - 1 });
+      } else {
+        visits.delete(workspaceId);
+        if (current.times !== null && !allWantedWorkspaces().includes(workspaceId)) {
+          storage.restoreAutomationWorkspaceTimes({ workspaceId, ...current.times });
+        }
+      }
+      replicas.reconcile();
+    }
+  }
+
+  const copyIsOpen = (workspaceId: string) => {
+    const ws = hosted.get(workspaceId);
+    return ws !== undefined && !ws.closed;
+  };
+
+  /** Resolves once the replicas module opened this workspace's copy, or refuses after RETAINED_COPY_OPEN_MS. */
+  function copyOpened(workspaceId: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        copyWaiters.delete(check);
+      };
+      const check = () => {
+        if (!copyIsOpen(workspaceId)) return;
+        done();
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        done();
+        reject(new RelayError("conflict", "Your server is opening its copy of this workspace. Try again.", 503));
+      }, RETAINED_COPY_OPEN_MS);
+      timer.unref?.();
+      copyWaiters.add(check);
+      check();
+    });
+  }
+
+  /**
+   * The owner's copy, caught up with what the relay has, so an Undo keeps
+   * every change someone made after the run, not only those the copy pulled.
+   */
+  async function currentCopy(scope: OwnerScope, ws: Hosted): Promise<Hosted> {
+    await ws.replica.sync();
+    return ownedCopy(scope);
+  }
+
+  const runs: ServerRuns = {
+    list: (scope, automationId, before) => withCopy(scope, (ws) => ws.executor.runs(automationId, before)),
+    get: (scope, automationId, claimId) => withCopy(scope, (ws) => ws.executor.listedRun(automationId, claimId)),
+    retry: (scope, input) => withCopy(scope, async (ws) => {
+      // A copy kept after the workspace left runs nothing, so a run queued in it would never run.
+      if (!allWantedWorkspaces().includes(scope.workspaceId)) {
+        return { status: "refused", reason: "Your server no longer runs this workspace's automations, so it will not run this again." };
+      }
+      return await ws.executor.retry(input);
+    }),
+    undo: (scope, input) => withCopy(scope, async (copy) => {
+      const ws = await currentCopy(scope, copy);
+      const result = await ws.executor.undo(input, trashIn(ws));
+      // What it put back reaches the relay while the action still holds the copy.
+      await ws.replica.sync();
+      return result;
+    }),
+    restore: (scope, definitions, again) => withCopy(scope, async (copy) => {
+      const ws = await currentCopy(scope, copy);
+      const result = await ws.executor.undoRunsOf(definitions, trashIn(ws), again);
+      // What it put back reaches the relay before the owner's computer takes its turn.
+      await ws.replica.sync();
+      return result;
+    }),
+    // A closed copy runs nothing, so it holds nothing.
+    holds: (scope) => ownedCopy(scope).executor.holds(),
+    allow: (scope, input) => ownedCopy(scope).executor.confirmReach(input),
+  };
+
   const stopDatasetClaims = options.datasetHost?.observeAutomationClaims((workspaceId, failed) => {
     const ws = hosted.get(workspaceId);
     if (ws) { ws.executor.notifyClaimed(); if (failed) ws.executor.failuresChanged(); }
@@ -837,6 +994,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         return ws.executor.pressDataset({ ...input, pressedBy: auth.userId }, describe, () => undefined);
       });
     },
+    /** The owner's view of each workspace's runs here, for the owner routes. */
+    runs,
     /** Whether this server's copies of workspaces keep failing to open or sync. */
     get unavailable(): boolean {
       return unavailable;

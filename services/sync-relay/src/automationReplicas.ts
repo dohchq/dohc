@@ -280,6 +280,9 @@ export async function startAutomationReplicas(options: {
           await replicas.get(row.workspaceId)?.close();
           await rm(folderOf(row.workspaceId), {recursive: true, force: true});
           storage.forgetAutomationWorkspace({workspaceId: row.workspaceId, incarnation: row.incarnation});
+        } else {
+          // A copy an owner's action opened again leaves once the action ends.
+          await replicas.get(row.workspaceId)?.close();
         }
       }) && ok;
     }

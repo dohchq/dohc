@@ -79,6 +79,7 @@ async function harness(automations: string, run: (context: {
     readMessageBody: async () => null,
     postNotice: async () => { throw new Error("No notices in this test."); },
     withRecordWrites: async (signal, work) => await work(collectionRecordWrites(editContext(signal))),
+    withUndoWrites: async (signal, work) => await work(collectionRecordWrites(editContext(signal))),
     readText: async (path) => {
       try {
         const text = await readFile(join(root, path), "utf8");

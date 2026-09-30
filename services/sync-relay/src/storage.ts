@@ -640,6 +640,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return automationWorkspaceStorage.serverHostedWorkspaces(this);
   }
 
+  restoreAutomationWorkspaceTimes(input: { workspaceId: string; incarnation: number; unwantedSinceMs: number; leftAtMs: number | null }) {
+    automationWorkspaceStorage.restoreAutomationWorkspaceTimes(this, input);
+  }
+
   automationWorkspaceInfo(workspaceId: string) {
     return automationWorkspaceStorage.automationWorkspaceInfo(this, workspaceId);
   }

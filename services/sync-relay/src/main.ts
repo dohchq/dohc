@@ -22,6 +22,7 @@ import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { automationHostMaxBodyBytes } from "./automationHostRoutes";
+import { AUTOMATION_SERVER_MAX_BODY_BYTES, isAutomationServerPath } from "./automationServerRoutes";
 import { isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
 import { AUTOMATION_PRESS_MAX_BODY_BYTES } from "@dohc/workspace-contracts/relay";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
@@ -366,6 +367,7 @@ const relayApplication = createSyncRelayHandler({
     if (!automations) throw notFound();
     return automations.pressDataset(auth, input, signal);
   },
+  serverRuns: () => automations?.runs,
   appCollectionPolicy,
   noticePostRateLimiter,
   ...(automationServer ? {automationServer} : {}),
@@ -478,6 +480,7 @@ const server = serveFetchHandler({
   maxBodyBytes: (url) => automationHostMaxBodyBytes(url.pathname) ?? (
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
     isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
+    isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
