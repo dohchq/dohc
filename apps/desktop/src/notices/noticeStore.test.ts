@@ -8,6 +8,7 @@ import {
   inspectDatabase,
   storagePath,
   createShare,
+  seedFullNoticeList,
   testHandler,
   testStorage,
   type HandlerOverrides,
@@ -951,19 +952,15 @@ describe("notices for another person", () => {
   it("says when a person's notices are full of unread ones", async () => {
     const server = await relay();
     await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
-    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) {
-      server.storage.postNotice({
-        noticeId: `own-${index}`, recipientUserId: "ana", reach: { workspaceId: WORKSPACE }, kind: "mention",
-        title: "Mentioned", body: "", target: {}, originInstallId: "install-b",
-        senderUserId: "ana", senderLabel: "Ana", nowMs: clock + index,
-      });
-    }
+    seedFullNoticeList(server.storage, {
+      workspaceId: WORKSPACE, recipientUserId: "ana", idPrefix: "own-", nowMs: clock,
+      senderLabel: "Ana", originInstallId: "install-b",
+    });
     clock += NOTICE_LIST_ROW_LIMIT;
     const owner = await computer(account(server, "owner"));
     await expect(owner.store.postNotice(notice({
       kind: "automation-failed", title: "Stamp the finish date failed", target: { path: "trip/tasks" }, recipientUserId: "ana",
     }))).rejects.toThrow(new NoticeNotSentError("This person has too many unread notices to get this one."));
-    // Filling a list of 1,000 rows takes seconds on a loaded machine.
   }, 60_000);
 });
 
