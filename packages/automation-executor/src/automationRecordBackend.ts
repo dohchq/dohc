@@ -90,6 +90,7 @@ export interface RunSource {
   reads(access: RecordReads, inventory: AutomationInventory, readable: ReadonlySet<string>): Pick<StepReads, "trigger">;
 }
 const failed = (error: string): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut: false });
+const RECORD_READ_CONCURRENCY = 8;
 
 export async function prepareRecordBackend(deps: RecordRunDependencies, input: RecordRunInput, source: RunSource): Promise<
   { outcome: CollectionAutomationRunOutcome } |
@@ -495,24 +496,31 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
               const path = pathOf(ordinal);
               const target = inventory.targets.get(path)!;
               const records: RunRecord[] = [];
-              for (const ref of refs) {
-                if (target.kind === "document") {
-                  const record = await document(path, ref.id);
-                  if (record !== null) records.push(record);
-                } else {
-                  const steps = inventory.datasets.get(path)!.steps;
-                  const own = steps.steps.get(ordinal)!;
-                  const reader = own.operation.kind === "read" ? own.operation : steps.rereads.get(ordinal);
-                  if (ref.key === undefined || ref.path !== datasetRecordKey(target.approved.datasetId, own.table.tableId, ref.key)) throw new Error(RULES_CHANGED_ERROR);
-                  if (reader === undefined) {
-                    const created = state.applied.flatMap((entry) => entry.ordinal === ordinal ? entry.writes : [])
-                      .find((write) => write.kind === "dataset-created" && write.recordId === ref.key);
-                    if (created?.kind === "dataset-created") versions.set(ref.path, { id: ref.key, version: created.version });
-                    records.push({ ...ref, values: {} });
-                    continue;
+              if (refs.length === 0) return records;
+              await ensure(path);
+              for (let start = 0; start < refs.length; start += RECORD_READ_CONCURRENCY) {
+                // Drain each batch before leaving this step's read session, even on failure.
+                const batch = await Promise.allSettled(refs.slice(start, start + RECORD_READ_CONCURRENCY).map(async (ref) => {
+                  if (target.kind === "document") {
+                    return document(path, ref.id);
+                  } else {
+                    const steps = inventory.datasets.get(path)!.steps;
+                    const own = steps.steps.get(ordinal)!;
+                    const reader = own.operation.kind === "read" ? own.operation : steps.rereads.get(ordinal);
+                    if (ref.key === undefined || ref.path !== datasetRecordKey(target.approved.datasetId, own.table.tableId, ref.key)) throw new Error(RULES_CHANGED_ERROR);
+                    if (reader === undefined) {
+                      const created = state.applied.flatMap((entry) => entry.ordinal === ordinal ? entry.writes : [])
+                        .find((write) => write.kind === "dataset-created" && write.recordId === ref.key);
+                      if (created?.kind === "dataset-created") versions.set(ref.path, { id: ref.key, version: created.version });
+                      return { ...ref, values: {} };
+                    }
+                    const row = await readDatasetRecord((op, value) => call(path, op, value), reader, own.table, ref.key);
+                    return row === null ? null : remember(path, row, own.table);
                   }
-                  const row = await readDatasetRecord((op, value) => call(path, op, value), reader, own.table, ref.key);
-                  if (row !== null) records.push(remember(path, row, own.table));
+                }));
+                for (const result of batch) {
+                  if (result.status === "rejected") throw result.reason;
+                  if (result.value !== null) records.push(result.value);
                 }
               }
               return records;

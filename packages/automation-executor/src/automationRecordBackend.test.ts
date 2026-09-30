@@ -1326,6 +1326,94 @@ describe("Find limits and admission", () => {
     }
   }
 
+  it.each([false, true])("rereads Find results in bounded parallel batches, preserving order and later changes, dataset=%s", async (dataset) => {
+    const f = await fixture(false, dataset);
+    populate(f, dataset, 17);
+    let active = 0, peak = 0, reads = 0;
+    const read = async <T>(index: number, work: () => Promise<T>): Promise<T> => {
+      reads += 1;
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        // Earlier records finish last without relying on timers.
+        for (let turn = 0; turn < 16 - index % 8; turn += 1) await Promise.resolve();
+        return await work();
+      } finally { active -= 1; }
+    };
+    if (dataset) {
+      const invoke = f.host.invoke;
+      f.host.invoke = (context, request) => {
+        const input = request.input as { limit?: number; filters?: { value: number }[] };
+        return request.datasetId === "Target-dataset" && request.operationId === "read" && input.limit === 1
+          ? read(input.filters![0]!.value, () => invoke(context, request)) : invoke(context, request);
+      };
+    } else {
+      const withReads = f.dependencies.withReads;
+      f.dependencies.withReads = (work) => withReads((reader) => work({ ...reader,
+        getCollectionRecord: (request) => request.collectionPath === "Target"
+          ? read(Number(request.recordId.slice("target-".length)), () => reader.getCollectionRecord(request))
+          : reader.getCollectionRecord(request),
+      }));
+    }
+    const task = automation(find("Target", dataset) + set(dataset, "found", "First") + set(dataset, "found", "=record.Status + '-Second'"));
+    expect(await f.run(task)).toEqual({ kind: "done" });
+    expect(reads).toBe(34);
+    expect(peak).toBe(8);
+    expect(active).toBe(0);
+    const saved = (await f.runs())[0]!;
+    for (const step of saved.steps.slice(1)) {
+      expect(step.effects.map((effect) => effect.kind === "dataset-edit" || effect.kind === "set" ? effect.target.recordId
+        : null)).toEqual(Array.from({ length: 17 }, (_, i) => dataset ? i : "target-" + i));
+    }
+    if (dataset) expect([...f.rows.get("Target-dataset")!.values()].map((row) => row.values.status)).toEqual(Array(17).fill("First-Second"));
+    else expect([...f.docs.values()].filter((doc) => doc.collection === "Target").map((doc) => doc.status)).toEqual(Array(17).fill("First-Second"));
+  });
+
+  it.each([false, true])("drains failed bound-read batches before returning and starts no further batch, dataset=%s", async (dataset) => {
+    const f = await fixture(false, dataset);
+    populate(f, dataset, 17);
+    let active = 0, reads = 0;
+    const read = async <T>(index: number, work: () => Promise<T>): Promise<T> => {
+      reads += 1;
+      active += 1;
+      try {
+        if (index === 0) throw new Error("Bound read failed");
+        for (let turn = 0; turn < 16; turn += 1) await Promise.resolve();
+        return await work();
+      } finally { active -= 1; }
+    };
+    if (dataset) {
+      const invoke = f.host.invoke;
+      f.host.invoke = (context, request) => {
+        const input = request.input as { limit?: number; filters?: { value: number }[] };
+        return request.datasetId === "Target-dataset" && request.operationId === "read" && input.limit === 1
+          ? read(input.filters![0]!.value, () => invoke(context, request)) : invoke(context, request);
+      };
+    } else {
+      const withReads = f.dependencies.withReads;
+      f.dependencies.withReads = (work) => withReads((reader) => work({ ...reader,
+        getCollectionRecord: (request) => request.collectionPath === "Target"
+          ? read(Number(request.recordId.slice("target-".length)), () => reader.getCollectionRecord(request))
+          : reader.getCollectionRecord(request),
+      }));
+    }
+    const activeAtSessionClose: number[] = [];
+    const withReads = f.dependencies.withReads;
+    f.dependencies.withReads = (work) => withReads(async (reader) => {
+      try { return await work(reader); }
+      finally { activeAtSessionClose.push(active); }
+    });
+    expect(await f.run(automation(find("Target", dataset) + set(dataset, "found"))))
+      .toEqual({ kind: "failed", error: "Bound read failed", timedOut: false });
+    expect(reads).toBe(8);
+    expect(active).toBe(0);
+    expect(activeAtSessionClose.length).toBeGreaterThan(0);
+    expect(activeAtSessionClose.every((count) => count === 0)).toBe(true);
+    expect((await f.runs())[0]!.steps).toHaveLength(1);
+    if (dataset) expect([...f.rows.get("Target-dataset")!.values()].map((row) => row.values.status)).toEqual(Array(17).fill("Open"));
+    else expect([...f.docs.values()].filter((doc) => doc.collection === "Target").map((doc) => doc.status)).toEqual(Array(17).fill("Open"));
+  });
+
   it.each([false, true])("accepts 500 matches and refuses 501 without partial binding, dataset=%s", async (dataset) => {
     for (const count of [500, 501]) {
       const f = await fixture(false, dataset);

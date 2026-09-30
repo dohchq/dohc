@@ -73,6 +73,9 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 //
 // The executor admits at most five Finds per definition, 500 matches per
 // Find, and 1,000 supplied field assignments per run, including Add fields.
+// The JSON scope for formulas, If conditions, and code is limited to 256 KiB,
+// including bound records with all their fields. Large Find results can exceed
+// this scope below 500 matches. Each formula result is limited to 64 KiB.
 // Each step reserves journal bytes before any effect. A refused later step
 // leaves earlier steps recorded and undoable. Invoke operations retain their
 // own runtime bounds; the assignment cap does not count their hidden writes.
