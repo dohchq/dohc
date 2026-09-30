@@ -5984,7 +5984,7 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
     let doc = Ydoc::wire();
     call(&transport, &handle, 3, "ydoc.recordUpdate", json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"a")),"actorOriginId":"first","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     let raw = rusqlite::Connection::open(&db).expect("coverage fixture");
-    let folded:Vec<Value>=(0..959).map(|i|json!({"kind":"agent","agentId":if i==0 {"first".to_owned()} else {format!("folded-{i}")},"onBehalfOf":"person"})).collect();
+    let folded:Vec<Value>=(0..dohc_engine_collab::author_coverage::SETTLE_AUTHOR_THRESHOLD-1).map(|i|json!({"kind":"agent","agentId":if i==0 {"first".to_owned()} else {format!("folded-{i}")},"onBehalfOf":"person"})).collect();
     raw.execute(
         "UPDATE ydoc_docs SET pending_authors_json=?1",
         [json!(folded).to_string()],
@@ -6083,5 +6083,31 @@ async fn record_update_preserves_existing_human_automation_context() {
         json!({"sessionId": opened["sessionId"]}),
     )
     .await;
+    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attributed_declared_seed_does_not_credit_opening() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle =
+        open_workspace_with_capture_mode(&transport, &scratch, "seed-authors", 1, Some("none"))
+            .await;
+    let opened=call(&transport,&handle,2,"ydoc.open",json!({"versionId":"main","path":"seed.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
+    let doc = Ydoc::wire();
+    call(&transport,&handle,3,"ydoc.recordUpdate",json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"seed")),"seed":true,"actorOriginId":"opener","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({"sessionId":opened["sessionId"]}),
+    )
+    .await;
+    let raw = rusqlite::Connection::open(&db).expect("inspect");
+    let authors:Option<String>=raw.query_row("SELECT author_json FROM moments WHERE path='seed.txt' ORDER BY moment_order DESC LIMIT 1",[],|row|row.get(0)).expect("moment");
+    assert_eq!(authors, None, "opening does not confer authorship");
+    drop(raw);
     call(&transport, &handle, 5, "workspace.close", json!({})).await;
 }
