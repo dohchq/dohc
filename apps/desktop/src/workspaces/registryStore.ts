@@ -10,7 +10,8 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
-import type { RosterListing, ShareRoster } from "../automations/shareRoster";
+import type { ShareRoster } from "../automations/shareRoster";
+import type { RosterListing } from "@dohc/automation-executor/roster-listing";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ConfirmedShareRemoval } from "./recipientShareReconciliation";
 import type { ShareViewSelector } from "./shareViewInfo";
