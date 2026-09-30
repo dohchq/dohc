@@ -366,13 +366,18 @@ export function recordStepDestinations(automation: Automation, source: string): 
   return destinations;
 }
 
+function isOwnCollection({ definition, sourceCollection }: DatasetRules): boolean {
+  return sourceCollection === undefined || sourceCollection === posix.dirname(definition.schemaPath);
+}
+
 // Each operation a run can call, once each: the trigger record's read, each
 // step's operation, and each read that checks a record again. A code step's
 // changes are known only once it runs, so it can call every edit, create,
 // and read on the table it changes records in. On a dataset whose
 // operations someone wrote, it changes no record, so it calls none.
-function invokedOperations(automation: Automation, { definition, generated, sourceCollection }: DatasetRules, { trigger, steps, rereads }: DatasetSteps): DatasetOperation[] {
-  const codeTable = (sourceCollection === undefined || sourceCollection === posix.dirname(definition.schemaPath)) && generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+function invokedOperations(automation: Automation, rules: DatasetRules, { trigger, steps, rereads }: DatasetSteps, ownCollection = isOwnCollection(rules)): DatasetOperation[] {
+  const { definition, generated } = rules;
+  const codeTable = ownCollection && generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
     ? datasetCodeTable(automation, definition)
     : undefined;
   const code = codeTable === undefined
@@ -467,16 +472,16 @@ export function datasetReachSteps(
   const resolved = resolve(automation, rules, false);
   if ("problem" in resolved) return null;
   const { trigger, steps } = resolved.steps;
+  const ownCollection = isOwnCollection(rules);
   const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access });
   // A code step on a generated dataset reads and changes its table's records, so their fields count too.
-  const code = (rules.sourceCollection === undefined || rules.sourceCollection === posix.dirname(definition.schemaPath)) && rules.generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+  const code = ownCollection && rules.generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
     ? datasetCodeTable(automation, definition)
     : undefined;
   const tables = new Map([...(trigger === null ? [] : [trigger.table]), ...[...steps.values()].map((step) => step.table), ...(code === undefined ? [] : [code])]
     .map((table) => [table.tableId, table] as const));
   const reads = definition.operations.filter((operation) => operation.kind === "read");
-  const operations = invokedOperations(automation, rules, resolved.steps);
-  const ownCollection = rules.sourceCollection === undefined || rules.sourceCollection === posix.dirname(definition.schemaPath);
+  const operations = invokedOperations(automation, rules, resolved.steps, ownCollection);
   const invokedReads = operations.filter((operation) => operation.kind === "read");
   return [
     ...chatReachStepsOf(automation, chat),

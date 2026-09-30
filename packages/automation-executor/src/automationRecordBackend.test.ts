@@ -228,6 +228,53 @@ const codeStep = (source: string) => automation(`      - run: ${JSON.stringify(s
 const changes = (...records: Array<{ action: "add" | "change"; collection: string; table?: string; id?: string; fields: Record<string, JsonValue> }>) => codeStep(`return ${JSON.stringify({ records })};`);
 
 describe("cross-Collection code changes", () => {
+  it.each([false, true])("denies a dynamic destination generically between steps, grant revoked=%s", async (grantRevoked) => {
+    const f = await fixture();
+    f.move("Target", "HR");
+    const target = f.targets.get("HR");
+    if (target?.kind !== "dataset") throw new Error("target");
+    target.approved.definition.operations.forEach((operation) => { operation.access = "helper"; });
+    target.approved.definition.operations.find((operation) => operation.operationId === "edit")!.name = "Update Status";
+    const editor: Exclude<ReachRoster, { kind: "unknown" }> = { kind: "owner", ownerUserId: "owner", grants: [
+      { grantId: "editor", recipientUserId: "editor", recipientEmail: "E", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null },
+    ] };
+    if (grantRevoked) {
+      f.setRoster(editor);
+      target.grants.grants = [{ principalKey: datasetPrincipalKey("workspace", "editor", "editor"), operationIds: ["read", "edit"] }];
+    }
+    f.hooks.afterEffect = () => {
+      f.hooks.afterEffect = undefined;
+      f.setRoster(editor);
+      target.grants.grants = [];
+    };
+    const a = automation('      - run: \'return { records: [{ action: "change", collection: "HR", id: "same", fields: { Status: "First" } }] };\'\n' +
+      '      - run: \'return { records: [{ action: "change", collection: "HR", id: "same", fields: { Status: "Second" } }] };\'\n');
+    expect(await f.run(a)).toMatchObject({ kind: "failed", error: "This automation cannot use the requested Collection or fields." });
+    expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("First");
+    expect(f.calls.filter((call) => call.operationId === "edit")).toHaveLength(1);
+    expect((await f.runs())[0]!.steps).toHaveLength(1);
+  });
+
+  it.each([false, true])("discloses schema errors to editors with only data grants, button=%s", async (button) => {
+    const f = await fixture();
+    const target = f.targets.get("Target");
+    if (target?.kind !== "dataset") throw new Error("target");
+    target.approved.definition.operations.forEach((operation) => { operation.access = "helper"; });
+    target.grants.grants = [{ principalKey: datasetPrincipalKey("workspace", "editor", "editor"), operationIds: ["read", "create", "edit", "delete"] }];
+    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [
+      { grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null },
+    ] });
+    const a = changes({ action: "add", collection: "Target", fields: { Missing: "x" } });
+    if (button) {
+      if (f.held.source !== "document") throw new Error("claim");
+      f.held.claim.change.kind = "button";
+      f.held.claim.change.onBehalfOf = "editor";
+      a.when = { kind: "button", field: "Run", table: null };
+    }
+    expect(await f.run(a)).toMatchObject({ kind: "failed", error: "The code in step 1 sets Missing, which is not a field in Rows." });
+    expect(f.calls).toEqual([]);
+  });
+
   it.each(["missing", "document", "dataset", "authored", "ambiguous", "missing-table"])("does not disclose HR's Salary field with a %s destination", async (kind) => {
     const answers: unknown[] = [];
     for (const salary of [false, true]) {

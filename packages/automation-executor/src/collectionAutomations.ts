@@ -2733,16 +2733,10 @@ export class CollectionAutomations {
       (named) => named === table.name || (named === null && definition.tables.length === 1), definition.name);
     if (resolved.kind === "state") return { state: resolved.state };
     const { automation } = resolved;
-    let inventory: AutomationInventory;
-    try { inventory = this.inventory(collectionPath, automation); }
-    catch (error) { return disabled(errorText(error)); }
-    if (!await canPressInventory(inventory, describe)) return disabled(noAccessReason(table.name));
-    const state = await this.runnableButtonState(collectionPath, automation, roster, inventory.reach);
+    const state = await this.checkedButtonState(collectionPath, automation, roster, table.name, describe);
     if (state.kind !== "ready") return { state };
-    // A press that runs an action asks first, since dohc cannot undo what the action did.
-    const irreversible = irreversibleActionsOf(automation, collectionPath, inventory);
     return {
-      state: irreversible.length === 0 ? state : { ...state, irreversible },
+      state,
       checked: { automation, datasetId: definition.datasetId, tableId: table.tableId, fieldId: field.fieldId },
     };
   }
@@ -2893,13 +2887,23 @@ export class CollectionAutomations {
     if (resolved.kind === "state") return resolved.state;
     const unsupported = this.cannotRun(collectionPath, resolved.automation);
     if (unsupported !== null) return { kind: "disabled", reason: unsupported };
+    return this.checkedButtonState(collectionPath, resolved.automation, roster, collectionNamed(collectionPath).name, describe);
+  }
+
+  private async checkedButtonState(
+    collectionPath: string,
+    automation: Automation,
+    roster: ReachRoster,
+    accessName: string,
+    describe?: (datasetId: string) => Promise<DatasetDescription>,
+  ): Promise<AutomationButtonState> {
     let inventory: AutomationInventory;
-    try { inventory = this.inventory(collectionPath, resolved.automation); }
+    try { inventory = this.inventory(collectionPath, automation); }
     catch (error) { return { kind: "disabled", reason: errorText(error) }; }
-    if (!await canPressInventory(inventory, describe)) return { kind: "disabled", reason: noAccessReason(collectionNamed(collectionPath).name) };
-    const state = await this.runnableButtonState(collectionPath, resolved.automation, roster, inventory.reach);
+    if (!await canPressInventory(inventory, describe)) return { kind: "disabled", reason: noAccessReason(accessName) };
+    const state = await this.runnableButtonState(collectionPath, automation, roster, inventory.reach);
     if (state.kind !== "ready") return state;
-    const irreversible = irreversibleActionsOf(resolved.automation, collectionPath, inventory);
+    const irreversible = irreversibleActionsOf(automation, collectionPath, inventory);
     return irreversible.length === 0 ? state : { ...state, irreversible };
   }
 

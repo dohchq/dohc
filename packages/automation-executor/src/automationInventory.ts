@@ -28,8 +28,7 @@ export async function canPressInventory(inventory: AutomationInventory, describe
     if (describe === undefined) return false;
     try {
       const access = await describe(datasetId);
-      const approved = [...inventory.targets.values()].find((target) => target.kind === "dataset" && target.approved.datasetId === datasetId);
-      if (approved?.kind !== "dataset" || access.datasetId !== datasetId ||
+      if (access.datasetId !== datasetId ||
         [...ids].some((id) => !access.operations.some((operation) => operation.operationId === id))) return false;
     } catch { return false; }
   }

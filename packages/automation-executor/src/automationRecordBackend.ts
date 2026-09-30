@@ -272,7 +272,8 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
         const schema = target.approved.definition.operations.map((operation): Extract<ReachStep, { kind: "dataset-operation" }> => ({ kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, grants, operation }));
         const allowed = schema.length > 0 && checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: schema }).every((verdict) => verdict.allowed) &&
           (automation.when.kind !== "button" || schema.every((step) => personHoldsOperation(currentRoster, source.personId, step, deps.localPersonId?.())));
-        addReach(request.ordinal, allowed ? pathReach : { kind: "unavailable", reason: "This automation cannot use the requested Collection or fields.", identity: pathReach.identity });
+        if (allowed) for (const reach of schema) addReach(request.ordinal, reach);
+        else addReach(request.ordinal, { kind: "unavailable", reason: "This automation cannot use the requested Collection or fields.", identity: pathReach.identity });
         problems.push(error instanceof Error ? error.message : String(error));
       }
     }
@@ -289,7 +290,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
         reach: verdict.allowed ? verdict : { ...verdict, reason: "This automation cannot use the requested Collection or fields." } }];
     });
     const kept = recipients.length === 0 ? [] : await deps.recipientVerdicts({ automationId: claim.automationId, definitionHash: definitionHash(automation), recipients });
-    for (const [index, entry] of checks.entries()) codeReach.set(JSON.stringify([entry.ordinal, reachStepId(entry.reach, index)]), entry);
+    for (const [key, entry] of checkedReach) codeReach.set(key, entry);
     for (const [index, { ordinal, reach }] of checks.entries()) {
       const verdict = verdicts[index]!;
       if (!verdict.allowed) throw new Error(`The code in step ${ordinal + 1} changes records. This automation cannot use the requested Collection or fields.`);
@@ -372,7 +373,9 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     if (recordVerdicts && await deps.checkReach?.(fresh.reach.slice(0, inventory.reach.length), currentRoster)) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
     for (const [index, verdict] of checks.entries()) {
       const step = fresh.reach[index]!;
-      if (!verdict.allowed && (step.kind !== "dataset-field" || visible.has(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)))) throw new Error(verdict.reason);
+      if (!verdict.allowed && (step.kind !== "dataset-field" || visible.has(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)))) {
+        throw new Error(index >= inventory.reach.length ? "This automation cannot use the requested Collection or fields." : verdict.reason);
+      }
     }
     return currentRoster;
   };
