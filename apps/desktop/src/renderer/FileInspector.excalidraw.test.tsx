@@ -66,7 +66,8 @@ vi.mock("./ExcalidrawCanvas", () => ({
   },
 }));
 
-import { classifyForView, FileInspector } from "./FileInspector";
+import { FileInspector } from "./FileInspector";
+import { classifyForView } from "./fileViewKind";
 import {
   EMPTY_EXCALIDRAW_DOCUMENT,
   parseExcalidrawDocument,
