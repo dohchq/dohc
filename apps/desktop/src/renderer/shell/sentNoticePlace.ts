@@ -1,3 +1,4 @@
+import { SERVER_HOLD_NOTICE_PREFIX, SERVER_RUN_FAILED_NOTICE_PREFIX } from "@dohc/workspace-contracts/relay";
 import type { NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 
 // Where Open takes a notice sent to you, on this computer.
@@ -52,4 +53,33 @@ export function sentNoticePlace(
 // folder is what tells the person where it came from.
 export function sentNoticeFolder(notice: Pick<NoticeRow, "target">): string | null {
   return notice.target?.path?.split("/").at(-2) ?? null;
+}
+
+/**
+ * The failed run a notice from the owner's self-hosted server names, or
+ * null. The server posts it to the owner as the owner, so it is the owner's
+ * own notice and no one else's.
+ */
+export function serverRunOfNotice(
+  notice: Pick<NoticeRow, "store" | "kind" | "noticeId" | "workspaceId" | "target">,
+): { workspaceId: string; automationId: string; claimId: string } | null {
+  const automationId = notice.target?.automation;
+  const claimId = notice.target?.run;
+  if (notice.store !== "account" || notice.kind !== "automation-failed") return null;
+  if (!notice.noticeId.startsWith(SERVER_RUN_FAILED_NOTICE_PREFIX)) return null;
+  if (notice.workspaceId === null || automationId === undefined || claimId === undefined) return null;
+  return { workspaceId: notice.workspaceId, automationId, claimId };
+}
+
+/**
+ * The server's notices about steps it holds in this workspace, as one key
+ * that changes when one arrives or goes, so the holds are read again then.
+ */
+export function serverHoldNoticesKey(notices: readonly NoticeRow[] | undefined, workspaceId: string): string {
+  return (notices ?? [])
+    .filter((notice) => notice.store === "account" && notice.workspaceId === workspaceId &&
+      notice.noticeId.startsWith(SERVER_HOLD_NOTICE_PREFIX))
+    .map((notice) => notice.noticeId)
+    .sort()
+    .join("\n");
 }

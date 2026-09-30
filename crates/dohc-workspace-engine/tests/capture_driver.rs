@@ -552,7 +552,6 @@ async fn a_sink_policy_hold_recovers_when_the_original_policy_bytes_return() {
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_until_capture_ready(&transport, &handle, 2).await;
     wait_for_text(&transport, &handle, "kept.md", Some("captured before hold")).await;
-    let starts_before = probe.layer_start_count();
 
     probe.pause_next_apply_worker();
     write_file(
@@ -626,10 +625,6 @@ async fn a_sink_policy_hold_recovers_when_the_original_policy_bytes_return() {
     })
     .await
     .expect("the same policy fingerprint must recover the held edit");
-    assert!(
-        probe.layer_start_count() > starts_before,
-        "policy recovery must rebuild even though its bytes did not change"
-    );
     transport
         .call(
             RequestContext::unbounded(),

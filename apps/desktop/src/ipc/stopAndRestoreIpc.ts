@@ -3,13 +3,14 @@ import { join } from "node:path";
 import { z } from "zod";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import type { ServerRuns } from "../automations/serverRuns";
 import {
   LiveDocumentMutationError,
   RestoreFolderInUseError,
   RestoreHeadChangedError,
   type WorkspaceEngineCapture,
 } from "../workspaces/workspaceEngineCapture";
-import { restoreDirectWrites, type DirectWriteFile } from "../workspaces/stopAndRestore";
+import { restoreDirectWrites, UndoRunsStopped, type DirectWriteFile, type UndoneRuns } from "../workspaces/stopAndRestore";
 import { folderEntriesOrNone } from "../workspaces/folderEntries";
 import {
   StopAndRestorePayload,
@@ -40,6 +41,9 @@ const MAX_LINK_PAGES = 50;
 // Ending a link names its dependents. Someone who opens it meanwhile changes
 // them, so dohc lists again and retries this many times.
 const LINK_END_ATTEMPTS = 3;
+// Stop and restore undoes runs in at most this many passes; each after the
+// first puts back at least one field, or ends.
+const UNDO_PASSES = 8;
 
 const ID = z.string().min(1).max(512);
 const GrantedListing = z.object({ granted: z.array(z.unknown()) });
@@ -104,11 +108,15 @@ export function registerStopAndRestoreIpc<
   }>;
   /** Asks the workspace's sync to pull now. */
   queuePull(workspaceId: string): void;
+  /** Runs one sync pass of the workspace now, pushing and pulling, and throws when it did not sync. */
+  syncNow(workspaceId: string): Promise<void>;
   /** A person's delete: the OS trash, or the workspace's .dohc/trash. */
   deletePath(event: Event, payload: DeleteWorkspacePathPayload): Promise<unknown>;
   notifyRenderer(input: { workspaceId: string }): void;
   /** Only the original workspace has grants to stop. */
   assertOriginalWorkspace(workspace: Workspace): void;
+  /** The owner's self-hosted server's runs. */
+  serverRuns: Pick<ServerRuns, "restore">;
 }): void {
   const { registerHandler, assertTrustedSender, relayJson } = dependencies;
   const ownerRelayShareHandler = createOwnerRelayShareHandler<Sender, Workspace, Operation, Credentials>({
@@ -116,6 +124,52 @@ export function registerStopAndRestoreIpc<
     remoteForWorkspace: dependencies.remoteForWorkspace,
     credentialGeneration: dependencies.currentCredentialGeneration,
   });
+
+  /**
+   * Undoes the runs of these definitions on the owner's server and here. A
+   * run on one of them may have written a field after a run on the other,
+   * in an order neither records, so Undo keeps a field that no longer holds
+   * what its run wrote. Each later pass syncs, then tries only the kept
+   * fields again, and stops when a pass puts nothing back: a field goes back
+   * only while it holds what the run wrote, so a repeat changes nothing else.
+   */
+  async function undoRunsHereAndOnServer(
+    workspaceId: string,
+    definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
+    undoHere: (again: boolean) => ReturnType<CollectionAutomations["undoRunsOf"]>,
+  ): Promise<UndoneRuns> {
+    const counts = { undone: 0, left: 0, missing: 0, otherKept: 0, errorMessage: null };
+    // The fields each computer's runs still keep, by hash: one kept on both counts once.
+    const kept = { server: [] as string[], here: [] as string[] };
+    const total = (): UndoneRuns => ({ ...counts, kept: new Set([...kept.server, ...kept.here]).size });
+    const add = (host: "server" | "here", pass: { undone: number; left: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null }, again: boolean) => {
+      if (!again) {
+        counts.undone += pass.undone;
+        counts.left += pass.left;
+      }
+      counts.missing += pass.missing;
+      kept[host] = pass.keptFields;
+      counts.otherKept += pass.otherKept;
+      if (pass.errorMessage !== null) throw new UndoRunsStopped(pass.errorMessage, total());
+    };
+    try {
+      for (let pass = 0; pass < UNDO_PASSES; pass += 1) {
+        const again = pass > 0;
+        const server = await dependencies.serverRuns.restore(workspaceId, definitions, again);
+        add("server", server, again);
+        // What the server put back reaches this computer, and what this one puts back reaches the server.
+        await dependencies.syncNow(workspaceId);
+        const here = await undoHere(again);
+        add("here", here, again);
+        await dependencies.syncNow(workspaceId);
+        if (again && server.reverted + here.reverted === 0) break;
+      }
+    } catch (error) {
+      // What it undid before it stopped is reported with why it stopped.
+      throw new UndoRunsStopped(error instanceof Error ? error.message : String(error), total());
+    }
+    return total();
+  }
 
   registerHandler(CHANNELS.stopAndRestore, async (event, payload) => {
     assertTrustedSender(event);
@@ -235,9 +289,10 @@ export function registerStopAndRestoreIpc<
         },
         folderEntries: (path) => folderEntriesOrNone(join(root, path)),
         removeEmptyFolder: async (path) => await rmdir(join(root, path)).catch(() => undefined),
-        undoRuns: (definitions) => operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
-          await dependencies.deletePath(event, { workspaceId, relativePath });
-        }),
+        undoRuns: (definitions) => undoRunsHereAndOnServer(workspaceId, definitions, (again) =>
+          operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
+            await dependencies.deletePath(event, { workspaceId, relativePath });
+          }, again)),
       }, writes.flatMap((write) => write.files));
       if (outcome.status === "waiting") dependencies.queuePull(workspaceId);
       else dependencies.notifyRenderer({ workspaceId });

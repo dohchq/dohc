@@ -239,7 +239,7 @@ export type HandlerOverrides = Partial<CreateSyncRelayHandlerOptions>;
 export function testHandler(
   storage: SyncRelayStorage,
   overrides: HandlerOverrides = {},
-): SyncRelayHandler {
+): ReturnType<typeof createSyncRelayHandler> {
   let shareId = 0;
   let grantId = 0;
   return createSyncRelayHandler({

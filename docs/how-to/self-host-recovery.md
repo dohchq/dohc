@@ -28,6 +28,16 @@ That state also refuses startup and cannot be repaired from an older snapshot.
 Preserve its volumes.
 Offline salvage requires an earlier completed relay snapshot; it cannot read the failed deployment or its archive directly.
 
+Automation copies live in `dohc_self_host_host_data`, alongside their engine databases and run history.
+A relay snapshot does not include their pending claims, schedule marks, or Group coverage.
+Preserve this volume in a private archive before maintenance.
+The bundle cannot restore or view archived run history.
+The server can rebuild workspace files from the relay after a copy is lost or its sync identity changes.
+A rebuilt copy cannot recover pending claims or Undo for earlier runs from those files.
+Due times missed while no computer or server runs schedules do not run later.
+Missed schedules produce a skipped-schedule notice; Group triggers start from the rejoin.
+These rules do not make an older relay snapshot safe to restore.
+
 ## Save a relay snapshot
 
 Choose a private backup parent directory outside the deployment's data volumes.

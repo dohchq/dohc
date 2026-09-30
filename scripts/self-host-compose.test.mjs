@@ -86,6 +86,15 @@ test('diagnostics reject placeholders and invalid origins without revealing secr
   assert.ok(validateSettings(parseEnv(readFileSync('.env.self-host.example', 'utf8'))).length > 0);
 });
 
+test('server automations default on and accept an explicit opt-out', () => {
+  assert.equal(settings().DOHC_RELAY_AUTOMATIONS, '1');
+  assert.equal(compose.services['sync-relay'].environment.DOHC_RELAY_AUTOMATIONS, '${DOHC_RELAY_AUTOMATIONS:-1}');
+  for (const value of [undefined, '0', '1']) assert.deepEqual(validateSettings({...settings(), DOHC_RELAY_AUTOMATIONS: value}), []);
+  for (const value of ['', 'true', '2']) {
+    assert.ok(validateSettings({...settings(), DOHC_RELAY_AUTOMATIONS: value}).some(error => error.includes('DOHC_RELAY_AUTOMATIONS to 0 or 1')));
+  }
+});
+
 test('app publications use one opt-in setting', () => {
   assert.equal(settings().DOHC_RELAY_APP_PUBLICATIONS, '0');
   assert.equal(compose.services['sync-relay'].environment.DOHC_RELAY_APP_PUBLICATIONS, '${DOHC_RELAY_APP_PUBLICATIONS:-0}');

@@ -22,7 +22,7 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
-import { hasGeneratedDatasetOperations } from "./datasetGenerator";
+import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };

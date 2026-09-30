@@ -1,3 +1,4 @@
+import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
 import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh} from "./workspaces/ownerShareLabels";
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
@@ -23,6 +24,7 @@ import {
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
+import { createServerRuns } from "./automations/serverRuns";
 import { createPressWindows, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
@@ -136,7 +138,8 @@ import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
-import { runCollectionRecordCreation, collectionRecordWrites, type CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
+import { runCollectionRecordCreation, collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
+import { desktopRecordEditContext, type DesktopRecordEditHost } from "./workspaces/desktopRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
@@ -214,15 +217,18 @@ import {
   recipientShareNeedsRecheck,
   readReceivedShareListing,
 } from "./workspaces/recipientShareReconciliation";
-import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
+import { createShareRosters, rosterAuthorLabel } from "./automations/shareRoster";
+import { listRosterGrants } from "@dohc/automation-executor/roster-listing";
 import {
   CollectionAutomations,
+  type CollectionAutomationsOptions,
   type AutomationSwitchedOff,
   type CollectionAutomationRetry,
   type PressWaitReason,
 } from "@dohc/automation-executor/collection-automations";
 import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { AutomationScheduler } from "@dohc/automation-executor/automation-scheduler";
+import { parseReachHandover, type ReachRelayRecord } from "@dohc/automation-executor/reach-verdicts";
 import {
   computerLabel,
   computersOfAnswer,
@@ -230,6 +236,7 @@ import {
   hostOfAnswer,
   automationHostGeneration,
   isAutomationHost,
+  refusalOfAnswer,
   relayUnreachable,
 } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
@@ -238,7 +245,12 @@ import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-no
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { provedNeverShared, readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
-import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
+import { automationPressRelay, relayPressTransport } from "./automations/relayedPresses";
+import {
+  createRelayedPressHost,
+  relayedPressFailureNotice,
+  type RelayedPressHost,
+} from "@dohc/automation-executor/relayed-presses";
 import {
   retryAutomationRun,
   retryFromFailureNotice,
@@ -254,6 +266,8 @@ import { createAutomationRunStore } from "@dohc/automation-executor/automation-r
 import { resolveWorkspaceMetadataDir } from "./workspaces/workspaceMetadata";
 import { readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent } from "./automations/automationAgentWake";
+import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
+import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 import { configuredRunnerCommand } from "./agents/agentToolCatalog";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import {
@@ -329,7 +343,7 @@ import {
   WorkspaceActivityState,
 } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
-import { AuthoredTextChangedError, probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
+import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
@@ -407,7 +421,6 @@ import {
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
   writeWorkspaceText,
-  withOrderedWorkspaceTextPath,
 } from "./workspaces/workspaceAssets";
 import {
   createShareViewFiles,
@@ -918,6 +931,7 @@ async function noticeSession(): Promise<NoticeSession | null> {
   };
 }
 function notifyNoticesChanged(): void {
+  if (app.isReady()) void automationWakeConsumer.resume();
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send(CHANNELS.noticesChanged);
   }
@@ -2138,6 +2152,8 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.retryCloudSync(lease.state.activity, reason),
     ),
+  syncNow: (workspaceId: string): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.syncNow(lease.state.activity)),
   retryFailingCloudSyncs: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
       // Started inside the promise, so a workspace closing under the loop
@@ -3254,12 +3270,12 @@ async function collectionEditContextFor(
 
 function collectionEditContextWith(
   operation: DesktopWorkspaceOperation,
-  capture: CollectionRecordEditContext["capture"],
+  capture: DesktopRecordEditHost["capture"],
   signal: AbortSignal,
 ): CollectionRecordEditContext {
   const workspace = operation.workspace;
   assertWritableWorkspace(workspace);
-  return {
+  return desktopRecordEditContext({
     capture,
     workspaceRoot: workspace.rootPath,
     withAdapter: (work) => withEngineAdapter(workspace, work),
@@ -3269,7 +3285,7 @@ function collectionEditContextWith(
       return onWorkspaceCaptureSettled(daemon, workspace.workspaceId, listener);
     },
     signal,
-  };
+  });
 }
 
 // A workspace text file, or null when there is none.
@@ -3307,6 +3323,105 @@ const automationScheduler = new AutomationScheduler({
 // What each workspace's schedules need when no window has it open.
 const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
 const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
+
+async function agentRunnerReady(): Promise<boolean> {
+  const runner = (await readCachedUserSettingsFile(stateDir())).settings.runner;
+  return runner.enabled && configuredRunnerCommand(runner) !== "";
+}
+
+async function wakeAutomationAgent(
+  workspace: { workspaceId: string; rootPath: string; attachmentId?: symbol },
+  signal: AbortSignal,
+  message: AutomationChatMessage,
+  waitForDispatch = false,
+): Promise<void> {
+  const { workspaceId } = workspace;
+  await withWorkspaceAttachmentAsync(workspace, async (lease) => {
+    signal.throwIfAborted();
+    const place = { workspaceId, store: linkedChatStoreFor(lease) };
+    const local = {
+      writer: { via: "automation" as const, ...message.automation, local: true as const },
+      signal, body: message.body, messageId: message.messageId, idempotencyKey: message.effectId,
+      resolveAttachments: async () => [],
+    };
+    await wakeAgent({
+      runnerReady: agentRunnerReady,
+      agentChannelId: async () => {
+        signal.throwIfAborted();
+        return (await place.store.ensureAgentChannel({ workspaceId })).id;
+      },
+      threadExists: async (threadId) => (await place.store.findThreadChannelId({ workspaceId, threadId })) !== null,
+      start: ({ channelId, message: wake }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId }),
+      send: ({ message: wake }) => chatWrites.sendMessage(place, { ...local, threadId: wake.threadId }),
+      recordTrigger: ({ triggerMessageId, threadId }) => {
+        signal.throwIfAborted();
+        return agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId });
+      },
+      scan: () => {
+        signal.throwIfAborted();
+        const scan = chatDispatchService.scanWorkspace(workspaceId, lease.binding.attachmentId);
+        if (waitForDispatch) return scan;
+        void scan.catch((error: unknown) => console.error("[desktop] chat dispatch scan:", error));
+      },
+    }, message);
+  });
+}
+
+const automationWakeConsumer = createAutomationWakeConsumer({
+  intents: createAutomationWakeIntents(join(stateDir(), "automation-wakes.json")),
+  pending: () => noticeStore().pendingAutomationWakes(),
+  ready: async (intent, needsRunner) => {
+    const session = await noticeSession();
+    return session !== null && session.account.key === intent.account &&
+      session.reachFor(intent.workspaceId)?.workspaceId === intent.workspaceId &&
+      (!needsRunner || await agentRunnerReady()) && session.isCurrent();
+  },
+  enabledIfOpen: async (intent) => {
+    const workspace = findWorkspace(intent.workspaceId);
+    if (!workspace || workspace.shareView !== undefined) return undefined;
+    return await withWorkspaceAttachment(workspace, (held) => {
+      if (!workspaceActivity.isOpen(held.state.activity) || held.state.activityClosing) return undefined;
+      return held.state.collectionAutomations.enabledForWake(intent.wake.automationId);
+    });
+  },
+  enabled: async (intent) => {
+    const workspace = findWorkspace(intent.workspaceId);
+    if (!workspace || workspace.shareView !== undefined) return false;
+    await desktopEngine.startup;
+    const release = await acquireDispatchRunActivity(workspace);
+    try {
+      const automations = withWorkspaceAttachment(workspace, (held) => held.state.collectionAutomations);
+      if (!automations) throw new Error("dohc could not read this workspace's automations.");
+      if (!activity.engineCaptureFor(workspace.workspaceId)) throw new Error("dohc could not open this workspace's automations.");
+      await automations.open();
+      return await automations.enabledForWake(intent.wake.automationId);
+    } finally { await release(); }
+  },
+  dismiss: (intent) => noticeStore().dismissFirst({ store: "account", noticeId: intent.noticeId }, intent.account),
+  wake: async (intent, message) => {
+    const session = await noticeSession();
+    const signal = ownerDeliveryCredentialLifetime.signal;
+    const workspace = findWorkspace(intent.workspaceId);
+    if (!session || session.account.key !== intent.account || !session.isCurrent() ||
+      session.reachFor(intent.workspaceId)?.workspaceId !== intent.workspaceId ||
+      !workspace || workspace.shareView !== undefined) throw new Error("The wake's account or workspace changed.");
+    await desktopEngine.startup;
+    signal.throwIfAborted();
+    const release = await acquireDispatchRunActivity(workspace);
+    try {
+      signal.throwIfAborted();
+      if (!session.isCurrent() || session.reachFor(intent.workspaceId)?.workspaceId !== intent.workspaceId) {
+        throw new Error("The wake's account or workspace changed.");
+      }
+      const automations = withWorkspaceAttachment(workspace, (held) => held.state.collectionAutomations);
+      if (!automations) throw new Error("dohc could not read this workspace's automations.");
+      if (!activity.engineCaptureFor(workspace.workspaceId)) throw new Error("dohc could not open this workspace's automations.");
+      await automations.open();
+      if (await automations.enabledForWake(intent.wake.automationId)) await wakeAutomationAgent(workspace, signal, message, true);
+    } finally { await release(); }
+  },
+  onError: (error) => console.error("[desktop] agent wake:", error),
+});
 
 // At start, every workspace this computer ran schedules for waits for its
 // next due time, open or not.
@@ -3566,9 +3681,42 @@ const automationHosts = createAutomationHosts({
     const released = automations ? await automations.releaseGroupSubscriptions(stillHandingOver) : null;
     if (released === null) return null;
     const throughMs = await automationScheduler.finishHere(workspaceId);
-    return throughMs === null ? null : { throughMs, groups: released.handover, groupsWatched: released.watchedGeneration };
+    if (throughMs === null) return null;
+    // Carried so a step stopped here stays stopped on the next host.
+    const reach = automations ? await automations.reachHandover() : null;
+    return { throughMs, groups: released.handover, groupsWatched: released.watchedGeneration, reach };
   },
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
+});
+
+// The runs, Undo, and held steps of the owner's self-hosted server, through
+// the relay's owner routes. Only the owner's own session asks; any other
+// answers that the server has none to show.
+const serverRuns = createServerRuns(async (workspaceId, request) => {
+  const workspace = findWorkspace(workspaceId);
+  if (!workspace?.remote || workspace.shareView !== undefined) return null;
+  let credentials: CloudSessionCredentials;
+  try {
+    ({ credentials } = await remoteForWorkspace(workspace));
+  } catch {
+    // Signed out, or signed in to another account or server.
+    return null;
+  }
+  if (!credentials.relayUrl) return null;
+  const query = request.method === "GET" && request.query ? `?${new URLSearchParams(request.query).toString()}` : "";
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/automation-server/${request.action}${query}`,
+    request.method === "GET"
+      ? { method: "GET", signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS) }
+      : {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request.body),
+        signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+      },
+  );
+  return { status: response.status, body: await response.json().catch(() => undefined) };
 });
 
 // Which of the owner's computers runs a workspace's schedules, for settings
@@ -3622,6 +3770,9 @@ async function scheduleHostState(
   if (credentialCacheGeneration !== credentialGeneration) {
     throw new Error("Your account changed while dohc asked. Open this setting again.");
   }
+  // The server refused the choice, as when it runs no more workspaces: say why.
+  const refusal = change ? refusalOfAnswer(answer) : undefined;
+  if (refusal !== undefined) throw new Error(refusal);
   const answered = hostOfAnswer(answer);
   const computers = computersOfAnswer(answer);
   if (answered === undefined || computers === undefined) {
@@ -3658,8 +3809,35 @@ function stillRunsSchedulesHere(workspaceId: string): boolean {
 // the engine takes it: 0 for none, with the handover when a release left it
 // for this computer. The engine checks a handover again before it takes it.
 async function automationGroupRelayRecord(workspaceId: string, generation: number): Promise<AutomationGroupRelayRecord> {
+  const kept = await automationHandoverRecord(workspaceId, generation);
+  if (kept === null) return { generation: 0, handover: null };
+  return {
+    generation: typeof kept.generation === "number" ? kept.generation : 0,
+    handover: kept.groups === null ? null : decodeAutomationGroupHandover(kept.groups),
+  };
+}
+
+// The same record, as the executor takes the last host's reach verdicts:
+// verdicts it cannot read count as none, so it holds what it cannot prove.
+async function automationReachRelayRecord(workspaceId: string, generation: number): Promise<ReachRelayRecord> {
+  const kept = await automationHandoverRecord(workspaceId, generation);
+  if (kept === null) return { generation: 0, reach: null, everShared: false };
+  if (typeof kept.everShared !== "boolean") throw new Error("The relay's Group handover read did not say whether the workspace was shared.");
+  return {
+    generation: typeof kept.generation === "number" ? kept.generation : 0,
+    reach: kept.reach === null ? null : parseReachHandover(kept.reach),
+    everShared: kept.everShared,
+  };
+}
+
+// The relay's last release or take over at this host generation, or null
+// for a workspace that does not sync. Throws when the relay does not answer.
+async function automationHandoverRecord(
+  workspaceId: string,
+  generation: number,
+): Promise<{ generation: unknown; groups: NonNullable<unknown> | null; reach: NonNullable<unknown> | null; everShared: unknown } | null> {
   const entry = findWorkspace(workspaceId);
-  if (!entry?.remote) return { generation: 0, handover: null };
+  if (!entry?.remote) return null;
   const { credentials } = await remoteForWorkspace(entry);
   const response = await relayShareResponseWithCredentials(
     credentials,
@@ -3668,15 +3846,15 @@ async function automationGroupRelayRecord(workspaceId: string, generation: numbe
   );
   const body: unknown = await response.json().catch(() => undefined);
   const kept = response.status === 200 && body && typeof body === "object" && (body as { ok?: unknown }).ok === true
-    ? body as { generation?: unknown; groups?: unknown }
+    ? body as { generation?: unknown; groups?: unknown; reach?: unknown; everShared?: unknown }
     : undefined;
-  if (kept === undefined || !(kept.generation === null || Number.isSafeInteger(kept.generation)) || kept.groups === undefined) {
+  if (
+    kept === undefined || !(kept.generation === null || Number.isSafeInteger(kept.generation)) ||
+    kept.groups === undefined || kept.reach === undefined
+  ) {
     throw new Error(`The relay answered the Group handover read with ${response.status}.`);
   }
-  return {
-    generation: typeof kept.generation === "number" ? kept.generation : 0,
-    handover: kept.groups === null ? null : decodeAutomationGroupHandover(kept.groups),
-  };
+  return { generation: kept.generation, groups: kept.groups, reach: kept.reach, everShared: kept.everShared };
 }
 
 // Whether any computer can run this workspace's schedules and Group
@@ -3698,7 +3876,6 @@ const WM_TIMECHANGE = 0x001e;
 function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
   return createRelayedPressHost({
     workspaceId,
-    installId: localReactorFallbackId(),
     // The one automation host module decides where automations run; this
     // loop only asks it.
     host: {
@@ -3710,13 +3887,17 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
         return automationHosts.stillRuns(workspaceId) && host ? host.generation : null;
       },
     },
-    relay: async () => {
+    transport: async () => {
       await warmCredentialCache();
       const credentials = cachedCredentials;
       const entry = findWorkspace(workspaceId);
       if (!credentials?.relayUrl || !entry?.remote || shareViewIsPresent(entry.shareView)) return null;
       if (credentials.userId !== entry.remote.ownerUserId || !relayUrlsMatch(credentials.relayUrl, entry.remote.serverUrl)) return null;
-      return { baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch };
+      return relayPressTransport(
+        { baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch },
+        workspaceId,
+        localReactorFallbackId(),
+      );
     },
     heldClaim: async (press) => {
       const executor = collectionAutomationsOf(workspaceId);
@@ -3728,20 +3909,8 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
       if (!executor) throw new Error("This workspace was closed.");
       return await executor.pressRelayed(input, (claimId) => watch(claimId));
     },
-    notifyFailure: async ({ press, field, outcome, error }) => {
-      const button = (field ?? "A button").slice(0, 80);
-      const { collectionPath } = press;
-      await noticeStore().postNotice({
-        workspaceId,
-        noticeId: `automation-press:${press.hostPressId}`,
-        kind: "automation-failed",
-        title: outcome === "busy" ? `${button} did not run` : `${button} did not finish`,
-        body: (outcome === "busy"
-          ? "It was already running on this record for someone else. Press it again when that run finishes."
-          : error ?? "The automation failed.").slice(0, 500),
-        target: { path: collectionPath, record: press.recordId, automation: press.automationId },
-        recipientUserId: press.pressedBy,
-      });
+    notifyFailure: async (failure) => {
+      await noticeStore().postNotice({ workspaceId, ...relayedPressFailureNotice(failure) });
     },
     onError: (context, error) => console.warn(`[desktop] Relayed Button presses in ${workspaceId}: ${context}:`, error),
   });
@@ -3756,34 +3925,31 @@ function createCollectionAutomationsFor(
 ): CollectionAutomations {
   const { workspaceId, canonicalRootPath: rootPath, attachmentId } = binding;
   const workspace = { workspaceId, rootPath, attachmentId };
+  const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = (signal, work) =>
+    withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
+      if (operation.workspace.attachmentId !== attachmentId) {
+        throw new Error("This workspace was closed.");
+      }
+      const capture = activity.engineCaptureFor(workspaceId);
+      if (!capture) throw new Error(captureRefusal("Automations"));
+      return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
+    });
   return new CollectionAutomations({
     withEngine: (work) => withEngineAdapter(workspace, work),
-    withRecordWrites: (signal, work) =>
-      withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
-        if (operation.workspace.attachmentId !== attachmentId) {
-          throw new Error("This workspace was closed.");
-        }
-        const capture = activity.engineCaptureFor(workspaceId);
-        if (!capture) throw new Error(captureRefusal("Automations"));
-        return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
-      }),
+    // Each write names its author, so Undo writes as the person here the same way.
+    withRecordWrites: recordWrites,
+    withUndoWrites: recordWrites,
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
     writeText: async (path, text, expectedContentHash, automationId) => {
-      const capture = activity.engineCaptureFor(workspaceId);
-      // A shared view keeps no History, so it writes the way it always does.
-      if (!capture || findWorkspace(workspaceId)?.shareView !== undefined) {
-        return await writeWorkspaceText(rootPath, path, text, expectedContentHash);
-      }
-      // In the editor's own order for the file, so neither save overwrites the other.
-      return await withOrderedWorkspaceTextPath(rootPath, path, async () => {
-        try {
-          await capture.writeAuthoredTextFile(join(rootPath, path), text,
-            { kind: "automation", automationId, depth: 1 }, { expectedContentHash });
-          return { status: "written" as const };
-        } catch (error) {
-          if (error instanceof AuthoredTextChangedError) return { status: "conflict" as const };
-          throw error;
-        }
+      return withPhysicalWorkspaceOperation(workspaceId, async operation => {
+        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+        const capture = activity.engineCaptureFor(workspaceId);
+        if (!capture || operation.workspace.shareView !== undefined) return writeWorkspaceText(rootPath, path, text, expectedContentHash);
+        const result = await writeWorkspaceFilesAs(operation, [{ path, contentBase64: Buffer.from(text).toString("base64"), expectedSha256: expectedContentHash }],
+          { kind: "automation", automationId, depth: 1 }, { capture });
+        if (result.ok) return { status: "written" as const };
+        if (result.currentSha256 !== undefined) return { status: "conflict" as const };
+        throw new Error(result.reason);
       });
     },
     pathExists: (path) => lstat(join(rootPath, path)).then(() => true, () => false),
@@ -3826,24 +3992,7 @@ function createCollectionAutomationsFor(
           idempotencyKey: message.effectId,
           resolveAttachments: async () => [],
         };
-        if (message.target.kind === "agent") {
-          // A wake stays in this computer's "My agent", so it never waits for a session.
-          const local = { ...common, writer: { ...common.writer, local: true as const } };
-          return await wakeAgent({
-            runnerReady: async () => {
-              const runner = (await readCachedUserSettingsFile(stateDir())).settings.runner;
-              return runner.enabled && configuredRunnerCommand(runner) !== "";
-            },
-            agentChannelId: async () => (await place.store.ensureAgentChannel({ workspaceId })).id,
-            threadExists: async (threadId) => (await place.store.findThreadChannelId({ workspaceId, threadId })) !== null,
-            start: ({ channelId, message: wake }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId }),
-            send: ({ message: wake }) => chatWrites.sendMessage(place, { ...local, threadId: wake.threadId }),
-            recordTrigger: ({ triggerMessageId, threadId }) =>
-              agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId }),
-            scan: () => void chatDispatchService.scanWorkspace(workspaceId).catch((error: unknown) =>
-              console.error("[desktop] chat dispatch scan:", error)),
-          }, message);
-        }
+        if (message.target.kind === "agent") return wakeAutomationAgent(workspace, signal, message);
         return message.target.kind === "group"
           ? await chatWrites.startThread(place, {
               ...common, channelId: message.target.channelId, lane: message.target.lane, threadId: message.threadId,
@@ -3861,6 +4010,7 @@ function createCollectionAutomationsFor(
     // hostChanged when the answer may differ.
     groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
     groupRelayRecord: (generation) => automationGroupRelayRecord(workspaceId, generation),
+    reachRelayRecord: (generation) => automationReachRelayRecord(workspaceId, generation),
     requestHost: () => automationHosts.admit(workspaceId),
     groupMessagesSkipped: (reason, atMs) => noticeStore().postNotice(groupMessagesNotice({ workspaceId, reason, atMs })),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
@@ -4742,7 +4892,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       void watchRecordedSchedules().catch((error: unknown) =>
         console.warn("[desktop] Schedules: read the recorded schedules:", error));
       resumeRunNow();
-      app.on("browser-window-focus", () => resumeRunNow());
+      void automationWakeConsumer.resume();
+      app.on("browser-window-focus", () => { resumeRunNow(); void automationWakeConsumer.resume(); });
+      powerMonitor.on("resume", () => void automationWakeConsumer.resume());
       powerMonitor.on("suspend", () => automationScheduler.suspended());
       powerMonitor.on("resume", () => automationScheduler.resumed());
       powerMonitor.on("unlock-screen", () => automationScheduler.wake());
@@ -5018,7 +5170,10 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
   applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
-  broadcastUserSettings,
+  broadcastUserSettings: (settings) => {
+    broadcastUserSettings(settings);
+    void automationWakeConsumer.resume();
+  },
   openPath: (path) => shell.openPath(path),
   knownWorkspaceIds: () => workspaceSummaries().map((workspace) => workspace.workspaceId),
 });
@@ -5519,6 +5674,8 @@ function registerIpcHandlers(): void {
     showItemInFolder: (path) => shell.showItemInFolder(path),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
     watchPress: (workspaceId, claimId, sender) => pressWindows.watch(workspaceId, claimId, sender, null),
+    serverRuns,
+    relayUnreachable,
   });
 
   pressNamedForCli = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
@@ -5600,11 +5757,13 @@ function registerIpcHandlers(): void {
     sharesChanged: shareRosters.sharesChanged,
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),
+    syncNow: (workspaceId) => activity.syncNow(workspaceId),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
     notifyRenderer,
     assertOriginalWorkspace: (workspace) => {
       if (shareViewIsPresent(workspace.shareView)) throw new Error("Only the original workspace has shares to stop.");
     },
+    serverRuns,
   });
 
   shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({

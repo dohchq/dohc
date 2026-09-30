@@ -145,6 +145,11 @@ export interface AutomationNotice {
   recipientUserId: string;
 }
 
+/** The server handed a wake to the owner's computers instead of posting local chat. */
+export class AutomationWakeSent {
+  constructor(readonly noticeId: string, readonly name: string, readonly supersededBy?: string) {}
+}
+
 // A notice for another person that did not reach them. The message says why.
 export class NoticeNotSentError extends Error {
   constructor(message: string) {

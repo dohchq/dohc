@@ -7,7 +7,8 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { bridgeAutomationClaimsToExecutors } from "../workspaces/automationClaimsBridge";
 import { onWorkspaceCaptureSettled } from "../workspaces/captureActivityBridge";
-import { collectionRecordWrites, setCollectionRecordFields, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
+import { collectionRecordWrites, setCollectionRecordFields, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
+import { desktopRecordEditContext } from "../workspaces/desktopRecordEdits";
 import { createTestScratch } from "../workspaces/testTemp";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { waitForPathMoments } from "../workspaces/waitForPathMoments";
@@ -60,7 +61,7 @@ async function harness(automations: string, run: (context: {
       };
       return await work(adapter);
     });
-  const editContext = (signal: AbortSignal): CollectionRecordEditContext => ({
+  const editContext = (signal: AbortSignal): CollectionRecordEditContext => desktopRecordEditContext({
     capture, workspaceRoot: root, signal,
     withAdapter: withEngine,
     onCaptureSettled: (listener) => onWorkspaceCaptureSettled(lifecycle, workspace.workspaceId, listener),
@@ -72,11 +73,13 @@ async function harness(automations: string, run: (context: {
     chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test."); } },
     groupHost: async () => null,
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
+    reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
     groupMessagesSkipped: async () => undefined,
     requestHost: async () => undefined,
     readMessageBody: async () => null,
     postNotice: async () => { throw new Error("No notices in this test."); },
     withRecordWrites: async (signal, work) => await work(collectionRecordWrites(editContext(signal))),
+    withUndoWrites: async (signal, work) => await work(collectionRecordWrites(editContext(signal))),
     readText: async (path) => {
       try {
         const text = await readFile(join(root, path), "utf8");

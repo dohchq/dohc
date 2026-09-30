@@ -14,7 +14,8 @@ import { sendsMessages } from "@dohc/automation-executor/collection-automation-r
 // Collection the person created goes, unless anyone else's files remain in
 // it once the person's are gone.
 // Runs of the automation definitions the person wrote are undone where this
-// computer's run history holds them. What cannot be undone is said, never
+// computer's run history holds them, and on the owner's self-hosted server.
+// What cannot be undone is said, never
 // hidden: messages those automations sent, changes Undo leaves, and runs
 // another computer's history holds.
 
@@ -62,9 +63,26 @@ export interface StopAndRestoreDependencies {
   folderEntries(path: string): Promise<string[]>;
   /** Removes a workspace folder only when it is empty. */
   removeEmptyFolder(path: string): Promise<void>;
+  /** Runs undone and left, and fields kept at a later value or on records that left their Collection. */
   undoRuns(
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
-  ): Promise<{ undone: number; left: number; kept: number; errorMessage: string | null }>;
+  ): Promise<UndoneRuns>;
+}
+
+export interface UndoneRuns {
+  undone: number;
+  left: number;
+  kept: number;
+  missing: number;
+  otherKept: number;
+  errorMessage: string | null;
+}
+
+/** Undoing runs stopped part way: what it undid before it stopped. */
+export class UndoRunsStopped extends Error {
+  constructor(message: string, readonly runs: UndoneRuns) {
+    super(message);
+  }
 }
 
 export type StopAndRestoreOutcome =
@@ -81,6 +99,10 @@ export type StopAndRestoreOutcome =
       wroteAutomations: boolean;
       /** An automation they wrote posts, messages, notifies, or wakes an agent, which no Undo takes back. */
       sendsMessages: boolean;
+      /** Fields the runs wrote that kept a later value. */
+      fieldsKept: number;
+      /** Fields the runs wrote on records no longer in their Collection. */
+      fieldsMissing: number;
       /** What stopped the restore part way; everything above it happened. */
       errorMessage: string | null;
     };
@@ -206,9 +228,10 @@ export async function restoreDirectWrites(
   restorable.sort((left, right) => restoreOrder(left.entry) - restoreOrder(right.entry));
   const restored: RestoreReceipt[] = [];
   const outcome = () => ({ status: "restored" as const, restored, review: [...review.values()].sort((left, right) => left.path.localeCompare(right.path)) });
-  let runs = { undone: 0, left: 0, kept: 0 };
+  let runs = { undone: 0, left: 0, kept: 0, missing: 0, otherKept: 0 };
   const done = (errorMessage: string | null) => ({
-    ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, runChangesKept: runs.kept,
+    ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, runChangesKept: runs.kept + runs.missing + runs.otherKept,
+    fieldsKept: runs.kept, fieldsMissing: runs.missing,
     wroteAutomations: definitions.length > 0, sendsMessages: messages, errorMessage,
   });
   try {
@@ -246,6 +269,7 @@ export async function restoreDirectWrites(
       if (undone.errorMessage !== null) return done(undone.errorMessage);
     }
   } catch (error) {
+    if (error instanceof UndoRunsStopped) runs = error.runs;
     return done(error instanceof Error ? error.message : String(error));
   }
   return done(null);

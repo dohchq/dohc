@@ -564,6 +564,144 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     );
 }
 
+/// A self-hosted server's automation writes in its own copy of a workspace,
+/// and the live host receives the write by ordinary replication, never as a
+/// live frame. There the write keeps its automation author and chain depth,
+/// and claims nothing, so a chain cannot start again at depth 0 on the host
+/// that claims live edits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_automations_write_replicated_to_the_live_host_keeps_its_depth_and_claims_nothing() {
+    let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha");
+    let server_scratch = ScratchDir::new().expect("server scratch");
+    let server_db = engine_db_path(&server_scratch).expect("server db");
+    let host_scratch = ScratchDir::new().expect("live host scratch");
+    let host_db = engine_db_path(&host_scratch).expect("live host db");
+    seed_collection_replica(&server_db, WS, OBJECT, PATH, &initial);
+    seed_collection_replica(&host_db, WS, OBJECT, PATH, &initial);
+    enable_sync(&server_db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor
+        .open(&server_db, 10)
+        .expect("open server actor")
+        .actor;
+    let key = DocKey::new(WS, "main", OBJECT).expect("collection document key");
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, &initial)
+        .expect("seed collection rich document");
+    let base = handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            doc.encode_full_state(),
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+            100,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("originate collection base");
+    // The server's automation sets the status at chain depth 2.
+    let edit = doc.frontmatter_set("status", "stamped").unwrap();
+    handle
+        .ydoc_record_update(
+            key,
+            PATH.to_owned(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            edit,
+            Some(AUTOMATION.to_owned()),
+            Some(ChangeAttribution {
+                actor_kind: ChangeActorKind::Automation,
+                on_behalf_of: Some("owner".to_owned()),
+                depth: 2,
+            }),
+            base.lineage_claim_id.clone(),
+            false,
+            None,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("the automation's write");
+    supervisor.close(&server_db).expect("close server actor");
+
+    // The live host watches the same Collection and pulls the writes.
+    let mut host = EngineStore::open(&host_db, 300).expect("open live host store");
+    subscribe_automation(
+        &mut host,
+        WS,
+        &subscription("collection:tasks#other", None),
+        310,
+        &NoFaults,
+    )
+    .expect("the live host subscribes another automation");
+    let ops = local_ydoc_ops(&server_db);
+    let first_origin_seq = ops[0].origin_seq;
+    for op in &ops {
+        let sha = op.payload["updateBlobSha256"]
+            .as_str()
+            .expect("every ydoc.update names its blob")
+            .to_owned();
+        host.put_binary_blob(&blob_bytes(&server_db, &sha))
+            .expect("copy Y.Doc blob");
+        let envelope = ReplicationEnvelope {
+            workspace_id: WS.to_owned(),
+            origin_id: op.origin_id.clone(),
+            origin_seq: op.origin_seq - first_origin_seq,
+            relay_seq: Some(op.origin_seq - first_origin_seq),
+            op_kind: op.op_kind.clone(),
+            payload: op.payload.clone(),
+            recorded_at_ms: op.recorded_at_ms,
+        };
+        apply_ydoc_envelope(
+            &mut host,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("the live host applies the replicated write");
+    }
+    let history: Vec<(Option<String>, Option<String>, Option<i64>)> = host
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT author_origin_id, actor_kind, chain_depth FROM collection_field_history \
+                 WHERE workspace_id = ?1 AND field_name = 'status' ORDER BY recorded_at_ms",
+            )?;
+            let rows = stmt
+                .query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .expect("read the live host's field history");
+    drop(host);
+    assert_eq!(
+        history.last(),
+        Some(&(
+            Some(AUTOMATION.to_owned()),
+            Some("automation".to_owned()),
+            Some(2)
+        )),
+        "the write keeps its automation and chain depth on the live host: {history:?}"
+    );
+    assert!(
+        claim_rows(&host_db, WS).is_empty(),
+        "a replicated write claims nothing on the live host"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The claim ledger's crash tier: a claim is served at most once per attempt,
 // a crashed settle rolls back to running for the open-time reaper, and the

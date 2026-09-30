@@ -5,7 +5,9 @@ import { spawn } from "node:child_process";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
-vi.mock("../../e2e/helpers/desktopApp", () => ({ desktopRoot: "/desktop" }));
+vi.mock("../../e2e/helpers/desktopApp", () => {
+  throw new Error("Relay startup must not load the desktop launcher");
+});
 
 function relayChild() {
   return Object.assign(new EventEmitter(), {

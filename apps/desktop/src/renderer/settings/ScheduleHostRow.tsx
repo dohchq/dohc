@@ -1,22 +1,20 @@
+import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
 import { Check } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import type { ScheduleHostComputer, ScheduleHostResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import { computerInSentence, computerName, shownScheduleHost } from "../scheduleHost";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { SettingRow } from "./SettingRow";
 
-// "Schedules run on": which of the owner's computers runs this workspace's
-// schedules. Choosing another starts a handover; while it waits, the old
+// "Schedules run on": which of the owner's computers, or their dohc server,
+// runs this workspace's schedules. The server heads the list while it runs
+// automations. Choosing another starts a handover; while it waits, the old
 // computer's last check-in shows, with a way to take over without it.
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
-
-/** How a computer shows: its name, or "This computer" for this one. */
-export function computerName(computer: Pick<ScheduleHostComputer, "label" | "thisComputer">): string {
-  return computer.thisComputer ? "This computer" : computer.label;
-}
 
 type Loaded = { status: "loading" } | { status: "ready"; state: ScheduleHostResult } | { status: "failed" };
 
@@ -104,9 +102,10 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
     );
   }
 
-  const handingOver = state.handoverFrom === null
+  const shown = shownScheduleHost(state);
+  const handingOver = shown.handoverFrom === null
     ? null
-    : state.computers.find((computer) => computer.installId === state.handoverFrom) ?? null;
+    : state.computers.find((computer) => computer.installId === shown.handoverFrom) ?? null;
   const choose = (computer: ScheduleHostComputer) =>
     void run(
       () => bridge().chooseScheduleHost({ workspaceId, installId: computer.installId, generation: state.generation }),
@@ -124,7 +123,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   };
   // One tab stop for the list; arrows, Home, and End move between computers.
   const focusedIndex = state.computers.findIndex((computer) => computer.installId === focusedId);
-  const chosenIndex = state.computers.findIndex((computer) => computer.installId === state.hostInstallId);
+  const chosenIndex = state.computers.findIndex((computer) => computer.installId === shown.hostInstallId);
   const tabStop = focusedIndex !== -1 ? focusedIndex : chosenIndex !== -1 ? chosenIndex : 0;
   const moveFocus = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const last = state.computers.length - 1;
@@ -143,7 +142,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
       <div className="flex min-w-[260px] flex-col gap-2">
         <div role="group" aria-label="Schedules run on" className="flex flex-col">
           {state.computers.map((computer, index) => {
-            const chosen = computer.installId === state.hostInstallId;
+            const chosen = computer.installId === shown.hostInstallId;
             return (
               <button
                 key={computer.installId}
@@ -152,11 +151,12 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
                 aria-pressed={chosen}
                 tabIndex={index === tabStop ? 0 : -1}
                 data-testid={`schedule-host-${computer.installId}`}
-                disabled={busy}
+                // Focus stays on the computer while dohc asks, so the keyboard does not lose its place.
+                aria-disabled={busy}
                 onKeyDown={(event) => moveFocus(event, index)}
                 onFocus={() => setFocusedId(computer.installId)}
-                onClick={() => { if (!chosen) choose(computer); }}
-                className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 disabled:cursor-default ${
+                onClick={() => { if (!chosen && !busy) choose(computer); }}
+                className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 aria-disabled:cursor-default ${
                   chosen ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink"
                 }`}
               >
@@ -164,24 +164,32 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
                   {chosen ? <Check size={12} /> : null}
                 </span>
                 <span className="min-w-0 flex-1 truncate">{computerName(computer)}</span>
-                <span className="shrink-0 font-mono text-[11px] text-subtle">
-                  {dayFormat.format(computer.lastSeenMs)}
-                </span>
+                {/* The server is on whenever it is listed, so it has no last check-in to show. */}
+                {computer.kind === "server" ? null : (
+                  <span className="shrink-0 font-mono text-[11px] text-subtle">
+                    {dayFormat.format(computer.lastSeenMs)}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
+        {shown.serverOff && shown.hostInstallId === null ? (
+          <p data-testid="schedule-host-server-off" className="m-0 text-[12px] text-muted">{AUTOMATION_SERVER_OFF}</p>
+        ) : null}
         {handingOver ? (
           <div data-testid="schedule-host-handover" className="flex flex-col gap-2">
             <p className="m-0 text-[12px] text-muted">
-              {handingOver.thisComputer
-                ? "Waiting for this computer to hand over."
-                : `Waiting for ${handingOver.label} to hand over. Last seen ${dayFormat.format(handingOver.lastSeenMs)}.`}
+              {handingOver.kind === "computer" && !handingOver.thisComputer
+                ? `Waiting for ${handingOver.label} to hand over. Last seen ${dayFormat.format(handingOver.lastSeenMs)}.`
+                : `Waiting for ${computerInSentence(handingOver)} to hand over.`}
             </p>
             {confirmingTakeOver ? (
               <div className="flex flex-col gap-2">
                 <p id={warningId} role="alert" className="m-0 text-[12px] text-ink">
-                  If {computerName(handingOver)} is still on, a run can repeat.
+                  {handingOver.kind === "server"
+                    ? "If this server has not stopped, a run can repeat."
+                    : `If ${computerInSentence(handingOver)} is still on, a run can repeat.`}
                 </p>
                 <div className="flex gap-2">
                   <PrimaryButton size="compact" aria-describedby={warningId} disabled={busy} onClick={takeOver}>

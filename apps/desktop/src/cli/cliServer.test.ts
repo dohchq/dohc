@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { createApp, importData, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
@@ -507,6 +508,69 @@ describe("CLI socket server", () => {
     expect(calls.openWorkspace).toBe(0);
     expect(calls.identity).toBe(0);
     expect(calls.writes).toBe(0);
+  });
+
+  it("receives a 10 MiB file through the socket and preserves partial batch results", async () => {
+    if (!server) throw new Error("This test requires the CLI socket.");
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => ({ ok: true, written: files.map(file => file.path) }));
+    context.writeFiles = writeFiles;
+    const args = { cwd: workspaceRoot, actor: "agent" as const, requestId: "large", files: [{ path: "large.txt", contentBase64: Buffer.alloc(10 * 1024 * 1024, 97).toString("base64") }] };
+    expect(await invoke("fileWrite", args)).toEqual({ ok: true, written: ["large.txt"] });
+    expect(writeFiles.mock.calls[0]?.[0][0]?.contentBase64).toBe(args.files[0]!.contentBase64);
+    const partial = { ok: false as const, written: ["1.txt", "2.txt"], path: "3.txt", reason: "Disk full. Free space and retry." };
+    writeFiles.mockResolvedValueOnce(partial);
+    expect(await invoke("fileWrite", { ...args, requestId: "batch", files: [1, 2, 3, 4, 5].map(n => ({ path: n + ".txt", contentBase64: "eA==" })) })).toEqual(partial);
+  });
+
+  it("keeps all MCP file writes relative to a subfolder cwd", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    await writeFile(join(workspaceRoot, "index.html"), "root file");
+    await writeFile(join(cwd, "source.csv"), "name\nPat\n");
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => {
+      for (const file of files) {
+        const absolute = join(workspaceRoot, file.path);
+        await mkdir(dirname(absolute), { recursive: true });
+        await writeFile(absolute, Buffer.from(file.contentBase64, "base64"));
+      }
+      return { ok: true, written: files.map(file => file.path) };
+    });
+    context.writeFiles = writeFiles;
+    const ctx: ToolContext = { root: cwd, home: stateDir, request: request => invoke(request.verb, request.args) };
+    expect(await writeWorkspaceFile(ctx, { path: "index.html", content: "subfolder file" })).toMatchObject({ ok: true, path: "index.html" });
+    expect(await createApp(ctx, { appRoot: "site" })).toMatchObject({ ok: true, appRoot: "site" });
+    expect(await importData(ctx, { sourcePath: "source.csv", databasePath: "people.sqlite", tableName: "people" })).toMatchObject({ ok: true, path: "people.sqlite" });
+    expect(await readFile(join(workspaceRoot, "index.html"), "utf8")).toBe("root file");
+    expect(await readFile(join(cwd, "index.html"), "utf8")).toBe("subfolder file");
+    expect(writeFiles.mock.calls.map(([files]) => files.map(file => file.path))).toEqual([
+      ["app/index.html"], expect.arrayContaining(["app/site/index.html"]), ["app/people.sqlite"],
+    ]);
+    expect(writeFiles.mock.calls.flatMap(([files]) => files).every(file => file.path.startsWith("app/"))).toBe(true);
+    await expect(stat(join(cwd, "site/index.html"))).resolves.toBeDefined();
+    await expect(stat(join(cwd, "people.sqlite"))).resolves.toBeDefined();
+    writeFiles.mockResolvedValueOnce({ ok: false, written: ["app/partial/index.html"], path: "app/partial/styles.css", reason: "Cannot write app/partial/styles.css: disk full. Free space." });
+    expect(await createApp(ctx, { appRoot: "partial" })).toEqual({
+      ok: false, written: ["partial/index.html"], path: "partial/styles.css", reason: "Cannot write partial/styles.css: disk full. Free space.",
+    });
+  });
+
+  it("refuses traversal in a fileWrite before cwd translation", async () => {
+    const cwd = join(workspaceRoot, "app");
+    await mkdir(cwd);
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>();
+    context.writeFiles = writeFiles;
+    expect(await invoke("fileWrite", { cwd, actor: "agent", requestId: "traversal", files: [{ path: "../index.html", contentBase64: "" }] }))
+      .toMatchObject({ ok: false, written: [], reason: expect.stringContaining("traversal") });
+    expect(writeFiles).not.toHaveBeenCalled();
+  });
+
+  it("refuses a fileWrite envelope larger than 14 MiB before opening the workspace", async () => {
+    if (!server) throw new Error("This test requires the CLI socket.");
+    const opened = calls.openWorkspace;
+    const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+      args: { cwd: workspaceRoot, actor: "agent", requestId: "oversized", files: [{ path: "large.txt", contentBase64: "A".repeat(14 * 1024 * 1024) }] } });
+    expect(response).toMatchObject({ ok: false, error: "dohc: CLI request exceeds 14 MiB. Split the files into smaller batches." });
+    expect(calls.openWorkspace).toBe(opened);
   });
 
   it("routes app publication through the authenticated owning workspace without renderer access", async () => {
@@ -1636,7 +1700,7 @@ describe("CLI socket server", () => {
       replacement: "Appended.",
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
     // An agent that names itself is recorded under that name, and one that
-    // does not stays an agent with no name.
+    // does not uses the unnamed agent label.
     const agent = { actorKind: "agent", onBehalfOf: "person-local", depth: 0 };
     expect(edits).toEqual([
       {
@@ -1647,7 +1711,7 @@ describe("CLI socket server", () => {
       {
         path: "notes/plan.md",
         edit: { find: undefined, replacement: "Appended." },
-        origin: { attribution: agent },
+        origin: { actorOriginId: "dohc-mcp", attribution: agent },
       },
     ]);
   });
@@ -1869,6 +1933,8 @@ describe("CLI socket server", () => {
 
     await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } });
     await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", name: "b", fields: {} });
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", agent: "Client", recordPath: "tasks/a.md", fields: { status: "done" } });
+    await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", agent: "Client", collectionPath: "tasks", name: "c", fields: {} });
     await invoke("documentEdit", { cwd: workspaceRoot, actor: "agent", path: "notes/plan.md", replacement: "Done." });
     await invoke("documentCreate", { cwd: workspaceRoot, actor: "agent", agent: "claude-code", path: "notes/new.md", markdown: "# New" });
     // A write that names a person is the run's agent's too, so the agent
@@ -1883,7 +1949,9 @@ describe("CLI socket server", () => {
     expect(authors).toEqual([
       woken,
       woken,
-      { attribution },
+      { ...woken, agentId: "Client" },
+      { ...woken, agentId: "Client" },
+      { actorOriginId: "dohc-mcp", attribution },
       { actorOriginId: "claude-code", attribution },
       woken,
       { kind: "local", label: "Sam" },

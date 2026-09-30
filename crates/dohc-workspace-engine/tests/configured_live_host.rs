@@ -381,6 +381,95 @@ fn production_entrypoint_discovers_fixed_roots_after_authentication() {
     );
 }
 
+/// The relay's automations drain the claims this host makes when it accepts
+/// a live frame. For a workspace the host replicates as its owner, the
+/// owning connection gets the claim ledger and nothing else of the
+/// automation surface; a workspace without replication gets none of it.
+#[test]
+fn configured_host_admits_only_the_claim_ledger_for_its_replicated_workspaces() {
+    let scratch = ScratchDir::new().unwrap();
+    let replicated = scratch.path().join("replicated");
+    let plain = scratch.path().join("plain");
+    std::fs::create_dir(&replicated).unwrap();
+    std::fs::create_dir(&plain).unwrap();
+    let mut config = configuration(&plain);
+    config["workspaces"].as_array_mut().unwrap().push(json!({
+        "root": replicated, "workspaceId": "replicated", "maxRegistrations": 2,
+        "relay": {"baseUrl": "https://relay.example.test", "bearerToken": "dohc-service-v1.test"}
+    }));
+    let path = scratch.path().join("host.json");
+    std::fs::write(&path, config.to_string()).unwrap();
+    let mut daemon = Daemon(command(Some(&path)).spawn().unwrap());
+    daemon.hello("configured-test-secret");
+    assert!(matches!(daemon.read(), Envelope::HelloAck(_)));
+    let Envelope::Response(response) = daemon.request(1, "liveApplication.hosts", None, json!({}))
+    else {
+        panic!("expected discovery")
+    };
+    let handle = |index: usize| -> dohc_engine_protocol::wire::WorkspaceHandle {
+        serde_json::from_value(response.result["workspaces"][index]["workspaceHandle"].clone())
+            .unwrap()
+    };
+    let (plain, replicated) = (handle(0), handle(1));
+    let subscription = json!({
+        "automationId": "collection:Tasks#stamp", "path": "Tasks", "kinds": ["changed"], "fields": ["Status"]
+    });
+    let mut id = 10;
+    let mut call = |daemon: &mut Daemon, method: &str, workspace, params: Value| {
+        id += 1;
+        daemon.request(id, method, Some(workspace), params)
+    };
+    let Envelope::Response(subscribed) = call(
+        &mut daemon,
+        "automations.subscribe",
+        replicated.clone(),
+        subscription.clone(),
+    ) else {
+        panic!("the replicated workspace admits a subscription")
+    };
+    assert_eq!(subscribed.result["subscribed"], true);
+    for (method, params) in [
+        (
+            "automations.claimNext",
+            json!({"automationIdPrefix": "collection:"}),
+        ),
+        (
+            "automations.listClaims",
+            json!({"automationId": "collection:Tasks#stamp"}),
+        ),
+        ("automations.failures", json!({})),
+        (
+            "automations.unsubscribe",
+            json!({"automationId": "collection:Tasks#stamp", "path": "Tasks"}),
+        ),
+    ] {
+        assert!(
+            matches!(
+                call(&mut daemon, method, replicated.clone(), params),
+                Envelope::Response(_)
+            ),
+            "{method} is admitted for the replicated workspace"
+        );
+    }
+    for (method, params) in [
+        ("automations.press", json!({})),
+        ("automations.claimSchedule", json!({})),
+        ("automations.runNow", json!({})),
+        ("automations.watchGroups", json!({})),
+        ("versionedText.write", json!({})),
+    ] {
+        let Envelope::Error(error) = call(&mut daemon, method, replicated.clone(), params) else {
+            panic!("{method} must refuse")
+        };
+        assert_eq!(error.error.code, ErrorCode::Forbidden, "{method}");
+    }
+    let Envelope::Error(error) = call(&mut daemon, "automations.subscribe", plain, subscription)
+    else {
+        panic!("a workspace without replication must refuse the ledger")
+    };
+    assert_eq!(error.error.code, ErrorCode::Forbidden);
+}
+
 #[test]
 fn invalid_complete_configuration_never_opens_the_first_root() {
     let scratch = ScratchDir::new().unwrap();

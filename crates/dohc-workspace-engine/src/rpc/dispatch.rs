@@ -85,6 +85,17 @@ impl EngineService {
                 | "sync.materializePendingCursor"
                 | "sync.commitCursor"
                 | "sync.push"
+                // The claim ledger, so the relay's automations can run the
+                // field changes this host claims when it accepts a live frame.
+                // Nothing that writes files, chats, schedules, or presses.
+                | "automations.subscribe"
+                | "automations.unsubscribe"
+                | "automations.claimNext"
+                | "automations.settle"
+                | "automations.release"
+                | "automations.retry"
+                | "automations.listClaims"
+                | "automations.failures"
         ) && self.configured_ordinary_request(ctx, request)
         {
             return Ok(());

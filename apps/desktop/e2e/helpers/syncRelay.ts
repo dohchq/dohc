@@ -2,8 +2,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { desktopRoot } from "./desktopApp";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Spawns the real sync-relay service (services/sync-relay) as a child
 // process for the 0P sync E2E specs — the same pattern as the relay's own
@@ -12,7 +11,7 @@ import { desktopRoot } from "./desktopApp";
 // lives in the spec's scratch directory. IPC requests orderly shutdown on
 // Windows too, where child.kill("SIGTERM") would bypass the relay's cleanup.
 
-const relayRoot = join(desktopRoot, "../../services/sync-relay");
+const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
 
 export interface SyncRelayHandle {
   baseUrl: string;

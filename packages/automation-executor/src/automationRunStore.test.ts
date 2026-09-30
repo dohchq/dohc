@@ -14,15 +14,68 @@ const setA = { kind: "set" as const, target: { recordId: "rec_a", collectionPath
 
 function run(claimId: string, state: "done" | "failed" | null, atMs: number, settled = state === "done"): StoredRun {
   return {
-    version: 7, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
+    version: 8, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: atMs, finishedAtMs: state === null ? null : atMs, steps: [{ ordinal: 0, effects: [setA, setA] }],
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, settled,
+    created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], settled,
     outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1, step: 0 },
   };
 }
 
 describe("the automation run store", () => {
+  it.each([7, 8])("rejects v%s history without the required kept fields", async (version) => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("atc_one", "done", 1);
+    await store.save(saved);
+    const base = join(root, ".dohc", "automations", "runs");
+    const [folder] = await readdir(base);
+    const files = await readdir(join(base, folder!));
+    for (const file of files.filter((name) => name.endsWith(".json"))) {
+      const path = join(base, folder!, file);
+      const value = JSON.parse(await readFile(path, "utf8"));
+      value.version = version;
+      delete value.undoKept;
+      await writeFile(path, JSON.stringify(value));
+    }
+    expect(await store.runsOf(AUTOMATION, "atc_one")).toEqual({ runs: [], unreadable: true });
+  });
+
+  it("preserves progress when saving kept fields in v8 history", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-automation-runs-"), testMetadataDir);
+    const saved = run("atc_one", "done", 1);
+    await store.save(saved);
+    const undoKept = [{ recordId: "rec_a", field: "__proto__" }];
+    await store.updateState(saved, { undo: "done", undoKept });
+    expect((await store.runsOf(AUTOMATION, "atc_one")).runs).toEqual([{ ...saved, undo: "done", undoKept }]);
+  });
+  it("keeps the later run that superseded a server wake", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("old", "done", 1);
+    saved.applied = [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice; agent wake superseded by a later run", supersededBy: "new/hash/0/wake" }] }];
+    await store.save(saved);
+    expect((await store.runsOf(AUTOMATION, "old")).runs).toEqual([saved]);
+  });
+
+  it("marks a superseded wake without overwriting newer step progress or Undo state", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-automation-runs-"), testMetadataDir);
+    const saved = run("old", "done", 1);
+    saved.applied = [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice" }] }];
+    await store.save(saved);
+    const later = { ordinal: 1, writes: [{ kind: "field" as const, recordId: "rec_a", path: "Tasks/a.md", field: "A", before: null, after: 1 }] };
+    await Promise.all([
+      store.appendEffect(saved, later),
+      store.updateState(saved, { undo: "started" }),
+      store.supersedeWake(AUTOMATION, saved.claimId, saved.keySeed, "wake", "new"),
+    ]);
+    await store.supersedeWake(AUTOMATION, saved.claimId, saved.keySeed, "wake", "new");
+    expect((await store.runsOf(AUTOMATION, "old")).runs).toEqual([{
+      ...saved, undo: "started", applied: [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice; agent wake superseded by a later run", supersededBy: "new" }] }, later],
+    }]);
+    await expect(store.supersedeWake(AUTOMATION, "expired", saved.keySeed, "wake", "new")).resolves.toBeUndefined();
+  });
+
   it("keeps each claim's runs under the workspace's metadata folder and reads them back as written", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
@@ -165,7 +218,7 @@ describe("the automation run store", () => {
     const files = await readdir(join(folder, automationFolder!));
     const planOf = (claimId: string) => join(folder, automationFolder!, files.find((file) => file.endsWith(".json") && file.startsWith(hashOf(claimId)))!);
     const text = await readFile(planOf("atc_older"), "utf8");
-    await writeFile(planOf("atc_older"), text.replace('"version":7', '"version":6'));
+    await writeFile(planOf("atc_older"), text.replace('"version":8', '"version":7'));
     await writeFile(planOf("atc_damaged"), "{ torn");
     const later = Date.now() + 31 * 24 * 60 * 60 * 1000;
     await expect(store.expire(Date.now(), async () => "gone", null)).resolves.toBeNull();
@@ -318,17 +371,27 @@ describe("the automation run store", () => {
   it("tells a missing reach file from one it cannot read", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
-    await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: false });
+    const none = { verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenPaths: [], unprovenFolders: [], pending: null, taken: null };
+    await expect(store.readReachVerdicts()).resolves.toEqual({ ...none, unreadable: false, missing: true });
     await writeFile(await store.reachVerdictsPath(), "{ torn");
-    await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: true });
+    await expect(store.readReachVerdicts()).resolves.toEqual({ ...none, unreadable: true, missing: false });
+  });
+
+  it("keeps the verdicts with the host record they were taken at and the definitions still unproven", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const verdict = { automationId: AUTOMATION, definitionHash: "h1", step: "0", verdict: "held" as const, stoppedFor: null, seq: 3 };
+    const reach = { verdicts: [verdict], hostRecord: 7, unproven: [JSON.stringify([AUTOMATION, "h1"])], unprovenAll: true, unprovenPaths: ["Unknown"], unprovenFolders: ["Tasks"], pending: 9, taken: 8 };
+    await store.saveReachVerdicts(reach);
+    await expect(store.readReachVerdicts()).resolves.toEqual({ ...reach, unreadable: false, missing: false });
   });
 
   it("fails closed on old unqualified reach keys", async () => {
     const store = createAutomationRunStore(await createTestScratch("dohc-reach-old-"), testMetadataDir);
-    await writeFile(await store.reachVerdictsPath(), JSON.stringify({ version: 1, verdicts: [{
+    await writeFile(await store.reachVerdictsPath(), JSON.stringify({ version: 2, verdicts: [{
       automationId: AUTOMATION, definitionHash: "h", step: "operation:records.edit", verdict: "stopped", stoppedFor: "Ana", seq: 1,
     }] }));
-    expect(await store.readReachVerdicts()).toEqual({ unreadable: true, verdicts: [] });
+    expect(await store.readReachVerdicts()).toEqual({ unreadable: true, missing: false, verdicts: [], hostRecord: 0, pending: null, taken: null, unproven: [], unprovenAll: false, unprovenPaths: [], unprovenFolders: [] });
   });
 
   it("reads a run in another format, a run without its progress, or a renamed run as unreadable", async () => {
@@ -343,8 +406,8 @@ describe("the automation run store", () => {
     const progress = (await readdir(files)).find((file) => file.endsWith(".progress.jsonl"))!;
     const text = await readFile(join(files, header), "utf8");
 
-    // An earlier format kept its progress inside the run, or did not qualify formula-visible fields.
-    await writeFile(join(files, header), text.replace('"version":7', '"version":6'));
+    // The previous format did not require the fields kept by Undo.
+    await writeFile(join(files, header), text.replace('"version":8', '"version":7'));
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
     await writeFile(join(files, header), text);
     await rm(join(files, progress));

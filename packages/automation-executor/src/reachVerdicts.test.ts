@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextReachVerdict } from "./reachVerdicts";
+import { mergedReachVerdict, nextReachVerdict, parseReachHandover } from "./reachVerdicts";
 
 const allowed = { allowed: true } as const;
 const stoppedByBob = { allowed: false, reason: "bob@dohc.test cannot edit Budget.", person: "bob@dohc.test" } as const;
@@ -59,5 +59,30 @@ describe("reach verdicts", () => {
     expect(nextReachVerdict({ verdict: "allowed", stoppedFor: null }, stoppedByBob, false).narrowed).toBeUndefined();
     expect(nextReachVerdict(narrowed, stoppedByBob, false)).toEqual({ verdict: "stopped", stoppedFor: "bob@dohc.test" });
     expect(nextReachVerdict({ verdict: "held", stoppedFor: "bob@dohc.test" }, stoppedByBob, true).narrowed).toBeUndefined();
+  });
+});
+
+describe("verdicts taken from the last host", () => {
+  const base = { automationId: "collection:Tasks#a", definitionHash: "h1", step: "0", seq: 4 } as const;
+  const allowedHere = { ...base, verdict: "allowed", stoppedFor: null } as const;
+  const stoppedThere = { ...base, verdict: "stopped", stoppedFor: "bob@dohc.test", seq: 9 } as const;
+  const heldThere = { ...base, verdict: "held", stoppedFor: "bob@dohc.test", seq: 9 } as const;
+
+  it("keeps a step stopped or held on either host, and takes an allowed step only where there is none", () => {
+    expect(mergedReachVerdict(allowedHere, stoppedThere)).toEqual(stoppedThere);
+    expect(mergedReachVerdict(allowedHere, heldThere)).toEqual(heldThere);
+    expect(mergedReachVerdict({ ...stoppedThere, seq: 2 }, { ...allowedHere, seq: 9 })).toBeUndefined();
+    expect(mergedReachVerdict(allowedHere, { ...allowedHere, seq: 9 })).toBeUndefined();
+    expect(mergedReachVerdict(undefined, allowedHere)).toEqual(allowedHere);
+  });
+
+  it("reads a release's verdicts, and none from anything else", () => {
+    expect(parseReachHandover({ version: 2, verdicts: [stoppedThere], unproven: ["k"], unprovenAll: false, unprovenPaths: [], unprovenFolders: ["Tasks"] }))
+      .toEqual({ version: 2, verdicts: [stoppedThere], unproven: ["k"], unprovenAll: false, unprovenPaths: [], unprovenFolders: ["Tasks"] });
+    expect(parseReachHandover({ version: 2, verdicts: [stoppedThere] })).toBeNull();
+    expect(parseReachHandover({ version: 2, verdicts: [] })).toBeNull();
+    expect(parseReachHandover({ version: 2, verdicts: [{ ...stoppedThere, verdict: "maybe" }] })).toBeNull();
+    expect(parseReachHandover({ version: 1, verdicts: [stoppedThere], unproven: [], unprovenAll: false, unprovenFolders: ["Tasks"] })).toBeNull();
+    expect(parseReachHandover(null)).toBeNull();
   });
 });

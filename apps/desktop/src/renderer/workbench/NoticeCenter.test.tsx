@@ -134,10 +134,10 @@ describe("automation notices", () => {
   it("asks once to allow a step that reaches more only because an editor left", async () => {
     const hold = {
       automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef",
-      step: "0", seq: 4, collection: "Trip", collectionPath: "Projects/Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test",
+      step: "0", seq: 4, collection: "Trip", collectionPath: "Projects/Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test", fileUnread: false, onServer: false,
     };
     const onAllowAutomationHold = vi.fn();
-    renderNotices({ automationHolds: [hold], onAllowAutomationHold });
+    renderNotices({ automationHolds: [hold, { ...hold, onServer: true }], onAllowAutomationHold });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#spend-0");
     expect(notice.textContent).toContain('Automation "Spend" is waiting');
@@ -146,12 +146,18 @@ describe("automation notices", () => {
     );
     await userEvent.click(within(notice).getByRole("button", { name: "Allow" }));
     expect(onAllowAutomationHold).toHaveBeenCalledWith(hold);
+    // The same step held on the owner's server is its own row, and says where it waits.
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const onServer = await screen.findByTestId("notice-automation-hold-server-collection:Trip#spend-0");
+    expect(onServer.textContent).toContain('Automation "Spend" is waiting on your server');
+    await userEvent.click(within(onServer).getByRole("button", { name: "Allow" }));
+    expect(onAllowAutomationHold).toHaveBeenLastCalledWith({ ...hold, onServer: true });
   });
 
   it("names every automation a share stopped in one notice, and dismisses them together", async () => {
     const stop = (automation: string, name: string, target: string, action: "change" | "find") => ({
       automationId: `collection:object-trip#${automation}`, automationName: name, definitionHash: "0123456789abcdef",
-      step: "0", seq: 4, collection: "Trip", collectionPath: "Projects/Trip", target, action, stoppedFor: "ana@dohc.test",
+      step: "0", seq: 4, collection: "Trip", collectionPath: "Projects/Trip", target, action, stoppedFor: "ana@dohc.test", fileUnread: false,
     });
     const onDismissAutomationStops = vi.fn();
     const spend = stop("spend", "Spend", "Budget", "change");
@@ -189,7 +195,7 @@ describe("automation notices", () => {
   it("names the Group whose messages a held automation would start from", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#task", automationName: "Add a task", definitionHash: "0123456789abcdef",
-      step: "0", seq: 7, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "read", stoppedFor: "bob@dohc.test",
+      step: "0", seq: 7, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "read", stoppedFor: "bob@dohc.test", fileUnread: false, onServer: false,
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#task-0");
@@ -201,17 +207,29 @@ describe("automation notices", () => {
   it("names the Group a held post would post in", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
-      step: "1", seq: 5, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "post", stoppedFor: null,
+      step: "1", seq: 5, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "post", stoppedFor: null, fileUnread: false, onServer: false,
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-1");
     expect(notice.textContent).toContain("A step in Trip can post in Planning. Allow it to run?");
   });
 
+  it("says a held step waits because its Collection's automations file does not read in one version", async () => {
+    renderNotices({ automationHolds: [{
+      automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
+      step: "1", seq: 5, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "post", stoppedFor: null, fileUnread: true, onServer: false,
+    }] });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-1");
+    expect(notice.textContent).toContain(
+      "A step in Trip can post in Planning. dohc cannot read Trip's automations file in one version of the workspace. New steps there wait for you. Allow it to run?",
+    );
+  });
+
   it("names the person a held notice would go to", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
-      step: "2", seq: 6, collection: "Trip", collectionPath: "Projects/Trip", target: "ana@dohc.test", action: "notify", stoppedFor: null,
+      step: "2", seq: 6, collection: "Trip", collectionPath: "Projects/Trip", target: "ana@dohc.test", action: "notify", stoppedFor: null, fileUnread: false, onServer: false,
     }] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-2");
@@ -1455,6 +1473,7 @@ function sentRow(noticeId: string, overrides: Partial<NoticeRow> = {}, folder: s
     },
     folder,
     openable: true,
+    retryable: false,
   };
 }
 
@@ -1550,6 +1569,24 @@ describe("failed run notices", () => {
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("sent-notice-o-open").textContent).toBe("Open automation");
     expect(screen.queryByTestId("sent-notice-o-retry")).toBeNull();
+  });
+});
+
+describe("failed runs of the owner's server", () => {
+  it("offers Try again on the row and the toast of a run the server can run again", async () => {
+    const failed = { ...sentRow("f", { kind: "automation-failed", senderKind: "automation", title: 'Automation "Stamp" failed' }), retryable: true };
+    const onRetrySentNotice = vi.fn();
+    renderNotices({ sentNotices: [failed, sentRow("a")], sentNoticeToast: failed, onOpenSentNotice: vi.fn(async () => null), onRetrySentNotice });
+    // Copy sits beside the failure on the toast and the row; another notice has none.
+    expect(screen.getByTestId("sent-notice-toast-copy")).toBeTruthy();
+    await userEvent.click(screen.getByTestId("sent-notice-toast-retry"));
+    expect(onRetrySentNotice).toHaveBeenCalledWith(failed.notice);
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("sent-notice-a-retry")).toBeNull();
+    await userEvent.click(screen.getByTestId("sent-notice-f-retry"));
+    expect(onRetrySentNotice).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("sent-notice-f-copy")).toBeTruthy();
+    expect(screen.queryByTestId("sent-notice-a-copy")).toBeNull();
   });
 });
 
@@ -1718,6 +1755,20 @@ describe("notices sent to you", () => {
     expect(document.activeElement).toBe(screen.getByTestId("notice-center"));
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByTestId("notice-center")).toBeNull();
+  });
+
+  it("offers no dismiss on a wake from the server, since dismissing it would cancel the wake", async () => {
+    const onDismissSentNotice = vi.fn();
+    renderNotices({
+      sentNotices: [sentRow("wake", { kind: "automation-wake", senderKind: "automation" }), sentRow("b")],
+      onDismissSentNotice,
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("sent-notice-wake-dismiss")).toBeNull();
+    expect(screen.getByTestId("sent-notice-b-dismiss")).toBeTruthy();
+    screen.getByTestId("sent-notice-wake").focus();
+    await userEvent.keyboard("{Delete}");
+    expect(onDismissSentNotice).not.toHaveBeenCalled();
   });
 
   it("shows no All clear before the first list of sent notices answers", async () => {
@@ -1937,7 +1988,7 @@ describe("notices sent to you", () => {
 it("names the chat permission that stopped a step", async () => {
   renderNotices({ automationStops: [{
     automationId: "collection:Tasks#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
-    step: "0", seq: 1, collection: "Tasks", collectionPath: "Tasks", target: "Trip", action: "post", stoppedFor: "ana@dohc.test",
+    step: "0", seq: 1, collection: "Tasks", collectionPath: "Tasks", target: "Trip", action: "post", stoppedFor: "ana@dohc.test", fileUnread: false,
   }] });
   await userEvent.click(screen.getByTestId("notice-center-toggle"));
   expect((await screen.findByTestId("notice-automation-stops")).textContent).toContain("ana@dohc.test cannot post in Trip.");

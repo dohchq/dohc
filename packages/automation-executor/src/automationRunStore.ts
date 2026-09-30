@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
 import type { PlannedEffect, StepOutput } from "./automationPlan";
-import type { StoredReachVerdict } from "./reachVerdicts";
+import { StoredReachVerdictSchema, type StoredReachVerdict } from "./reachVerdicts";
 
 // This computer's record of each Collection automation run, under
 // <workspace>/.dohc/automations. Claims are local to the computer that ran
@@ -139,7 +139,7 @@ const StepSchema = z.object({
   collections: z.array(CollectionRefSchema).optional(),
   destinations: z.array(z.object({ path: z.string(), rules: DatasetRulesSchema.nullable() })).optional(),
 });
-const WriteSchema = z.union([
+export const WriteSchema = z.union([
   z.object({
     kind: z.literal("field"),
     recordId: z.string(),
@@ -201,7 +201,7 @@ const WriteSchema = z.union([
   // A post or direct message the automation wrote, and where it went.
   z.object({ kind: z.literal("message"), messageId: z.string(), name: z.string() }),
   // A notice the automation sent, and to whom.
-  z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string() }),
+  z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string(), supersededBy: z.string().optional() }),
 ]);
 // A record the run created: the id its plan gave it, which finds it again on
 // a retry, and the id and path the engine gave it.
@@ -251,15 +251,15 @@ const UndoCallSchema = z.union([
     idempotencyKey: z.string(),
   }),
 ]);
-// Version 7 plans and saves one step at a time, in the progress file beside
-// the run's state, names each Collection the steps write by its Collection
+// Version 8 requires the fields kept by Undo. It plans and saves each step
+// in the progress file beside the run's state, names each Collection by its
 // id, records when the run ended, qualifies formula-visible fields by
 // dataset and table, and keeps the deletes an Undo may use on each record
 // it added and the calls a dataset Undo saved. A run in any other format
 // cannot be read, and the claim fails instead of starting over or reading
 // bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.literal(7),
+  version: z.literal(8),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -278,6 +278,7 @@ const StoredRunSchema = z.object({
   rules: DatasetRulesSchema.nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
+  undoKept: z.array(z.object({ recordId: z.string(), field: z.string() })),
   settled: z.boolean(),
   outcome: z.union([
     z.object({ state: z.literal("done") }),
@@ -336,7 +337,7 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 7;
+  version: 8;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -397,6 +398,12 @@ export interface StoredRun {
    * that stopped part way resumes.
    */
   undo: "started" | "done" | null;
+  /**
+   * The fields a done Undo left because they no longer held what the run
+   * wrote. Another run may have written them after this one, so Undo and
+   * Stop and restore try them again.
+   */
+  undoKept: Array<{ recordId: string; field: string }>;
   /** The engine accepted this run's claim as done, so nothing will resume it. */
   settled: boolean;
   /**
@@ -424,19 +431,35 @@ const SubscriptionsSchema = z.object({
 });
 
 const ReachVerdictsSchema = z.object({
-  version: z.literal(2),
-  verdicts: z.array(z.object({
-    automationId: z.string().min(1),
-    definitionHash: z.string().min(1),
-    step: z.string().min(1).max(512),
-    verdict: z.enum(["allowed", "stopped", "held"]),
-    stoppedFor: z.string().nullable(),
-    narrowed: z.literal(true).optional(),
-    accountedLinks: z.array(z.string().min(1)).optional(),
-    seq: z.number().int().nonnegative(),
-    recipient: z.object({ id: z.string(), name: z.string(), action: z.enum(["post", "notify", "change"]) }).optional(),
-  })),
+  version: z.literal(3),
+  verdicts: z.array(StoredReachVerdictSchema),
+  hostRecord: z.number().int().nonnegative(),
+  unproven: z.array(z.string()),
+  unprovenAll: z.boolean(),
+  unprovenFolders: z.array(z.string()),
+  unprovenPaths: z.array(z.string()),
+  pending: z.number().int().nonnegative().nullable(),
+  taken: z.number().int().nonnegative().nullable(),
 });
+
+/**
+ * Each step's last reach verdict, the relay's last release or take over this
+ * computer took them at, the definitions whose steps it holds until a
+ * current editor confirms them because it could not take the last host's,
+ * whether that covers every definition it has not seen yet, the Collections
+ * whose automations it could not list, the host generation whose record it
+ * has not read yet, and the one it took.
+ */
+export interface StoredReach {
+  verdicts: StoredReachVerdict[];
+  hostRecord: number;
+  unproven: string[];
+  unprovenAll: boolean;
+  unprovenFolders: string[];
+  unprovenPaths: string[];
+  pending: number | null;
+  taken: number | null;
+}
 
 const TimeoutsSchema = z.object({
   version: z.literal(1),
@@ -601,7 +624,8 @@ export interface AutomationRunStore {
    * its header, so the settle and an Undo never overwrite each other's state
    * with a copy read before it. Throws when the saved run cannot be read.
    */
-  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo">>): Promise<void>;
+  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoKept">>): Promise<void>;
+  supersedeWake(automationId: string, claimId: string, keySeed: string, noticeId: string, supersededBy: string): Promise<void>;
   /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
   /**
@@ -638,11 +662,11 @@ export interface AutomationRunStore {
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   /**
-   * Each step's last reach verdict. `unreadable` is true when the file is
-   * there and cannot be read, so no step can be treated as seen before.
+   * The reach verdicts. `unreadable` is true when the file is there and
+   * cannot be read, so no step can be treated as seen before.
    */
-  readReachVerdicts(): Promise<{ verdicts: StoredReachVerdict[]; unreadable: boolean }>;
-  saveReachVerdicts(verdicts: readonly StoredReachVerdict[]): Promise<void>;
+  readReachVerdicts(): Promise<StoredReach & { unreadable: boolean; missing: boolean }>;
+  saveReachVerdicts(reach: StoredReach): Promise<void>;
   /** Where the reach verdicts are saved, for a person to look at. */
   reachVerdictsPath(): Promise<string>;
   /** Consecutive timed-out runs per automation, for the circuit breaker. */
@@ -984,6 +1008,26 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         if (next.undo !== "started") await noteUndo(next, name);
       });
     },
+    supersedeWake(automationId, claimId, keySeed, noticeId, supersededBy) {
+      return serial(async () => {
+        const folder = await runsFolder(automationId);
+        const name = runName(claimId, keySeed);
+        if (await readBounded(join(folder, `${name}${HEADER_SUFFIX}`)) === undefined) return;
+        const saved = await readRun(folder, name, automationId);
+        if (saved === null) throw new Error("This server could not record the superseded agent wake.");
+        let changed = false;
+        const applied = saved.applied.map((step) => ({ ...step, writes: step.writes.map((write) => {
+          if (write.kind !== "notice" || write.noticeId !== noticeId || write.supersededBy) return write;
+          changed = true;
+          return { ...write, supersededBy, name: write.name + "; agent wake superseded by a later run" };
+        }) }));
+        if (changed) {
+          const progress = progressText({ ...saved, applied });
+          if (Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
+          await writeDurably(join(folder, `${name}${PROGRESS_SUFFIX}`), progress);
+        }
+      });
+    },
     appendEffect(run, applied) {
       return serial(() => appendLine(run, { kind: "effect", ...applied }));
     },
@@ -1094,13 +1138,20 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     },
     async readReachVerdicts() {
       const read = await readJson(join(await base(), "reach.json"));
-      if (read === undefined) return { verdicts: [], unreadable: false };
+      const none = { verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenFolders: [], unprovenPaths: [], pending: null, taken: null };
+      if (read === undefined) return { ...none, unreadable: false, missing: true };
       const parsed = ReachVerdictsSchema.safeParse(read);
-      return parsed.success ? { verdicts: parsed.data.verdicts, unreadable: false } : { verdicts: [], unreadable: true };
+      return parsed.success
+        ? {
+          verdicts: parsed.data.verdicts, hostRecord: parsed.data.hostRecord, unproven: parsed.data.unproven,
+          unprovenAll: parsed.data.unprovenAll, unprovenFolders: parsed.data.unprovenFolders, unprovenPaths: parsed.data.unprovenPaths,
+          pending: parsed.data.pending, taken: parsed.data.taken, unreadable: false, missing: false,
+        }
+        : { ...none, unreadable: true, missing: false };
     },
-    saveReachVerdicts(verdicts) {
+    saveReachVerdicts(reach) {
       return serial(async () => {
-        await writeDurably(join(await base(), "reach.json"), `${JSON.stringify({ version: 2, verdicts })}\n`);
+        await writeDurably(join(await base(), "reach.json"), `${JSON.stringify({ version: 3, ...reach })}\n`);
       });
     },
     async reachVerdictsPath() {

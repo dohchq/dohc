@@ -2,21 +2,19 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { createServer } from "node:net";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildRelay } from "../scripts/build.mjs";
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 import { initializeRelayDeployment } from "./relayDeployment";
 import { RELAY_API_VERSIONS } from "./apiVersion";
 import { RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 
-// This file's spawn helper allows 45s for the relay to report a port (tsx compiles
-// on startup), and the package default is 30s — so a slow launch would be killed by
-// vitest before its own deadline could fire, and even a 20s launch would eat the
-// budget the assertions need. File-level rather than package-level: only some of
-// the test files here spawn a relay child, and the rest keep the tighter default.
+// Child startup has a 45s deadline. Allow its assertions and cleanup to finish
+// within this file's budget, including the development source-entry proof.
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 30_000 });
 
 // Some sandboxes refuse loopback listens with EPERM. Every test below spawns
@@ -49,6 +47,18 @@ interface RunningRelay {
 
 let roots: string[] = [];
 let children: ChildProcess[] = [];
+let buildDirectory: string;
+
+beforeAll(async () => {
+  const output = join(packageRoot(), ".output");
+  await mkdir(output, { recursive: true });
+  buildDirectory = await mkdtemp(join(output, "main-process-"));
+  await buildRelay(buildDirectory);
+});
+
+afterAll(async () => {
+  if (buildDirectory) await rm(buildDirectory, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   roots = [];
@@ -99,12 +109,13 @@ async function spawnRelay(
 async function spawnRunningRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
-  bootstrap: { rejectPoolEnd?: boolean } = {},
+  bootstrap: { rejectPoolEnd?: boolean; engineHandshake?: boolean; sourceEntry?: boolean } = {},
 ): Promise<RunningRelay> {
-  const mainUrl = new URL("./main.ts", import.meta.url);
+  const mainUrl = bootstrap.sourceEntry
+    ? new URL("./main.ts", import.meta.url)
+    : pathToFileURL(join(buildDirectory, "main.js"));
   const childArguments = [
-    "--import",
-    process.platform === "win32" ? "tsx" : "tsx/esm",
+    ...(bootstrap.sourceEntry ? ["--import", process.platform === "win32" ? "tsx" : "tsx/esm"] : []),
     "--input-type=module",
     "--eval",
     `process.on("message", (message) => {
@@ -131,6 +142,36 @@ async function spawnRunningRelay(
         writeSync(2, "SYNC_RELAY_TEST_POOL_END_REJECTED\\n");
         throw new Error("injected pool shutdown failure");
       };
+    }
+    if (${bootstrap.engineHandshake === true}) {
+      const { default: childProcess } = await import("node:child_process");
+      const { syncBuiltinESMExports } = await import("node:module");
+      const spawn = childProcess.spawn;
+      childProcess.spawn = (command, args, options) => {
+        if (command === process.execPath && args?.length === 0 && options?.env?.DOHC_ENGINE_AUTH_TOKEN) {
+          args = ["--import", ${JSON.stringify(process.platform === "win32" ? "tsx" : "tsx/esm")},
+            "--input-type=module", "--eval", ${JSON.stringify(`
+              import { FrameDecoder, encodeFrame } from "@dohc/workspace-engine-client/daemon";
+              const decoder = new FrameDecoder(1024 * 1024);
+              process.stdin.on("data", bytes => {
+                for (const frame of decoder.push(bytes)) {
+                  if (frame.kind !== "control") throw new Error("Unexpected engine frame");
+                  const message = JSON.parse(frame.payload.toString("utf8"));
+                  if (message.type !== "hello" || message.authToken !== process.env.DOHC_ENGINE_AUTH_TOKEN) {
+                    throw new Error("Expected authenticated engine hello");
+                  }
+                  process.stdout.write(encodeFrame(1, 0, Buffer.from(JSON.stringify({
+                    type: "helloAck", protocolVersion: 2, sessionGeneration: 1, capabilities: ["core", "blobs"],
+                    limits: { maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 64 * 1024,
+                      maxStringBytes: 64 * 1024, maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32 }
+                  })), 1024 * 1024));
+                }
+              });
+            `)}];
+        }
+        return spawn(command, args, options);
+      };
+      syncBuiltinESMExports();
     }
     await import(${JSON.stringify(mainUrl.href)});`,
   ];
@@ -169,7 +210,7 @@ async function spawnRunningRelay(
       new Error(`${reason}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not report a port\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts
+    }, 45_000);
     childStdout.on("data", (chunk) => {
       stdout += String(chunk);
       const match = /SYNC_RELAY_LISTENING host=([^\s]+) port=(\d+)/u.exec(stdout);
@@ -375,6 +416,14 @@ async function settleWithin<T>(
 }
 
 describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
+  it("starts the development source entry and reports readiness", async () => {
+    const root = await tempRoot("source-entry");
+    const relay = await spawnRunningRelay(join(root, "relay.sqlite"), {}, { sourceEntry: true });
+    const response = await fetch(`${relay.baseUrl}/ready`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, service: "sync-relay", selfHostedLive: false, apiVersions: RELAY_API_VERSIONS, automations: "off" });
+  });
+
   it.each([undefined, "0", "2"])("wires app publication and collection approval opt-ins with quota %s", async (quota) => {
     const root = await tempRoot("app-publication-config");
     const disabled = await spawnRelay(join(root, "disabled.sqlite"));
@@ -884,7 +933,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
   });
 });
 
-// Spawn main.ts expecting it to refuse to start; resolves with the exit code
+// Spawn the built relay expecting it to refuse to start; resolves with the exit code
 // and captured stderr instead of a listening URL.
 async function spawnRelayExpectExit(
   envOverrides: Record<string, string | undefined>,
@@ -893,7 +942,7 @@ async function spawnRelayExpectExit(
   for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, ...envOverrides })) {
     if (value !== undefined) env[key] = value;
   }
-  const child = spawn(process.execPath, ["--import", "tsx/esm", "src/main.ts"], {
+  const child = spawn(process.execPath, [join(buildDirectory, "main.js")], {
     cwd: packageRoot(),
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -905,7 +954,7 @@ async function spawnRelayExpectExit(
     let stderr = "";
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not exit\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts
+    }, 45_000);
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
       if (/SYNC_RELAY_LISTENING/u.test(stdout)) {
@@ -957,17 +1006,24 @@ describe("sync relay startup guards", () => {
       DOHC_RELAY_DEPLOYMENT_CONFIG: configPath, DOHC_RELAY_SERVICE_HOST_ROOT: root,
       DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
       DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
-      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
-    // An empty deployment reconciles before the relay listens, so a relay still
-    // unready after 10 s is stuck; its stderr says why.
+      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)}, {engineHandshake: true});
+    // The empty deployment must complete its engine handshake and first pass.
     await vi.waitFor(async () => {
       const response = await fetch(`${relay.baseUrl}/ready`);
       expect(response.status, `relay stayed unready\nstderr:\n${relay.stderr()}`).toBe(200);
-      expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true, apiVersions: RELAY_API_VERSIONS});
+      // The self-host profile runs automations by default.
+      expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true, apiVersions: RELAY_API_VERSIONS, automations: "on"});
     }, {timeout: 10_000});
     expect((await fetch(`${relay.baseUrl}/sync/workspace/live-host`)).status).toBe(404);
   });
 
+  it.each(["true", "", "2"])("refuses an invalid automations flag before opening storage: %j", async value => {
+    const dbPath = join(await tempRoot("invalid-automations"), "relay.sqlite");
+    const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, DOHC_RELAY_AUTOMATIONS: value});
+    expect(code).toBe(1); expect(stderr).toContain("DOHC_RELAY_AUTOMATIONS must be 0 or 1.");
+    await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
+  });
   it.each(["true", "", "2"])("refuses an invalid self-host live flag before opening storage: %j", async value => {
     const dbPath = join(await tempRoot("invalid-self-host"), "relay.sqlite");
     const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",

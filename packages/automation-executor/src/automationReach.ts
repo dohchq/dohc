@@ -123,6 +123,8 @@ export type ReachStep = (
 export interface ReachDatasetOperation {
   operationId: string;
   name: string;
+  /** What the app calls the operation. */
+  label: string;
   access: "owner" | "helper" | "link";
 }
 
