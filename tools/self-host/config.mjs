@@ -15,7 +15,7 @@ export function readSettings(path = '.env.self-host') {
 
 export function validateSettings(settings) {
   const errors = [];
-  for (const name of ['DOHC_RELAY_APP_PUBLICATIONS']) {
+  for (const name of ['DOHC_RELAY_APP_PUBLICATIONS', 'DOHC_RELAY_AUTOMATIONS']) {
     if (settings[name] !== undefined && !['0', '1'].includes(settings[name])) errors.push(`Set ${name} to 0 or 1.`);
   }
   const participants = settings.DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT;

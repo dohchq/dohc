@@ -998,7 +998,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     runs,
     /** Whether this server's copies of workspaces keep failing to open or sync. */
     get unavailable(): boolean {
-      return unavailable;
+      return unavailable || replicas.unavailable;
     },
     async close(): Promise<void> {
       closed = true;
