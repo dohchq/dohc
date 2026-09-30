@@ -17,18 +17,24 @@ node tools/perf-profiling/packaged-benchmark.mjs --binary C:/packages/baseline/d
 node tools/perf-profiling/summarize-packaged-benchmark.mjs C:/perf/baseline-1
 ```
 
-Use `--label candidate` for the candidate. Keep the workload settings identical and alternate execution order.
+Use `--label candidate` for the candidate. Keep the workload settings identical. Alternate baseline and candidate runs.
 
 To fail on a regression, run `node tools/perf-profiling/compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory>`.
 It writes `comparison.json` in the candidate directory and exits 1 when the candidate fails.
 The candidate fails when:
 
 - either receipt is incomplete, or the receipts differ in a setting other than `--find-cap` and `--write-cap`;
-- the p95 of Collection open, typing on its own, typing during an automation run, or an automation case's press-to-settled time is worse than the baseline's by more than the margin;
+- the p95 of Collection open, typing on its own, or typing during an automation run exceeds the baseline's by more than 10% or 17 ms, whichever is larger;
+- an automation case's median press-to-settled time exceeds the baseline's median by more than 25% or 17 ms, whichever is larger;
+- an automation case has fewer than five runs on either side;
 - a measurement the baseline has is missing from the candidate;
 - any candidate automation case failed its own checks.
 
-The margin is 10% of the baseline's p95, or 17 ms when 10% is smaller. 17 ms is one 60 Hz frame; these timings end at an animation-frame callback, so a smaller difference is within frame quantization. 10% is a starting point until baseline-against-baseline runs measure the host's own spread. With three runs, p95 is the slowest run. Change the margin with `--margin-percent` and `--floor-ms`; the comparison records the margin it used.
+Contention cases, which type during the run, report press-to-settled with verdict `reported` and do not gate on that duration. Their typing-during-run check still gates on p95. Undersampled automation durations show `insufficient-runs`; missing measurements still fail.
+
+Change the p95 margin with `--margin-percent` and the automation median margin with `--automation-margin-percent`. The defaults are 10 and 25. `--floor-ms` controls both floors, default 17. The comparison records all three values. The floor is one 60 Hz frame; these timings end at an animation-frame callback.
+
+On this host, two three-run passes of the same main package failed 10 of 24 checks under the old p95 rule. Collection open and typing stayed within the margin. Finished-case medians agreed within 10% for 7 of 12 cases, but at-cap Finds varied 24 to 36%. Press-to-settled while typing varied 45 to 47%. With few runs, p95 is the slowest run, so one outlier decides the result. Use at least five runs per side for automations and alternate baseline and candidate runs.
 
 An automation case is compared across receipts only when its fixture digest matches: the same records, steps, and expected outcome. A case whose fixture depends on `--find-cap`, or whose expected outcome changed with the limits, is checked only within the candidate.
 Use `--engine-commit <full-SHA>` when a diagnostic package has a separately built engine.
@@ -37,6 +43,7 @@ Output directories cannot be reused. Failure logs and fixtures remain available 
 Cleanup closes the recorded app and helper; failed startup and shutdown also terminate their owned process trees.
 Ctrl-C and SIGTERM cancel pending launch or idle work, stop owned processes, and preserve the failed-run receipt.
 
+The Collection scenario defaults to five runs; other scenarios default to three. Set `--runs` to override the default.
 The default workload uses three fresh/restart cycles, 100-paragraph rich editing, 5,000-paragraph source editing,
 30 trusted keystrokes per document, ten switches, and 60 seconds each of visible and minimized idle.
 `--files 5000 --scenario switches` adds deterministic flat files; the two editor documents count toward each workspace's total.
@@ -209,4 +216,3 @@ A missing scenario is `null`, never a pass. `complete` is true only when every
 scenario produced an artifact.
 
 React commit counts are currently `null`. The app has no production React Profiler or commit mark.
-

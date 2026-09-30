@@ -12,6 +12,8 @@ This whole AI thing is still new and we're still trying to figure out how agents
 
 Instead of a fixed CRM, project process, or agent-team template, dohc provides building blocks. It handles the boring parts: file sync, history, identity, permissions, storage, hosting, and app isolation. With those parts handled, you and your agents go straight to the work itself.
 
+Agents now write much of the software people run, and few people read it. The more an agent builds for you, the more you depend on the layer underneath. dohc owns that layer. Sync, history, permissions, and app isolation work the same whether a person or an agent made the change, so you can let an agent build an app without reading its code to know what data it can reach.
+
 Lastly, working with an agent resembles collaborating with another person: communicating with natural language and building on shared context. That is why dohc is multiplayer by design: humans and agents share one workspace. One person can use dohc as a personal workspace and can easily share their work when they're ready.
 
 ## Agents and workspace apps
