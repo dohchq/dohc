@@ -247,7 +247,7 @@ fn a_peer_keeps_the_depth_an_agent_moment_names() {
 fn a_peer_applies_pre_upgrade_control_character_authors() {
     let authors = json!([
         {"kind":"agent", "agentId":"old\nagent", "onBehalfOf":"old\u{0085}person"},
-        {"kind":"human", "humanId":"old\u{0085}human", "name":"old\nname"}
+        {"kind":"human", "humanId":"old\u{0085}human"}
     ]);
     let (_scratch, mut peer) = test_store();
     let mut payload = absent_text_payload("legacy-authors", "object", "doc.md", "content");
