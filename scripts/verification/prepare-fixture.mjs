@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 // Copy the actual preparer; replace only its external command and staging boundaries.
-export function createPrepareFixture(root, buildSource) {
+export function createPrepareFixture(root, buildSource, { commit = true } = {}) {
   const put = (path, contents) => {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), contents);
@@ -56,9 +56,11 @@ export function createPrepareFixture(root, buildSource) {
   `);
   const git = (args) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
   git(["init"]);
-  git(["add", "."]);
-  git(["-c", `core.hooksPath=${join(root, "no-hooks")}`, "-c", "commit.gpgsign=false",
-    "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Fixture"]);
+  if (commit) {
+    git(["add", "."]);
+    git(["-c", `core.hooksPath=${join(root, "no-hooks")}`, "-c", "commit.gpgsign=false",
+      "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Fixture"]);
+  }
   return ({ failInstall = false, statusOnly = false, platform = process.platform, arch = process.arch, install = true } = {}) => spawnSync(process.execPath, ["--input-type=module", "-e", `
     import cp from 'node:child_process';
     import {syncBuiltinESMExports} from 'node:module';
