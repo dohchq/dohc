@@ -8,13 +8,27 @@ const productionInputs = { "@dohc/site": ["@dohc/desktop"] };
 // These inputs include ordinary tests and separate native/browser proofs.
 // Test consumers do not become changed production packages themselves.
 const testInputs = {
-  // The onboarding fixture imports the API harness, which reads Postgres SQL.
-  "@dohc/desktop": ["@dohc/site", "@dohc/workspace-api", "@dohc/workspace-postgres", "@dohc/share-web"],
+  "@dohc/desktop": ["@dohc/site"],
   "@dohc/workspace-auth": ["@dohc/workspace-postgres"],
   "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop"],
   "@dohc/share-web": ["@dohc/desktop", "@dohc/mcp", "@dohc/cli", "@dohc/workspace-postgres", "@dohc/workspace-engine-client"],
   "@dohc/sync-relay": ["@dohc/share-web", "@dohc/desktop"],
   "@dohc/workspace-api": ["@dohc/workspace-postgres"],
+};
+// These browser helpers do not feed desktop unit tests or packaging scripts.
+// The onboarding helper imports the API harness, which reads Postgres SQL.
+const desktopProofInputs = {
+  "@dohc/workspace-api": ["e2e/helpers/selfHostOnboarding.ts"],
+  "@dohc/workspace-postgres": ["e2e/helpers/selfHostOnboarding.ts"],
+  "@dohc/share-web": ["e2e/helpers/sharedDatasetBrowser.ts"],
+};
+// Keep a helper wrapper from hiding a new unit-test dependency on these inputs.
+const desktopProofConsumers = {
+  "apps/desktop/e2e/helpers/selfHostOnboarding": ["apps/desktop/e2e/self-host-onboarding.spec.ts"],
+  "apps/desktop/e2e/helpers/sharedDatasetBrowser": [
+    "apps/desktop/e2e/apps.spec.ts", "apps/desktop/e2e/collection-link-lane.spec.ts",
+    "apps/desktop/e2e/dataset-completion.spec.ts", "apps/desktop/e2e/dataset-shared-form.spec.ts",
+  ],
 };
 // External consumers can select compatibility files. A production change in
 // the consumer or an input without a file map still selects its complete suite.
@@ -75,7 +89,7 @@ function result(selected, affected, full, reason) {
   const proofs = {
     accounts: selected.has("@dohc/workspace-api"),
     selfHostNative: selected.has("@dohc/share-web"),
-    desktop: desktopScripts,
+    desktop: desktopScripts || Object.keys(desktopProofInputs).some(input => affected.has(input)),
   };
   return {
     packages: [...selected].sort(), affected: [...affected].sort(), full, reason, proofs, testFiles, desktopScripts,
@@ -130,10 +144,17 @@ export function uncoveredWorkspaceInputs(files, packages) {
       || path === "packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.ts";
     for (const match of source.matchAll(/(["'`])((?:\.{1,2}\/|@dohc\/)[^"'`\r\n]+)\1/gu)) {
       const reference = match[2];
+      const inputPath = posix.normalize(posix.join(posix.dirname(path), reference));
+      const proofConsumers = desktopProofConsumers[inputPath.replace(/\.[cm]?[jt]sx?$/u, "")];
+      if (proofConsumers && !proofConsumers.includes(path)) {
+        findings.push({ path, reference, consumer: consumer.name, input: "@dohc/desktop" });
+        continue;
+      }
       const input = reference.startsWith("@dohc/")
         ? packages.find(pkg => pkg.name === reference.split("/").slice(0, 2).join("/"))
-        : owner(posix.normalize(posix.join(posix.dirname(path), reference)), packages);
+        : owner(inputPath, packages);
       if (!input || input.name === consumer.name || declared.has(input.name) || productionInputs[consumer.name]?.includes(input.name)) continue;
+      if (consumer.name === "@dohc/desktop" && desktopProofInputs[input.name]?.includes(posix.relative(consumer.path, path))) continue;
       if (testFile && testInputs[consumer.name]?.includes(input.name)) {
         const files = externalTestFiles[consumer.name]?.[input.name];
         if (!files || files.includes(posix.relative(consumer.path, path))) continue;
