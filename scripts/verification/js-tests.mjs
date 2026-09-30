@@ -53,9 +53,11 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {}, beforeDesktopScripts } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {}, repository = "full", desktopScripts = true, beforeDesktopScripts } = {}) {
+  if (!["full", "source"].includes(repository)) throw new Error("Unknown repository test scope.");
+  if (typeof desktopScripts !== "boolean") throw new Error("Desktop script selection must be a boolean.");
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, concurrency: 2, steps: [], verdict: "RUNNING" };
+  const report = { version: 1, concurrency: 2, repository, desktopScripts, steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
   const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(report, null, 2) + "\n");
   const cancellation = cancellationScope("Workspace tests");
@@ -96,13 +98,13 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     // source and this checkout's HEAD, which package tests never change, so
     // they run beside the package lanes. Both lanes settle before any failure
     // is reported, so no command outlives cleanup.
-    const [, packages] = await Promise.allSettled([command("repository", ["run", "test:repo"]), runPackages()]);
+    const [, packages] = await Promise.allSettled([command("repository", ["run", repository === "full" ? "test:repo" : "test:repo:source"]), runPackages()]);
     if (failure) throw failure;
     if (packages.status === "rejected") throw packages.reason;
     const tasks = packages.value;
     // Packaging rebuilds dist, which package tests and Rust's public-collection
     // recovery fixture read. Both must finish before the rebuild.
-    if (tasks.some(task => task.name === "@dohc/desktop")) {
+    if (desktopScripts && tasks.some(task => task.name === "@dohc/desktop")) {
       await beforeDesktopScripts?.();
       await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts"]);
     }
