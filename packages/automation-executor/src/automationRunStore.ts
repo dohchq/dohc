@@ -467,6 +467,19 @@ const TimeoutsSchema = z.object({
   timeouts: z.array(z.object({ automationId: z.string().min(1), count: z.number().int().nonnegative() })),
 });
 
+const CircuitBreakersSchema = z.object({
+  version: z.literal(1),
+  breakers: z.array(z.object({
+    automationId: z.string().min(1),
+    claimId: z.string().min(1),
+    datasetInstance: z.string().min(1).nullable(),
+    reason: z.literal("consecutive-timeouts"),
+    collectionPath: z.string().min(1),
+    run: z.number().int().positive(),
+  })),
+});
+export type StoredCircuitBreaker = z.infer<typeof CircuitBreakersSchema>["breakers"][number];
+
 const ReportedFailuresSchema = z.object({
   version: z.literal(1),
   failures: z.array(z.object({
@@ -673,6 +686,9 @@ export interface AutomationRunStore {
   /** Consecutive timed-out runs per automation, for the circuit breaker. */
   readTimeouts(): Promise<Map<string, number>>;
   saveTimeouts(timeouts: ReadonlyMap<string, number>): Promise<void>;
+  readCircuitBreakers(): Promise<StoredCircuitBreaker[]>;
+  recordCircuitBreaker(breaker: StoredCircuitBreaker): Promise<void>;
+  clearCircuitBreaker(run: { automationId: string; claimId: string }): Promise<void>;
   /**
    * The newest failure this computer sent a notice for, per automation, so
    * a failure is sent once. `open` is false once its notice was taken back.
@@ -1166,6 +1182,27 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       return serial(async () => {
         const entries = [...timeouts].map(([automationId, count]) => ({ automationId, count }));
         await writeDurably(join(await base(), "timeouts.json"), `${JSON.stringify({ version: 1, timeouts: entries })}\n`);
+      });
+    },
+    async readCircuitBreakers() {
+      const parsed = CircuitBreakersSchema.safeParse(await readJson(join(await base(), "circuit-breakers.json")));
+      return parsed.success ? parsed.data.breakers : [];
+    },
+    recordCircuitBreaker(breaker) {
+      return serial(async () => {
+        const parsed = CircuitBreakersSchema.safeParse(await readJson(join(await base(), "circuit-breakers.json")));
+        const breakers = [...(parsed.success ? parsed.data.breakers : []).filter((entry) =>
+          entry.automationId !== breaker.automationId || entry.datasetInstance !== breaker.datasetInstance), breaker];
+        await writeDurably(join(await base(), "circuit-breakers.json"), `${JSON.stringify({ version: 1, breakers })}\n`);
+      });
+    },
+    clearCircuitBreaker(run) {
+      return serial(async () => {
+        const parsed = CircuitBreakersSchema.safeParse(await readJson(join(await base(), "circuit-breakers.json")));
+        if (!parsed.success) return;
+        const breakers = parsed.data.breakers.filter((entry) => entry.automationId !== run.automationId || entry.claimId !== run.claimId);
+        if (breakers.length === parsed.data.breakers.length) return;
+        await writeDurably(join(await base(), "circuit-breakers.json"), `${JSON.stringify({ version: 1, breakers })}\n`);
       });
     },
     async readReportedFailures() {

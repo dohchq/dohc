@@ -520,14 +520,30 @@ export interface NoticeTarget {
   share?: string;
   automation?: string;
   run?: string;
+  recovery?: "automation-controls";
+}
+
+export interface AutomationControlsTarget extends NoticeTarget {
+  recovery: "automation-controls";
+  automation: string;
+  path: string;
+}
+
+export function isAutomationControlsTarget(target: NoticeTarget): target is AutomationControlsTarget {
+  return target.recovery === "automation-controls" && typeof target.automation === "string" &&
+    typeof target.path === "string" && target.path.endsWith("/automations.yaml") && target.path.length > "/automations.yaml".length;
 }
 
 const NOTICE_TARGET_FIELDS = [
-  "path", "record", "thread", "message", "share", "automation", "run",
+  "path", "record", "thread", "message", "share", "automation", "run", "recovery",
 ] as const satisfies readonly (keyof NoticeTarget)[];
 
 export function isNoticeTarget(value: unknown): value is NoticeTarget {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const recovery = Object.getOwnPropertyDescriptor(value, "recovery")?.value as unknown;
+  if (recovery !== undefined) {
+    if (recovery !== "automation-controls" || !isAutomationControlsTarget(value as NoticeTarget)) return false;
+  }
   return Object.entries(value).every(([field, fieldValue]) =>
     (NOTICE_TARGET_FIELDS as readonly string[]).includes(field) &&
     isNoticeLine(fieldValue, NOTICE_TARGET_FIELD_MAX_CHARS)) &&

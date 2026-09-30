@@ -37,6 +37,7 @@ import {
   NOTICE_SENDER_LABEL_MAX_CHARS,
   NOTICE_TARGET_FIELD_MAX_CHARS,
   NOTICE_TITLE_MAX_CHARS,
+  isNoticeTarget,
 } from "@dohc/workspace-contracts/relay";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
@@ -5666,7 +5667,14 @@ export const NoticeTargetShape = z.object({
   share: NOTICE_TARGET_FIELD,
   automation: NOTICE_TARGET_FIELD,
   run: NOTICE_TARGET_FIELD,
-});
+  recovery: z.literal("automation-controls").optional(),
+}).refine(isNoticeTarget);
+export const AutomationControlsTargetShape = z.object({
+  recovery: z.literal("automation-controls"),
+  automation: codePoints(1, NOTICE_TARGET_FIELD_MAX_CHARS),
+  path: codePoints(1, NOTICE_TARGET_FIELD_MAX_CHARS),
+  run: NOTICE_TARGET_FIELD,
+}).refine(isNoticeTarget);
 export const RefusalCoordinate = z.object({ originId: z.string(), originSeq: z.number().int() });
 export type RefusalCoordinate = z.infer<typeof RefusalCoordinate>;
 export const NoticeRow = z.object({
@@ -5733,6 +5741,7 @@ export const RetryAutomationNoticePayload = z.object({
 export const RetryAutomationNoticeResult = z.union([
   z.object({ status: z.literal("queued"), press: z.boolean() }),
   z.object({ status: z.literal("definition-changed"), repeatsMessages: z.boolean() }),
+  z.object({ status: z.literal("switched-off"), target: AutomationControlsTargetShape }),
   z.object({ status: z.literal("refused"), reason: z.string().min(1).max(2_000) }),
 ]);
 

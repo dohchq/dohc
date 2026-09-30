@@ -8,6 +8,8 @@
     "./automation-chat": "./src/automationChat.ts",
     "./automation-evaluator-host": "./src/automationEvaluatorHost.ts",
     "./automation-failed-notice": "./src/automationFailedNotice.ts",
+    "./automation-failure-reporting": "./src/automationFailureReporting.ts",
+    "./automation-history": "./src/automationHistory.ts",
     "./automation-plan": "./src/automationPlan.ts",
     "./automation-reach": "./src/automationReach.ts",
     "./automation-run-store": "./src/automationRunStore.ts",

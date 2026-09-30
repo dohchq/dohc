@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { isNoticeBody, isNoticeLine, NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
-import { automationFailedElsewhereBody, automationFailedNotice, FAILED_ELSEWHERE_BODY, type AutomationFailure } from "./automationFailedNotice";
+import { isNoticeBody, isNoticeLine, isNoticeTarget, NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import { automationFailedElsewhereBody, automationFailedNotice, automationFailureBodyForPermission, AUTOMATION_SWITCHED_OFF_BODY, FAILED_ELSEWHERE_BODY, type AutomationFailure } from "./automationFailedNotice";
 
 const failure = (overrides: Partial<AutomationFailure> = {}): AutomationFailure => ({
   automationId: "collection:object-tasks#stamp",
@@ -16,6 +16,55 @@ const failure = (overrides: Partial<AutomationFailure> = {}): AutomationFailure 
 const laptop = { installId: "install-a", label: "Ice's laptop" };
 
 describe("a failed run's notice", () => {
+  it.each([
+    [true, true, "Open the automation to turn it back on."],
+    [true, false, "Open its automations file to turn it back on."],
+    [false, false, "Ask someone who can edit the Collection to turn it back on."],
+  ] as const)("gives the recipient a recovery they can use (edit %s, owner %s)", (canEdit, isOwner, next) => {
+    const fact = "dohc switched this automation off after 3 runs in a row took too long. ";
+    expect(automationFailureBodyForPermission(`${AUTOMATION_SWITCHED_OFF_BODY} Detail.`, canEdit, isOwner)).toBe(`${fact}${next} Detail.`);
+    expect(isNoticeBody(automationFailureBodyForPermission(AUTOMATION_SWITCHED_OFF_BODY + "x".repeat(2_000), canEdit, isOwner))).toBe(true);
+    expect(automationFailureBodyForPermission("Ordinary failure.", canEdit, isOwner)).toBe("Ordinary failure.");
+  });
+
+  it("puts the switch-off and recovery before a long private error, with a typed controls target", () => {
+    const stopped = failure({ switchedOff: { reason: "consecutive-timeouts", collectionPath: "Projects/Tasks" }, error: "private-step-detail".repeat(2_000) });
+    const notice = automationFailedNotice({ workspaceId: "ws", computer: laptop, failure: stopped, name: "Slow", collectionPath: "Moved/Tasks" });
+    expect(notice.title).toBe('Automation "Slow" switched off');
+    expect(notice.body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)).toBe(true);
+    expect(isNoticeBody(notice.body)).toBe(true);
+    expect(notice.target).toEqual({ recovery: "automation-controls", path: "Moved/Tasks/automations.yaml", automation: stopped.automationId, run: stopped.claimId });
+    expect(isNoticeTarget(notice.target)).toBe(true);
+    expect(automationFailedElsewhereBody(stopped, "Slow")).toBe(AUTOMATION_SWITCHED_OFF_BODY);
+    expect(isNoticeTarget({ recovery: "automation-controls", automation: stopped.automationId })).toBe(false);
+    expect(isNoticeTarget({ ...notice.target, recovery: "unknown" })).toBe(false);
+    expect(automationFailedNotice({ workspaceId: "ws", computer: laptop, failure: stopped, name: "Slow", collectionPath: null }).target.path)
+      .toBe("Projects/Tasks/automations.yaml");
+  });
+
+  it.each(["x".repeat(1_000), "界".repeat(330)])("keeps controls when the path fits without duplication (%#)", (collectionPath) => {
+    const stopped = failure({ switchedOff: { reason: "consecutive-timeouts", collectionPath } });
+    const notice = automationFailedNotice({ workspaceId: "ws", computer: laptop, failure: stopped, name: "Slow", collectionPath });
+    expect(notice.target).toEqual({ recovery: "automation-controls", path: `${collectionPath}/automations.yaml`, automation: stopped.automationId, run: stopped.claimId });
+    expect(isNoticeTarget(notice.target)).toBe(true);
+  });
+
+  it.each(["x".repeat(1_008), "x".repeat(2_000), "界".repeat(700)])("delivers a switch-off Notice without oversized controls (%#)", (collectionPath) => {
+    const stopped = failure({ switchedOff: { reason: "consecutive-timeouts", collectionPath } });
+    const notice = automationFailedNotice({ workspaceId: "ws", computer: laptop, failure: stopped, name: "Slow", collectionPath });
+    expect(notice.body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)).toBe(true);
+    expect(notice.target).toEqual({ automation: stopped.automationId, run: stopped.claimId });
+    expect(isNoticeTarget(notice.target)).toBe(true);
+  });
+
+  it("never infers a switch-off from ordinary error text", () => {
+    const ordinary = failure({ error: "The step says switched off, but dohc did not change the automation." });
+    const notice = automationFailedNotice({ workspaceId: "ws", computer: laptop, failure: ordinary, name: "Slow", collectionPath: "Tasks" });
+    expect(notice.title).toBe('Automation "Slow" failed');
+    expect(notice.target).not.toHaveProperty("recovery");
+    expect(automationFailedElsewhereBody(ordinary, "Slow")).toBe(FAILED_ELSEWHERE_BODY);
+  });
+
   it("names the automation, the error, and the computer, and offers its run", () => {
     expect(automationFailedNotice({ workspaceId: "ws", computer: laptop, failure: failure(), name: "Stamp the finish date", collectionPath: "Projects/Tasks" })).toEqual({
       workspaceId: "ws",

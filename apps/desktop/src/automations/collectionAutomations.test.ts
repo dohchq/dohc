@@ -10,6 +10,7 @@ import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-co
 import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
+import { AUTOMATION_SWITCHED_OFF_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { desktopRecordEditContext, type DesktopRecordEditHost } from "../workspaces/desktopRecordEdits";
@@ -1970,7 +1971,11 @@ describe("Collection automations", () => {
 
     expect(claims.map((claim) => claim.state)).toEqual(["failed", "failed", "failed"]);
     expect(claims[1]!.error).not.toContain("switched off");
-    expect(claims[2]!.error).toContain('dohc switched off "Slow" after 3 runs in a row took too long.');
+    expect(claims[2]!.error).toContain(AUTOMATION_SWITCHED_OFF_BODY);
+    await w.until(() => w.failureReports.some((report) => report.failure.claimId === claims[2]!.claimId));
+    expect(w.failureReports.find((report) => report.failure.claimId === claims[1]!.claimId)?.failure.switchedOff).toBeUndefined();
+    expect(w.failureReports.find((report) => report.failure.claimId === claims[2]!.claimId)?.failure.switchedOff)
+      .toEqual({ reason: "consecutive-timeouts", collectionPath: "Tasks" });
     expect(await readFile(join(w.root, "Tasks", "automations.yaml"), "utf8")).toContain("enabled: false");
     expect(w.writtenAs).toEqual([{ path: "Tasks/automations.yaml", automationId: "collection:Tasks#slow" }]);
     // Its own switch off is no person's, so nobody hears who did it.
@@ -2273,12 +2278,44 @@ describe("Collection automations", () => {
     expect(claim.state).toBe("pending");
   });
 
-  it("refuses Try again for an automation that is switched off", async () => {
+  it("propagates a failed automations re-read before retry without queuing the stale definition", async () => {
+    const w = await world({ automations: { Tasks: BUMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 0 });
+    w.failOpenAt(1);
+    const claim = w.claim(TASKS, task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const retry = vi.spyOn(w.engine, "retryAutomationClaim");
+    const error = new Error("automations read failed");
+    w.beforeNextRead(() => { throw error; });
+
+    await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false }))
+      .rejects.toBe(error);
+    expect(retry).not.toHaveBeenCalled();
+    expect(claim.state).toBe("failed");
+    expect(w.fieldsOf(task).Count).toBe(0);
+  });
+
+  it("propagates a failed automations re-read before returning switched-off controls", async () => {
+    const w = await world({ automations: { Tasks: BUMP.replace("    name: Bump", "    name: Bump\n    enabled: false") } });
+    await w.executor.open();
+    const error = new Error("automations read failed");
+    w.beforeNextRead(() => { throw error; });
+
+    await expect(w.executor.switchedOffTarget(TASKS)).rejects.toBe(error);
+  });
+
+  it("returns controls for Try again while off without queuing a run", async () => {
     const off = "  - id: off\n    name: Off\n    enabled: false\n    when: {field-changed: Status}\n    do: [{set: {X: 1}}]\n";
     const w = await world({ automations: { Tasks: off } });
     await w.executor.open();
     await expect(w.executor.retry({ automationId: "collection:Tasks#off", claimId: "atc_any", startOver: false }))
-      .resolves.toEqual({ status: "refused", reason: '"Off" is switched off. Switch it on, then try again.' });
+      .resolves.toEqual({ status: "switched-off", target: { recovery: "automation-controls", path: "Tasks/automations.yaml", automation: "collection:Tasks#off" } });
+    expect(w.claims.size).toBe(0);
+    await expect(w.executor.switchedOffTarget("collection:Tasks#off"))
+      .resolves.toMatchObject({ recovery: "automation-controls", path: "Tasks/automations.yaml" });
+    await w.writeAutomations("Tasks", off.replace("enabled: false", "enabled: true"));
+    await expect(w.executor.switchedOffTarget("collection:Tasks#off")).resolves.toBeNull();
   });
 
   it("fails closed when a run's saved progress cannot be read, instead of starting over", async () => {
@@ -2692,7 +2729,87 @@ describe("Collection automations", () => {
     await restarted.open();
     for (const claim of later) await w.settledClaim(claim);
     expect(later[0]!.error).not.toContain("switched off");
-    expect(later[1]!.error).toContain('dohc switched off "Slow" after 3 runs in a row took too long.');
+    expect(later[1]!.error).toContain(AUTOMATION_SWITCHED_OFF_BODY);
+  });
+
+  it("reports a saved breaker after restart when delivery failed, once", async () => {
+    const timedOut: AutomationEvaluator["evaluate"] = async (_scope, formulas) =>
+      formulas.map(() => ({ ok: false, error: { code: "timeout", message: "private-step-token".repeat(2_000) } }));
+    const w = await world({ automations: { Tasks: "  - id: slow\n    name: Slow\n    when: {field-changed: Status}\n    do: [{set: {X: '=spin()'}}]\n" },
+      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })).forWorkspace("workspace") });
+    await w.executor.dispose();
+    const offline = w.makeExecutor({ reportFailure: async () => { throw new Error("offline"); } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claims = [
+      w.claim("collection:Tasks#slow", task, { actorKind: "human", onBehalfOf: "human" }),
+      w.claim("collection:Tasks#slow", task, { actorKind: "human", onBehalfOf: "creator" }),
+      w.claim("collection:Tasks#slow", task, { actorKind: "human", onBehalfOf: "remover" }),
+    ];
+    await offline.open();
+    for (const claim of claims) await w.settledClaim(claim);
+    await offline.dispose();
+    const restarted = w.makeExecutor();
+    await restarted.open();
+    await w.until(() => w.reportedFailures().some((entry) => entry.claimId === claims[2]!.claimId));
+    expect(w.failureReports).toHaveLength(1);
+    expect(w.failureReports[0]).toMatchObject({ startedBy: "remover", failure: { claimId: claims[2]!.claimId,
+      switchedOff: { reason: "consecutive-timeouts", collectionPath: "Tasks" } } });
+    restarted.failuresChanged();
+    await restarted.dispose();
+    expect(w.failureReports).toHaveLength(1);
+    expect(w.writtenAs).toHaveLength(1);
+  });
+
+  it("resets timeouts despite a failed breaker save and never reuses an old breaker for a retried run", async () => {
+    const source = "  - id: slow\n    name: Slow\n    when: {field-changed: Status}\n    do: [{set: {X: '=spin()'}}]\n";
+    const timedOut: AutomationEvaluator["evaluate"] = async (_scope, formulas) =>
+      formulas.map(() => ({ ok: false, error: { code: "timeout", message: "Too long" } }));
+    const w = await world({ automations: { Tasks: source },
+      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })).forWorkspace("workspace") });
+    await w.executor.dispose();
+    const store = createAutomationRunStore(w.root, resolveWorkspaceMetadataDir);
+    let failedSave = false;
+    const executor = w.makeExecutor({ store: { ...store,
+      recordCircuitBreaker: async (breaker) => {
+        if (!failedSave) { failedSave = true; throw new Error("disk busy"); }
+        await store.recordCircuitBreaker(breaker);
+      },
+      clearCircuitBreaker: async () => { throw new Error("disk busy"); },
+    } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claims = Array.from({ length: 3 }, () => w.claim("collection:Tasks#slow", task));
+    await executor.open();
+    for (const claim of claims) await w.settledClaim(claim);
+    await w.until(() => w.failureReports.some((report) => report.failure.claimId === claims[2]!.claimId && report.failure.switchedOff !== undefined));
+    expect(await store.readTimeouts()).toEqual(new Map());
+    await w.writeAutomations("Tasks", source);
+    await expect(executor.retry({ automationId: "collection:Tasks#slow", claimId: claims[2]!.claimId, startOver: true }))
+      .resolves.toEqual({ status: "queued", press: false });
+    await w.settledClaim(claims[2]!);
+    await w.until(() => w.failureReports.some((report) => report.failure.generation === 4));
+    expect(w.failureReports.find((report) => report.failure.generation === 4)!.failure.switchedOff).toBeUndefined();
+    expect(await store.readTimeouts()).toEqual(new Map([["collection:Tasks#slow", 1]]));
+    expect(await readFile(join(w.root, "Tasks", "automations.yaml"), "utf8")).not.toContain("enabled: false");
+    await executor.dispose();
+  });
+
+  it.each([
+    { actorKind: "human" as const, onBehalfOf: "person", sharedAuthor: null, expected: "person" },
+    { kind: "added" as const, actorKind: "human" as const, onBehalfOf: "creator", sharedAuthor: null, expected: "creator" },
+    { kind: "removed" as const, actorKind: "human" as const, onBehalfOf: "remover", sharedAuthor: null, expected: "remover" },
+    { actorKind: null, onBehalfOf: "untrusted", sharedAuthor: { kind: "named" as const, userId: "authenticated", grantId: "grant", grantGeneration: 1 }, expected: "authenticated" },
+    { actorKind: "agent" as const, onBehalfOf: "person", sharedAuthor: null, expected: null },
+    { actorKind: null, onBehalfOf: "untrusted", sharedAuthor: { kind: "link" as const, grantId: "grant", grantGeneration: 1, principalId: "link" }, expected: null },
+  ])("reports the triggering person from record-change provenance: $expected", async ({ expected, ...change }) => {
+    const w = await world({ automations: { Tasks: "  - id: fail\n    name: Fail\n    when: {field-changed: Status}\n    do: [{set: {X: '=bad()'}}]\n" } });
+    const claim = w.claim("collection:Tasks#fail", w.addRecord("Tasks", "one", { Status: "Done" }), change);
+    claim.state = "running";
+    claim.attempts = 1;
+    await w.engine.settleAutomationClaim({ claimId: claim.claimId, state: "failed", error: "A step failed." });
+    await w.executor.open();
+    await w.until(() => w.failureReports.length === 1);
+    expect(w.failureReports[0]).toMatchObject({ startedBy: expected, failure: { claimId: claim.claimId } });
+    expect(w.failureReports[0]!.failure.switchedOff).toBeUndefined();
   });
   it("checks every field of the step a stop interrupted, so it keeps someone's change, and later steps start from it", async () => {
     const steps = "  - id: steps\n    name: Steps\n    when: {field-changed: Status}\n    do: [{set: {Count: 1}}, {set: {Note: a}}, {set: {Count: 2}}]\n";

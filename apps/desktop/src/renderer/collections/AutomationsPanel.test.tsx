@@ -22,7 +22,7 @@ import type { DatasetDescription, DatasetOperation } from "@dohc/security-contra
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { formulaProblems } from "@dohc/automation-executor/automation-plan";
-import { automationCount, AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations } from "./AutomationsPanel";
+import { automationCount, AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations, type AutomationFocus } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import type { AutomationDatasetTable, AutomationTable } from "./automationDraft";
 import { START_OVER_SENTENCE } from "./useAutomationRetry";
@@ -182,7 +182,7 @@ function Panel(props: {
   table?: AutomationTable;
   onRunUndone?: () => void;
   fields?: FieldDefinition[];
-  focus?: { automationId: string; run: string | null; name?: string | null; seq: number } | null;
+  focus?: AutomationFocus | null;
   onNotice?: (message: string, undo?: () => void) => void;
   onError?: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onOpenFile?: (path: string) => void;
@@ -2530,6 +2530,54 @@ describe("an automation's runs", () => {
     await waitFor(() => expect(bridge.retryCollectionAutomation).toHaveBeenLastCalledWith(
       expect.objectContaining({ claimId: "atc_failed", startOver: true }),
     ));
+  });
+
+  const switchedOff = {
+    recovery: "automation-controls" as const, automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml",
+  };
+
+  it("opens a switched-off automation's notice on its switch, not its runs", async () => {
+    const { bridge } = makeBridge(read([summary(nudge), summary({ ...stamp, enabled: false })]), [failed]);
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: "atc_failed", controls: true, seq: 1 }} />);
+    const toggle = within(await screen.findByTestId("automation-stamp")).getByRole("switch");
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByTestId("automation-runs")).toBeNull();
+    expect(bridge.listCollectionAutomationRuns).not.toHaveBeenCalled();
+  });
+
+  it("keeps focus on the automation's row when its switch cannot change", async () => {
+    // A file dohc cannot read in full is not saved from here, so every switch waits.
+    makeBridge({ status: "read", contentHash: HASH, addsStay: [], automations: [
+      summary(nudge), summary({ ...stamp, enabled: false }),
+      { valid: false, id: "Broken", name: "Broken", diagnostics: [{ code: "invalid-id", path: "/automations/2/id" }] },
+    ] });
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, controls: true, seq: 1 }} />);
+    const row = await screen.findByTestId("automation-stamp");
+    expect((within(row).getByRole("switch") as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(document.activeElement).toBe(within(row).getByRole("button", { name: "Stamp the finish date actions" })));
+  });
+
+  it("moves focus to Close when the switched-off automation is no longer in the list", async () => {
+    makeBridge(read([summary(nudge)]));
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, controls: true, seq: 1 }} />);
+    await screen.findByTestId("automation-nudge");
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close automations" })));
+  });
+
+  it("goes to the switch when Try again finds the automation switched off, and queues nothing", async () => {
+    const onError = vi.fn();
+    const { bridge } = makeBridge(read([summary(nudge), summary({ ...stamp, enabled: false }, { lastRun: { state: "failed", atMs: Date.now() } })]), [failed]);
+    bridge.retryCollectionAutomation.mockResolvedValueOnce({ status: "switched-off", target: switchedOff });
+    render(<Panel onError={onError} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+
+    await userEvent.click(within(await screen.findByTestId("automation-run-atc_failed")).getByRole("button", { name: "Try again" }));
+    const toggle = within(await screen.findByTestId("automation-stamp")).getByRole("switch");
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    expect(screen.queryByTestId("automation-runs")).toBeNull();
+    expect(screen.queryByTestId("automation-start-over")).toBeNull();
+    expect(bridge.retryCollectionAutomation).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("shows dataset changes in run history", async () => {

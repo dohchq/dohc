@@ -13,7 +13,8 @@ import {
 import { COLLECTION_SCHEMA_FILENAME, collectionVersionError, type CollectionListResult } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import { AUTOMATION_HOST_REACH_MAX_BYTES } from "@dohc/workspace-contracts/relay";
+import { AUTOMATION_HOST_REACH_MAX_BYTES, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
+import { automationControlsTarget, AUTOMATION_SWITCHED_OFF_BODY } from "./automationFailedNotice";
 import type {
   DatasetAutomationClaim,
   DatasetAutomationFailure,
@@ -62,7 +63,7 @@ import {
   type ReachShare,
   type ReachStep,
 } from "./automationReach";
-import type { AutomationRunStore, ClaimStanding, DatasetUndoCall, ExpiringClaim, ReportedFailure, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
+import type { AutomationRunStore, ClaimStanding, DatasetUndoCall, ExpiringClaim, ReportedFailure, RunWrite, StoredCircuitBreaker, StoredRun, StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
@@ -721,6 +722,7 @@ export type CollectionAutomationRetry =
   // must choose that. `repeatsMessages` says the confirmation must also say
   // that messages it sent may be sent again.
   | { status: "definition-changed"; repeatsMessages: boolean }
+  | { status: "switched-off"; target: AutomationControlsTarget }
   | { status: "refused"; reason: string };
 
 export type CollectionAutomationUndo =
@@ -1064,6 +1066,7 @@ export class CollectionAutomations {
   private reportFailuresAgain = false;
   /** Consecutive timed-out runs per automation, saved so a restart keeps them. */
   private timeouts = new Map<string, number>();
+  private readonly pendingCircuitBreakers = new Map<string, StoredCircuitBreaker>();
   /**
    * The Groups and direct messages automations post to, as the last roster
    * found them. Reach reads it; a run reads its own.
@@ -1189,7 +1192,8 @@ export class CollectionAutomations {
 
   /** The settled watcher batch: re-read the Collections whose automations or schema changed. */
   handleWatcherEvents(events: readonly WatcherEvent[]): void {
-    this.rereadFoldersOf(events.flatMap((event) => [event.path, event.fromPath]));
+    void this.rereadFoldersOf(events.flatMap((event) => [event.path, event.fromPath]))
+      .catch((error: unknown) => this.options.onError("reload Collection automations", error));
   }
 
   /**
@@ -1198,10 +1202,11 @@ export class CollectionAutomations {
    * Collection's automations or schema (ADR 0013) is read from here.
    */
   handlePulledPaths(paths: readonly string[]): void {
-    this.rereadFoldersOf(paths);
+    void this.rereadFoldersOf(paths)
+      .catch((error: unknown) => this.options.onError("reload Collection automations", error));
   }
 
-  private rereadFoldersOf(paths: readonly (string | undefined)[]): void {
+  private async rereadFoldersOf(paths: readonly (string | undefined)[]): Promise<void> {
     const folders = new Set<string>();
     for (const path of paths) {
       if (path === undefined || !WATCHED_FILES.has(posix.basename(path))) continue;
@@ -1210,7 +1215,7 @@ export class CollectionAutomations {
     }
     if (folders.size === 0 || this.opened === null) return;
     this.targetRevision += 1;
-    void this.enqueue(async () => {
+    return this.enqueue(async () => {
       let datasets: Promise<Map<string, IndexedDataset> | null> | undefined;
       let listed: Promise<Map<string, string>> | undefined;
       for (const folder of folders) {
@@ -1256,8 +1261,7 @@ export class CollectionAutomations {
         this.options.onAutomationsChanged();
         this.rosterChanged();
         this.options.onSchedulesChanged?.();
-      })
-      .catch((error: unknown) => this.options.onError("reload Collection automations", error));
+      });
   }
 
   /**
@@ -1720,6 +1724,11 @@ export class CollectionAutomations {
       ...(dataset ?? []),
     ];
     const reported = new Map((await this.options.store.readReportedFailures()).map((entry) => [automationFailureKey(entry), entry]));
+    for (const [key, breaker] of [...this.pendingCircuitBreakers]) {
+      await this.options.store.recordCircuitBreaker(breaker);
+      if (this.pendingCircuitBreakers.get(key) === breaker) this.pendingCircuitBreakers.delete(key);
+    }
+    const breakers = await this.options.store.readCircuitBreakers();
     // A pass that outlived its executor saves nothing: the next executor
     // reports from what was saved, and its notices are the same ones.
     const commit = async (key: string, entry: ReportedFailure): Promise<boolean> => {
@@ -1736,11 +1745,14 @@ export class CollectionAutomations {
       // failed run a retry of the newest leaves, is news.
       if (last !== undefined && last.claimId === failure.claimId && failure.generation <= last.generation) continue;
       try {
+        const context = await this.failureContextOf(failure);
+        const breaker = breakers.find((entry) => automationFailureKey(entry) === key && entry.claimId === failure.claimId && entry.run === context.run);
+        if (breaker !== undefined) failure.switchedOff = { reason: breaker.reason, collectionPath: breaker.collectionPath };
         await this.options.reportFailure({
           failure,
           name: this.nameOf(failure.automationId),
           collectionPath: this.locate(failure.automationId)?.collectionPath ?? null,
-          startedBy: await this.startedByOf(failure),
+          startedBy: context.startedBy,
           replaces: last?.open ? last : null,
         });
       } catch (error) {
@@ -1766,16 +1778,21 @@ export class CollectionAutomations {
    * edit did. Null when the claim names no person, as an app's or an agent's
    * change does.
    */
-  private async startedByOf(failure: AutomationFailure): Promise<string | null> {
+  private async failureContextOf(failure: AutomationFailure): Promise<{ startedBy: string | null; run: number | null }> {
+    const unknown = { startedBy: null, run: null };
     if (failure.datasetInstance !== null) {
       const claim = await this.withLiveHost((ledger) => ledger.claim(failure.automationId, failure.claimId));
-      if (!claim) return null;
-      return claim.actor.kind === "named" ? claim.actor.userId : datasetPresser(claim);
+      if (!claim) return unknown;
+      return { run: claim.run, startedBy: claim.actor.kind === "named" || claim.actor.kind === "owner" ? claim.actor.userId ?? null : null };
     }
     const found = await this.withLiveEngine((engine) => engine.getAutomationClaim({ claimId: failure.claimId }));
     const claim = found?.claim;
-    if (claim?.automationId !== failure.automationId) return null;
-    return claim.change.kind === "message" || claim.change.kind === "button" ? claim.change.onBehalfOf : null;
+    if (claim?.automationId !== failure.automationId) return unknown;
+    const change = claim.change;
+    const startedBy = change.kind === "message" || change.kind === "button" ? change.onBehalfOf
+      : change.sharedAuthor?.kind === "named" ? change.sharedAuthor.userId
+        : change.sharedAuthor === null && change.actorKind === "human" ? change.onBehalfOf : null;
+    return { run: claim.run, startedBy };
   }
 
   /**
@@ -2323,6 +2340,13 @@ export class CollectionAutomations {
     if (this.locate(automationId) === null) await this.enqueue(() => this.indexDatasets(true));
   }
 
+  private async refreshAutomation(automationId: string): Promise<void> {
+    await this.indexAutomation(automationId);
+    const located = this.locate(automationId);
+    if (located === null) return;
+    await this.rereadFoldersOf([`${located.collectionPath}/${AUTOMATIONS_FILE_NAME}`]);
+  }
+
   /**
    * One page of an automation's runs on this computer, newest first, and
    * the `before` of the next page, or null after the oldest.
@@ -2417,6 +2441,15 @@ export class CollectionAutomations {
     };
   }
 
+  async switchedOffTarget(automationId: string): Promise<AutomationControlsTarget | null> {
+    await this.ready();
+    await this.refreshAutomation(automationId);
+    const parsed = this.locate(automationId);
+    const automation = this.definitionFor(automationId);
+    return parsed !== null && automation !== null && !automation.enabled
+      ? automationControlsTarget(automationId, parsed.collectionPath) : null;
+  }
+
   /**
    * Try again for a failed claim. The caller contract: after the engine
    * queues the claim, this wakes the drain and asks the failure notices to
@@ -2431,14 +2464,14 @@ export class CollectionAutomations {
     watch?: (claimId: string, waiting: PressWaitReason | null) => void,
   ): Promise<CollectionAutomationRetry> {
     await this.ready();
-    await this.indexAutomation(input.automationId);
+    await this.refreshAutomation(input.automationId);
     const parsed = this.locate(input.automationId);
     const automation = this.definitionFor(input.automationId);
     if (parsed === null || automation === null) {
       return { status: "refused", reason: "This automation is no longer in its Collection's automations.yaml." };
     }
     if (!automation.enabled) {
-      return { status: "refused", reason: `"${automation.name}" is switched off. Switch it on, then try again.` };
+      return { status: "switched-off", target: automationControlsTarget(input.automationId, parsed.collectionPath) };
     }
     const cannotRun = this.cannotRun(parsed.collectionPath, automation);
     if (cannotRun !== null) return { status: "refused", reason: cannotRun };
@@ -2475,6 +2508,11 @@ export class CollectionAutomations {
         ? await this.withLiveHost((ledger) => ledger.retry(input.claimId))
         : await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
       if (retried === null) throw new Error("The workspace engine is not running.");
+      for (const [key, entry] of this.pendingCircuitBreakers) {
+        if (entry.automationId === input.automationId && entry.claimId === input.claimId) this.pendingCircuitBreakers.delete(key);
+      }
+      try { await this.options.store.clearCircuitBreaker(input); }
+      catch (error) { this.options.onError("clear the retried automation's switch-off outcome", error); }
       if (startsOver) {
         const hash = definitionHash(automation);
         for (const run of (await this.options.store.runsOf(input.automationId, input.claimId)).runs) {
@@ -4556,9 +4594,9 @@ export class CollectionAutomations {
       case "failed": {
         let error = outcome.error;
         if (await this.countTimeout(claim.automationId, outcome.timedOut) >= TIMEOUTS_BEFORE_SWITCH_OFF) {
-          const note = await this.switchOff(id.collectionPath, automation, stop);
+          const note = await this.switchOff(id.collectionPath, automation, held, stop);
           if (note === null) return release;
-          error = `${error} ${note}`;
+          error = `${note} ${error}`;
         }
         return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.afterSettle() };
       }
@@ -4824,9 +4862,10 @@ export class CollectionAutomations {
    * sentence the failure notice adds, or null when a pause or close stopped
    * the run before the write.
    */
-  private async switchOff(collectionPath: string, automation: Automation, stop: AbortSignal): Promise<string | null> {
+  private async switchOff(collectionPath: string, automation: Automation, held: HeldClaim, stop: AbortSignal): Promise<string | null> {
     const path = `${collectionPath}/${AUTOMATIONS_FILE_NAME}`;
     const name = `"${automation.name}"`;
+    let switchedOff = false;
     try {
       const read = await this.options.readText(path);
       const parsed = read && !read.truncated ? parseAutomationsFile(read.text) : null;
@@ -4839,8 +4878,12 @@ export class CollectionAutomations {
         if (stop.aborted) return null;
         const automationId = this.automationIdIn(collectionPath, automation.id);
         if (written.status === "ok" && (await this.options.writeText(path, written.text, read.contentHash, automationId)).status === "written") {
+          switchedOff = true;
+          const breaker: StoredCircuitBreaker = { automationId, claimId: held.claim.claimId,
+            datasetInstance: held.source === "dataset" ? JSON.stringify([held.claim.datasetId, held.claim.hostEpoch]) : null,
+            reason: "consecutive-timeouts", collectionPath, run: held.claim.run };
+          this.pendingCircuitBreakers.set(automationFailureKey(breaker), breaker);
           this.timeouts.delete(automationId);
-          await this.options.store.saveTimeouts(this.timeouts);
           const indexed = this.files.get(collectionPath);
           if (indexed?.file.status === "read") {
             this.files.set(collectionPath, { ...indexed, file: { status: "read", entries: off(indexed.file.entries) } });
@@ -4849,14 +4892,23 @@ export class CollectionAutomations {
           const saved = this.enabledSaved?.get(collectionPath);
           if (saved?.includes(automation.id)) {
             this.enabledSaved!.set(collectionPath, saved.filter((id) => id !== automation.id));
-            await this.options.store.saveEnabledAutomations(this.enabledSaved!);
           }
-          return `dohc switched off ${name} after ${TIMEOUTS_BEFORE_SWITCH_OFF} runs in a row took too long. Fix it, then switch it on again.`;
+          const persist = async (context: string, write: () => Promise<void>) => {
+            try { await write(); } catch (error) { this.options.onError(context, error); }
+          };
+          await persist("save the automation's switch-off outcome", async () => {
+            await this.options.store.recordCircuitBreaker(breaker);
+            if (this.pendingCircuitBreakers.get(automationFailureKey(breaker)) === breaker) this.pendingCircuitBreakers.delete(automationFailureKey(breaker));
+          });
+          await persist("reset the automation's timeout count", () => this.options.store.saveTimeouts(this.timeouts));
+          if (this.enabledSaved) await persist("save the switched-on automations", () => this.options.store.saveEnabledAutomations(this.enabledSaved!));
+          return AUTOMATION_SWITCHED_OFF_BODY;
         }
       }
     } catch (error) {
       this.options.onError(`switch off automation "${automation.id}"`, error);
     }
+    if (switchedOff) return AUTOMATION_SWITCHED_OFF_BODY;
     return `${name} took too long ${TIMEOUTS_BEFORE_SWITCH_OFF} times in a row, and dohc could not switch it off. Switch it off in ${path}.`;
   }
 

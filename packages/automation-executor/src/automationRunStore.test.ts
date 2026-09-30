@@ -23,6 +23,27 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  it("keeps the structured circuit breaker outcome across restart and clears it after recovery", async () => {
+    const root = await createTestScratch("dohc-automation-breaker-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const breaker = { automationId: AUTOMATION, claimId: "third-timeout", datasetInstance: null, reason: "consecutive-timeouts" as const, collectionPath: "Tasks", run: 1 };
+    await store.recordCircuitBreaker(breaker);
+    const restarted = createAutomationRunStore(root, testMetadataDir);
+    expect(await restarted.readCircuitBreakers()).toEqual([breaker]);
+    await restarted.clearCircuitBreaker(breaker);
+    expect(await store.readCircuitBreakers()).toEqual([]);
+  });
+
+  it("keeps document and dataset circuit breaker outcomes in separate instances", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-automation-breakers-"), testMetadataDir);
+    const breaker = { automationId: AUTOMATION, claimId: "document-timeout", datasetInstance: null, reason: "consecutive-timeouts" as const, collectionPath: "Tasks", run: 1 };
+    const dataset = { ...breaker, claimId: "dataset-timeout", datasetInstance: JSON.stringify(["dataset", "epoch"]) };
+    await store.recordCircuitBreaker(breaker);
+    await store.recordCircuitBreaker(dataset);
+    expect(await store.readCircuitBreakers()).toEqual([breaker, dataset]);
+    await store.clearCircuitBreaker(breaker);
+    expect(await store.readCircuitBreakers()).toEqual([dataset]);
+  });
   it.each([7, 8])("rejects v%s history without the required kept fields", async (version) => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);

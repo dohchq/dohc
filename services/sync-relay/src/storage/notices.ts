@@ -1,4 +1,5 @@
 import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
+import { automationFailureBodyForPermission, AUTOMATION_SWITCHED_OFF_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import { createHash } from "node:crypto";
 import {
   AUTOMATION_WAKE_PREFIX,
@@ -140,7 +141,15 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
 
     sweepExpiredNotices(storage, input.recipientUserId, input.nowMs);
     makeRoom(storage, input.recipientUserId, self ? null : input.senderUserId, input.nowMs);
-    insertNotice(storage, { ...input, noticeId, placement });
+    let body = input.body;
+    if (input.kind === "automation-failed" && body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)) {
+      const workspaceId = placement.workspaceId ?? storage.getShare(placement.recipientShareId)?.workspaceId;
+      const isOwner = workspaceId !== undefined && storage.workspaceIsOwnedBy(workspaceId, input.recipientUserId);
+      const canEdit = workspaceId !== undefined && (isOwner ||
+        (input.target.path !== undefined && shareReach(storage, input.recipientUserId, true).admitting(workspaceId, input.target.path) !== null));
+      body = automationFailureBodyForPermission(body, canEdit, isOwner);
+    }
+    insertNotice(storage, { ...input, body, noticeId, placement });
   });
 }
 
@@ -674,6 +683,7 @@ function fileSidesOn(
   userId: string,
   shareId: string,
   grants: "named" | "any" = "any",
+  editable = false,
 ): ShareSelector[] | null {
   let held = false;
   const sides: ShareSelector[] = [];
@@ -688,7 +698,7 @@ function fileSidesOn(
     if (!authorized.ok) continue;
     held = true;
     const files = fileSideOf(authorized.effectiveSelector);
-    if (files?.versionId === null) sides.push(files);
+    if (files?.versionId === null && (!editable || files.access === "edit")) sides.push(files);
   }
   return held ? sides : null;
 }
@@ -713,11 +723,11 @@ function admits(sides: ShareSelector[] | null, path: string): boolean {
 
 // What `userId` reads through shares during one check. Each share's grants
 // and the list of shares received are read once, however many notices ask.
-function shareReach(storage: StorageContext, userId: string) {
+function shareReach(storage: StorageContext, userId: string, editable = false) {
   const sides = new Map<string, ShareSelector[] | null>();
   let received: ReturnType<StorageContext["listSharesReceivedBy"]> | null = null;
   const sidesOn = (shareId: string): ShareSelector[] | null => {
-    if (!sides.has(shareId)) sides.set(shareId, fileSidesOn(storage, userId, shareId));
+    if (!sides.has(shareId)) sides.set(shareId, fileSidesOn(storage, userId, shareId, "any", editable));
     return sides.get(shareId)!;
   };
   return {
