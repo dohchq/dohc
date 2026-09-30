@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DocumentMenu, FEEDBACK_MS } from "./DocumentMenu";
@@ -511,13 +511,12 @@ describe("DocumentMenu", () => {
   it("cannot be closed by a previous result's timer once a new attempt starts", async () => {
     vi.useFakeTimers();
     try {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       renderMenu();
       stubClipboard();
 
-      await user.click(screen.getByTestId("document-menu-trigger"));
+      fireEvent.click(screen.getByTestId("document-menu-trigger"));
       const written = nextClipboardWrite();
-      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      fireEvent.click(screen.getByTestId("document-menu-item-copy-markdown"));
       expect(await written).toBe(MARKDOWN);
       await act(async () => {});
       expect(screen.getByText("Copied")).toBeTruthy();
@@ -525,7 +524,7 @@ describe("DocumentMenu", () => {
       // A second copy, inside that confirmation's window. It does not settle.
       const retry = deferredWrite();
       writeText.mockImplementationOnce(() => retry.promise);
-      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      fireEvent.click(screen.getByTestId("document-menu-item-copy-markdown"));
       await act(async () => {});
 
       // Pass the previous confirmation's deadline while the retry is pending.
