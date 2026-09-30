@@ -49,6 +49,7 @@ pub(crate) struct YdocSession {
     pub(super) restore_generation: Option<i64>,
     pub(super) lineage_absent: bool,
     pub(super) first_update_pending: bool,
+    author_settlement_queued: bool,
     pub(super) last_settled_sha: Option<String>,
     /// The head sha observed at open — the settle preimage expectation
     /// until the session's first settle replaces it.
@@ -75,6 +76,7 @@ impl YdocSession {
             restore_generation: captured.restore_generation,
             lineage_absent: false,
             first_update_pending: false,
+            author_settlement_queued: false,
             last_settled_sha: None,
             open_head_sha: Some(captured.source.source_digest.clone()),
             owner_seed_source: None,
@@ -997,6 +999,7 @@ impl EngineService {
                 restore_generation: state.restore_generation,
                 lineage_absent: !state.lineage_existing,
                 first_update_pending: !state.lineage_existing,
+                author_settlement_queued: false,
                 last_settled_sha: None,
                 open_head_sha: state.head_blob_sha256,
                 owner_seed_source: state.owner_seed_source,
@@ -1158,30 +1161,75 @@ impl EngineService {
                     session.first_update_pending = false;
                     session.lineage_claim_id = append.lineage_claim_id.clone();
                 }
-                if outcome.as_ref().is_ok_and(|append| append.settlement_requested) {
+                let queue_settlement = outcome
+                    .as_ref()
+                    .is_ok_and(|append| append.settlement_requested)
+                    && lock(&sessions).get_mut(&session_id).is_some_and(|session| {
+                        if session.author_settlement_queued {
+                            return false;
+                        }
+                        session.author_settlement_queued = true;
+                        true
+                    });
+                if queue_settlement {
                     tokio::spawn(async move {
                         let _serial = settle_open.session_ops.lock().await;
-                        let pending = lock(&sessions).get(&session_id).map(|session| (
-                            session.key.clone(), session.path.clone(), session.content_kind,
-                            session.lineage_claim_id.clone(), session.open_head_sha.clone(),
-                            session.restore_generation,
-                        ));
-                        let Some((key, path, kind, lineage, head, restore)) = pending else { return; };
-                        match settle_open.actor.ydoc_settle(
-                            settle_open.root.clone(), key, path, kind, lineage, head,
-                            session_id.clone(), settle_writes, now, Arc::new(NoFaults),
-                            tokio_util::sync::CancellationToken::new(), restore,
-                        ).await {
+                        let pending = lock(&sessions).get(&session_id).map(|session| {
+                            (
+                                session.key.clone(),
+                                session.path.clone(),
+                                session.content_kind,
+                                session.lineage_claim_id.clone(),
+                                session.open_head_sha.clone(),
+                                session.restore_generation,
+                            )
+                        });
+                        let Some((key, path, kind, lineage, head, restore)) = pending else {
+                            return;
+                        };
+                        match settle_open
+                            .actor
+                            .ydoc_settle(
+                                settle_open.root.clone(),
+                                key,
+                                path,
+                                kind,
+                                lineage,
+                                head,
+                                session_id.clone(),
+                                settle_writes,
+                                now,
+                                Arc::new(NoFaults),
+                                tokio_util::sync::CancellationToken::new(),
+                                restore,
+                            )
+                            .await
+                        {
                             Ok(dohc_engine_runtime::YdocSettleOutcome::Settled(settled)) => {
-                                if settled.collection_reconcile_required { settle_open.request_collection_reconcile(); }
+                                if settled.collection_reconcile_required {
+                                    settle_open.request_collection_reconcile();
+                                }
                                 if let Some(session) = lock(&sessions).get_mut(&session_id) {
                                     session.last_settled_sha = Some(settled.sha256.clone());
                                 }
                             }
-                            Ok(dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { record_facts }) => {
-                                for facts in &record_facts { emit_record_events(&settle_events, &settle_open.workspace_id, facts); }
+                            Ok(dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending {
+                                record_facts,
+                            }) => {
+                                for facts in &record_facts {
+                                    emit_record_events(
+                                        &settle_events,
+                                        &settle_open.workspace_id,
+                                        facts,
+                                    );
+                                }
                             }
-                            Err(error) => eprintln!("engine: queued author coverage settlement failed: {error}"),
+                            Err(error) => eprintln!(
+                                "engine: queued author coverage settlement failed: {error}"
+                            ),
+                        }
+                        if let Some(session) = lock(&sessions).get_mut(&session_id) {
+                            session.author_settlement_queued = false;
                         }
                     });
                 }

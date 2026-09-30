@@ -20,7 +20,9 @@ pub enum CollabError {
     #[error("configured Y.Doc byte budget exceeded")]
     ConfiguredByteBudgetExceeded,
 
-    #[error("This file has too many pending authors. Retry saving the file, then try the edit again.")]
+    #[error(
+        "This file has too many pending authors. Retry saving the file, then try the edit again."
+    )]
     AuthorCapacity,
 
     #[error("This edit's author details exceed the supported size. Shorten the author details and try again.")]

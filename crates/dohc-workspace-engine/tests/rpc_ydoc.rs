@@ -5970,3 +5970,61 @@ async fn a_seed_declared_after_the_first_update_refuses() {
     .await;
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn author_threshold_queues_settlement_after_admission_without_explicit_settle() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle =
+        open_workspace_with_capture_mode(&transport, &scratch, "queued-authors", 1, Some("none"))
+            .await;
+    let opened = call(&transport, &handle, 2, "ydoc.open", json!({"versionId":"main","path":"authors.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
+    let doc = Ydoc::wire();
+    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"a")),"actorOriginId":"first","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
+    let raw = rusqlite::Connection::open(&db).expect("coverage fixture");
+    let folded:Vec<Value>=(0..959).map(|i|json!({"kind":"agent","agentId":if i==0 {"first".to_owned()} else {format!("folded-{i}")},"onBehalfOf":"person"})).collect();
+    raw.execute(
+        "UPDATE ydoc_docs SET pending_authors_json=?1",
+        [json!(folded).to_string()],
+    )
+    .expect("folded interval fixture");
+    drop(raw);
+    call(&transport, &handle, 4, "ydoc.recordUpdate", json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(1,"b")),"actorOriginId":"threshold","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let raw = rusqlite::Connection::open(&db).expect("inspect");
+        let covered:bool=raw.query_row("SELECT settled_update_seq=head_update_seq AND settle_prior_update_seq IS NULL AND pending_authors_json='[]' FROM ydoc_docs", [], |r|r.get(0)).expect("coverage");
+        drop(raw);
+        if covered {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "queued settlement did not complete"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("authors.txt")).expect("artifact"),
+        "ab"
+    );
+    let page = call(
+        &transport,
+        &handle,
+        5,
+        "moments.list",
+        json!({"versionId":"main","limit":10}),
+    )
+    .await;
+    assert_eq!(page["moments"].as_array().expect("moments").len(), 1);
+    assert_eq!(
+        page["moments"][0]["authors"]
+            .as_array()
+            .expect("authors")
+            .len(),
+        960
+    );
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
+}

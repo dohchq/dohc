@@ -1251,7 +1251,9 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                     && authors.iter().any(|author| {
                         matches!(
                             author,
-                            MomentAuthor::Public { .. } | MomentAuthor::Named { .. }
+                            MomentAuthor::Public { .. }
+                                | MomentAuthor::Named { .. }
+                                | MomentAuthor::Link { .. }
                         )
                     }))
         })

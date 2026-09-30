@@ -199,7 +199,7 @@ fn an_over_large_author_json_is_refused_with_its_measurements() {
             .as_str()
             .is_some_and(|field| field.len() < MAX_AUTHOR_FIELD_BYTES)
     }));
-    let author_json = serde_json::json!([author]).to_string();
+    let author_json = serde_json::json!(vec![author; 400]).to_string();
     assert!(author_json.len() > MAX_AUTHOR_JSON_BYTES);
 
     let scratch = ScratchDir::new().expect("scratch");

@@ -69,7 +69,7 @@ use sha2::{Digest, Sha256};
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
-pub const MAX_AUTHOR_JSON_BYTES: usize = 10 * 1024;
+pub const MAX_AUTHOR_JSON_BYTES: usize = 1_024 * 4_096 + 1_025;
 
 /// The in-band content cap every capped read binds into its SQL and every
 /// RPC references — one definition, so the query guard and the wire

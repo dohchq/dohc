@@ -1024,8 +1024,9 @@ fn moment_authors_are_a_nonempty_list_and_a_relay_author_stands_alone() {
         hydrate_texts(&mut store, &["content"]);
         let mut payload = absent_text_payload("refused", "object", "doc.md", "content");
         payload["authors"] = authors.clone();
-        let result = apply_moment_envelope(&mut store, &envelope(origin, 0, "ws", payload), &NoFaults)
-            .expect("refusal is recorded");
+        let result =
+            apply_moment_envelope(&mut store, &envelope(origin, 0, "ws", payload), &NoFaults)
+                .expect("refusal is recorded");
         assert!(
             matches!(result.primary, ApplyDisposition::Refused(_)),
             "{authors}"
@@ -1368,7 +1369,7 @@ fn direct_write_authors_are_refused_outside_a_collections_own_files() {
             "direct-write author may write only a Collection's own files",
             "{path} {} {}",
             op.payload["momentId"],
-            op.payload["author"]["kind"]
+            op.payload["authors"][0]["kind"]
         );
     }
     assert_eq!(

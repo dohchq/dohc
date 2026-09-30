@@ -2035,8 +2035,10 @@ pub(super) fn ydoc_record_update_on_store(
                 .and_then(|marker| marker.lineage_claim_id);
             Ok(YdocAppend {
                 settlement_requested: store.read_with(|conn| {
-                    dohc_engine_collab::author_coverage::reserved_in(conn, key)
-                        .map(|authors| authors.len() >= dohc_engine_collab::author_coverage::SETTLE_AUTHOR_THRESHOLD)
+                    dohc_engine_collab::author_coverage::reserved_in(conn, key).map(|authors| {
+                        authors.len()
+                            >= dohc_engine_collab::author_coverage::SETTLE_AUTHOR_THRESHOLD
+                    })
                 })?,
                 outcome,
                 sharing_declined,
@@ -2125,16 +2127,16 @@ fn record_file_holds_head(
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<(), RuntimeError> {
-    let (head, settled): (i64, Option<i64>) = store.read_with(|conn| {
+    let (head, settled, pending_empty): (i64, Option<i64>, bool) = store.read_with(|conn| {
         conn.query_row(
-            "SELECT head_update_seq, settled_update_seq FROM ydoc_docs \
+            "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]' FROM ydoc_docs \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![key.workspace_id, key.version_id, key.object_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(StorageError::persist_public)
     })?;
-    if settled == Some(head) {
+    if settled == Some(head) && pending_empty {
         return Ok(());
     }
     let recorded = store.write_with(faults, |tx| {
@@ -2159,13 +2161,22 @@ fn reconcile_author_coverage(
     faults: &dyn FaultInjector,
 ) -> Result<bool, RuntimeError> {
     let unresolved: bool = store.read_with(|conn| {
-        conn.query_row("SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs \
+        conn.query_row(
+            "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs \
             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0))
-            .optional().map(|value| value.unwrap_or(false)).map_err(StorageError::persist_public)
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.unwrap_or(false))
+        .map_err(StorageError::persist_public)
     })?;
-    if !unresolved { return Ok(true); }
-    match store.write_with(faults, |tx| dohc_engine_collab::author_coverage::reconcile_in(tx, key, now_ms))? {
+    if !unresolved {
+        return Ok(true);
+    }
+    match store.write_with(faults, |tx| {
+        dohc_engine_collab::author_coverage::reconcile_in(tx, key, now_ms)
+    })? {
         TxnOutcome::Committed(resolved) => Ok(resolved),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
@@ -2174,10 +2185,13 @@ fn reconcile_author_coverage(
 fn compensate_author_coverage(
     store: &mut EngineStore,
     key: &DocKey,
+    moment_id: &str,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<(), RuntimeError> {
-    match store.write_with(faults, |tx| dohc_engine_collab::author_coverage::compensate_in(tx, key, now_ms))? {
+    match store.write_with(faults, |tx| {
+        dohc_engine_collab::author_coverage::compensate_in(tx, key, Some(moment_id), now_ms)
+    })? {
         TxnOutcome::Committed(()) => Ok(()),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
@@ -2566,7 +2580,13 @@ pub(super) fn ydoc_settle_on_store(
                 }
                 JobOutcome::Conflict | JobOutcome::Superseded => {
                     self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
-                    compensate_author_coverage(store, key, now_ms, faults)?;
+                    compensate_author_coverage(
+                        store,
+                        key,
+                        &current.latest_moment_id,
+                        now_ms,
+                        faults,
+                    )?;
                     return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
                 }
                 JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
@@ -2574,7 +2594,10 @@ pub(super) fn ydoc_settle_on_store(
         }
     }
     if !reconcile_author_coverage(store, key, now_ms, faults)? {
-        return Err(DomainError::InvalidInput { reason: "settlement-materialization-pending" }.into());
+        return Err(DomainError::InvalidInput {
+            reason: "settlement-materialization-pending",
+        }
+        .into());
     }
     let projected_sha = dohc_engine_storage::hex_sha256(
         settled_content_override
@@ -2605,8 +2628,10 @@ pub(super) fn ydoc_settle_on_store(
     // materialization job — the TS driver only settles when the projection
     // differs. Answer with the current head instead (its pending job, if
     // any, was replayed above).
-    if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
-        == Some(projected_sha.as_str()) || probe_sha.as_deref() == Some(projected_sha.as_str())
+    if (dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+        == Some(projected_sha.as_str())
+        || probe_sha.as_deref() == Some(projected_sha.as_str()))
+        && matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
         if matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
@@ -2910,7 +2935,7 @@ pub(super) fn ydoc_settle_on_store(
             materialized = false;
         }
         JobOutcome::Conflict | JobOutcome::Superseded => {
-            compensate_author_coverage(store, key, now_ms, faults)?;
+            compensate_author_coverage(store, key, &write.moment.moment_id, now_ms, faults)?;
             self_writes.retract(
                 &key.workspace_id,
                 &write.snapshot.path,

@@ -823,13 +823,24 @@ pub(super) fn replay_pending_materializations(
                                     .map_err(StorageError::corrupt_public)
                             })?;
                         if let Some((workspace_id, version_id, object_id)) = coords {
-                            store.write_with(faults, |transaction| {
+                            let compensated = store.write_with(faults, |transaction| {
                                 dohc_engine_collab::author_coverage::compensate_in(
                                     transaction,
-                                    &dohc_engine_collab::DocKey { workspace_id, version_id, object_id },
+                                    &dohc_engine_collab::DocKey {
+                                        workspace_id,
+                                        version_id,
+                                        object_id,
+                                    },
+                                    Some(moment_id),
                                     now_ms,
                                 )
                             })?;
+                            if matches!(
+                                compensated,
+                                dohc_engine_storage::TxnOutcome::Crashed { .. }
+                            ) {
+                                return Err(RuntimeError::OperationCrashed);
+                            }
                         }
                     }
                 }
@@ -1016,9 +1027,18 @@ fn reconcile_settlement_attempts(
         conn.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND settle_prior_update_seq IS NOT NULL)",
             [workspace_id], |row| row.get(0)).map_err(StorageError::persist_public)
     })?;
-    if unresolved && matches!(store.write_with(faults, |tx| {
-        dohc_engine_collab::author_coverage::reconcile_workspace_in(tx, workspace_id, now_ms)
-    })?, dohc_engine_storage::TxnOutcome::Crashed { .. }) {
+    if unresolved
+        && matches!(
+            store.write_with(faults, |tx| {
+                dohc_engine_collab::author_coverage::reconcile_workspace_in(
+                    tx,
+                    workspace_id,
+                    now_ms,
+                )
+            })?,
+            dohc_engine_storage::TxnOutcome::Crashed { .. }
+        )
+    {
         return Err(RuntimeError::OperationCrashed);
     }
     Ok(())

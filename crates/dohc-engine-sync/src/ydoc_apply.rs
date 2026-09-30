@@ -2034,6 +2034,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         attribution,
     } = author;
     let key = &complete.key;
+    require_resolved_local_settlement(tx, key, now_ms)?;
     ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
     require_unfenced_lineage(tx, key)?;
     let Some((marker, doc)) = complete.state.as_ref() else {
@@ -3207,6 +3208,30 @@ fn map_projection_error(
 /// the same admission transaction, so `versionedText.read`, search, and the
 /// disk pipeline advance with the relay cursor instead of trailing it until
 /// someone manually opens and settles the doc.
+fn require_resolved_local_settlement(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let unresolved: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 \
+         AND object_id=?3 AND settle_prior_update_seq IS NOT NULL)",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if unresolved
+        && !dohc_engine_collab::author_coverage::reconcile_in(tx, key, now_ms)
+            .map_err(map_collab_hard_error)?
+    {
+        return Err(SyncError::RetryableState {
+            reason: "settlement-materialization-pending",
+        });
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn project_and_write_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -3219,6 +3244,7 @@ pub fn project_and_write_in_tx(
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
+    require_resolved_local_settlement(tx, key, now_ms)?;
     let current = validate_ydoc_identity(tx, key, path)?;
     if content_kind == dohc_engine_collab::ContentKind::Richdoc {
         dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(

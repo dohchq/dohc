@@ -2823,7 +2823,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 24,
         id: "v2-materialization-text-blobs",
         sql: V2_MATERIALIZATION_TEXT_BLOBS_DDL,
-    sets_user_version: None,
+        sets_user_version: None,
     },
     // Ordinal 25 belongs to PR #1484.
     Migration {

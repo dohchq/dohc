@@ -24,7 +24,7 @@ fn text(key: &str, path: &str, body: &str) -> WriteText {
         metadata_origin: "api".into(),
         metadata_summary: None,
         metadata_correlation_id: Some("batch".into()),
-        author_json: Some(r#"{"kind":"agent","agentId":"agent","onBehalfOf":"local"}"#.into()),
+        author_json: Some(r#"[{"kind":"agent","agentId":"agent","onBehalfOf":"local"}]"#.into()),
         now_ms: 10,
         request_id: Some(key.into()),
     }
