@@ -21,10 +21,8 @@ import type {
   ChatFileMentionRecord,
   ChatThreadRecord,
   DesktopUserSettingsResult,
-  EngineMomentRecord,
   EngineStoreRefusal,
   ImportWorkspaceFilesResult,
-  ListEngineMomentsResult,
   MyShareChangeRow,
   RefreshSharedViewResult,
   RebuildEngineStoreResult,
@@ -98,6 +96,7 @@ import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
+import { useHistoryPage } from "./shell/useHistoryPage";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
   fileOpenStartMark,
@@ -313,15 +312,6 @@ const LazyRelayShareDialog = lazy(() =>
   import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
 );
 const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
-// A history read already spent one second in the daemon's capture-flush
-// ladder before it can answer `updating`. Four renderer retries give that
-// flush another 1.85 seconds of breathing room without leaving the panel in
-// an unbounded spinner. After this ladder, the inline Try again remains.
-const HISTORY_UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
-
-function waitForHistoryRetry(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
 
 // How often an open workspace re-reads the share state only the relay knows:
 // a recipient's mounts, and a granter's waiting changes. Slow on purpose —
@@ -1433,55 +1423,27 @@ export function DesktopWorkspaceShell(props: {
     if (!workspaceIsReady) return;
     void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error, () => { void refreshDatasets(); }));
   }, [workspaceIsReady, refreshDatasets, reportShellError]);
-  // Engine history page state: newest-first moments,
-  // the keyset cursor for older pages, and the monotonic latest order used
-  // as the open-file refresh key.
-  const [engineHistory, setEngineHistory] = useState<{
-    moments: EngineMomentRecord[];
-    nextBeforeMomentOrder: number | null;
-    latestMomentOrder: number;
-    protectedTruncated: boolean;
-  } | null>(null);
-  const [engineHistoryLoadingMore, setEngineHistoryLoadingMore] = useState(false);
-  // Why there is no page. A null timeline is not "no changes": it is also a
-  // first read still in flight, a read that failed, and a page dropped as
-  // stale and asked again. "No changes yet" is an assertion about the
-  // WORKSPACE, so only a read that answered may reach it — this says
-  // whether the newest read answered at all.
-  const [engineHistoryReadState, setEngineHistoryReadState] = useState<
-    "loading" | "failed" | "updating"
-  >("loading");
-  // The newest history refresh ISSUED. Only it may call the surface
-  // unloadable: an older read failing while a newer one is still in flight
-  // has settled nothing. Kept apart from the committed-page watermark on
-  // purpose — a failure must not supersede the page lane, because an older
-  // read that still succeeds is the only answer anyone has.
-  const newestHistoryRefresh = useRef(0);
-  // Liveness token for the engine history loads (bumped on unmount): a slow
-  // response for one workspace must never repaint another.
+  // One issue counter for every engine read the shell orders: the history
+  // page, the status lanes, the workspace open, the agent observation, and
+  // the version callbacks. Bumped on unmount, so a slow response for one
+  // workspace can never repaint another.
   const engineHistoryToken = useRef(0);
-  // The newest request whose answer is displayed — the same commit-time
-  // watermark the file listing above uses, for the same reason. A request that
-  // is merely in flight has answered nothing, and one that fails never will,
-  // so superseding on ISSUE threw away the only answer there was and left the
-  // timeline stale until some later event refreshed it. Only an answer older
-  // than what is already displayed is dropped.
-  const committedEngineHistoryToken = useRef(0);
-  // A pagination in flight, or 0. Its page is fetched from a cursor into the
-  // displayed timeline, so an older refresh must not reset the timeline under
-  // it — the append would land against a cursor that no longer describes what
-  // is on screen. Cleared when the pagination settles, so a failed one stops
-  // holding anything back.
-  const pendingEngineHistoryPage = useRef(0);
-  // A refresh that was blocked by that pagination, held until it settles.
-  // Blocked is not refuted: the pagination may fail, and then this is again
-  // the only answer anyone has. Dropping it at resolve time would be the very
-  // bug the watermark exists to fix, one interleaving over.
-  const blockedEngineHistoryRefresh = useRef<{
-    token: number;
-    activeVersionId: string;
-    commit: () => void;
-  } | null>(null);
+  const markHistoryReady = useCallback(
+    () => markCurrentSwitchPhase("history-ready"),
+    [markCurrentSwitchPhase],
+  );
+  // The history page owns its admission rules: version staleness, a
+  // pagination that may hold a refresh, and the updating retry ladder. The
+  // shell issues its tokens and reports its failures.
+  const {
+    page: engineHistory,
+    loadingMore: engineHistoryLoadingMore,
+    readState: engineHistoryReadState,
+    refresh: refreshHistoryPage,
+    supersede: supersedeHistoryPage,
+    loadMore: loadMoreEngineHistory,
+    observeVersion: observeEngineVersion,
+  } = useHistoryPage(engineHistoryToken, workspaceId, markHistoryReady);
   // The sync, agent, and try snapshots ride the refresh response but are not
   // the timeline: no pagination competes for them, so they apply as soon as
   // they arrive. Each is its own lane with its own watermark, because a local
@@ -1491,8 +1453,7 @@ export function DesktopWorkspaceShell(props: {
   //
   // Each lane owns its state, so a write that names no request cannot be
   // written at all. The history page is not one of these: it carries
-  // its own admission rules — version staleness, a pagination that may hold it
-  // — and the refresh returns it, so it is judged where those rules live.
+  // its own admission rules, so it is judged where those rules live.
   const [syncStatus, syncStatusLane] = useSnapshotLane<SyncStatusResult | null>(
     engineHistoryToken,
     null,
@@ -1520,73 +1481,6 @@ export function DesktopWorkspaceShell(props: {
   const [tryState, tryStateLane] = useSnapshotLane<TryInVersionRunState | null>(
     engineHistoryToken,
     null,
-  );
-  // The version the displayed timeline describes, so a pagination can prove
-  // its page extends the same timeline it is appending to.
-  const committedEngineVersionId = useRef<string | null>(null);
-  // The newest authoritative statement of which version is active, and the
-  // request that carried it. The engine stamps every history answer with the
-  // version it served, and a version-state change asks for it directly; both
-  // are the same kind of fact, ordered by the same issue counter, so the newer
-  // one wins. The active version is tracked here rather than inferred from the
-  // displayed page because a user can switch versions before the first page
-  // commits — then there is no displayed version to name, and the old-version
-  // answer used to paint over the version they had switched to.
-  const activeEngineVersion = useRef<{ token: number; versionId: string | null }>({
-    token: 0,
-    versionId: null,
-  });
-  const noteActiveEngineVersion = useCallback((token: number, versionId: string) => {
-    if (token > activeEngineVersion.current.token) {
-      activeEngineVersion.current = { token, versionId };
-    }
-  }, []);
-  // Staleness is one question: does this answer describe a version that a newer
-  // statement has already replaced? An answer issued after that statement can
-  // never be stale — the engine served it after the switch — which is what
-  // keeps a valid new-version refresh that raced the switch event.
-  const engineHistoryAnswerIsStale = useCallback(
-    (token: number, activeVersionId: string) =>
-      activeVersionId !== activeEngineVersion.current.versionId &&
-      token < activeEngineVersion.current.token,
-    [],
-  );
-  // The retraction both version paths need. A version statement can arrive
-  // after the page it contradicts is already on screen, and the guard only
-  // stops a bad answer from being admitted — nothing takes back a page
-  // admitted legitimately before the switch. A committed page the newest
-  // statement contradicts describes a timeline nobody is on, so drop it and
-  // let the surface say it does not know. Reports whether it dropped, because
-  // the caller that has no refresh already running owes one. Returns false
-  // after an unmount by construction: the committed watermark then sits at
-  // the bumped issue counter, which no statement is newer than.
-  const dropContradictedEngineHistory = useCallback(() => {
-    if (
-      committedEngineVersionId.current === null ||
-      !engineHistoryAnswerIsStale(
-        committedEngineHistoryToken.current,
-        committedEngineVersionId.current,
-      )
-    ) {
-      return false;
-    }
-    committedEngineVersionId.current = null;
-    setEngineHistory(null);
-    return true;
-  }, [engineHistoryAnswerIsStale]);
-  useEffect(
-    () => () => {
-      // Unmount invalidates every load in flight on the history page. Hygiene,
-      // not a repaint guard: the shell is keyed by workspace, so a late
-      // response has no mounted state to reach. It keeps the invalidation true
-      // to what it claims, now that the issue counter alone no longer stops a
-      // response from committing. The snapshot lanes invalidate themselves.
-      engineHistoryToken.current += 1;
-      committedEngineHistoryToken.current = engineHistoryToken.current;
-      newestHistoryRefresh.current = engineHistoryToken.current;
-      blockedEngineHistoryRefresh.current = null;
-    },
-    [],
   );
   // Which surface the right-hand Chats panel shows (all chats vs the active
   // file's). Runtime-only — not persisted.
@@ -1657,16 +1551,7 @@ export function DesktopWorkspaceShell(props: {
     // after a failed capture build the renderer's own read still
     // says engine-on, and every listEngineMoments call would error.
     const token = ++engineHistoryToken.current;
-    newestHistoryRefresh.current = token;
     if (!isShareView && !statusSaysNoRecorder(syncStatusLane.latest())) {
-      // Latest-COMMITTED-wins: each request advances the token, and an answer
-      // displays only if it is newer than the answer already displayed, so an
-      // older response can never overwrite newer moments or move
-      // latestMomentOrder backward (shared with loadMoreEngineHistory).
-      // A read is on the way, so the surface does not know yet — which is a
-      // different thing from knowing the last read failed. Saying so here is
-      // also what makes the retry control show that it is working.
-      setEngineHistoryReadState("loading");
       // Four reads ride one refresh, and they answer four different
       // questions. One batch made every answer hostage to the worst of them:
       // a try-state failure discarded a history page the engine had already
@@ -1675,36 +1560,15 @@ export function DesktopWorkspaceShell(props: {
       // sibling that never settles would hold a failed history read in
       // "Loading history..." forever, with no failure and no Try again.
       // So the reads are issued together and handled apart: each lane
-      // commits its own answer when that answer arrives.
+      // commits its own answer when that answer arrives. The page read goes
+      // out first, and only its own failure is this refresh's failure.
       //
       // The snapshots need no ordering against the page: nothing can block
       // them, and holding them for a later commit would republish a world the
       // user has already acted on — a dismissed review card, most visibly.
       // Each is handed whole to the lane rule, which judges both ways it can
       // settle.
-      const pageRead = (async () => {
-        for (
-          let attempt = 0;
-          attempt <= HISTORY_UPDATING_RETRY_DELAYS_MS.length;
-          attempt += 1
-        ) {
-          const response = await bridge().listEngineMoments({
-            workspaceId,
-            limit: 200,
-          });
-          if (!("status" in response)) return response;
-          if (
-            attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length ||
-            token !== newestHistoryRefresh.current
-          ) {
-            return response;
-          }
-          await waitForHistoryRetry(HISTORY_UPDATING_RETRY_DELAYS_MS[attempt]!);
-          if (token !== newestHistoryRefresh.current) return response;
-        }
-        // The loop's inclusive bound always returns on its final attempt.
-        throw new Error("History retry ladder ended without an answer.");
-      })();
+      const pageRead = refreshHistoryPage(token);
       // Asking again IS this refresh: it re-reads all four, so the lane that
       // failed is read again. Same control the History surface offers for its
       // own read, and the same one the caller runs on any activity.
@@ -1738,70 +1602,15 @@ export function DesktopWorkspaceShell(props: {
             askAgain,
           ),
       );
-      let response: Awaited<typeof pageRead>;
-      try {
-        response = await pageRead;
-      } catch (error) {
-        // A failure is an answer too — about why the surface is blank, not
-        // about what the timeline holds. Only the newest read may give it:
-        // an older one failing while a newer is still in flight has settled
-        // nothing, and after unmount the counter belongs to no read at all.
-        if (token !== newestHistoryRefresh.current) return;
-        setEngineHistoryReadState("failed");
-        throw error;
-      }
-      if ("status" in response) {
-        if (token === newestHistoryRefresh.current) {
-          setEngineHistoryReadState("updating");
-        }
-        return "waiting" as const;
-      }
-      const page: ListEngineMomentsResult = response;
-      if (token <= committedEngineHistoryToken.current) return;
-      // An answer describing the version the user left is not late — it is
-      // about somewhere else.
-      if (engineHistoryAnswerIsStale(token, page.activeVersionId)) return;
-      noteActiveEngineVersion(token, page.activeVersionId);
-      const commit = () => {
-        committedEngineHistoryToken.current = token;
-        committedEngineVersionId.current = page.activeVersionId;
-        // A refresh returns to the newest page; older pages reload on demand,
-        // so any load-more it supersedes is over.
-        setEngineHistoryLoadingMore(false);
-        setEngineHistory({
-          moments: page.moments,
-          nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-          latestMomentOrder: page.latestMomentOrder,
-          protectedTruncated: page.protectedTruncated,
-        });
-        // Readiness belongs to the page that actually commits. A newer
-        // activity refresh can beat the workspace-open refresh; marking only
-        // the caller's promise then left the profiler waiting even though the
-        // current History page was already visible.
-        markCurrentSwitchPhase("history-ready");
-      };
-      // Blocked by a newer pagination: hold this answer instead of throwing it
-      // away, and let the pagination's settlement decide (keeping the newest
-      // blocked answer, since an older one could never win afterwards).
-      if (token < pendingEngineHistoryPage.current) {
-        const held = blockedEngineHistoryRefresh.current;
-        if (!held || token > held.token) {
-          blockedEngineHistoryRefresh.current = {
-            token,
-            activeVersionId: page.activeVersionId,
-            commit,
-          };
-        }
-        return;
-      }
-      commit();
-      return "ready" as const;
+      return pageRead;
     }
     // No history source exists: only status and agent state refresh. They ride the same issue order as
     // the engine branch's reads: this refresh answers the very lanes the
     // settings panel and a second refresh also write, and an untimed write
     // ranked by arrival undid both — a run the user had just started, and a
-    // newer status.
+    // newer status. The page reads this refresh supersedes still learn of it,
+    // so their failures stay quiet and their retries stop.
+    supersedeHistoryPage(token);
     const statusRead = bridge().getSyncStatus({ workspaceId });
     const agentRead = readAgentStatusForHistory();
     const askAgain = () => {
@@ -1825,107 +1634,21 @@ export function DesktopWorkspaceShell(props: {
     );
     const settled = await Promise.allSettled([statusRead, agentRead]);
     if (settled.some((lane) => lane.status === "fulfilled")) {
-      markCurrentSwitchPhase("history-ready");
+      markHistoryReady();
     }
-    return "ready" as const;
   }, [
     agentActiveLane,
     isShareView,
-    markCurrentSwitchPhase,
+    markHistoryReady,
     readAgentStatusForHistory,
+    refreshHistoryPage,
     reportLaneFailure,
     reportShellError,
+    supersedeHistoryPage,
     syncStatusLane,
     tryStateLane,
     workspaceId,
   ]);
-
-  const loadMoreEngineHistory = useCallback(async () => {
-    const cursor = engineHistory?.nextBeforeMomentOrder;
-    if (cursor === null || cursor === undefined || engineHistoryLoadingMore) return;
-    // Same rule as refreshHistory, in both directions: overlapping responses
-    // are ordered by which one is newer, never by which one was issued last,
-    // so they can neither interleave into a mixed timeline nor discard each
-    // other for merely existing.
-    const token = ++engineHistoryToken.current;
-    // The version this page belongs to: the one the displayed timeline shows,
-    // because that is the timeline the cursor points into.
-    const pageVersionId = committedEngineVersionId.current;
-    pendingEngineHistoryPage.current = token;
-    setEngineHistoryLoadingMore(true);
-    try {
-      const page = await bridge().listEngineMoments({
-        workspaceId,
-        limit: 200,
-        beforeMomentOrder: cursor,
-      });
-      // The displayed page remains the honest last answer while capture is
-      // settling. Releasing the loading button below gives the user a bounded
-      // retry; this expected progress result is never a global error.
-      if ("status" in page) return;
-      // The committed-answer rule, applied to this page as well: display it
-      // unless a newer answer already took the timeline. Superseding on issue
-      // here let a newer refresh that merely failed throw this page away.
-      // Same two questions as the refresh, plus one an append owes: the page
-      // must describe the same version as the timeline it extends.
-      const stale = engineHistoryAnswerIsStale(token, page.activeVersionId);
-      if (!stale) noteActiveEngineVersion(token, page.activeVersionId);
-      if (
-        token > committedEngineHistoryToken.current &&
-        !stale &&
-        page.activeVersionId === committedEngineVersionId.current
-      ) {
-        committedEngineHistoryToken.current = token;
-        setEngineHistory((current) =>
-          current
-            ? {
-                moments: [...current.moments, ...page.moments],
-                nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-                latestMomentOrder: Math.max(
-                  current.latestMomentOrder,
-                  page.latestMomentOrder,
-                ),
-                protectedTruncated:
-                  current.protectedTruncated || page.protectedTruncated,
-              }
-            : current,
-        );
-      }
-    } catch (error) {
-      // Two ways this failure is about a timeline nobody is looking at: a
-      // newer answer already replaced what the page was going to extend, or
-      // the user left the version the page belongs to. A failure IS an answer
-      // for the purposes of the version rule — it answers about somewhere
-      // else — and the switch does not move the committed watermark, so
-      // without this the user gets a banner for a timeline they have left.
-      const forALeftVersion =
-        pageVersionId !== null && engineHistoryAnswerIsStale(token, pageVersionId);
-      if (token > committedEngineHistoryToken.current && !forALeftVersion) {
-        reportShellError("Could not load earlier history.", error);
-      }
-    } finally {
-      // Settlement, not success, releases what this pagination held: the
-      // pending slot, the refresh it blocked, and the button. A pagination
-      // superseded by a newer one releases nothing — that newer one owns all
-      // three now, so nothing is left stuck either way. The held answer is
-      // judged here, by the same two questions every answer faces, so a
-      // version switch in between drops it and a merge that never changed the
-      // version does not.
-      if (pendingEngineHistoryPage.current === token) {
-        pendingEngineHistoryPage.current = 0;
-        const held = blockedEngineHistoryRefresh.current;
-        blockedEngineHistoryRefresh.current = null;
-        if (
-          held &&
-          held.token > committedEngineHistoryToken.current &&
-          !engineHistoryAnswerIsStale(held.token, held.activeVersionId)
-        ) {
-          held.commit();
-        }
-        setEngineHistoryLoadingMore(false);
-      }
-    }
-  }, [engineHistory, engineHistoryLoadingMore, reportShellError, workspaceId]);
 
   // Whether this workspace has engine-backed surfaces at all: history and
   // versions. A shared view renders neither: its open deliberately installed
@@ -1994,14 +1717,13 @@ export function DesktopWorkspaceShell(props: {
       // settles, not thrown away on the chance that a switch happened.
       const versionToken = ++engineHistoryToken.current;
       if (activeVersionId !== undefined) {
-        noteActiveEngineVersion(versionToken, activeVersionId);
         // The page on screen belongs to the version the user just left, and
         // the refresh below is the only thing that would replace it — so a
         // refresh that fails used to leave the timeline naming a version
-        // nobody is on. Retract it here instead. A merge or a
+        // nobody is on. The observation retracts it instead. A merge or a
         // conflict resolution names the version the page already describes,
         // so nothing is dropped for them.
-        dropContradictedEngineHistory();
+        observeEngineVersion(versionToken, activeVersionId);
       } else if (
         // The capture gate again, off the mirrors for the same reason
         // refreshHistory uses them: this callback also runs from the
@@ -2022,7 +1744,6 @@ export function DesktopWorkspaceShell(props: {
         void bridge()
           .listWorkspaceVersions({ workspaceId })
           .then(({ activeVersionId: active }) => {
-            noteActiveEngineVersion(versionToken, active);
             // A boundary that arrives after the answers it must judge is not
             // a boundary: while this lookup was in flight, an answer
             // issued before it could commit against a guard that still named
@@ -2032,7 +1753,7 @@ export function DesktopWorkspaceShell(props: {
             // after the refresh below ran, so a drop here owes its own
             // re-fetch — the named branch's refresh is already in flight and
             // owes nothing.
-            if (dropContradictedEngineHistory()) {
+            if (observeEngineVersion(versionToken, active)) {
               void refreshHistory().catch((error) =>
                 reportShellError("Could not refresh history.", error),
               );
@@ -2048,9 +1769,8 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [
-      dropContradictedEngineHistory,
       isShareView,
-      noteActiveEngineVersion,
+      observeEngineVersion,
       refreshFiles,
       refreshHistory,
       reportShellError,
@@ -4265,7 +3985,11 @@ export function DesktopWorkspaceShell(props: {
         hasMore={engineHistory.nextBeforeMomentOrder != null}
         loadingMore={engineHistoryLoadingMore}
         protectedTruncated={engineHistory.protectedTruncated}
-        onLoadMore={() => void loadMoreEngineHistory()}
+        onLoadMore={() =>
+          void loadMoreEngineHistory().catch((error) =>
+            reportShellError("Could not load earlier history.", error),
+          )
+        }
         onOpenMoment={openMomentDiffTab}
       />
     ) : engineHistoryReadState === "failed" ||
