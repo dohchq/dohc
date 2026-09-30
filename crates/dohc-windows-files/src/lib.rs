@@ -1,7 +1,6 @@
 //! Safe exclusive Windows file rename.
 
 #[cfg(windows)]
-#[allow(unsafe_code)]
 /// Move a file without replacing the destination or copying across volumes.
 pub fn move_file_no_replace(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
     use std::io::ErrorKind;
@@ -23,7 +22,9 @@ pub fn move_file_no_replace(from: &std::path::Path, to: &std::path::Path) -> std
     let to = wide(to)?;
     // SAFETY: Both buffers remain alive and end with one null. The API
     // reads these paths synchronously and retains neither pointer.
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+    #[allow(unsafe_code)]
+    let moved = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) };
+    if moved == 0 {
         Err(std::io::Error::last_os_error())
     } else {
         Ok(())
