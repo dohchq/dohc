@@ -238,8 +238,14 @@ describe("history page pagination", () => {
     expect(listEngineMoments).toHaveBeenCalledTimes(1);
 
     await committed(it0, page("again", { nextBeforeMomentOrder: 1 }));
-    const first = it0.loadMore();
-    const second = it0.loadMore();
+    // Both clicks land before React renders the first one's loading state,
+    // so the suppression has to be synchronous.
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = it0.hook().loadMore();
+      second = it0.hook().loadMore();
+    });
     expect(listEngineMoments).toHaveBeenCalledTimes(3);
     await settle(reads[2]!, page("earlier"));
     await Promise.all([first, second]);
