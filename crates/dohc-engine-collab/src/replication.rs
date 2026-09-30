@@ -26,8 +26,8 @@ use crate::doc_cache::{GateBaseSource, RemoteAppendProbe, ServedGateBase};
 use dohc_engine_domain::ChangeAttribution;
 
 use crate::durable::{
-    CompactOutcome, Regime, append_validated_and_index_update, blob_seq_in_log, load_doc_in,
-    maybe_compact, read_marker_in, validate_update_bytes,
+    append_validated_and_index_update, blob_seq_in_log, load_doc_in, maybe_compact, read_marker_in,
+    validate_update_bytes, CompactOutcome, Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
@@ -433,7 +433,7 @@ mod dedupe_hoist_tests {
 
     use super::*;
     use crate::durable::{
-        CompactOutcome, LocalAppend, MarkerCreation, claim_base, record_local_update,
+        claim_base, record_local_update, CompactOutcome, LocalAppend, MarkerCreation,
     };
     use crate::replay_parity::with_armed_gate;
     use crate::ydoc::{ContentKind, Ydoc};

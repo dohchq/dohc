@@ -2,8 +2,8 @@ mod common;
 
 use common::*;
 use dohc_engine_collab::{
-    CollabError, ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
-    author_coverage, maybe_compact, record_local_update,
+    author_coverage, maybe_compact, record_local_update, CollabError, ContentKind, LocalAppend,
+    MarkerCreation, Regime, WriterDocCache, Ydoc,
 };
 use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
 use dohc_engine_storage::{FaultPoint, NoFaults, TxnOutcome};
@@ -55,12 +55,11 @@ fn declared_seed_is_not_an_author_and_index_tracks_fold_reset_and_consumption() 
     )
     .expect("declared seed");
     assert_eq!(indexed_count(&ts.store, &key), 0);
-    assert!(
-        ts.store
-            .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
-            .expect("seed coverage")
-            .is_empty()
-    );
+    assert!(ts
+        .store
+        .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+        .expect("seed coverage")
+        .is_empty());
     record(
         &mut ts.store,
         &mut ts.cache,
@@ -367,12 +366,11 @@ fn winning_base_replacement_clears_compacted_losing_authors() {
         outcome,
         TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
     ));
-    assert!(
-        ts.store
-            .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
-            .expect("after")
-            .is_empty()
-    );
+    assert!(ts
+        .store
+        .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+        .expect("after")
+        .is_empty());
     assert_eq!(
         dohc_engine_collab::load_persisted(&ts.store, &key)
             .expect("load")
@@ -416,12 +414,11 @@ fn human_automation_context_is_not_enabled_as_settlement_authorship() {
     .expect("main automation context remains admissible");
     assert!(matches!(admitted, TxnOutcome::Committed(outcome) if !outcome.settlement_requested));
     maybe_compact(&mut ts.store, &key, 0, &NoFaults, 3).expect("fold");
-    assert!(
-        ts.store
-            .read_with(|conn| author_coverage::reserved_in(conn, &key))
-            .expect("coverage")
-            .is_empty()
-    );
+    assert!(ts
+        .store
+        .read_with(|conn| author_coverage::reserved_in(conn, &key))
+        .expect("coverage")
+        .is_empty());
 }
 
 #[test]
@@ -607,9 +604,9 @@ fn retained_rebase_refresh_discards_identities_from_covered_raw_rows() {
         })
         .expect("retained rebase");
     ts.store.read_with(|conn| {
-        let count:usize=conn.query_row("SELECT COUNT(*) FROM ydoc_author_identities WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        let count:i64=conn.query_row("SELECT COUNT(*) FROM ydoc_author_identities WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             rusqlite::params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(dohc_engine_storage::StorageError::persist_public)?;
-        assert_eq!(count,author_coverage::reserved_in(conn,&key)?.len());
+        assert_eq!(count,author_coverage::reserved_in(conn,&key)?.len() as i64);
         assert_eq!(count,1);
         Ok::<_,CollabError>(())
     }).expect("index matches retained interval");

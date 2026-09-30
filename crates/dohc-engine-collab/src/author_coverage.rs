@@ -3,7 +3,7 @@
 use crate::{CollabError, DocKey};
 use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
 use dohc_engine_storage::StorageError;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -204,7 +204,7 @@ pub fn check_admission_in(
         .keys()
         .next()
         .ok_or_else(|| corrupt("attribution has no identity"))?;
-    let (known, count, unresolved): (bool, usize, bool) = conn
+    let (known, count, unresolved): (bool, u64, bool) = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM ydoc_author_identities a WHERE a.workspace_id=?1 \
          AND a.version_id=?2 AND a.object_id=?3 AND a.identity=?4), \
@@ -215,10 +215,10 @@ pub fn check_admission_in(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(sql)?;
-    if !known && count >= MAX_INTERVAL_AUTHORS {
+    if !known && count >= MAX_INTERVAL_AUTHORS as u64 {
         return Err(CollabError::AuthorCapacity);
     }
-    Ok(!unresolved && count + usize::from(!known) >= SETTLE_AUTHOR_THRESHOLD)
+    Ok(!unresolved && count + u64::from(!known) >= SETTLE_AUTHOR_THRESHOLD as u64)
 }
 
 /// Rebuild identities after retained raw rows have been removed.

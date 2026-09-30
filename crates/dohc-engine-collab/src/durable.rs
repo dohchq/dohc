@@ -17,16 +17,16 @@
 
 use dohc_engine_domain::ChangeAttribution;
 use dohc_engine_storage::{
-    EngineStore, FaultInjector, MaterializationJobSpec, Preimage, TxnOutcome, enqueue_job,
-    put_binary_blob, put_binary_blob_with_sha,
+    enqueue_job, put_binary_blob, put_binary_blob_with_sha, EngineStore, FaultInjector,
+    MaterializationJobSpec, Preimage, TxnOutcome,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::DocKey;
 use crate::doc_cache::{GateBaseProbe, GateBaseSource, ServedGateBase, WriterDocCache};
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
 use crate::ydoc::{ContentKind, Projection, SuccessorBase, Ydoc};
+use crate::DocKey;
 
 /// Which durability regime a lineage lives under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3058,8 +3058,8 @@ mod successor_validation_tests {
 
     use super::*;
     use crate::{
-        SceneAsset, SuccessorIdentity, SuccessorIdentityInput, encode_scene_asset_record,
-        import_portable_scene, scene_asset_ref,
+        encode_scene_asset_record, import_portable_scene, scene_asset_ref, SceneAsset,
+        SuccessorIdentity, SuccessorIdentityInput,
     };
 
     fn canonical_image_scene(key: &DocKey) -> String {

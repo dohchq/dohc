@@ -56,30 +56,54 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
     let mut authors = dohc_engine_collab::author_coverage::Authors::default();
     for index in 0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS {
         let mut entry = json!({"kind":"agent","agentId":format!("author-{index}"),"name":""});
-        let padding = dohc_engine_collab::author_coverage::MAX_AUTHOR_ENTRY_BYTES
-            - entry.to_string().len();
+        let padding =
+            dohc_engine_collab::author_coverage::MAX_AUTHOR_ENTRY_BYTES - entry.to_string().len();
         // Escaped quotes exercise the full encoded entry budget.
-        entry["name"] = Value::from(format!("{}{}", "\"".repeat(padding / 2), "x".repeat(padding % 2)));
-        assert_eq!(entry.to_string().len(), dohc_engine_collab::author_coverage::MAX_AUTHOR_ENTRY_BYTES);
-        authors.union_json(&json!([entry]).to_string()).expect("bounded entry");
+        entry["name"] = Value::from(format!(
+            "{}{}",
+            "\"".repeat(padding / 2),
+            "x".repeat(padding % 2)
+        ));
+        assert_eq!(
+            entry.to_string().len(),
+            dohc_engine_collab::author_coverage::MAX_AUTHOR_ENTRY_BYTES
+        );
+        authors
+            .union_json(&json!([entry]).to_string())
+            .expect("bounded entry");
     }
     let author_json = authors.json();
     assert_eq!(author_json.len(), dohc_engine_domain::MAX_AUTHOR_JSON_BYTES);
-    VersionedTextStore::new(&mut store).write_text(&WriteText {
-        workspace_id: "ws".into(), version_id: "main".into(), object_id: "author-limit".into(),
-        path: "authors.md".into(), text: "all authors".into(), moment_id: "limit-moment".into(),
-        metadata_origin: "ydoc".into(), metadata_summary: None, metadata_correlation_id: None,
-        author_json: Some(author_json), now_ms: 2, request_id: None,
-    }, &NoFaults).expect("maximum author moment");
-    store.write_with(&NoFaults, |tx| {
-        crate::journal_moment_append_in_tx(tx, "ws", "limit-moment")
-    }).expect("maximum author moment journals");
-    let bytes: usize = store.read_with(|conn| conn.query_row(
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "author-limit".into(),
+                path: "authors.md".into(),
+                text: "all authors".into(),
+                moment_id: "limit-moment".into(),
+                metadata_origin: "ydoc".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: Some(author_json),
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("maximum author moment");
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::journal_moment_append_in_tx(tx, "ws", "limit-moment")
+        })
+        .expect("maximum author moment journals");
+    let bytes: u64 = store.read_with(|conn| conn.query_row(
         "SELECT length(CAST(payload_json AS BLOB)) FROM replication_log WHERE op_kind='moment.append'",
         [], |row| row.get(0),
     ).map_err(dohc_engine_storage::StorageError::persist_public)).expect("payload bytes");
-    assert!(bytes < crate::MAX_PAYLOAD_JSON_BYTES);
-    assert!(crate::MAX_PAYLOAD_JSON_BYTES - bytes > 128 * 1024);
+    assert!(bytes < crate::MAX_PAYLOAD_JSON_BYTES as u64);
+    assert!(crate::MAX_PAYLOAD_JSON_BYTES as u64 - bytes > 128 * 1024);
 }
 
 #[test]

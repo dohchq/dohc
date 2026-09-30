@@ -20,9 +20,7 @@ pub enum CollabError {
     #[error("configured Y.Doc byte budget exceeded")]
     ConfiguredByteBudgetExceeded,
 
-    #[error(
-        "dohc could not save this edit because too many authors have unsaved edits."
-    )]
+    #[error("dohc could not save this edit because too many authors have unsaved edits.")]
     AuthorCapacity,
 
     #[error("This edit's author details exceed the supported size. Shorten the author details and try again.")]

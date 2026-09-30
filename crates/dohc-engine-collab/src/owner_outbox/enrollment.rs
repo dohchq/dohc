@@ -1,6 +1,6 @@
 //! Enrollment follows a full authenticated owner sync, never renderer authority.
 use super::draft::{
-    ObservedOwnerBinding, OwnerDraftDescriptor, bounded, bounded_blob, collab, key,
+    bounded, bounded_blob, collab, key, ObservedOwnerBinding, OwnerDraftDescriptor,
 };
 use super::*;
 use crate::Ydoc;
