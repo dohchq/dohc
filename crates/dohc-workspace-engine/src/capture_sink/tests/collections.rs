@@ -261,6 +261,10 @@ fn latest_ydoc_actor_origin(db: &Path, path: &str) -> Option<String> {
 
 fn ydoc_update_count(db: &Path, path: &str) -> i64 {
     let store = EngineStore::open(db, 100).expect("reopen store");
+    ydoc_update_count_from_store(&store, path)
+}
+
+fn ydoc_update_count_from_store(store: &EngineStore, path: &str) -> i64 {
     store
         .read_with(|conn| {
             conn.query_row(
@@ -474,8 +478,13 @@ proptest! {
         write_file(scratch.path(), "tasks/generated.md", case.markdown.as_bytes());
         ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
         ingest(&mut sink, "tasks/generated.md").expect("capture generated record");
-        let original_moments = moment_count(&db, "tasks/generated.md");
-        let original_updates = ydoc_update_count(&db, "tasks/generated.md");
+        let (original_moments, original_updates) = {
+            let store = EngineStore::open_read_only(&db).expect("read captured record");
+            (
+                moment_count_from_store(&store, "tasks/generated.md"),
+                ydoc_update_count_from_store(&store, "tasks/generated.md"),
+            )
+        };
 
         sink.reconcile_collections().expect("first adoption pass");
         if case.expected_adoption("placeholder").is_some() {
@@ -526,10 +535,15 @@ proptest! {
 
         let disk = std::fs::read(scratch.path().join("tasks/generated.md"))
             .expect("read generated record");
-        let stored = snapshot(&db, "tasks/generated.md").expect("generated snapshot");
-        let binding = collection_record(&db, "tasks/generated.md");
-        let final_moments = moment_count(&db, "tasks/generated.md");
-        let final_updates = ydoc_update_count(&db, "tasks/generated.md");
+        let (stored, binding, final_moments, final_updates) = {
+            let mut store = EngineStore::open_read_only(&db).expect("read adopted record");
+            (
+                snapshot_from_store(&mut store, "tasks/generated.md").expect("generated snapshot"),
+                collection_record_from_store(&store, "tasks/generated.md"),
+                moment_count_from_store(&store, "tasks/generated.md"),
+                ydoc_update_count_from_store(&store, "tasks/generated.md"),
+            )
+        };
         drop(sink);
         supervisor.close(&db).expect("close actor");
 

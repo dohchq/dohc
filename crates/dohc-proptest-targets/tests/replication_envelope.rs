@@ -39,6 +39,7 @@ use dohc_engine_sync::{
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use proptest::prelude::*;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn store() -> (ScratchDir, EngineStore) {
@@ -46,6 +47,24 @@ fn store() -> (ScratchDir, EngineStore) {
     let path = engine_db_path(&scratch).expect("db path");
     let store = EngineStore::open(&path, 1_000).expect("open");
     (scratch, store)
+}
+
+fn copied_empty_store() -> (ScratchDir, EngineStore) {
+    // Generated envelopes vary the input, not schema creation. Each case still
+    // opens its own real database; only the closed, empty schema is shared.
+    static IMAGE: OnceLock<Vec<u8>> = OnceLock::new();
+    let bytes = IMAGE.get_or_init(|| {
+        let (_scratch, engine) = store();
+        let path = engine.database_path().to_path_buf();
+        drop(engine);
+        assert!(!path.with_file_name("engine.db-wal").exists());
+        std::fs::read(path).expect("read closed empty database")
+    });
+    let scratch = ScratchDir::new().expect("scratch");
+    let path = engine_db_path(&scratch).expect("db path");
+    std::fs::write(&path, bytes).expect("copy empty database");
+    let engine = EngineStore::open(&path, 1_000).expect("open copied database");
+    (scratch, engine)
 }
 
 /// Whether `envelope`'s scalar fields satisfy `ReplicationEnvelope::validate`
@@ -215,7 +234,7 @@ proptest! {
     fn structurally_random_envelopes_fail_closed_before_any_mutation(
         envelope in arbitrary_envelope(),
     ) {
-        let (_scratch, mut engine) = store();
+        let (_scratch, mut engine) = copied_empty_store();
         let mutation_ran = AtomicUsize::new(0);
         let result = apply_envelope_with(&mut engine, &envelope, &NoFaults, |_tx, _envelope| {
             mutation_ran.fetch_add(1, Ordering::SeqCst);
@@ -249,13 +268,44 @@ proptest! {
     fn structurally_random_secret_envelopes_never_apply(
         envelope in arbitrary_secret_envelope(),
     ) {
-        let (_scratch, mut engine) = store();
+        let (_scratch, mut engine) = copied_empty_store();
         let result = apply_secret_envelope(&mut engine, &envelope, &NoFaults);
         prop_assert!(
             !matches!(result, Ok(ApplyOutcome { primary: ApplyDisposition::Applied(()), .. })),
             "an untrusted secret envelope must never apply against a store with no prior state: {envelope:?} -> {result:?}"
         );
     }
+}
+
+#[test]
+fn copied_stores_apply_independently_and_keep_commits_after_reopen() {
+    let (_first_scratch, mut first) = copied_empty_store();
+    let (_second_scratch, mut second) = copied_empty_store();
+    let envelope = ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: "peer-a".to_owned(),
+        origin_seq: 0,
+        relay_seq: None,
+        op_kind: "fuzz.seed".to_owned(),
+        payload: serde_json::json!({ "hello": "fuzz" }),
+        recorded_at_ms: 1_000,
+    };
+    for engine in [&mut first, &mut second] {
+        let outcome = apply_envelope_with(engine, &envelope, &NoFaults, |_tx, _envelope| {
+            Ok::<(), SyncError>(())
+        })
+        .expect("apply to an independent empty store");
+        assert!(matches!(outcome.primary, ApplyDisposition::Applied(())));
+    }
+    let path = first.database_path().to_path_buf();
+    drop(first);
+    let mut reopened = EngineStore::open(&path, 1_001).expect("reopen committed store");
+    let replay: ApplyOutcome<()> =
+        apply_envelope_with(&mut reopened, &envelope, &NoFaults, |_tx, _envelope| {
+            panic!("a committed coordinate must not run its mutation again")
+        })
+        .expect("replay committed envelope");
+    assert!(matches!(replay.primary, ApplyDisposition::Skipped));
 }
 
 /// Seed-corpus sanity: a real, valid envelope applies cleanly.
