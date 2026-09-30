@@ -608,6 +608,8 @@ export interface SyncRelayStorage {
   forgetAutomationWorkspace(input: { workspaceId: string; incarnation: number }): void;
   forgetAutomationWorkspaces(): void;
   currentAutomationWorkspace(workspaceId: string): import("./automationWorkspaces").AutomationWorkspace | null;
+  automationWorkspaceLogSeq(input: { workspaceId: string; originId: string; originSeq: number }): number | null;
+  liveClaimLogSeq(input: { workspaceId: string; liveCursor: number }): number | null;
   serverHostedWorkspaces(): string[];
   automationWorkspaceLogHead(workspaceId: string): number;
   commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;

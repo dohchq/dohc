@@ -186,6 +186,59 @@ export function automationWorkspaceLogHead(storage: StorageContext, workspaceId:
   ).get(workspaceId)?.head ?? 0));
 }
 
+// The engine journals this audit in the settlement's own transaction.
+// Index the durable log so recovery needs no service-host callback or backfill.
+export function initializeLiveClaimIndex(db: SqliteDb): void {
+  db.exec(`
+    DROP TABLE IF EXISTS sync_relay_live_settlements;
+    CREATE INDEX IF NOT EXISTS idx_sync_relay_log_live_settlements
+      ON sync_relay_log(workspace_id, json_extract(payload_json, '$.record.binding.objectId'),
+        json_extract(payload_json, '$.record.terminalCursor'))
+      WHERE op_kind = 'live.audit.settlement';
+    CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_identity
+      ON sync_relay_object_moments(workspace_id, object_id, moment_id, version_id, relay_seq);
+  `);
+}
+
+/**
+ * A logged settlement and moment covering the frame's cursor. Later audits
+ * without a logged moment cannot hide an earlier usable settlement. Pull
+ * through both records so the copy validates the audit and receives the moment.
+ */
+export function liveClaimLogSeq(storage: StorageContext, input: { workspaceId: string; liveCursor: number }): number | null {
+  return storage.readTx(() => {
+    // Unary + removes column affinity so SQLite can seek the JSON expression index.
+    const row = storage.db.prepare(
+      `SELECT MAX(m.relay_seq, s.relay_seq) AS relay_seq FROM sync_relay_live_update_journal j
+       JOIN sync_relay_log s ON s.workspace_id = j.workspace_id AND s.op_kind = 'live.audit.settlement'
+         AND json_extract(s.payload_json, '$.record.binding.objectId') = +j.object_id
+         AND json_extract(s.payload_json, '$.record.terminalCursor') >= +j.journal_cursor
+       JOIN sync_relay_object_moments m ON m.workspace_id = j.workspace_id AND m.object_id = j.object_id
+         AND m.version_id = j.main_version_id AND m.moment_id = json_extract(s.payload_json, '$.record.momentId')
+       WHERE j.journal_cursor = ? AND j.workspace_id = ?
+         AND json_extract(s.payload_json, '$.formatVersion') = 1
+         AND json_type(s.payload_json, '$.record.terminalCursor') = 'integer'
+         AND json_extract(s.payload_json, '$.record.terminalCursor') <= 9007199254740991
+         AND json_extract(s.payload_json, '$.record.binding.workspaceId') = j.workspace_id
+         AND json_extract(s.payload_json, '$.record.binding.mainVersionId') = j.main_version_id
+         AND json_extract(s.payload_json, '$.record.binding.lineageClaimId') = j.lineage_claim_id
+         AND json_extract(s.payload_json, '$.record.relayDatabaseNamespace') = j.relay_database_namespace
+       LIMIT 1`,
+    ).get(input.liveCursor, input.workspaceId);
+    return row === undefined ? null : Number(row.relay_seq);
+  });
+}
+
+/** Where the relay logged one op of a workspace, by the coordinate its computer journaled it at, or null before it arrives. */
+export function automationWorkspaceLogSeq(storage: StorageContext, input: { workspaceId: string; originId: string; originSeq: number }): number | null {
+  return storage.readTx(() => {
+    const row = storage.db.prepare(
+      "SELECT relay_seq FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?",
+    ).get(input.workspaceId, input.originId, input.originSeq);
+    return row === undefined ? null : Number(row.relay_seq);
+  });
+}
+
 /** The workspaces whose automation host record names the server, running or handing over. */
 export function serverHostedWorkspaces(storage: StorageContext): string[] {
   return storage.readTx(() => storage.db.prepare(

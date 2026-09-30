@@ -14,7 +14,7 @@ import {
 } from "./automationHosts";
 import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
-import { initializeAutomationWorkspaceSchema } from "./automationWorkspaces";
+import { initializeAutomationWorkspaceSchema, initializeLiveClaimIndex } from "./automationWorkspaces";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
@@ -1231,6 +1231,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeCollectionWriteSchema(db);
     initializeAutomationPressSchema(db);
     initializeAutomationWorkspaceSchema(db);
+    initializeLiveClaimIndex(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
