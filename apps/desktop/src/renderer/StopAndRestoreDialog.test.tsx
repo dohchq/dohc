@@ -182,7 +182,7 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
   expect(f.stopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, target: { kind: "link", grantId: "grant-link" } });
   expect(screen.getByText("Undid 1 run of automations written through Edit link to trip.")).toBeTruthy();
   expect(screen.getByText("dohc could not undo 1 run of automations written through Edit link to trip. Undo each from its Collection's run history.")).toBeTruthy();
-  expect(screen.getByText("2 changes from those runs stay as they are. Undo cannot reverse them, or someone changed them since.")).toBeTruthy();
+  expect(screen.getByText("Undo left 2 changes from those runs. Check each Collection's run history.")).toBeTruthy();
   expect(screen.getByText("Messages and notices from automations written through Edit link to trip stay sent.")).toBeTruthy();
   expect(screen.getByText("Runs on your other computers are not undone here. Undo them from the run history on each computer.")).toBeTruthy();
   expect(screen.getByText("Someone changed it after the link.")).toBeTruthy();
@@ -200,10 +200,10 @@ it("carries forward what undoing runs found when a try stopped part way", async 
   ]);
   await screen.findByRole("combobox", { name: "Who to stop" });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
-  expect(await screen.findByText("2 changes from those runs stay as they are. Undo cannot reverse them, or someone changed them since.")).toBeTruthy();
+  expect(await screen.findByText("Undo left 2 changes from those runs. Check each Collection's run history.")).toBeTruthy();
   act(() => f.props.onError.mock.calls[0]![2]());
   expect(await screen.findByText("Undid 2 runs of automations ana@example.com wrote.")).toBeTruthy();
-  expect(screen.getByText("3 changes from those runs stay as they are. Undo cannot reverse them, or someone changed them since.")).toBeTruthy();
+  expect(screen.getByText("Undo left 3 changes from those runs. Check each Collection's run history.")).toBeTruthy();
 });
 
 it("keeps the runs a try undid after the files are undone, and after the dialog closed during the try", async () => {
@@ -234,5 +234,40 @@ it("keeps the runs a try undid after the files are undone, and after the dialog 
   act(() => f.shell().retry(WORKSPACE, ANA, "stop"));
   expect(await screen.findByText("Stopped ana@example.com's access and restored 0 files.")).toBeTruthy();
   expect(screen.getByText("Undid 2 runs of automations ana@example.com wrote.")).toBeTruthy();
-  expect(screen.getByText("1 change from those runs stay as they are. Undo cannot reverse them, or someone changed them since.")).toBeTruthy();
+  expect(screen.getByText("Undo left 1 change from those runs. Check each Collection's run history.")).toBeTruthy();
+});
+
+it("shows each kept change once: fields at a later value, fields on records that left, and the rest", async () => {
+  const none = { review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
+  const f = fixture([
+    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 4, fieldsKept: 2, fieldsMissing: 1, errorMessage: "The workspace engine is not running." },
+    // The retry undoes the run the first try stopped on. It reports the same
+    // 2 fields still kept, and no missing field or other change of its own.
+    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 2, fieldsKept: 2, fieldsMissing: 0, errorMessage: null },
+  ]);
+  await screen.findByRole("combobox", { name: "Who to stop" });
+  fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText("2 fields kept a later value. Restore them from each record's History.")).toBeTruthy();
+  expect(screen.getByText("1 field was on records no longer in their Collection.")).toBeTruthy();
+  expect(screen.getByText("Undo left 1 other change from those runs. Check each Collection's run history.")).toBeTruthy();
+  expect(screen.getByTestId("stop-and-restore-outcome").textContent).not.toMatch(/\b4\b/);
+
+  // Kept fields a retry reports replace the earlier try's; missing fields and other changes add up.
+  act(() => f.props.onError.mock.calls[0]![2]());
+  expect(await screen.findByText("Undid 2 runs of automations ana@example.com wrote.")).toBeTruthy();
+  expect(screen.getByText("2 fields kept a later value. Restore them from each record's History.")).toBeTruthy();
+  expect(screen.getByText("1 field was on records no longer in their Collection.")).toBeTruthy();
+  expect(screen.getByText("Undo left 1 other change from those runs. Check each Collection's run history.")).toBeTruthy();
+});
+
+it("shows no other-changes line when the fields account for every kept change", async () => {
+  fixture([{
+    status: "restored", restored: [], review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false,
+    runsUndone: 1, runChangesKept: 3, fieldsKept: 2, fieldsMissing: 1, errorMessage: null,
+  }]);
+  await screen.findByRole("combobox", { name: "Who to stop" });
+  fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText("2 fields kept a later value. Restore them from each record's History.")).toBeTruthy();
+  expect(screen.getByText("1 field was on records no longer in their Collection.")).toBeTruthy();
+  expect(screen.getByTestId("stop-and-restore-outcome").textContent).not.toMatch(/Undo left|\b3\b/);
 });

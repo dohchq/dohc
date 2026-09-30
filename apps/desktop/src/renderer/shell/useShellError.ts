@@ -29,6 +29,7 @@ export type ShellErrorKind =
   | "drive-no-atomic-placement"
   | "file-recovery-unavailable"
   | "kept-files"
+  | "record-history"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 

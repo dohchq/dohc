@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import { UNVERIFIED_SHARED_DATASET_ACCESS } from "@dohc/automation-executor/automation-buttons";
 import { createPressWindows, registerAutomationButtonsIpc, type NamedPress, type PressCaller } from "./automationButtonsIpc";
 import { CHANNELS } from "./channels";
 
@@ -97,7 +98,7 @@ function fixture(options: {
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work(operation()),
     readText: async (_root, path) => {
-      const text = options.files?.[path];
+      const text = options.files?.[path] ?? (["Invoices/collection.yaml", "Billing/Invoices/collection.yaml"].includes(path) ? "fields:\n  Mark paid:\n    type: button\n" : undefined);
       return text === undefined ? null : { text, truncated: false, contentHash: "hash" };
     },
     buttonFields,
@@ -148,6 +149,38 @@ async function expectCallerDescriptions(
 const PAID_FILE = "version: 1\nautomations:\n  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n";
 const editShare = (paths: string[], access = "edit") => ({
   shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false, grantedSelector: { paths, versionId: null, access },
+});
+
+describe("dataset operations from shared document buttons", () => {
+  it.each([
+    ["Find", "      - find: 'true'\n        collection: Billing\n        operation: list\n        as: matches", { "Billing/dataset.json": dataset }],
+    ["Find without a pinned operation", "      - find: 'true'\n        collection: Billing\n        as: matches", { "Billing/dataset.json": dataset }],
+    ["invoke", "      - invoke: sendInvoice\n        collection: Billing\n        input: {id: 12}", { "Billing/dataset.json": dataset }],
+    ["nested step", "      - if: 'false'\n        do: [{set: {Paid: true}}]\n        otherwise:\n          - find: 'true'\n            collection: Billing\n            operation: list\n            as: matches", { "Billing/dataset.json": dataset }],
+    ["implicit read", "      - add-record: {Paid: false}\n        collection: Billing\n        operation: add\n        as: added\n      - set: {Paid: true}\n        records: added\n        operation: edit", { "Billing/dataset.json": dataset }],
+    ["missing destination", "      - find: 'true'\n        collection: Missing\n        as: matches", {}],
+    ["invalid destination", "      - find: 'true'\n        collection: Broken\n        as: matches", { "Broken/collection.yaml": "[" }],
+  ])("disables both listings and refuses window and named presses for %s", async (_name, steps, files) => {
+    const automations = `version: 1\nautomations:\n  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do:\n${steps}\n`;
+    const f = fixture({ shareView: editShare(["Invoices"]), files: { ...files, "Invoices/automations.yaml": automations } });
+    const state = { kind: "disabled", reason: UNVERIFIED_SHARED_DATASET_ACCESS };
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state }] });
+    await expect(f.call(CHANNELS.listRecordButtons, { path: "Invoices/12.md" })).resolves.toMatchObject({ buttons: [{ state }] });
+    await expect(f.press()).rejects.toThrow(UNVERIFIED_SHARED_DATASET_ACCESS);
+    await expect(f.named()).rejects.toThrow(UNVERIFIED_SHARED_DATASET_ACCESS);
+    await expect(f.press({ confirmed: ["sendInvoice"] })).rejects.toThrow(UNVERIFIED_SHARED_DATASET_ACCESS);
+    expect(f.relayPress).not.toHaveBeenCalled();
+    expect(f.executor.press).not.toHaveBeenCalled();
+    expect(f.describeDataset).not.toHaveBeenCalled();
+  });
+
+  it("keeps buttons ready and relays presses when all destinations are document Collections", async () => {
+    const automations = PAID_FILE.replace("do: [{set: {Paid: true}}]", "do: [{find: 'true', collection: Notes, as: matches}, {set: {Paid: true}, records: matches}]");
+    const f = fixture({ shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": automations, "Notes/collection.yaml": "fields: {Paid: {type: checkbox}}" } });
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "ready" } }] });
+    await expect(f.press()).resolves.toEqual({ busy: false, relayed: true });
+    expect(f.describeDataset).not.toHaveBeenCalled();
+  });
 });
 
 describe("listing a Collection's buttons", () => {

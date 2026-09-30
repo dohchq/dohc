@@ -3,11 +3,13 @@ import type { AutomationPressActor } from "@dohc/workspace-engine-client";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile, type AutomationsFileParseResult } from "@dohc/workspace-contracts/automations";
 import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
-import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
+import { isNormalizedRelativePath, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import {
   noAccessReason,
   type IrreversibleAction,
+  type ButtonDestinationKind,
   relayedButtonState,
   relayedButtonTarget,
   RUNNING_FOR_RECORD,
@@ -195,6 +197,28 @@ export function registerAutomationButtonsIpc<
     return read.truncated ? { status: "unreadable", diagnostic: { code: "file-too-large", path: "" } } : parseAutomationsFile(read.text);
   }
 
+  /** Inspect shared metadata only. A dataset host's owner description grants the recipient nothing. */
+  function sharedDestinationKinds(operation: Operation): ButtonDestinationKind {
+    const kinds = new Map<string, ReturnType<ButtonDestinationKind>>();
+    return (path) => {
+      let kind = kinds.get(path);
+      if (kind === undefined) {
+        kind = (async () => {
+          if (!isNormalizedRelativePath(path) || isSharedWithMePath(path)) return null;
+          if (await dependencies.readText(operation.workspace.rootPath, `${path}/dataset.json`) !== null) return "dataset";
+          const read = await dependencies.readText(operation.workspace.rootPath, `${path}/collection.yaml`);
+          if (read === null || read.truncated) return null;
+          const parsed = parseCollectionSchema(read.text);
+          if (collectionVersionError(parsed.reasons, `${path}/collection.yaml`) ||
+            parsed.reasons.some((reason) => reason.code === "invalid-yaml" || reason.code === "root-not-mapping")) return null;
+          return "document";
+        })();
+        kinds.set(path, kind);
+      }
+      return kind;
+    };
+  }
+
   /**
    * A document Collection's buttons. This workspace's own run here; a shared
    * view's are read from its automations.yaml and run on the owner's
@@ -211,7 +235,8 @@ export function registerAutomationButtonsIpc<
     if (access === "press") return await operation.state.collectionAutomations.buttons(collectionPath, fields, describe);
     const file = await sharedAutomations(operation, collectionPath);
     const collectionId = await dependencies.collectionId(operation, collectionPath);
-    return fields.map((field) => ({ field, state: relayedButtonState(file, collectionId, field, nameOf(collectionPath)) }));
+    const destinationKind = sharedDestinationKinds(operation);
+    return await Promise.all(fields.map(async (field) => ({ field, state: await relayedButtonState(file, collectionId, field, nameOf(collectionPath), collectionPath, destinationKind) })));
   }
 
   registerHandler(CHANNELS.listRecordButtons, async (event, payload) => {
@@ -277,7 +302,7 @@ export function registerAutomationButtonsIpc<
         }
         const file = await sharedAutomations(operation, input.collectionPath);
         const collectionId = await dependencies.collectionId(operation, input.collectionPath);
-        const target = relayedButtonTarget(file, collectionId, input.field, nameOf(input.collectionPath));
+        const target = await relayedButtonTarget(file, collectionId, input.field, nameOf(input.collectionPath), input.collectionPath, sharedDestinationKinds(operation));
         if ("state" in target) throw new Error(target.state.reason);
         await dependencies.relayPress(operation, { pressId: input.pressId, ...target, collectionPath: input.collectionPath, recordId: input.recordId });
         return { kind: "relayed" as const };

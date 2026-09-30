@@ -1,34 +1,28 @@
 import { History as HistoryIcon } from "lucide-react";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useRef, useState } from "react";
 // The label alone, so the document view does not load the table and board code.
 import { recordLabel } from "@dohc/collection-views/record-label";
 import type { CollectionRecord } from "@dohc/workspace-contracts";
 import { bridge } from "../bridge";
 import { SecondaryButton } from "../ui/controls";
-import { useRequestSequence } from "../useRequestSequence";
 import { RecordButton } from "./RecordButton";
 import { useAutomationButtons, type ReportButtonError } from "./useAutomationButtons";
+import type { RecordHistoryTarget } from "./useRecordHistory";
 
 // The record view's row above the record's properties, for a file that is a
 // record in a Collection: its Button fields, and History. Main says which
-// record the file is and what each button does. History loads only when a
-// person opens it.
-
-const RecordHistoryDialog = lazy(() => import("./RecordHistoryDialog").then((module) => ({ default: module.RecordHistoryDialog })));
+// record the file is and what each button does. The shell holds the History
+// dialog, so a failed read's Try again in Notices outlives this view.
 
 export function RecordButtonsRow(props: {
   workspaceId: string;
   path: string;
   onError: ReportButtonError;
   onNotice: (message: string) => void;
-  /** Opens the ⚡ panel at one run; resolves to a sentence when it cannot. */
-  onOpenAutomationRun: (automationId: string, claimId: string, name: string) => Promise<string | null>;
+  onOpenHistory: (record: RecordHistoryTarget) => void;
 }) {
   const { workspaceId, path } = props;
   const [found, setFound] = useState<{ record: CollectionRecord; collectionPath: string; fields: string[] } | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const historyButton = useRef<HTMLButtonElement | null>(null);
   const buttons = useAutomationButtons({
     workspaceId, of: found === null || found.fields.length === 0 ? null : { collectionPath: found.collectionPath }, onError: props.onError, onNotice: props.onNotice,
   });
@@ -36,9 +30,6 @@ export function RecordButtonsRow(props: {
   const requests = useRef(0);
   const report = useRef(props.onError);
   report.current = props.onError;
-  // Rises when the workspace or file changes, or the view goes, so opening a
-  // run that answers after that reports nothing here.
-  const scope = useRequestSequence([workspaceId, path]);
 
   useEffect(() => {
     let alive = true;
@@ -79,7 +70,6 @@ export function RecordButtonsRow(props: {
       alive = false;
       requests.current += 1;
       unsubscribe();
-      setHistoryOpen(false);
     };
   }, [workspaceId, path]);
 
@@ -91,23 +81,6 @@ export function RecordButtonsRow(props: {
 
   if (found === null) return null;
   const label = recordLabel(found.record);
-  // The ⚡ panel takes focus.
-  const openRun = (automationId: string, claimId: string, name: string) => {
-    const epoch = scope.current();
-    setHistoryOpen(false);
-    void props.onOpenAutomationRun(automationId, claimId, name).then((note) => {
-      if (note !== null && scope.isCurrent(epoch)) report.current(note, new Error(note), null);
-    }).catch((error: unknown) => {
-      if (!scope.isCurrent(epoch)) return;
-      report.current("dohc could not open this run.", error, () => {
-        if (scope.isCurrent(epoch)) openRun(automationId, claimId, name);
-      });
-    });
-  };
-  const closeHistory = () => {
-    setHistoryOpen(false);
-    historyButton.current?.focus();
-  };
   return (
     // In the page's column, as the title and properties are.
     <div data-testid="record-buttons" className="box-border w-full px-14 pb-2">
@@ -116,32 +89,16 @@ export function RecordButtonsRow(props: {
           <RecordButton key={field} buttons={buttons} field={field} recordId={found.record.id} recordLabel={label} />
         ))}
         <SecondaryButton
-          ref={historyButton}
           size="compact"
           data-testid="record-history-open"
           aria-haspopup="dialog"
           className="ml-auto inline-flex items-center gap-1.5"
-          onClick={() => setHistoryOpen(true)}
+          onClick={() => props.onOpenHistory({ collectionPath: found.collectionPath, recordId: found.record.id, recordName: label })}
         >
           <HistoryIcon size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
           History
         </SecondaryButton>
       </div>
-      {/* On the page's body, so no scrolling or clipping ancestor holds the dialog. */}
-      {historyOpen ? createPortal(
-        <Suspense fallback={null}>
-          <RecordHistoryDialog
-            workspaceId={workspaceId}
-            collectionPath={found.collectionPath}
-            recordId={found.record.id}
-            recordName={label}
-            onClose={closeHistory}
-            onOpenRun={openRun}
-            onError={props.onError}
-          />
-        </Suspense>,
-        document.body,
-      ) : null}
     </div>
   );
 }

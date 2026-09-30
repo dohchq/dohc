@@ -3,8 +3,8 @@
 // Extracted from main.ts's IPC handlers because the interleaving that matters
 // cannot be driven through the Electron bootstrap.
 //
-// Pairing is by TOKEN, never by order. The provider mints one identity per
-// settle and echoes it on whichever outcome that settle produces, so this
+// Pairing is by TOKEN, never by order. The capture mints one identity per
+// settle across provider generations and echoes it on the outcome, so this
 // module never reasons about which settle completes when. Arrival order does
 // not hold, for two independent reasons:
 //
@@ -23,7 +23,7 @@ export interface EngineYDocSaveSeqState {
   /** Highest local-edit seq main has received from the renderer. */
   dirtySeq: number;
   /**
-   * The seq each IN-FLIGHT settle started at, keyed by the provider's token.
+   * The seq each IN-FLIGHT settle started at, keyed by the capture's token.
    * A settle may only vouch for what had been journaled when it began.
    */
   inFlight: Map<number, number>;

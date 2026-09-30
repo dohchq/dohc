@@ -3,14 +3,66 @@ import type { DatasetDefinition, DatasetDescription } from "@dohc/security-contr
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import {
   datasetButtonAccess,
+  relayedButtonState,
+  relayedButtonTarget,
+  relayedDatasetReason,
   resolveButton,
   sharedDatasetButtonState,
+  UNVERIFIED_SHARED_DATASET_ACCESS,
 } from "./automationButtons";
 
 const file = (...entries: string[]) => parseAutomationsFile(`version: 1\nautomations:\n${entries.join("\n")}\n`);
 const entry = (id: string, when: string, extra = "") =>
   `  - id: ${id}\n    name: ${id}\n${extra}    when: ${when}\n    do: [{set: {Paid: true}}]`;
 const documentTable = (table: string | null) => table === null;
+
+describe("shared document button readiness", () => {
+  const parsed = (steps: string) => file(`  - id: send\n    name: Send\n    when: {button: Send}\n    do:\n${steps}`);
+  const disabled = { kind: "disabled", reason: UNVERIFIED_SHARED_DATASET_ACCESS };
+  const destinationKind = async (path: string) => path === "Log" || path === "Notes" ? "document" as const : path === "Budget" ? "dataset" as const : null;
+
+  it.each([
+    ["Find", "      - find: 'true'\n        collection: Budget\n        operation: invoices.list\n        as: matches"],
+    ["Find without a pinned operation", "      - find: 'true'\n        collection: Budget\n        as: matches"],
+    ["action", "      - invoke: invoices.settle\n        collection: Budget\n        input: {id: destination}"],
+    ["nested action", "      - if: 'false'\n        do: [{set: {Status: Done}}]\n        otherwise:\n          - invoke: invoices.settle\n            collection: Budget\n            input: {id: destination}"],
+    ["implicit reads on bound records", "      - add-record: {Status: Open}\n        collection: Budget\n        operation: invoices.create\n        as: added\n      - set: {Status: Done}\n        records: added\n        operation: invoices.edit"],
+    ["unresolved destination", "      - find: 'true'\n        collection: Missing\n        as: matches"],
+  ])("disables listing and admission for %s with the same reason", async (_name, steps) => {
+    const automationFile = parsed(steps);
+    expect(await relayedButtonState(automationFile, "log-id", "Send", "Log", "Log", destinationKind)).toEqual(disabled);
+    expect(await relayedButtonTarget(automationFile, "log-id", "Send", "Log", "Log", destinationKind)).toEqual({ state: disabled });
+  });
+
+  it("fails closed when destination metadata cannot be read", async () => {
+    expect(await relayedButtonState(parsed("      - set: {Status: Done}"), "log-id", "Send", "Log", "Log", async () => { throw new Error("Offline"); }))
+      .toEqual(disabled);
+  });
+
+  it("keeps the existing reason for an invalid document-only action", async () => {
+    const automationFile = parsed("      - invoke: invoices.settle\n        collection: Notes\n        input: {id: destination}");
+    const state = { kind: "disabled", reason: "This document Collection's automations cannot name a table or a Collection action. Remove those names from the automation." };
+    expect(await relayedButtonState(automationFile, "log-id", "Send", "Log", "Log", destinationKind)).toEqual(state);
+    expect(await relayedButtonTarget(automationFile, "log-id", "Send", "Log", "Log", destinationKind)).toEqual({ state });
+  });
+
+  it("follows nested record bindings to their dataset", async () => {
+    const resolved = resolveButton(parsed("      - if: 'true'\n        do:\n          - find: 'true'\n            collection: Budget\n            operation: invoices.list\n            as: matches\n          - set: {Status: Done}\n            records: matches\n            operation: invoices.edit"), "Send", documentTable, "Log");
+    if (resolved.kind !== "one") throw new Error("Expected a valid button automation");
+    const paths: string[] = [];
+    expect(await relayedDatasetReason(resolved.automation, "Log", async (path) => { paths.push(path); return await destinationKind(path); }))
+      .toBe(UNVERIFIED_SHARED_DATASET_ACCESS);
+    expect(paths).toEqual(["Log", "Budget"]);
+  });
+
+  it("keeps document-only steps ready, including nested steps and code", async () => {
+    const automationFile = parsed("      - find: 'true'\n        collection: Notes\n        as: matches\n      - if: 'true'\n        do:\n          - set: {Status: Done}\n            records: matches\n      - run: 'return []'");
+    expect(await relayedButtonState(automationFile, "log-id", "Send", "Log", "Log", destinationKind))
+      .toEqual({ kind: "ready", automationId: "collection:log-id#send" });
+    expect(await relayedButtonTarget(automationFile, "log-id", "Send", "Log", "Log", destinationKind))
+      .toMatchObject({ automationId: "collection:log-id#send" });
+  });
+});
 
 describe("resolveButton", () => {
   it("runs the one switched-on automation that uses the button", () => {

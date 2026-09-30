@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
   VERSIONED_METHOD,
@@ -436,10 +436,14 @@ it("settles and closes the Rust Y.Doc session before a version switch", async ()
 // History. So the close must end as quiet as the close that wins the race.
 it("closes clean and reports changed-on-disk when the close settle meets a moved head", async () => {
   const states: string[] = [];
+  const tokens: number[] = [];
   const session = await capture.openYDocSession({
     path: PATH,
     onRemoteUpdate: () => undefined,
-    onSaveState: (state) => states.push(state),
+    onSaveState: (state, token) => {
+      states.push(state);
+      tokens.push(token);
+    },
   });
   const editor = mirrorEditor(session);
   typeIntoBody(editor, "Typed in dohc.");
@@ -447,6 +451,7 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   // armed below and make this a NON-close settle failure by accident.
   await session.settleNow();
   states.length = 0;
+  tokens.length = 0;
   captureErrors = [];
 
   // The outside writer, on disk. The refusal alone does not make this state
@@ -459,6 +464,8 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   // The refusal is reported the moment it happens and WITHDRAWN once the
   // release proves it benign. The editor's last word is what it acts on.
   expect(states).toEqual(["settling", "error", "changed-on-disk"]);
+  expect(tokens[0]).toBeGreaterThan(0);
+  expect(tokens).toEqual([tokens[0], tokens[0], tokens[0]]);
   // The daemon session was released exactly as a clean close releases it.
   expect(methodCount("ydoc.close")).toBe(1);
 
@@ -600,6 +607,44 @@ it("stays on settling for a busy engine store, because the retry is coming", asy
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
   settleRefusal = null;
   await session.close({ settle: false });
+});
+
+it("retires capture settle bookkeeping after repeated busy-store failures", async () => {
+  const reports: Array<{ state: string; token: number }> = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state, token) => reports.push({ state, token }),
+  });
+  const ledgers = new Set<Map<unknown, unknown>>();
+  const mapSet = Map.prototype.set;
+  // Observe the private generation/token ledgers without exposing capture
+  // internals. Every completed settle must retire its entry in each ledger.
+  const setSpy = vi.spyOn(Map.prototype, "set").mockImplementation(function (
+    this: Map<unknown, unknown>, key: unknown, value: unknown,
+  ) {
+    if (typeof key === "string" && /^1:\d+$/.test(key)) ledgers.add(this);
+    return mapSet.call(this, key, value);
+  });
+  try {
+    settleRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(session.settleNow()).rejects.toThrow("engine-store-busy");
+    }
+    expect(reports).toEqual([
+      { state: "settling", token: 1 }, { state: "settling", token: 1 },
+      { state: "settling", token: 2 }, { state: "settling", token: 2 },
+      { state: "settling", token: 3 }, { state: "settling", token: 3 },
+    ]);
+    expect(ledgers.size).toBeGreaterThan(0);
+    expect([...ledgers].map((ledger) => ledger.size)).toEqual(
+      [...ledgers].map(() => 0),
+    );
+  } finally {
+    setSpy.mockRestore();
+    settleRefusal = null;
+    await session.close({ settle: false });
+  }
 });
 
 // A close is no longer the exception it once was. It used to release the

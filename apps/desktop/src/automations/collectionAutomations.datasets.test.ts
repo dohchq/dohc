@@ -14,7 +14,7 @@ import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { JsonValue } from "@dohc/app-backend-runtime";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import type { Automation } from "@dohc/workspace-contracts/automations";
+import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetAgent, type LocalDatasetHost } from "../workspaces/localDatasetHost";
@@ -43,6 +43,7 @@ import {
 import { UNDONE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
 import { PERSONAL_NEEDS_ACCOUNT } from "@dohc/automation-executor/automation-reach";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
+import { UNVERIFIED_SHARED_DATASET_ACCESS } from "@dohc/automation-executor/automation-buttons";
 import { DATASET_UNDO_RULES_CHANGED } from "@dohc/automation-executor/dataset-automation-undo";
 
 // Automations on a dataset Collection, end to end: a real dataset host runs
@@ -1707,7 +1708,7 @@ ${step}`;
     const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS, roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
     await f.writeAutomations(markPaid(settle));
     await f.executor.open();
-    const reason = "Only you can use invoices.settle in Budget, and ana@dohc.test can also edit these automations.";
+    const reason = "Only you can use Settle in Budget, and ana@dohc.test can also edit these automations.";
     expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ reach: { kind: "checked", steps: expect.arrayContaining([{ verdict: "stopped", reason }]) } }] });
     const { id: invoice } = await f.create({});
     const described = owner(f);
@@ -2846,7 +2847,7 @@ describe("code steps on a dataset", () => {
     const { id: invoice } = await f.create({});
     await f.edit(invoice, { [PAID]: true });
     await f.until(() => f.claims()[0]?.state === "failed");
-    expect(f.claims()[0]).toMatchObject({ error: "ana@dohc.test has no grant to use invoices.create in Budget." });
+    expect(f.claims()[0]).toMatchObject({ error: "ana@dohc.test has no grant to use Create in Budget." });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     await f.executor.dispose();
   });
@@ -3299,7 +3300,7 @@ it.each([false, true])("invokes and reverses another authored dataset through th
   expect((await f.record(source.id))?.values[STATUS]).toBe("Open");
   f.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [{ grantId: "source-editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Budget"], access: "edit", versionId: null }, channel: null }] });
   expect(await f.executor.undo({ deletes: null, automationId: AUTOMATION, claimId: f.claims()[0]!.claimId }, async () => undefined))
-    .toMatchObject({ status: "refused", reason: expect.stringContaining("invoices.release in Other") });
+    .toMatchObject({ status: "refused", reason: expect.stringContaining("Release in Other") });
   expect((await other.rows()).result).toMatchObject({ rows: [{ values: { [STATUS]: "On hold" } }] });
   f.setRoster(OWNER);
   expect(await f.executor.undo({ deletes: null, automationId: AUTOMATION, claimId: f.claims()[0]!.claimId }, async () => undefined))
@@ -3361,6 +3362,39 @@ automations:
   expect(await f.executor.buttons("Log", ["Send"], async (id) => ({ ...await describe(id), operations: [] }))).toMatchObject([{ state: { kind: "disabled" } }]);
   expect(await f.executor.buttons("Log", ["Send"], describe)).toMatchObject([{ state: { kind: "ready", irreversible: [{ name: `${BUDGET}/invoices.settle` }] } }]);
   await expect(f.executor.press(input, () => undefined, async () => undefined, describe)).rejects.toThrow("changed after it was pressed");
+  const automationFile = parseAutomationsFile(await readFile(join(f.root, "Log/automations.yaml"), "utf8"));
+  const automation = automationFile?.status === "read" ? automationFile.entries.find((entry) => entry.status === "valid") : undefined;
+  if (automation?.status !== "valid") throw new Error("Expected the document button automation");
+  await expect(f.executor.pressRelayed({ automationId: "collection:Log#send", collectionPath: "Log", definitionHash: definitionHash(automation.automation),
+    recordId: "source", pressId: id(207), pressedBy: "user-recipient" }, () => undefined)).rejects.toThrow(UNVERIFIED_SHARED_DATASET_ACCESS);
+  expect(f.engineClaims).toEqual([]);
+  await f.executor.dispose();
+});
+
+it.each([
+  ["Find", "      - find: 'true'\n        collection: Budget\n        operation: invoices.list\n        as: matches"],
+  ["Find without a pinned operation", "      - find: 'true'\n        collection: Budget\n        as: matches"],
+  ["nested Find", "      - if: 'false'\n        do: [{set: {Status: Done}}]\n        otherwise:\n          - find: 'true'\n            collection: Budget\n            operation: invoices.list\n            as: matches"],
+  ["bound records and implicit reads", "      - add-record: {Status: Open}\n        collection: Budget\n        operation: invoices.create\n        as: added\n      - set: {Status: Done}\n        records: added\n        operation: invoices.status"],
+  ["unresolved destination", "      - find: 'true'\n        collection: Missing\n        as: matches"],
+])("refuses a relayed document press with %s before claiming", async (_name, steps) => {
+  const f = await world({ documents: true });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Send:\n    type: button\n  Status:\n    type: text\n");
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1\nautomations:\n  - id: send\n    name: Send\n    when: {button: Send}\n    do:\n${steps}\n`);
+  await f.executor.open();
+  const automationFile = parseAutomationsFile(await readFile(join(f.root, "Log/automations.yaml"), "utf8"));
+  const automation = automationFile?.status === "read" ? automationFile.entries.find((entry) => entry.status === "valid") : undefined;
+  if (automation?.status !== "valid") throw new Error("Expected the document button automation");
+  const input = { automationId: "collection:Log#send", collectionPath: "Log", definitionHash: definitionHash(automation.automation), recordId: "source", pressId: id(208), pressedBy: "user-recipient" };
+  f.grant("g-recipient", "user-recipient", [LIST, CREATE, STATUS_ONLY]);
+  f.executor.datasetsChanged();
+  await f.executor.idle();
+  await expect(f.executor.pressRelayed(input, () => undefined)).rejects.toThrow(UNVERIFIED_SHARED_DATASET_ACCESS);
+  f.grant("g-recipient", "user-recipient", []);
+  f.executor.datasetsChanged();
+  await f.executor.idle();
+  await expect(f.executor.pressRelayed(input, () => undefined)).rejects.toThrow(UNVERIFIED_SHARED_DATASET_ACCESS);
   expect(f.engineClaims).toEqual([]);
   await f.executor.dispose();
 });

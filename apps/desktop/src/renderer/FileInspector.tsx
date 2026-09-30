@@ -1,4 +1,5 @@
 import type { ReportButtonError } from "./collections/useAutomationButtons";
+import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import { MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
 import { DrawingView } from "./DrawingView";
 import {
@@ -348,10 +349,10 @@ type FileInspectorProps = {
   workspaceId: string;
   path: string;
   // A record's Button fields report through the shell's toasts and Notices,
-  // and its History opens an automation's run in the ⚡ panel.
+  // and the shell opens the record's History.
   onButtonError?: ReportButtonError;
   onButtonNotice?: (message: string) => void;
-  onOpenAutomationRun?: (automationId: string, claimId: string, name: string) => Promise<string | null>;
+  onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
   fileOpenStartMark?: string;
   refreshKey?: number;
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
@@ -809,7 +810,7 @@ export const FileInspector = memo(function FileInspector(
             onPendingDraftChange={setPendingDraft}
             onButtonError={props.onButtonError}
             onButtonNotice={props.onButtonNotice}
-            onOpenAutomationRun={props.onOpenAutomationRun}
+            onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
             onRetryEngineOpen={retryEngineOpen}
             writesRefusedRef={writesRefusedRef}

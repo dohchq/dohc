@@ -35,7 +35,7 @@ import {
   type AutomationWatchGroupsParams,
   type VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
-import { changedSincePressed, datasetButtonAccess, namesButton, noAccessReason, resolveButton, type AutomationButtonState } from "./automationButtons";
+import { changedSincePressed, datasetButtonAccess, namesButton, noAccessReason, relayedDatasetReason, resolveButton, type AutomationButtonState } from "./automationButtons";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   codeFilesOf,
@@ -2056,7 +2056,7 @@ export class CollectionAutomations {
       const operations = approved.definition.operations;
       const verdicts = checkAutomationReach(roster, {
         id: "", collection, codeFiles: [], steps: operations.map((operation): ReachStep => ({
-          kind: "dataset-operation", collection: resolved.collection, datasetId: approved.datasetId, grants,
+          kind: "dataset-operation", collection: resolved.collection, datasetId: approved.datasetId, operations, grants,
           operation: { operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access },
         })),
       });
@@ -2849,6 +2849,9 @@ export class CollectionAutomations {
     if (resolved.kind === "one" && resolved.automation.id !== automation.id) {
       throw new Error(`${field} now runs another automation. Press it again.`);
     }
+    const datasetReason = await relayedDatasetReason(automation, id.collectionPath, async (path) =>
+      this.datasets.has(path) ? "dataset" : this.collections.has(path) && typeof this.schemaFields.get(path) !== "string" ? "document" : null);
+    if (datasetReason !== null) throw new Error(datasetReason);
     // The engine's press id carries that definition, so the claim stays
     // bound to it through a restart; the run refuses any other.
     const pressId = relayedPressId(input.pressId, input.definitionHash, input.collectionPath);

@@ -333,7 +333,7 @@ describe("share links as editors", () => {
   it("gives a link no data grant on a dataset", () => {
     const grants = { workspaceId: "w", grants: [{ principalKey: datasetPrincipalKey("w", "g-link", "u-ana"), operationIds: ["op-add"] }] };
     const operation: ReachDatasetOperation = { operationId: "op-add", name: "Add order", label: "Add order", access: "link" };
-    expect(check(owner(linkGrant("g-link", ["Trip"])), { kind: "dataset-operation", collection: trip, datasetId: "trip", operation, grants }))
+    expect(check(owner(linkGrant("g-link", ["Trip"])), { kind: "dataset-operation", collection: trip, datasetId: "trip", operation, operations: [operation], grants }))
       .toEqual(stopped("Anyone with your share link to Trip has no grant to use Add order in Trip."));
   });
 });
@@ -412,7 +412,7 @@ describe("reach on a dataset Collection", () => {
   const field = (fieldId: string, reads: Array<{ operationId: string }>, held = grants([])): Extract<ReachStep, { kind: "dataset-field" }> =>
     ({ kind: "dataset-field", collection: budget, datasetId: "budget", tableId: "invoices", field: { fieldId, name: fieldId === "f-amount" ? "Amount" : "Status" }, reads: reads.map(asOperation), grants: held });
   const step = (operation: ReachDatasetOperation, operationIds: string[] = []): Extract<ReachStep, { kind: "dataset-operation" }> =>
-    ({ kind: "dataset-operation", collection: budget, datasetId: "budget", operation, grants: grants(operationIds) });
+    ({ kind: "dataset-operation", collection: budget, datasetId: "budget", operation, operations: [operation], grants: grants(operationIds) });
 
   it("keeps duplicate operation names and fields separate by destination and table", () => {
     const a = step(edit, [edit.operationId]);
@@ -438,17 +438,26 @@ describe("reach on a dataset Collection", () => {
 
   it("allows an operation only when every other editor holds a current data grant that lists it", () => {
     expect(check(owner(anaGrant), step(edit, ["op-edit"]), budget)).toEqual(allowed);
-    expect(check(owner(anaGrant), step(edit, ["op-read"]), budget)).toEqual(stopped("ana@dohc.test has no grant to use invoices.edit in Budget."));
+    expect(check(owner(anaGrant), step(edit, ["op-read"]), budget)).toEqual(stopped("ana@dohc.test has no grant to use Edit in Budget."));
     // File Edit alone is not record access.
-    expect(check(owner(anaGrant), step(edit), budget)).toEqual(stopped("ana@dohc.test has no grant to use invoices.edit in Budget."));
+    expect(check(owner(anaGrant), step(edit), budget)).toEqual(stopped("ana@dohc.test has no grant to use Edit in Budget."));
     // A grant for someone else's share, or a pending invite with no account, is not Ana's.
     expect(check(owner(grant({ email: "cai@dohc.test" }, { paths: ["Budget"], access: "edit" })), step(edit, ["op-edit"]), budget))
-      .toEqual(stopped("cai@dohc.test has no grant to use invoices.edit in Budget."));
+      .toEqual(stopped("cai@dohc.test has no grant to use Edit in Budget."));
   });
 
   it("stops an owner-only operation whenever someone else edits the automations", () => {
     expect(check(owner(anaGrant), step(ownerOnly, ["op-delete"]), budget))
-      .toEqual(stopped("Only you can use invoices.delete in Budget, and ana@dohc.test can also edit these automations."));
+      .toEqual(stopped("Only you can use Delete in Budget, and ana@dohc.test can also edit these automations."));
+  });
+
+  it.each(["owner", "helper"] as const)("disambiguates shared labels in %s operation stop reasons", (access) => {
+    const operation = { ...edit, access };
+    const other = { ...edit, operationId: "op-refund", name: "refunds.edit" };
+    const verdict = check(owner(anaGrant), { ...step(operation), operations: [operation, other] }, budget);
+    expect(verdict).toEqual(stopped(access === "owner"
+      ? "Only you can use Edit (invoices.edit) in Budget, and ana@dohc.test can also edit these automations."
+      : "ana@dohc.test has no grant to use Edit (invoices.edit) in Budget."));
   });
 
   it("stops every dataset step on a collaborator's computer", () => {
