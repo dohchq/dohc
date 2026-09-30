@@ -676,6 +676,15 @@ fn byte_budget_refuses_new_identity_before_admission_and_queues_early() {
     let mut ts = fresh_store("author-byte-capacity");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &NoFaults,
+        1,
+    )
+    .expect("empty marker");
     let doc = Ydoc::wire();
     let scope = "person-00000000-0000-0000-0000-000000000000".repeat(5);
     let mut admitted = 0u32;
