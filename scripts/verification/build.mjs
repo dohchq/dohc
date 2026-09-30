@@ -189,21 +189,21 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   if (install) await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "prepare-install.log") });
   await cancellation.checkpoint();
   const receipt = readJson(receiptPath) ?? { version: 1 };
+  const pending = [];
   for (const kind of engineOnly ? ["engine"] : ["engine", "desktop"]) {
     if (kind === "engine" && existsSync(enginePath)) repairOwnedEngineExecutable(enginePath);
     const prepared = preparedStatus(kind, receipt);
     await cancellation.checkpoint();
     if (prepared) { console.log(`[prepare] reuse ${kind} ${receipt[kind].artifact.slice(0, 12)}`); continue; }
-    const source = sourceFingerprint(kind);
+    pending.push({kind, source: sourceFingerprint(kind)});
+  }
+  async function prepareKind({kind, source}, env) {
     await cancellation.checkpoint();
     if (kind === "engine") {
-      await withBuildBudget(async (env) => {
-        await cancellation.checkpoint();
-        const result = await run("cargo", ["build", "--locked", "--target-dir", join(repoRoot, "target"), "--message-format=json-render-diagnostics", "-p", "dohc-workspace-engine", "--bin", "dohc-workspace-engine"], { env, log: join(output, "engine-build.log"), quietStdout: true });
-        const artifacts = result.stdout.split(/\r?\n/).filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
-        const executable = artifacts.findLast((entry) => entry.reason === "compiler-artifact" && entry.target?.name === "dohc-workspace-engine" && entry.executable)?.executable;
-        if (!executable || resolve(executable).toLowerCase() !== resolve(enginePath).toLowerCase()) throw new Error(`Cargo did not build the native engine at ${enginePath}. Check Cargo target configuration.`);
-      });
+      const result = await run("cargo", ["build", "--locked", "--target-dir", join(repoRoot, "target"), "--message-format=json-render-diagnostics", "-p", "dohc-workspace-engine", "--bin", "dohc-workspace-engine"], { env, log: join(output, "engine-build.log"), quietStdout: true });
+      const artifacts = result.stdout.split(/\r?\n/).filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+      const executable = artifacts.findLast((entry) => entry.reason === "compiler-artifact" && entry.target?.name === "dohc-workspace-engine" && entry.executable)?.executable;
+      if (!executable || resolve(executable).toLowerCase() !== resolve(enginePath).toLowerCase()) throw new Error(`Cargo did not build the native engine at ${enginePath}. Check Cargo target configuration.`);
       repairOwnedEngineExecutable(enginePath);
     } else {
       await run(...pnpm(["--filter", "@dohc/desktop", "build"]), { log: join(output, "desktop-build.log") });
@@ -215,6 +215,17 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
     mkdirSync(resolve(receiptPath, ".."), { recursive: true });
     writeFileSync(receiptPath + ".tmp", JSON.stringify(receipt, null, 2) + "\n");
     renameSync(receiptPath + ".tmp", receiptPath);
+  }
+  async function buildPending(env) {
+    const results = await Promise.allSettled(pending.map(item => prepareKind(item, env)));
+    const rejected = results.find(result => result.status === "rejected");
+    if (rejected) throw rejected.reason;
+  }
+  if (pending.some(({kind}) => kind === "engine")) await withBuildBudget(buildPending);
+  else await buildPending();
+  // A completed build can become stale while its sibling is still running.
+  for (const kind of engineOnly ? ["engine"] : ["engine", "desktop"]) {
+    if (sourceFingerprint(kind) !== receipt[kind].source) throw new Error(`${kind} inputs changed during preparation. Run preparation again.`);
   }
   requireE2eEngine({ override: enginePath });
   await cancellation.checkpoint();

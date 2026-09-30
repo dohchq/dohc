@@ -2,8 +2,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { desktopRoot } from "./desktopApp";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Spawns the real sync-relay service (services/sync-relay) as a child
 // process for the 0P sync E2E specs — the same pattern as the relay's own
@@ -12,7 +11,7 @@ import { desktopRoot } from "./desktopApp";
 // lives in the spec's scratch directory. IPC requests orderly shutdown on
 // Windows too, where child.kill("SIGTERM") would bypass the relay's cleanup.
 
-const relayRoot = join(desktopRoot, "../../services/sync-relay");
+const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
 
 export interface SyncRelayHandle {
   baseUrl: string;
@@ -30,6 +29,8 @@ export interface SyncRelayLinkBoundary {
 
 export async function spawnSyncRelay(input: {
   dbPath: string;
+  // A suite may reuse freshly built code while keeping each process and store separate.
+  compiledMain?: string;
   // Restarts (the offline-rejoin spec) must come back on the same port the
   // desktop app already has in its credential file.
   port?: number;
@@ -53,12 +54,14 @@ export async function spawnSyncRelay(input: {
   const child: ChildProcess = spawn(
     process.execPath,
     [
-      "--import", process.platform === "win32" ? "tsx" : "tsx/esm",
+      ...(input.compiledMain === undefined
+        ? ["--import", process.platform === "win32" ? "tsx" : "tsx/esm"]
+        : []),
       "--input-type=module", "--eval",
       `process.on("message", (message) => {
         if (message === "SIGTERM") process.emit("SIGTERM");
       });
-      await import(${JSON.stringify(pathToFileURL(join(relayRoot, "src/main.ts")).href)});`,
+      await import(${JSON.stringify(pathToFileURL(input.compiledMain ?? join(relayRoot, "src/main.ts")).href)});`,
     ],
     {
       cwd: relayRoot,

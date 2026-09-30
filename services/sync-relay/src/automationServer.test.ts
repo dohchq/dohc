@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import type { ScheduledAutomation, CollectionAutomationsOptions, DatasetAutomationHost, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
 import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/relay";
 import type { ReachHandover } from "@dohc/automation-executor/reach-verdicts";
-import { VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
 import type { LiveClaimLedger } from "./automationLiveClaims";
@@ -215,6 +216,44 @@ const notices = (storage: SyncRelayStorage, userId: string) =>
   storage.readNoticeChanges({ recipientUserId: userId, cursor: null, limit: 50, nowMs: clock }).notices;
 
 describe("a server that runs a workspace's automations", () => {
+  it("returns a conflict for a write precondition refusal and throws other errors", async () => {
+    const { storage, h } = await relay();
+    const s = await server(storage, h);
+    const fake = await s.openReplica();
+    const path = "Tasks/automations.yaml";
+    const text = "automations: []\n";
+    const contentHash = createHash("sha256").update(text).digest("hex");
+    const active = vi.spyOn(VersionedLiveAdapter.prototype, "getActiveVersion").mockResolvedValue({
+      id: "main", workspaceId: WORKSPACE, kind: "main", name: "Main", createdAtMs: 0,
+    });
+    const read = vi.spyOn(VersionedLiveAdapter.prototype, "readTextFile").mockResolvedValue({
+      versionId: "main", path, objectId: "object", contentKind: "text", text, blobSha256: contentHash,
+      workspaceId: WORKSPACE, sha256: contentHash, byteLength: Buffer.byteLength(text), updatedAtMs: 0,
+      latestMomentId: "moment", metadataOrigin: "api",
+    });
+    const refused = new DaemonRefusalError({ code: "CONFLICT", message: "write-precondition-failed", retry: "no" }, undefined);
+    const write = vi.spyOn(VersionedLiveAdapter.prototype, "writeTextFile").mockRejectedValueOnce(refused);
+    try {
+      expect(await fake.options.readText(path)).toEqual({ text, truncated: false, contentHash });
+      await expect(fake.options.writeText(path, "automations: []\n# switched off\n", contentHash, PRESSED))
+        .resolves.toEqual({ status: "conflict" });
+      expect(write).toHaveBeenCalledWith(expect.objectContaining({ path, publish: true, expectedSha256: contentHash }));
+      expect(s.sync).not.toHaveBeenCalled();
+      for (const error of [
+        new DaemonRefusalError({ code: "CONFLICT", message: "conflict-stale-target", retry: "no" }, undefined),
+        new Error("write-precondition-failed"),
+      ]) {
+        write.mockRejectedValueOnce(error);
+        await expect(fake.options.writeText(path, text, contentHash, PRESSED)).rejects.toBe(error);
+      }
+      expect(s.errors).toEqual([]);
+    } finally {
+      active.mockRestore();
+      read.mockRestore();
+      write.mockRestore();
+    }
+  });
+
   it("loads a change author's name before handing the claim to the executor", async () => {
     const { storage, h } = await relay();
     const s = await server(storage, h);

@@ -672,6 +672,46 @@ export const CreateCollectionRecordPayload = z.object({
 }).strict();
 export type CreateCollectionRecordPayload = z.infer<typeof CreateCollectionRecordPayload>;
 
+// One page of a document record's field history, newest first. Main names
+// each change's agent or automation author, and says whether this computer
+// keeps the automation run that made it. `beforeHistoryId` is the
+// `nextBeforeHistoryId` of the page before; that is null after the oldest.
+export const RECORD_HISTORY_PAGE = 50;
+export const GetCollectionRecordHistoryPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  recordId: OPAQUE_ID,
+  beforeHistoryId: z.number().int().nonnegative().optional(),
+}).strict();
+export type GetCollectionRecordHistoryPayload = z.infer<typeof GetCollectionRecordHistoryPayload>;
+
+const RecordHistoryValue = z.object({ present: z.boolean(), value: CollectionValueSchema });
+const RecordHistoryAuthor = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("agent"), name: z.string().min(1).max(4096) }),
+  z.object({
+    kind: z.literal("automation"),
+    automationId: z.string().min(1).max(4096),
+    // The automation's name when it ran, or its name now for a change recorded without its run.
+    name: z.string().min(1).max(4096),
+    // The run that made the change, or null for a change recorded without it.
+    run: z.object({ claimId: z.string().min(1).max(256), onThisComputer: z.boolean() }).nullable(),
+  }),
+]);
+export const GetCollectionRecordHistoryResult = z.object({
+  entries: z.array(z.object({
+    historyId: z.number().int(),
+    field: z.string().min(1).max(4096),
+    previous: RecordHistoryValue,
+    next: RecordHistoryValue,
+    recordedAtMs: z.number().int(),
+    // Null for a person's change and an unattributed one.
+    author: RecordHistoryAuthor.nullable(),
+  })).max(RECORD_HISTORY_PAGE),
+  nextBeforeHistoryId: z.number().int().nullable(),
+});
+export type GetCollectionRecordHistoryResult = z.infer<typeof GetCollectionRecordHistoryResult>;
+export type RecordHistoryEntry = GetCollectionRecordHistoryResult["entries"][number];
+
 export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
@@ -4952,7 +4992,7 @@ const PressedButton = {
   pressId: z.uuid(),
 };
 export const PressAutomationButtonPayload = z.union([
-  z.strictObject({ ...PressedButton, collectionPath: PATH_STRING }),
+  z.strictObject({ ...PressedButton, collectionPath: PATH_STRING, confirmed: z.array(z.string().max(256)).max(64).optional() }),
   // `confirmed` holds the operation names of the actions the person was told can't be undone and chose to run.
   z.strictObject({ ...PressedButton, datasetId: z.uuid(), table: z.string().min(1).max(256), confirmed: z.array(z.string().max(256)).max(64).optional() }),
 ]);
@@ -6141,6 +6181,9 @@ export interface DohcDesktopBridge
   queryCollectionRecords(
     payload: QueryCollectionRecordsPayload,
   ): Promise<QueryCollectionRecordsResult>;
+  getCollectionRecordHistory(
+    payload: GetCollectionRecordHistoryPayload,
+  ): Promise<GetCollectionRecordHistoryResult>;
   readWorkspaceDatabase(
     payload: ReadWorkspaceDatabasePayload,
   ): Promise<DatabaseSnapshotResult>;

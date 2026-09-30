@@ -1,4 +1,4 @@
-import type { DatasetOperationKind } from "@dohc/security-contract/dataset";
+import type { DatasetDescribedField, DatasetDescription, DatasetOperationKind } from "@dohc/security-contract/dataset";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
 import type { Automation, AutomationStep, AutomationValue } from "./automationSentence";
 
@@ -186,6 +186,45 @@ export interface AutomationTable {
 export interface AutomationDatasetTable {
   fields: readonly FieldDefinition[];
   operations: ReadonlyArray<{ name: string; kind: DatasetOperationKind }>;
+}
+
+/**
+ * A dataset table's fields as the builder offers them. A file needs an
+ * upload, so it is not offered. A button stays for the button trigger. A
+ * relation holds the related record's key, which the builder takes as text.
+ */
+export function builderFields(fields: readonly DatasetDescribedField[]): FieldDefinition[] {
+  return fields.flatMap((field): FieldDefinition[] => {
+    switch (field.type) {
+      case "button":
+        return [{ name: field.name, type: "button" }];
+      case "attachment":
+        return [];
+      case "select":
+      case "multi-select":
+        return [{ name: field.name, type: field.type, options: field.options ?? [] }];
+      case "relation":
+        return [{ name: field.name, type: "text" }];
+      default:
+        return [{ name: field.name, type: field.type }];
+    }
+  });
+}
+
+/** A dataset as the builder reads it, going by `name`: its tables' fields, their operations, and its actions. */
+export function automationTableOf(dataset: DatasetDescription, name: string): AutomationTable {
+  const tableName = (tableId: string) => dataset.tables.find((candidate) => candidate.tableId === tableId)?.name ?? "";
+  return {
+    name,
+    tables: new Map(dataset.tables.map((candidate) => [candidate.name, {
+      fields: builderFields(candidate.fields),
+      operations: dataset.operations.flatMap((operation) =>
+        (operation.tableId === candidate.tableId ? [{ name: operation.name, kind: operation.kind }] : [])),
+    }])),
+    actions: dataset.operations.flatMap((operation) => operation.kind === "action"
+      ? [{ name: operation.name, label: operation.label, table: tableName(operation.tableId), reversible: operation.reversedBy !== undefined }]
+      : []),
+  };
 }
 
 /**

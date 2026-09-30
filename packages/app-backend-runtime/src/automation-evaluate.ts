@@ -22,8 +22,8 @@ const fieldValues = z.record(nonEmpty(), z.json());
 const codeStepReturn: z.ZodMiniType<CodeStepReturn> = z.strictObject({
   set: z.optional(fieldValues),
   records: z.optional(z.array(z.discriminatedUnion("action", [
-    z.strictObject({ action: z.literal("add"), collection: nonEmpty(), fields: fieldValues }),
-    z.strictObject({ action: z.literal("change"), collection: nonEmpty(), id: nonEmpty(), fields: fieldValues }),
+    z.strictObject({ action: z.literal("add"), collection: nonEmpty(), table: z.optional(nonEmpty()), fields: fieldValues }),
+    z.strictObject({ action: z.literal("change"), collection: nonEmpty(), table: z.optional(nonEmpty()), id: nonEmpty(), fields: fieldValues }),
   ]))),
   output: z.optional(z.json()),
 });

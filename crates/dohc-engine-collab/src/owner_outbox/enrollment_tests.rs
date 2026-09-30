@@ -266,6 +266,7 @@ fn enrollment_folds_unsettled_authors_before_removing_native_update_rows() {
         actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
         on_behalf_of: Some("person".into()),
         depth: 2,
+        run: None,
     };
     store
         .write_with(&NoFaults, |tx| {

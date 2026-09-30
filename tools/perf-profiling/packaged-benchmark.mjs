@@ -4,10 +4,13 @@ import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInp
 import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
+import { automationCases, automationFixtureDigest, automationOf, automationsYaml, CASE_TIMEOUT_MS, classifyOutcome, cpuByKind, DATASET_FOLDER, DATASET_NAME,
+  datasetListRequest, datasetRowValues, datasetSetupRequest, DOCUMENT_FOLDER, documentAutomationFiles, journalBytes, observeAutomationRun,
+  outcomeTexts, peakByKind, readDocumentCase, readRunJournal, TRIGGER, verifyCase, waitForQuiet } from './packaged-collection-automations.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
 import { join, resolve, dirname, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -21,14 +24,16 @@ if (options.help) {
 }
 if (process.platform !== 'win32') throw Error('The packaged release benchmark requires Windows');
 const root = resolve('.');
-const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, chatMessages, records } = options;
+const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, chatMessages, records, findCap, writeCap } = options;
 await createEvidenceDirectory(output);
 const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
-const settings = { runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, chatMessages, records };
+const settings = { runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, chatMessages, records,
+  ...(scenario === 'collection' ? { findCap, writeCap } : {}) };
 const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [], status: 'setup' };
 const feedRequests = [];
 let feed, active, windowController, helperStartup, workload;
+const automationFailures = [];
 const cancellation = benchmarkCancellation();
 try {
 await json(join(output, 'result.json'), receipt);
@@ -53,6 +58,8 @@ const cli = join(root, 'packages/cli');
 const cliLauncher = join(cli, 'bin/dohc.js');
 const cliHashedPaths = ['bin', 'src', 'package.json'];
 const seedScript = join(dirname(fileURLToPath(import.meta.url)), 'seed-chat-cli.mjs');
+const automationsModule = join(dirname(fileURLToPath(import.meta.url)), 'packaged-collection-automations.mjs');
+const datasetCliScript = join(dirname(fileURLToPath(import.meta.url)), 'dataset-cli.mjs');
 const processRunner = fileURLToPath(new URL('../../scripts/verification', import.meta.url));
 const processRunnerPaths = ['process.mjs', 'windows-job.ps1', 'windows-command.mjs'];
 Object.assign(receipt, {
@@ -70,8 +77,10 @@ Object.assign(receipt, {
   surfacesSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-surfaces.mjs')),
   closeImplementationSha256: await sha256(fileURLToPath(new URL('../../scripts/verification/close-electron.mjs', import.meta.url))),
   summarizerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'summarize-packaged-benchmark.mjs')),
-  ...(scenario === 'chat-history' ? { cli, cliLauncher, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths), seedScript, seedScriptSha256: await sha256(seedScript),
+  ...(scenario === 'chat-history' || scenario === 'collection' ? { cli, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths),
     processRunner, processRunnerPaths, processRunnerSha256: await sha256Tree(processRunner, processRunnerPaths) } : {}),
+  ...(scenario === 'chat-history' ? { cliLauncher, seedScript, seedScriptSha256: await sha256(seedScript) } : {}),
+  ...(scenario === 'collection' ? { automationsModule, automationsModuleSha256: await sha256(automationsModule), datasetCliScript, datasetCliSha256: await sha256(datasetCliScript) } : {}),
   harnessCheckout: root, harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [],
   limits: [
@@ -96,6 +105,10 @@ Object.assign(receipt, {
     'With an engine capture, search queries the engine index and returns at most 50 results in one batch, so limitHit false does not mean the results are complete. sawUpdating records whether the view passed through updating, whose retry backoff lands in the settled time.',
     'chat-history seeds one #general post and its replies through the checkout CLI (packages/cli) against the running package, then restarts before measuring. Seeding runs seed-chat-cli.mjs through scripts/verification/process.mjs. The benchmark runs only on Windows, where that runner holds seeding in a job object that kills every descendant when the harness-owned job owner exits. Each CLI call times out after 60 seconds. Each message runs two Node processes, the launcher and the CLI. The thread comment list is not virtualized; every reply renders.',
     'collection seeds Markdown records with pre-minted ids. The table is virtualized and pages on demand: rowsRendered is the visible window and loadedRecords is the first page.',
+    'collection then types in small.md, and then runs the automation phase: it writes a document Collection to disk and creates a dataset Collection through the checkout CLI, and presses one Button per case on a trigger record. Seeding starts no run. Before the first document case, the harness scrolls the table until it holds every record, so no Find runs before the engine indexed its records. A case starts once main and the engine used under 5% of one core over three consecutive intervals of at least 1 s. Before each press, the harness dismisses the shown toast, so the settle text arrives as new text in the toast stack or Notices.',
+    'Automation settle times run from the renderer receipt of the trusted mousedown to the first animation-frame callback after the settle text appeared. startMs runs from that mousedown, in wall-clock time, to the run header startedAtMs, which the executor sets when it creates the run, before any Find: it covers the press, the claim and loading the automation. runMs runs from startedAtMs to finishedAtMs and covers every Find, formula evaluation and write. The executor saves no time between these, so the harness cannot split them. A run refused before it saves a header leaves both missing.',
+    'Automation CPU is per process kind between the snapshot that ended the quiet wait and one started when the run settled; PowerShell start-up adds about half a second to that window. The formula evaluator runs on a worker thread in main, so its CPU is part of main CPU; the executor saves no evaluation time, so the harness reports no separate evaluator cost. Peak memory and header bytes are sampled about once a second, so a short peak can be missed.',
+    'Contention cases press the button, then run the typing workload in small.md; samplesDuringRun counts trusted input events between the press and the settle text, and a case expected to finish fails when none arrived. Their CPU ends when the run settles, not when typing ends. Document values are read from the settled Markdown; dataset values through the approved list operation.',
     'soak samples working set and private bytes per process kind after each mixed cycle. Growth includes allocator and garbage-collector timing; it is not a leak proof.',
   ],
 });
@@ -569,6 +582,157 @@ async function openCollection(page, folder) {
   return { folder, records, indexedWaitObservedMs, observedMs: performance.now() - started, clickToFirstRowMs: observed.matchedMs - observed.triggerMs,
     clickToRowsPaintedMs: observed.paintedMs - observed.triggerMs, rowsRendered: observed.count, loadedRecords: ariaRowCount - 1, observed };
 }
+// The automation phase: one document and one dataset Collection, one Button per case on a trigger record.
+const cliModule = join(cli, 'src/index.ts');
+const tsxLoader = pathToFileURL(createRequire(join(cli, 'package.json')).resolve('tsx')).href;
+const { load: loadYaml } = require('js-yaml');
+async function datasetCli(instance, runDir, name, request, timeoutMs) {
+  const requestPath = join(runDir, `dataset-${name}.json`);
+  await json(requestPath, { ...request, cliModule });
+  // The same job object as chat seeding owns this process and anything it starts.
+  const { stdout } = await runOwnedCommand(process.execPath, ['--import', tsxLoader, datasetCliScript, requestPath],
+    { cwd: instance.fixture.workspaces[0].rootPath, env: { ...env, DOHC_STATE_DIR: instance.fixture.profile, NODE_NO_WARNINGS: '1' }, timeoutMs, quietStdout: true, log: join(runDir, `dataset-${name}.log`) });
+  return JSON.parse(stdout.trim().split(/\r?\n/).at(-1));
+}
+// A button can run once main has said which automation it runs.
+async function buttonReady(page, name) {
+  await page.waitForFunction(name => {
+    const button = [...document.querySelectorAll('button[aria-label]')].find(candidate => candidate.getAttribute('aria-label') === name);
+    return Boolean(button) && !button.hasAttribute('aria-disabled');
+  }, name, { timeout: 120000, polling: 100 });
+}
+// The engine indexes records a writer dropped on disk after the Collection appears. The table pages on
+// demand, so the harness scrolls it to the end until it holds every record, then back to the top.
+async function tableHolds(page, expected, timeoutMs = 180000) {
+  const started = performance.now();
+  const scroll = to => page.evaluate(to => {
+    const grid = document.querySelector('[data-testid="collection-page"] [role="grid"]');
+    if (!grid) return null;
+    const scroller = [...grid.querySelectorAll('div')].find(node => ['auto', 'scroll'].includes(getComputedStyle(node).overflowY));
+    if (scroller) scroller.scrollTop = to === 'end' ? scroller.scrollHeight : 0;
+    return Number(grid.getAttribute('aria-rowcount')) - 1;
+  }, to);
+  for (let held = await scroll('end'); held !== expected; held = await scroll('end')) {
+    if (performance.now() - started > timeoutMs) throw Error(`The Collection table held ${held} of ${expected} records after ${timeoutMs}ms`);
+    await delay(250, undefined, { signal: cancellation.signal });
+  }
+  await scroll('top');
+  return performance.now() - started;
+}
+// A toast the last case left would hide a new toast with the same words, so it goes first.
+async function dismissToasts(page) {
+  const dismiss = page.locator('[data-testid="notice-toasts"] button[aria-label^="Dismiss workspace"]');
+  while (await dismiss.count()) await dismiss.first().click();
+}
+// Installs the observer, then presses with trusted input. Returns the pending observation in an object,
+// so awaiting the press does not also await the run.
+async function press(page, name, texts) {
+  await page.evaluate(`(() => { window.__dohcAutomation = (${observeAutomationRun.toString()})(${JSON.stringify({ button: name, texts, timeoutMs: CASE_TIMEOUT_MS })}); window.__dohcAutomation.catch(() => {}); })()`);
+  await page.getByRole('button', { name, exact: true }).click();
+  const settled = page.evaluate(() => window.__dohcAutomation);
+  void settled.catch(() => {});
+  return { settled };
+}
+// Process snapshots and the case's journal size, about once a second, until the run settles.
+async function sampleDuring(settled, pid, root, automation) {
+  let done = false;
+  const finished = settled.then(() => { done = true; }, () => { done = true; });
+  const snapshots = [];
+  let headerPeakBytes = 0;
+  while (!done) {
+    snapshots.push(await snapshot(pid));
+    headerPeakBytes = Math.max(headerPeakBytes, (await journalBytes(root, automation)).headerBytes);
+    await Promise.race([finished, delay(1000, undefined, { signal: cancellation.signal })]);
+  }
+  return { snapshots, headerPeakBytes };
+}
+async function verifyDocuments(root, spec, outcome, createdPaths) {
+  const started = performance.now();
+  for (;;) {
+    const verification = verifyCase(spec, outcome, await readDocumentCase(root, spec, loadYaml, createdPaths));
+    // Settlement writes the Markdown after the run settles.
+    if (verification.ok || performance.now() - started > 120000) return { ...verification, settledOnDiskObservedMs: verification.ok ? performance.now() - started : null };
+    await delay(500, undefined, { signal: cancellation.signal });
+  }
+}
+async function automationCase(instance, runDir, kind, spec, surface) {
+  const { page } = instance, pid = instance.child.pid, workspace = instance.fixture.workspaces[0], root = workspace.rootPath;
+  const name = `${spec.name} for ${surface.label}`, automation = automationOf(kind, spec.name);
+  if (!(await page.getByRole('button', { name, exact: true }).isVisible())) await surface.open();
+  await buttonReady(page, name);
+  await dismissToasts(page);
+  const quiet = await waitForQuiet({ sample: () => snapshot(pid), appPid: pid, signal: cancellation.signal });
+  const before = quiet.snapshot;
+  const { settled } = await press(page, name, outcomeTexts(spec.name, surface.label));
+  // The closing snapshot starts as the run settles, not after sampling or typing ends.
+  const closing = settled.then(() => snapshot(pid));
+  void closing.catch(() => {});
+  const typed = spec.contention ? typing(page, 'small.md') : null;
+  void typed?.catch(() => {});
+  const during = await sampleDuring(settled, pid, root, automation);
+  const observed = await settled;
+  const after = await closing;
+  const typingResult = typed ? await typed : null;
+  const runs = await readRunJournal(root, automation);
+  const outcome = classifyOutcome(observed);
+  const verification = kind === 'document'
+    ? await verifyDocuments(root, spec, outcome, runs.flatMap(run => run.createdPaths))
+    : verifyCase(spec, outcome, (await datasetCli(instance, runDir, `list-${spec.name}`, datasetListRequest(surface.setup, workspace.workspaceId, spec.name), 120000)).rows.map(datasetRowValues));
+  const triggerEpochMs = observed.installedEpochMs + observed.triggerMs - observed.installedMs;
+  const run = runs.at(-1) ?? null;
+  // Keystroke N is the Nth trusted input event, which the renderer stamped when it arrived.
+  const samplesDuringRun = typingResult?.inputs.filter(input => input.timestamp >= observed.triggerMs && input.timestamp <= observed.matchedMs).length ?? null;
+  // A contention case that settled before the first keystroke arrived measured no contention.
+  const overlapped = !spec.contention || spec.expected !== 'done' || samplesDuringRun > 0;
+  return { kind, name: spec.name, fixtureSha256: spec.fixtureSha256, expected: spec.expected, outcome, reason: observed.text, pass: outcome === spec.expected && verification.ok && overlapped,
+    matches: spec.matches, plannedAssignments: spec.assignments, visibility: verification.visibility, verification, triggerTrusted: observed.triggerTrusted,
+    triggerToSettledPaintedMs: observed.paintedMs - observed.triggerMs, triggerToSettledMatchedMs: observed.matchedMs - observed.triggerMs,
+    startMs: run ? run.startedAtMs - triggerEpochMs : null, runMs: run?.finishedAtMs ? run.finishedAtMs - run.startedAtMs : null,
+    journal: { runs, headerPeakBytesSampled: during.headerPeakBytes },
+    elapsedMs: after.completedAtMs - before.completedAtMs, cpuMs: cpuByKind(before, after, pid),
+    peakBytes: peakByKind([before, ...during.snapshots, after], pid),
+    longTasks: observed.longTasks.filter(task => task.startTime + task.duration >= observed.triggerMs && task.startTime <= observed.paintedMs),
+    quiet: { waitedMs: quiet.waitedMs, busyShare: quiet.busyShare },
+    typing: typingResult && { ...typingResult, samplesDuringRun } };
+}
+async function automationKind(instance, runDir, kind, cases, surface, result) {
+  for (const spec of cases) await buttonReady(instance.page, `${spec.name} for ${surface.label}`);
+  for (const spec of cases) {
+    const record = await automationCase(instance, runDir, kind, spec, surface);
+    result.cases.push(record);
+    await json(join(output, 'result.json'), receipt);
+    console.log(JSON.stringify({ label, phase: 'automation-case', kind, name: spec.name, expected: record.expected, outcome: record.outcome, pass: record.pass, ms: Math.round(record.triggerToSettledPaintedMs) }));
+  }
+}
+// Writes into data.collectionAutomations as it goes, so a failed run keeps the cases it finished.
+async function automationPhase(instance, runDir, data) {
+  const { page, fixture } = instance, workspace = fixture.workspaces[0];
+  const cases = automationCases({ findCap, writeCap });
+  const result = data.collectionAutomations = { findCap, writeCap, fixtureSha256: automationFixtureDigest(cases), document: { cases: [] }, dataset: { cases: [] } };
+  // Written as an agent writes files: the schema and automations first, then the records.
+  const files = documentAutomationFiles(cases);
+  const written = performance.now();
+  await mkdir(join(workspace.rootPath, DOCUMENT_FOLDER));
+  for (let begin = 0; begin < files.length; begin += 32) {
+    cancellation.signal.throwIfAborted();
+    await Promise.all(files.slice(begin, begin + 32).map(file => writeFile(join(workspace.rootPath, file.path), file.content)));
+  }
+  await page.locator(`[data-testid="tree-row"][data-path="${DOCUMENT_FOLDER}"][data-collection="true"]`).waitFor({ timeout: 120000 });
+  result.document.seed = { files: files.length, collectionObservedMs: performance.now() - written };
+  const documents = { label: TRIGGER.document.label, open: () => page.locator(`[data-testid="tree-row"][data-path="${DOCUMENT_FOLDER}"]`).click() };
+  await documents.open();
+  result.document.seed.tableHoldsAllObservedMs = await tableHolds(page, files.filter(file => file.path.endsWith('.md')).length);
+  await automationKind(instance, runDir, 'document', cases, documents, result.document);
+
+  await waitUntil(() => Promise.all(['dohc-cli-endpoint', 'dohc-cli-token'].map(name => stat(join(fixture.profile, name)))).then(() => true, () => false), 60000);
+  const setup = await datasetCli(instance, runDir, 'setup', datasetSetupRequest(cases, workspace.workspaceId), 600000);
+  result.dataset.seed = setup;
+  await writeFile(join(workspace.rootPath, DATASET_FOLDER, 'automations.yaml'), automationsYaml(cases, 'dataset'));
+  const opener = page.getByRole('region', { name: 'Collections', exact: true }).getByRole('button', { name: DATASET_NAME, exact: true });
+  const datasets = { label: TRIGGER.dataset.label, setup, open: async () => { await opener.waitFor({ timeout: 120000 }); await opener.click(); } };
+  await datasets.open();
+  await automationKind(instance, runDir, 'dataset', cases, datasets, result.dataset);
+}
 async function soak(instance, data) {
   const page = instance.page;
   const sample = async cycle => ({ cycle, ...aggregateByKind(await snapshot(instance.child.pid), instance.child.pid) });
@@ -660,7 +824,13 @@ async function soak(instance, data) {
       if (scenario === 'go-to') data.goTo = await goTo(fresh.page);
       if (scenario === 'command-palette') data.commandPalette = await commandPalette(fresh.page);
       if (scenario === 'search') data.search = await search(fresh.page);
-      if (scenario === 'collection') data.collection = await openCollection(fresh.page, 'records');
+      if (scenario === 'collection') {
+        data.collection = await openCollection(fresh.page, 'records');
+        data.typing = [await typing(fresh.page, 'small.md')];
+        await json(join(output, 'result.json'), receipt);
+        await automationPhase(fresh, runDir, data);
+        automationFailures.push(...['document', 'dataset'].flatMap(kind => data.collectionAutomations[kind].cases.filter(c => !c.pass).map(c => `run ${index + 1} ${kind} ${c.name}: expected ${c.expected}, ${c.outcome}${c.verification.ok ? '' : `, ${c.verification.problemCount} wrong values`}`)));
+      }
       await fresh.page.screenshot({ path: join(runDir, 'completed.png') });
       await shutdown(runDir, fresh);
       await json(join(output, 'result.json'), receipt);
@@ -728,6 +898,7 @@ async function soak(instance, data) {
     console.log(JSON.stringify({ label, run: index + 1, phase: 'complete', restartMs: data.restartStartup.editablePaintObservedMs }));
   }
   cancellation.signal.throwIfAborted();
+  if (automationFailures.length) throw Error(`Collection automation cases failed: ${automationFailures.join('; ')}`);
   receipt.status = 'complete';
   })()));
 } catch (error) {

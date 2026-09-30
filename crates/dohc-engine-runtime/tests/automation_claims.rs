@@ -275,6 +275,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
                 actor_kind: ChangeActorKind::Agent,
                 on_behalf_of: Some("user:ice".to_owned()),
                 depth: 0,
+                run: None,
             }),
             base.lineage_claim_id.clone(),
             false,
@@ -411,6 +412,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
                 actor_kind: ChangeActorKind::Automation,
                 on_behalf_of: Some("user:ice".to_owned()),
                 depth: dohc_engine_domain::AUTOMATION_CHAIN_DEPTH_CAP,
+                run: None,
             }),
             replay.lineage_claim_id.clone(),
             false,
@@ -454,6 +456,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
                 actor_kind: ChangeActorKind::Human,
                 on_behalf_of: None,
                 depth: 0,
+                run: None,
             }),
             at_cap.lineage_claim_id.clone(),
             false,
@@ -623,6 +626,7 @@ async fn an_automations_write_replicated_to_the_live_host_keeps_its_depth_and_cl
                 actor_kind: ChangeActorKind::Automation,
                 on_behalf_of: Some("owner".to_owned()),
                 depth: 2,
+                run: None,
             }),
             base.lineage_claim_id.clone(),
             false,
@@ -763,6 +767,7 @@ async fn a_record_created_in_a_document_session_credits_its_interval_authors() {
             actor_kind: ChangeActorKind::Automation,
             on_behalf_of: Some("user:ice".to_owned()),
             depth,
+            run: None,
         })
     };
 
@@ -841,6 +846,7 @@ async fn a_record_created_in_a_document_session_credits_its_interval_authors() {
                     actor_kind: ChangeActorKind::Automation,
                     on_behalf_of: case.principal.map(str::to_owned),
                     depth,
+                    run: None,
                 }),
                 None,
                 true,

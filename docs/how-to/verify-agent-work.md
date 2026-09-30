@@ -72,12 +72,22 @@ Fetch the PR's target branch. Use its fetched ref as `<target-ref>` below, such 
 Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
 The plan also lists selected JavaScript packages, test files, integration proofs, and required services.
 JavaScript selection follows workspace dependencies and declared external test inputs.
+Site-only changes run the site's tests and two desktop renderer compatibility files, without desktop packaging or native proofs.
+Account API and Postgres inputs retain desktop preparation and account and desktop browser proofs, without unrelated desktop unit or packaging tests.
+Share-web inputs retain desktop preparation, desktop browser proofs, and the native delivery proof.
+Combined site changes retain both renderer compatibility files and those proofs.
+Desktop production changes and shared inputs retain the complete desktop suite, packaging tests, and proofs.
 Desktop-only changes run the Y.Doc compatibility files that import desktop code.
 Changes to Y.Doc projection or its other inputs run the complete Y.Doc suite, including the checkpoint boundary test.
 Shared configuration and unclassified code inputs select the full JavaScript suite.
+Ordinary package changes run repository source guards: exports, brand, dependency inputs, and Vitest version consistency.
+Shared inputs and full mode also run the repository's verification, release, process, and self-host contracts.
+These contracts read scripts, tools, workflows, and configuration; product files inside their fixtures are synthetic.
+When a contract gains a real package input, add that input to full selection before narrowing its coverage.
+`pnpm test:repo` retains the complete repository suite.
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
-The JavaScript gate typechecks the whole workspace and runs repository checks before selected package tests.
+The JavaScript gate typechecks the whole workspace, then runs repository checks alongside selected package tests.
 It installs Electron only when desktop preparation is selected.
 On headless Linux hosts, only the desktop proof runs under Xvfb.
 It starts a dedicated Postgres container when selected tests or proofs need one.
@@ -108,12 +118,14 @@ The `timings` rows record the queue wait, source checks, preparation, and databa
 Preparation finishes before the Rust and JavaScript jobs start together. Their step rows can overlap, as can failed startup cleanup.
 Do not add step durations to estimate elapsed time.
 
-`pnpm test` builds the SDK and app runtime before testing packages.
-It runs repository tests first, then at most two packages concurrently, then desktop packaging tests.
+`pnpm test` builds the app runtime before testing packages.
+Repository checks run beside at most two package commands.
+Isolated desktop script tests then use the repository lane.
+The runtime packaging test waits for all three lanes because it rebuilds shared runtime files.
 Database consumers share one slot. Vitest uses at most four workers per package and retains stricter existing limits.
 Package results and durations are in the JS test report referenced by `result.json`.
 The canonical verifier supplies the prerequisites once before running this test schedule.
-It holds desktop packaging until Rust finishes because both use the built app runtime.
+It also holds runtime packaging until Rust finishes because both use the built app runtime.
 The `packaging-wait` timing records that wait, which also contributes to the `tests` step.
 
 ## Measure performance

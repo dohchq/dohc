@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CollectionRecord } from "@dohc/workspace-contracts";
-import type { AutomationRunSettledEvent, ListRecordButtonsResult, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
+import type {
+  AutomationRunSettledEvent, GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, ListRecordButtonsResult, WorkspaceActivityEvent,
+} from "../../ipc/bridgeContract";
 import { RecordButtonsRow } from "./RecordButtonsRow";
 import { resetAutomationButtonsForTests } from "./useAutomationButtons";
+
+// The shell opens the ⚡ panel at a run; these tests open none.
+const noRun = async () => null;
 
 const invoice: CollectionRecord = {
   id: "rec-12", path: "Invoices/12.md", conflicted: false,
@@ -46,7 +51,7 @@ describe("RecordButtonsRow", () => {
       buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid" } }],
     });
     const onNotice = vi.fn();
-    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={onNotice} />);
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={onNotice} onOpenAutomationRun={noRun} />);
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     expect(screen.getByTestId("record-buttons").contains(button)).toBe(true);
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
@@ -64,7 +69,7 @@ describe("RecordButtonsRow", () => {
       record: invoice, collectionPath: "Invoices",
       buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid", irreversible: [{ name: "invoices.settle", label: "Settle" }, { name: "receipts.send", label: "Send receipt" }] } }],
     });
-    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} />);
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} onOpenAutomationRun={noRun} />);
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     fireEvent.click(button);
@@ -96,6 +101,7 @@ describe("RecordButtonsRow", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(button);
     await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1));
+    expect(bridge.pressAutomationButton).toHaveBeenCalledWith(expect.objectContaining({ confirmed: ["invoices.settle", "receipts.send"] }));
   });
 
   it("closes the question on scroll even when its words were already showing", async () => {
@@ -103,7 +109,7 @@ describe("RecordButtonsRow", () => {
       record: invoice, collectionPath: "Invoices",
       buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid", irreversible: [{ name: "invoices.settle", label: "Settle" }] } }],
     });
-    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} />);
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} onOpenAutomationRun={noRun} />);
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     // A press someone else is running leaves words on the button, which show while the pointer is over it.
@@ -124,7 +130,7 @@ describe("RecordButtonsRow", () => {
       record: invoice, collectionPath: "Invoices",
       buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid", irreversible: [{ name: "invoices.settle", label: "Settle" }] } }],
     });
-    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} />);
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} onOpenAutomationRun={noRun} />);
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     fireEvent.click(button);
@@ -139,16 +145,70 @@ describe("RecordButtonsRow", () => {
     expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
   });
 
-  it("shows nothing for a file that is not a record, or a Collection without buttons", async () => {
+  it("shows nothing for a file that is not a record", async () => {
     const bridge = stub({ record: null });
-    const { container } = render(<RecordButtonsRow workspaceId="ws-1" path="Notes/todo.md" onError={() => undefined} onNotice={() => undefined} />);
+    const { container } = render(<RecordButtonsRow workspaceId="ws-1" path="Notes/todo.md" onError={() => undefined} onNotice={() => undefined} onOpenAutomationRun={noRun} />);
     await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalled());
     expect(container.innerHTML).toBe("");
   });
 
+  it("offers History for a record without buttons, reads it only when opened, and opens a run from it", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [] });
+    const history = vi.fn(async (_payload: GetCollectionRecordHistoryPayload): Promise<GetCollectionRecordHistoryResult> => ({
+      entries: [{
+        historyId: 3, field: "Paid", previous: { present: false, value: null }, next: { present: true, value: true }, recordedAtMs: Date.now(),
+        author: { kind: "automation", automationId: "collection:invoices-id#paid", name: "Mark paid", run: { claimId: "atc_1", onThisComputer: true } },
+      }],
+      nextBeforeHistoryId: null,
+    }));
+    Object.assign(bridge, { getCollectionRecordHistory: history });
+    const openRun = vi.fn(async (_automationId: string, _claimId: string, _name: string) => null);
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} onOpenAutomationRun={openRun} />);
+    const open = await screen.findByRole("button", { name: "History" });
+    expect(screen.queryByRole("button", { name: /Mark paid/ })).toBeNull();
+    expect(history).not.toHaveBeenCalled();
+    fireEvent.click(open);
+    const dialog = await screen.findByRole("dialog", { name: "History of Invoice 12" });
+    expect(history).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "Invoices", recordId: "rec-12" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: "View run" }));
+    // The name travels too, so the panel's title is right before it reads the file.
+    expect(openRun).toHaveBeenCalledWith("collection:invoices-id#paid", "atc_1", "Mark paid");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("gives focus back to History when its dialog closes", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [] });
+    Object.assign(bridge, { getCollectionRecordHistory: vi.fn(async () => ({ entries: [], nextBeforeHistoryId: null })) });
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} onOpenAutomationRun={noRun} />);
+    const open = await screen.findByRole("button", { name: "History" });
+    fireEvent.click(open);
+    const dialog = await screen.findByRole("dialog", { name: "History of Invoice 12" });
+    await within(dialog).findByText("No field of this record has changed yet.");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(open);
+  });
+
+  it("reports a run the shell cannot open", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [] });
+    Object.assign(bridge, { getCollectionRecordHistory: vi.fn(async (): Promise<GetCollectionRecordHistoryResult> => ({
+      entries: [{
+        historyId: 3, field: "Paid", previous: { present: false, value: null }, next: { present: true, value: true }, recordedAtMs: Date.now(),
+        author: { kind: "automation", automationId: "collection:invoices-id#paid", name: "Mark paid", run: { claimId: "atc_1", onThisComputer: true } },
+      }],
+      nextBeforeHistoryId: null,
+    })) });
+    const onError = vi.fn();
+    const note = "dohc cannot find this automation's Collection on this computer.";
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={onError} onNotice={() => undefined} onOpenAutomationRun={async () => note} />);
+    fireEvent.click(await screen.findByRole("button", { name: "History" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View run" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(note, expect.any(Error), null));
+  });
+
   it("reads again when the record or its Collection's automations change, and not for other files", async () => {
     const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [] });
-    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/2026/12.md" onError={() => undefined} onNotice={() => undefined} />);
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/2026/12.md" onError={() => undefined} onNotice={() => undefined} onOpenAutomationRun={noRun} />);
     await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalledTimes(1));
     act(() => bridge.emitActivity({ workspaceId: "ws-1", paths: ["Notes/todo.md", "Invoice/automations.yaml"] } as WorkspaceActivityEvent));
     act(() => bridge.emitActivity({ workspaceId: "ws-2", paths: ["Invoices/automations.yaml"] } as WorkspaceActivityEvent));
@@ -161,7 +221,7 @@ describe("RecordButtonsRow", () => {
     const bridge = stub({ record: null });
     bridge.listRecordButtons.mockRejectedValueOnce(new Error("The workspace engine is not running."));
     const onError = vi.fn();
-    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={onError} onNotice={() => undefined} />);
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={onError} onNotice={() => undefined} onOpenAutomationRun={noRun} />);
     await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not read this record's buttons.", expect.any(Error), expect.any(Function)));
     act(() => (onError.mock.calls[0]![2] as () => void)());
     await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalledTimes(2));

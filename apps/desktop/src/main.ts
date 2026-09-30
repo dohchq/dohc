@@ -4022,6 +4022,7 @@ function createCollectionAutomationsFor(
       (await linkedChatStoreFor(lease).listChannels({ workspaceId }))
         .flatMap((channel) => (channel.kind === "channel" ? [{ name: channel.name, slug: channel.slug }] : []))),
     personName: (userId) => (userId === localUserId() ? localUserDisplayName() : userId),
+    localPersonId: localUserId,
     mayRetryPress: async (pressedBy) => pressedBy === (await pressingPerson()) || (await localPersonOwns(workspaceId)),
     onPressSettled: (event) => {
       pressWindows.settled(workspaceId, event);
@@ -5262,6 +5263,9 @@ function registerIpcHandlers(): void {
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     namedAuthorLabel: (workspaceId, author) => rosterAuthorLabel(findWorkspace(workspaceId)?.shareRoster, author),
     automationAuthor, notifyRenderer,
+    // A shared view keeps no runs: its automations run on the owner's computer.
+    automationRunOnThisComputer: async (workspaceId, automationId, claimId) =>
+      !sharedViewOf(workspaceId) && (await collectionAutomationsOf(workspaceId)?.hasRun(automationId, claimId) ?? false),
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
@@ -5501,11 +5505,11 @@ function registerIpcHandlers(): void {
         origin: transfer.targetOrigin, ...remote, currentCredentialGeneration: () => credentialCacheGeneration,
         signal, assertCurrent: authorize, maxBytes: 1024 * 1024 * 1024 + 2 * 1024 * 1024,
         relayResponse: relayShareResponseWithCredentials });
-      try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream, maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
+      try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream, maxBytes: archive.maxBytes, signal, authorize, workspaceRoots: listWorkspaces().map(entry => entry.rootPath) })).savedPath; }
       finally { await archive.dispose(); }
     }
     const archive = await local.prepareExport(datasetId, { signal });
-    try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
+    try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize, workspaceRoots: listWorkspaces().map(entry => entry.rootPath) })).savedPath; }
     finally { await archive.dispose(); }
   };
   const datasetHandler = createDatasetHandler<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({

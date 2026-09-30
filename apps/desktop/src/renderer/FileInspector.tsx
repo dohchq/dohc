@@ -348,9 +348,11 @@ function TruncatedNotice(props: { workspaceId: string; path: string }) {
 type FileInspectorProps = {
   workspaceId: string;
   path: string;
-  // A record's Button fields report through the shell's toasts and Notices.
+  // A record's Button fields report through the shell's toasts and Notices,
+  // and its History opens an automation's run in the ⚡ panel.
   onButtonError?: ReportButtonError;
   onButtonNotice?: (message: string) => void;
+  onOpenAutomationRun?: (automationId: string, claimId: string, name: string) => Promise<string | null>;
   fileOpenStartMark?: string;
   refreshKey?: number;
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
@@ -813,6 +815,7 @@ export const FileInspector = memo(function FileInspector(
             onPendingDraftChange={setPendingDraft}
             onButtonError={props.onButtonError}
             onButtonNotice={props.onButtonNotice}
+            onOpenAutomationRun={props.onOpenAutomationRun}
             engine={engine}
             onRetryEngineOpen={retryEngineOpen}
             writesRefusedRef={writesRefusedRef}

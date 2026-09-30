@@ -64,7 +64,42 @@ export async function summarize(data, readLog = async () => '') {
       privateBytes: stats(idle.totals.map(t => t.privateBytes)), processCounts: [...new Set(idle.totals.map(t => t.processCount))],
       deltas: idle.deltas, contextSwitches: idle.contextSwitches, hardwareWakeups: idle.hardwareWakeups });
   }
-  Object.assign(summary, surfaceSummaries(data.runs));
+  Object.assign(summary, surfaceSummaries(data.runs), { collectionAutomations: automationSummary(data.runs) });
+  return summary;
+}
+
+// One row per Collection kind and case, over every run that pressed it. A refused run saves no plan,
+// so its planning and write times stay missing; so does any measurement a run did not produce.
+function automationSummary(runs) {
+  const phases = runs.flatMap(run => run.collectionAutomations ? [run.collectionAutomations] : []);
+  if (!phases.length) return null;
+  const unique = values => [...new Set(values.filter(value => value !== undefined))];
+  const summary = { findCap: unique(phases.map(phase => phase.findCap)), writeCap: unique(phases.map(phase => phase.writeCap)),
+    fixtureSha256: unique(phases.map(phase => phase.fixtureSha256)), document: {}, dataset: {} };
+  for (const kind of ['document', 'dataset']) {
+    const cases = phases.flatMap(phase => phase[kind]?.cases ?? []);
+    for (const name of unique(cases.map(c => c.name))) {
+      const rows = cases.filter(c => c.name === name);
+      const cpu = key => stats(rows.map(c => c.cpuMs?.[key]));
+      const peak = (key, field) => stats(rows.map(c => c.peakBytes?.[key]?.[field]));
+      const typed = rows.flatMap(c => c.typing ? [c.typing] : []);
+      const during = typed.flatMap(t => t.samples.slice(0, t.samplesDuringRun));
+      summary[kind][name] = {
+        fixtureSha256: unique(rows.map(c => c.fixtureSha256)), expected: unique(rows.map(c => c.expected)), outcomes: unique(rows.map(c => c.outcome)), visibility: unique(rows.map(c => c.visibility)),
+        failures: rows.filter(c => !c.pass).length, runs: rows.length,
+        triggerToSettledPaintedMs: stats(rows.map(c => c.triggerToSettledPaintedMs)), startMs: stats(rows.map(c => c.startMs)), runMs: stats(rows.map(c => c.runMs)),
+        settledOnDiskObservedMs: stats(rows.map(c => c.verification?.settledOnDiskObservedMs)),
+        headerPeakBytesSampled: stats(rows.map(c => c.journal?.headerPeakBytesSampled)),
+        headerBytes: stats(rows.map(c => c.journal?.runs?.at(-1)?.headerBytes)), progressBytes: stats(rows.map(c => c.journal?.runs?.at(-1)?.progressBytes)),
+        fieldWrites: unique(rows.map(c => c.journal?.runs?.at(-1)?.fieldWrites)), created: unique(rows.map(c => c.journal?.runs?.at(-1)?.created)),
+        cpuMs: { main: cpu('main'), engine: cpu('engine'), renderer: cpu('renderer'), gpu: cpu('gpu'), utility: cpu('utility') },
+        peakPrivateBytes: { main: peak('main', 'privateBytes'), engine: peak('engine', 'privateBytes'), renderer: peak('renderer', 'privateBytes') },
+        longTaskCount: stats(rows.map(c => c.longTasks?.length)), longTaskTotalMs: stats(rows.map(c => c.longTasks?.reduce((sum, task) => sum + task.duration, 0))),
+        typingDuringRun: typed.length ? { samplesDuringRun: typed.reduce((sum, t) => sum + t.samplesDuringRun, 0), inputToNextPaintReportedOnlyMs: stats(during.map(s => s.inputToNextPaintMs)),
+          dispatchToTwoRafObservedMs: stats(during.map(s => s.dispatchToTwoRafMs)) } : null,
+      };
+    }
+  }
   return summary;
 }
 

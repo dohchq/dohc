@@ -2656,6 +2656,16 @@ WHEN OLD.sha256 <> NEW.sha256
 BEGIN SELECT RAISE(ABORT, 'referenced materialization content'); END;
 ";
 
+/// Record history names the automation run that wrote a change: the claim
+/// it ran for and the automation's name when it ran. Only an automation's
+/// change names one, and the two are set together.
+const V2_RECORD_HISTORY_AUTOMATION_RUN_DDL: &str = "\
+ALTER TABLE collection_field_history ADD COLUMN automation_claim_id TEXT
+    CHECK (automation_claim_id IS NULL OR actor_kind = 'automation');
+ALTER TABLE collection_field_history ADD COLUMN automation_name TEXT
+    CHECK ((automation_name IS NULL) = (automation_claim_id IS NULL));
+";
+
 /// Live edits keep their authors. A moment's `author_json` becomes a list
 /// with one entry per author, so each stored single author becomes a list of
 /// one; NULL stays NULL. `pending_authors_json` holds the authors compaction folded
@@ -2918,7 +2928,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_MATERIALIZATION_TEXT_BLOBS_DDL,
         sets_user_version: None,
     },
-    // Ordinal 25 belongs to PR #1484.
+    Migration {
+        ordinal: 25,
+        id: "v2-record-history-automation-run",
+        sql: V2_RECORD_HISTORY_AUTOMATION_RUN_DDL,
+        sets_user_version: None,
+    },
     Migration {
         ordinal: 26,
         id: "v2-ydoc-live-edit-authors",
@@ -3277,6 +3292,10 @@ mod tests {
             (
                 "v2-materialization-text-blobs",
                 "2f5662203a97d14c1ecd6e1902a1dfd2d1b0dfe11734fe7c12b4a2982fc317ca",
+            ),
+            (
+                "v2-record-history-automation-run",
+                "7a31e23961f026d1e131b1473e9e6f47e867b00c40bb5090ada94d7fedf07a83",
             ),
             (
                 "v2-ydoc-live-edit-authors",

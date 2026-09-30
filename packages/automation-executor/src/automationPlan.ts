@@ -917,7 +917,7 @@ export interface RunContext {
 }
 
 /** How a run finds a record a code step names by its Collection and id. */
-export const codeRecordKey = (collection: string, id: string) => JSON.stringify([collection, id]);
+export const codeRecordKey = (collection: string, id: string, table?: string) => JSON.stringify([collection, id, table ?? null]);
 
 /**
  * Whether the claim's change is the one the trigger names, before any
@@ -1343,8 +1343,8 @@ export interface PlannedField {
 export type PlannedTarget = { recordId: string; collectionPath: string; path: string };
 
 export type PlannedEffect =
-  | { kind: "set"; target: PlannedTarget; fields: PlannedField[] }
-  | { kind: "add"; collectionPath: string; recordId: string; name: string; fields: Array<{ field: string; value: JsonValue }> }
+  | { kind: "set"; target: PlannedTarget; table?: string; fields: PlannedField[] }
+  | { kind: "add"; collectionPath: string; table?: string; recordId: string; name: string; fields: Array<{ field: string; value: JsonValue }> }
   | {
       kind: "message";
       /** Also the idempotency key, so a retry writes the message once. */
@@ -1489,6 +1489,7 @@ export interface CodeChange {
   action: "add" | "change";
   /** The Collection's workspace path. */
   collection: string;
+  table?: string;
   id: string | null;
   fields: JsonObject;
 }
@@ -1513,7 +1514,7 @@ export function codeChangesOf(
     const own: CodeChange[] = [
       ...(answer.set === undefined ? [] : [{ ordinal, action: "change" as const, collection: collectionPath, id: null, fields: answer.set }]),
       ...(answer.records ?? []).map((change): CodeChange => ({
-        ordinal, action: change.action, collection: change.collection, id: change.action === "change" ? change.id : null, fields: change.fields,
+        ordinal, action: change.action, collection: change.collection, ...(change.table === undefined ? {} : { table: change.table }), id: change.action === "change" ? change.id : null, fields: change.fields,
       })),
     // A change of no fields changes nothing. An added record with none still adds one.
     ].filter((change) => change.action === "add" || Object.keys(change.fields).length > 0);
@@ -1676,7 +1677,7 @@ export function planStep(
       // The code's changes as Set fields and Add record effects, in the order
       // the code listed them. Changes to one record merge into one write, so
       // each field keeps one idempotency key.
-      const edits = new Map<string, { target: RunRecord; collectionPath: string; values: Map<string, JsonValue> }>();
+      const edits = new Map<string, { target: RunRecord; collectionPath: string; table?: string; values: Map<string, JsonValue> }>();
       const order: Array<PlannedEffect | { edit: string }> = [];
       for (const [index, change] of extra.codeChanges.entries()) {
         const values = Object.entries(change.fields).map(([field, after]) => ({ field, after }));
@@ -1685,13 +1686,14 @@ export function planStep(
           order.push({
             kind: "add",
             collectionPath: change.collection,
+            ...(change.table === undefined ? {} : { table: change.table }),
             recordId,
             name: `${automation.id}-${recordId.slice(4, 12)}`,
             fields: values.map(({ field, after }) => ({ field, value: after })),
           });
           continue;
         }
-        const target = change.id === null ? record : (extra.codeRecords.get(codeRecordKey(change.collection, change.id)) ?? null);
+        const target = change.id === null ? record : (extra.codeRecords.get(codeRecordKey(change.collection, change.id, change.table)) ?? null);
         if (target === null) {
           const starter = automation.when.kind === "schedule" ? "A schedule" : automation.when.kind === "group-message" ? "A Group message" : null;
           return { problem: change.id === null
@@ -1703,7 +1705,7 @@ export function planStep(
         // Records key on their path and id together: dataset records of two tables can share an id.
         const edit = `${target.path}\u0000${target.id}`;
         if (!edits.has(edit)) {
-          edits.set(edit, { target, collectionPath: change.collection, values: new Map() });
+          edits.set(edit, { target, collectionPath: change.collection, ...(change.table === undefined ? {} : { table: change.table }), values: new Map() });
           order.push({ edit });
         }
         for (const { field, after } of values) edits.get(edit)!.values.set(field, after);
@@ -1711,8 +1713,8 @@ export function planStep(
       const output: StepOutput | undefined = step.as === null ? undefined : { kind: "code", value: codeOutput(answers.get("code") ?? null) };
       return done(order.map((entry): PlannedEffect => {
         if (!("edit" in entry)) return entry;
-        const { target, collectionPath, values } = edits.get(entry.edit)!;
-        return set(target, collectionPath, [...values].map(([field, after]) => ({ field, after })));
+        const { target, collectionPath, table, values } = edits.get(entry.edit)!;
+        return { ...set(target, collectionPath, [...values].map(([field, after]) => ({ field, after }))), ...(table === undefined ? {} : { table }) };
       }), output);
     }
     case "add-record": {

@@ -5,7 +5,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { desktopRecordEditContext, type DesktopRecordEditHost } from "./desktopRecordEdits";
 import { AuthoredTextChangedError } from "./workspaceEngineCapture";
 
-const automation = { kind: "automation", automationId: "collection:tasks#stamp", onBehalfOf: "local", depth: 1 } as const;
+const automation = {
+  kind: "automation", automationId: "collection:tasks#stamp", onBehalfOf: "local", depth: 1,
+  run: { claimId: "atc_stamp", automationName: "Stamp" },
+} as const;
 const roots: string[] = [];
 
 afterEach(async () => {

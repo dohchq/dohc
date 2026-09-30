@@ -84,6 +84,7 @@ jobs:
               - 'packages/workspace-contracts/**'
               - 'packages/workspace-core/**'
               - 'packages/workspace-fs/text-media-cases.json'
+              - 'packages/excalidraw-scene/fixtures/canonical-json.json'
               - 'packages/workspace-engine-client/**'
               - 'packages/workspace-auth/**'
               - 'packages/service-http/**'

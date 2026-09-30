@@ -14,6 +14,7 @@ fn author(scope: &str) -> ChangeAttribution {
         actor_kind: ChangeActorKind::Agent,
         on_behalf_of: Some(scope.into()),
         depth: 0,
+        run: None,
     }
 }
 
@@ -391,6 +392,7 @@ fn human_automation_context_is_not_enabled_as_settlement_authorship() {
         actor_kind: ChangeActorKind::Human,
         on_behalf_of: Some("person".into()),
         depth: 0,
+        run: None,
     };
     let admitted = record_local_update(
         &mut ts.store,

@@ -134,6 +134,7 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
                 actor_kind,
                 on_behalf_of,
                 depth: depth.unwrap_or(0),
+                run: None,
             });
         if let Some(json) =
             dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref())

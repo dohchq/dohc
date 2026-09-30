@@ -537,6 +537,9 @@ pub struct CollectionFieldHistoryEntry {
     pub on_behalf_of: Option<String>,
     pub depth: Option<i64>,
     pub recorded_at_ms: i64,
+    /// The automation run that wrote the change, `None` for any other
+    /// author and for an automation's write recorded without its run.
+    pub automation_run: Option<AutomationRunAttribution>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -2806,10 +2809,10 @@ impl ChangeActorKind {
 }
 
 /// Declared write provenance beside `author_origin_id`: the actor kind, the
-/// person it acted for, and its automation-chain depth. The person is an
-/// account id, or a signed-out computer's installation id: the person
-/// typing, the person an agent works for, or the person whose change
-/// started an automation. Optional
+/// person it acted for, its automation-chain depth, and for an automation
+/// the run that wrote it. The person is an account id, or a signed-out
+/// computer's installation id: the person typing, the person an agent works
+/// for, or the person whose change started an automation. Optional
 /// provenance, never a second authority — the storage and permission
 /// boundaries stay identical with or without it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2820,6 +2823,8 @@ pub struct ChangeAttribution {
     pub on_behalf_of: Option<String>,
     #[serde(default)]
     pub depth: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<AutomationRunAttribution>,
 }
 
 /// A person the owner shared with, or an Edit share link, whose change the
@@ -2871,6 +2876,21 @@ impl SharedChangeAuthor {
             && (1..=9_007_199_254_740_991).contains(&generation)
     }
 }
+
+/// The automation run a write came from: the claim it ran for, and the
+/// automation's name when it ran. Record history names the automation by
+/// it after the definition changes or goes, and opens the run by its claim
+/// on the computer that ran it. Another computer keeps the name; its claim
+/// names a run that computer does not have.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationRunAttribution {
+    pub claim_id: String,
+    pub automation_name: String,
+}
+
+/// The longest automation name a run attribution carries, in bytes.
+pub const MAX_AUTOMATION_RUN_NAME_BYTES: usize = 1024;
 
 /// The most automation hops any declared chain may report. Bounds the wire,
 /// not the loop guard: the executor's stop-at-depth rule owns the product
@@ -2962,6 +2982,7 @@ fn author_entry_attribution(author: &Value) -> (Option<String>, Option<ChangeAtt
         actor_kind,
         on_behalf_of: text("onBehalfOf"),
         depth,
+        run: None,
     };
     (Some(actor), Some(attribution))
 }
@@ -3022,6 +3043,21 @@ impl ChangeAttribution {
         }
         if self.depth > MAX_CHANGE_ATTRIBUTION_DEPTH {
             return Err("attribution depth exceeds the supported chain bound");
+        }
+        if let Some(run) = &self.run {
+            if self.actor_kind != ChangeActorKind::Automation {
+                return Err("only an automation's attribution names a run");
+            }
+            if run.claim_id.is_empty()
+                || run.claim_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+            {
+                return Err("attribution run claim id must be non-empty and bounded");
+            }
+            if run.automation_name.trim().is_empty()
+                || run.automation_name.len() > MAX_AUTOMATION_RUN_NAME_BYTES
+            {
+                return Err("attribution run automation name must be non-empty and bounded");
+            }
         }
         Ok(())
     }
@@ -3094,13 +3130,15 @@ fn insert_field_history(
     let (source_origin_id, source_origin_seq) = source_update
         .map(|(origin_id, origin_seq)| (Some(origin_id), Some(origin_seq)))
         .unwrap_or((None, None));
+    let run = attribution.and_then(|attribution| attribution.run.as_ref());
     let inserted = conn
         .execute(
             "INSERT INTO collection_field_history \
          (workspace_id,version_id,record_id,field_name,previous_value_json, \
           next_value_json,author_origin_id,source_origin_id,source_origin_seq, \
-          actor_kind,on_behalf_of,chain_depth,recorded_at_ms) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) \
+          actor_kind,on_behalf_of,chain_depth,recorded_at_ms, \
+          automation_claim_id,automation_name) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) \
          ON CONFLICT(workspace_id,version_id,record_id,field_name, \
                      source_origin_id,source_origin_seq) \
          WHERE source_origin_id IS NOT NULL DO NOTHING",
@@ -3118,6 +3156,8 @@ fn insert_field_history(
                 attribution.and_then(|attribution| attribution.on_behalf_of.as_deref()),
                 attribution.map(|attribution| i64::from(attribution.depth)),
                 recorded_at_ms,
+                run.map(|run| run.claim_id.as_str()),
+                run.map(|run| run.automation_name.as_str()),
             ],
         )
         .map_err(crate::DomainError::sql_persist)?;
@@ -6077,7 +6117,8 @@ pub fn get_collection_record(
         .transpose()?;
     let mut sql = String::from(
         "SELECT history_id,field_name,previous_value_json,next_value_json,author_origin_id,\
-                actor_kind,on_behalf_of,chain_depth,recorded_at_ms \
+                actor_kind,on_behalf_of,chain_depth,recorded_at_ms,\
+                automation_claim_id,automation_name \
          FROM collection_field_history \
          WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
     );
@@ -6118,6 +6159,8 @@ pub fn get_collection_record(
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<i64>>(7)?,
                 row.get::<_, i64>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })
         .map_err(crate::DomainError::sql_corrupt)?
@@ -6136,6 +6179,8 @@ pub fn get_collection_record(
                 on_behalf_of,
                 depth,
                 recorded_at_ms,
+                automation_claim_id,
+                automation_name,
             )| {
                 Ok(CollectionFieldHistoryEntry {
                     history_id,
@@ -6154,6 +6199,12 @@ pub fn get_collection_record(
                     on_behalf_of,
                     depth,
                     recorded_at_ms,
+                    automation_run: automation_claim_id.zip(automation_name).map(
+                        |(claim_id, automation_name)| AutomationRunAttribution {
+                            claim_id,
+                            automation_name,
+                        },
+                    ),
                 })
             },
         )
@@ -6358,6 +6409,83 @@ pub fn mint_record_id() -> Result<String, getrandom::Error> {
 
 fn record_id_from_random(random: [u8; 16]) -> String {
     format!("{RECORD_ID_PREFIX}{}", base32_lowercase_no_padding(&random))
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use serde_json::json;
+
+    use super::{AutomationRunAttribution, ChangeActorKind, ChangeAttribution};
+
+    /// The run rides the replicated update beside the attribution, so a peer
+    /// records it too; a write that names none sends what it sent before.
+    #[test]
+    fn an_automation_run_round_trips_on_the_wire_and_only_when_named() {
+        let named = ChangeAttribution {
+            actor_kind: ChangeActorKind::Automation,
+            on_behalf_of: Some("local".to_owned()),
+            depth: 1,
+            run: Some(AutomationRunAttribution {
+                claim_id: "atc_1".to_owned(),
+                automation_name: "Stamp the finish date".to_owned(),
+            }),
+        };
+        let wire = serde_json::to_value(&named).expect("encode");
+        assert_eq!(
+            wire,
+            json!({
+                "actorKind": "automation",
+                "onBehalfOf": "local",
+                "depth": 1,
+                "run": { "claimId": "atc_1", "automationName": "Stamp the finish date" },
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ChangeAttribution>(wire).expect("decode"),
+            named
+        );
+        let unnamed = ChangeAttribution { run: None, ..named };
+        assert_eq!(
+            serde_json::to_value(&unnamed).expect("encode"),
+            json!({ "actorKind": "automation", "onBehalfOf": "local", "depth": 1 })
+        );
+    }
+
+    #[test]
+    fn only_a_bounded_automation_attribution_names_a_run() {
+        let run = |claim_id: &str, automation_name: &str| {
+            Some(AutomationRunAttribution {
+                claim_id: claim_id.to_owned(),
+                automation_name: automation_name.to_owned(),
+            })
+        };
+        let attribution = |actor_kind, run| ChangeAttribution {
+            actor_kind,
+            on_behalf_of: None,
+            depth: 1,
+            run,
+        };
+        assert!(
+            attribution(ChangeActorKind::Automation, run("atc_1", "Stamp"))
+                .validate()
+                .is_ok()
+        );
+        for refused in [
+            attribution(ChangeActorKind::Agent, run("atc_1", "Stamp")),
+            attribution(ChangeActorKind::Human, run("atc_1", "Stamp")),
+            attribution(ChangeActorKind::Automation, run("", "Stamp")),
+            attribution(ChangeActorKind::Automation, run("atc_1", " ")),
+            attribution(
+                ChangeActorKind::Automation,
+                run(
+                    "atc_1",
+                    &"n".repeat(super::MAX_AUTOMATION_RUN_NAME_BYTES + 1),
+                ),
+            ),
+        ] {
+            assert!(refused.validate().is_err(), "{refused:?}");
+        }
+    }
 }
 
 #[cfg(test)]

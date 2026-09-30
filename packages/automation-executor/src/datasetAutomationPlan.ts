@@ -302,7 +302,7 @@ function resolve(
   return { steps: { trigger: table === null ? null : { table, read: triggerRead }, steps, finds, rereads }, pinned };
 }
 
-const GENERATED_ONLY = (name: string) =>
+export const GENERATED_ONLY = (name: string) =>
   `${name}'s operations were written or changed outside dohc, so Set fields, Add record, and Find steps cannot use them.`;
 const AUTHORED_MATCHING = (name: string) =>
   `${name}'s operations were written or changed outside dohc, so dohc cannot read a record to check a condition. Choose a record change or a button as the trigger.`;
@@ -357,11 +357,17 @@ export function recordStepDestinations(automation: Automation, source: string): 
       if (step.as !== null) bindings.set(step.as, path);
     } else if (step.kind === "set") {
       destinations.set(ordinal, step.records === null ? source : bindings.get(step.records) ?? source);
-    } else if (step.kind === "invoke" || step.kind === "run" || step.kind === "run-file") {
+    } else if (step.kind === "invoke") {
+      destinations.set(ordinal, step.collection ?? source);
+    } else if (step.kind === "run" || step.kind === "run-file") {
       destinations.set(ordinal, source);
     }
   }
   return destinations;
+}
+
+function isOwnCollection({ definition, sourceCollection }: DatasetRules): boolean {
+  return sourceCollection === undefined || sourceCollection === posix.dirname(definition.schemaPath);
 }
 
 // Each operation a run can call, once each: the trigger record's read, each
@@ -369,8 +375,9 @@ export function recordStepDestinations(automation: Automation, source: string): 
 // changes are known only once it runs, so it can call every edit, create,
 // and read on the table it changes records in. On a dataset whose
 // operations someone wrote, it changes no record, so it calls none.
-function invokedOperations(automation: Automation, { definition, generated, sourceCollection }: DatasetRules, { trigger, steps, rereads }: DatasetSteps): DatasetOperation[] {
-  const codeTable = (sourceCollection === undefined || sourceCollection === posix.dirname(definition.schemaPath)) && generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+function invokedOperations(automation: Automation, rules: DatasetRules, { trigger, steps, rereads }: DatasetSteps, ownCollection = isOwnCollection(rules)): DatasetOperation[] {
+  const { definition, generated } = rules;
+  const codeTable = ownCollection && generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
     ? datasetCodeTable(automation, definition)
     : undefined;
   const code = codeTable === undefined
@@ -444,8 +451,9 @@ export function datasetButtonOf(automation: Automation, definition: DatasetDefin
  * reaches, as a document Collection's automation reaches them. Then each
  * operation it can call, once each: the trigger record's read, each step's
  * operation, each read that checks a record again after someone changed
- * it, and each operation a code step can pick. Then each field of the tables it uses, which its formulas see only
- * while every editor can read it; a field that becomes readable because an
+ * it, and each operation a code step can pick. Then fields its formulas can see:
+ * every field in its own tables, and fields its reads expose in other Collections.
+ * Formulas see these only while every editor can read them. A field that becomes readable because an
  * editor left waits for a current editor's confirmation, like a step. A
  * button holds no value, so formulas never see one. The chats come first so
  * a schema change cannot move their places. Null for an automation whose
@@ -464,18 +472,22 @@ export function datasetReachSteps(
   const resolved = resolve(automation, rules, false);
   if ("problem" in resolved) return null;
   const { trigger, steps } = resolved.steps;
+  const ownCollection = isOwnCollection(rules);
   const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access });
   // A code step on a generated dataset reads and changes its table's records, so their fields count too.
-  const code = (rules.sourceCollection === undefined || rules.sourceCollection === posix.dirname(definition.schemaPath)) && rules.generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+  const code = ownCollection && rules.generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
     ? datasetCodeTable(automation, definition)
     : undefined;
   const tables = new Map([...(trigger === null ? [] : [trigger.table]), ...[...steps.values()].map((step) => step.table), ...(code === undefined ? [] : [code])]
     .map((table) => [table.tableId, table] as const));
   const reads = definition.operations.filter((operation) => operation.kind === "read");
+  const operations = invokedOperations(automation, rules, resolved.steps, ownCollection);
+  const invokedReads = operations.filter((operation) => operation.kind === "read");
   return [
     ...chatReachStepsOf(automation, chat),
-    ...invokedOperations(automation, rules, resolved.steps).map((operation): ReachStep => ({ kind: "dataset-operation", collection, datasetId: definition.datasetId, grants, operation: reach(operation) })),
-    ...[...tables.values()].flatMap((own) => own.fields.flatMap((field): ReachStep[] => field.type === "button" ? [] : [{
+    ...operations.map((operation): ReachStep => ({ kind: "dataset-operation", collection, datasetId: definition.datasetId, grants, operation: reach(operation) })),
+    ...[...tables.values()].flatMap((own) => own.fields.flatMap((field): ReachStep[] => field.type === "button" ||
+      (!ownCollection && !invokedReads.some((read) => read.tableId === own.tableId && read.fieldIds.includes(field.fieldId))) ? [] : [{
       kind: "dataset-field", collection, datasetId: definition.datasetId, tableId: own.tableId, grants, field: { fieldId: field.fieldId, name: field.name },
       reads: reads.filter((read) => read.tableId === own.tableId && read.fieldIds.includes(field.fieldId)).map(reach),
     }])),
@@ -494,10 +506,11 @@ export function datasetUndoDeletes(
   definition: DatasetDefinition,
   tableId: string,
   grants: ReachDatasetGrants,
+  codeFiles: readonly string[] = [],
 ): DatasetOperation[] {
   const deletes = definition.operations.filter((operation) => operation.kind === "delete" && operation.tableId === tableId);
   const verdicts = checkAutomationReach(roster, {
-    id: "", collection, codeFiles: [],
+    id: "", collection, codeFiles,
     steps: deletes.map((operation): ReachStep => ({
       kind: "dataset-operation", collection, datasetId: definition.datasetId, grants,
       operation: { operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access },

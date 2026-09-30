@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // walkthrough.
 vi.mock("react-big-calendar/lib/addons/dragAndDrop", async () => {
   const { createElement, Fragment } = await import("react");
-  const { addDays: shift } = await import("date-fns");
+  const { addDays: shift } = await import("date-fns/addDays");
   interface MockEvent {
     record: { id: string };
     start: Date;

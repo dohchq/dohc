@@ -4938,6 +4938,7 @@ mod tests {
             actor_kind: dohc_engine_domain::ChangeActorKind::Human,
             on_behalf_of: Some("forged-person".into()),
             depth: 0,
+            run: None,
         };
         assert!(valid_attribution(Some(&human)));
         let agent = dohc_engine_domain::ChangeAttribution {
