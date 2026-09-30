@@ -18,6 +18,7 @@ import type {
   WriteCollectionAutomationsPayload,
   WriteCollectionAutomationsResult,
 } from "../../ipc/bridgeContract";
+import type { DatasetDescription, DatasetOperation } from "@dohc/security-contract/dataset";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { formulaProblems } from "@dohc/automation-executor/automation-plan";
@@ -127,9 +128,9 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       ({ ...NOTHING_UNDONE, reverted: 1, changedSince: 1 })),
     confirmCollectionAutomationStep: vi.fn(async () => ({ status: "confirmed" as const })),
     listAutomationTargets: vi.fn(async (): Promise<ListAutomationTargetsResult> => ({ collections: [
-      { path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
-      { path: "Log", name: "Log", stopped: null, findStopped: null },
-      { path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget.", findStopped: null },
+      { kind: "document", path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
+      { kind: "document", path: "Log", name: "Log", stopped: null, findStopped: null },
+      { kind: "document", path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget.", findStopped: null },
     ] })),
     getCollection: vi.fn(async ({ collectionPath }: { collectionPath: string }) => ({
       path: collectionPath, status: "valid", reasons: [], recordCount: 0,
@@ -449,7 +450,7 @@ describe("a dataset table's ⚡ panel", () => {
     expect(automationCount(orphan, REFUNDS)).toBe(1);
   });
 
-  it("starts a new automation on this table, adds records to the trigger's table, and asks for no other Collection", async () => {
+  it("starts a new automation on this table, adds records to the trigger's table, and lists the other Collections a step can use", async () => {
     const { bridge, written } = makeBridge(read([summary(onRefunds)]));
     const user = userEvent.setup();
     render(<Panel table={INVOICES} />);
@@ -459,12 +460,17 @@ describe("a dataset table's ⚡ panel", () => {
     const picker = screen.getByRole("combobox", { name: "Step 2, table" }) as HTMLSelectElement;
     expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toEqual(["Invoices", "Refunds"]);
     expect(picker.value).toBe("Invoices");
+    // Another Collection is a choice too, and one no step can change is disabled, with why.
+    const collection = screen.getByRole("combobox", { name: "Step 2, Collection" }) as HTMLSelectElement;
+    await waitFor(() => expect([...collection.options].map((option) => [option.textContent, option.disabled])).toEqual([
+      ["Tasks", false], ["Log", false], ["Budget (ana@dohc.test cannot edit Budget.)", true],
+    ]));
     await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, field 1" }), "Title");
     await user.type(screen.getByRole("textbox", { name: "Step 2, Title" }), "Log");
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1), SLOW);
     expect(written[0]!.automations).toEqual([onRefunds, expect.objectContaining({ when: { kind: "record-added", table: "Invoices" } })]);
-    expect(bridge.listAutomationTargets).not.toHaveBeenCalled();
+    expect(bridge.listAutomationTargets).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "Tasks" });
   });
 
   it("runs an action on the record, with its id as input, says it can't be undone, and saves the step", async () => {
@@ -1456,7 +1462,9 @@ describe("the builder's Find and results", () => {
     // Budget can be read, though no step can change it.
     await waitFor(() => expect(options("Step 1, Collection")).toEqual(["Tasks", "Log", "Budget"]));
     await user.click(screen.getByRole("button", { name: "Add a record" }));
-    expect(options("Step 2, Collection")).toEqual(["Tasks", "Log"]);
+    // No step can change Budget, so an Add a record offers it disabled, with why.
+    expect(options("Step 2, Collection")).toEqual(["Tasks", "Log", "Budget (ana@dohc.test cannot edit Budget.)"]);
+    expect((screen.getByRole("option", { name: "Budget (ana@dohc.test cannot edit Budget.)" }) as HTMLOptionElement).disabled).toBe(true);
     unmount();
 
     // Opened on Invoices, a Find the file pinned to Refunds reads Refunds, and a Set on what it found takes Refunds' fields.
@@ -1556,14 +1564,15 @@ describe("the builder's Find and results", () => {
   it("keeps a Find on a Collection it can no longer read, with why beside it", async () => {
     const { bridge } = makeBridge(read([summary({ ...stamp, do: [{ kind: "find", condition: "true", collection: "Budget", as: "bills", operation: null }] })]));
     bridge.listAutomationTargets.mockResolvedValue({ collections: [
-      { path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
-      { path: "Log", name: "Log", stopped: null, findStopped: "ana@dohc.test cannot view Log." },
-      { path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget.", findStopped: "ana@dohc.test cannot view Budget." },
+      { kind: "document", path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
+      { kind: "document", path: "Log", name: "Log", stopped: null, findStopped: "ana@dohc.test cannot view Log." },
+      { kind: "document", path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget.", findStopped: "ana@dohc.test cannot view Budget." },
     ] });
     const user = userEvent.setup();
     render(<Panel />);
     await openBuilder(user);
-    const picker = screen.getByRole("combobox", { name: "Step 1, Collection" }) as HTMLSelectElement;
+    // The Find edits once main has said what Budget is.
+    const picker = await screen.findByRole("combobox", { name: "Step 1, Collection" }) as HTMLSelectElement;
     await waitFor(() => expect([...picker.options].map((option) => [option.textContent, option.disabled])).toEqual([
       ["Tasks", false], ["Log (ana@dohc.test cannot view Log.)", true], ["Budget (ana@dohc.test cannot view Budget.)", false],
     ]));
@@ -1595,6 +1604,320 @@ describe("the builder's Find and results", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1), SLOW);
     expect(written[0]!.automations[0]!.do).toEqual([{ ...saved.do[0], as: "every" }, { ...saved.do[1], records: "every" }]);
+  }, 30_000);
+});
+
+describe("the builder's steps in other Collections", () => {
+  const openBuilder = async (user: ReturnType<typeof userEvent.setup>, name = "Stamp the finish date") =>
+    await user.click(await screen.findByRole("button", { name }));
+  const options = (name: string) =>
+    [...(screen.getByRole("combobox", { name }) as HTMLSelectElement).options].map((option) => [option.textContent, option.disabled]);
+  const LEDGER_ID = "00000000-0000-4000-8000-000000000301";
+  const PAYEES_STOPPED = "ana@dohc.test cannot use payees.create in Ledger.";
+  const VOID_STOPPED = "ana@dohc.test cannot use entries.void in Ledger.";
+  type Target = Extract<ListAutomationTargetsResult, { collections: unknown }>["collections"][number];
+  const LEDGER: Target = {
+    kind: "dataset", path: "Ledger", name: "Ledger", datasetId: LEDGER_ID, stopped: null, findStopped: null, editStopped: null, actionsStopped: null,
+    operations: [
+      { name: "entries.list", kind: "read", stopped: null },
+      { name: "entries.create", kind: "create", stopped: null },
+      { name: "entries.edit", kind: "edit", stopped: null },
+      { name: "payees.create", kind: "create", stopped: PAYEES_STOPPED },
+      { name: "entries.post", kind: "action", stopped: null },
+      { name: "entries.void", kind: "action", stopped: VOID_STOPPED },
+    ],
+  };
+  const operation = (operationId: string, name: string, tableId: string, kind: DatasetOperation["kind"], fieldIds: string[], extra: Partial<DatasetOperation> = {}): DatasetOperation =>
+    ({ operationId, name, label: name, tableId, kind, access: "helper", readOnly: kind === "read", fieldIds, ...extra });
+  const LEDGER_DATASET: DatasetDescription = {
+    datasetId: LEDGER_ID, name: "Ledger", revision: 1, revisionSha256: "c".repeat(64),
+    tables: [
+      { tableId: "entries", name: "Entries", fields: [
+        { fieldId: "memo", name: "Memo", type: "text", required: false, unique: false },
+        { fieldId: "amount", name: "Amount", type: "number", required: false, unique: false },
+      ] },
+      { tableId: "payees", name: "Payees", fields: [{ fieldId: "payee", name: "Payee", type: "text", required: true, unique: true }] },
+    ],
+    operations: [
+      operation("o1", "entries.list", "entries", "read", ["memo", "amount"]),
+      operation("o2", "entries.create", "entries", "create", ["memo", "amount"]),
+      operation("o3", "entries.edit", "entries", "edit", ["memo", "amount"]),
+      operation("o4", "payees.create", "payees", "create", ["payee"]),
+      operation("o5", "entries.post", "entries", "action", ["amount"], { label: "Post", reversedBy: "entries.void" }),
+      operation("o6", "entries.void", "entries", "action", ["amount"], { label: "Void" }),
+    ],
+  };
+  const DOCUMENTS: Target[] = [
+    { kind: "document", path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
+    { kind: "document", path: "Log", name: "Log", stopped: null, findStopped: null },
+  ];
+  /** A bridge whose main lists Ledger, a dataset dohc describes as LEDGER_DATASET. */
+  function ledgerBridge(file: ListCollectionAutomationsResult, targets: Target[] = [...DOCUMENTS, LEDGER]) {
+    const made = makeBridge(file);
+    made.bridge.listAutomationTargets.mockResolvedValue({ collections: targets });
+    const dataset = vi.fn(async (_payload: { workspaceId: string; datasetPath: string; expectedDatasetId: string; action: "describe" }) =>
+      ({ kind: "description" as const, dataset: LEDGER_DATASET }));
+    return { ...made, bridge: Object.assign(made.bridge, { dataset }) };
+  }
+
+  it("adds a record to a table of another dataset, offering a table the step cannot reach disabled, with why", async () => {
+    const { bridge, written } = ledgerBridge(read([summary(stamp)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    await user.click(screen.getByRole("button", { name: "Add a record" }));
+    await waitFor(() => expect(options("Step 2, Collection")).toEqual([["Tasks", false], ["Log", false], ["Ledger", false]]));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, Collection" }), "Ledger");
+    // Ledger has two tables, so the step names one. Payees' only way to add records is out of reach.
+    const table = await screen.findByRole("combobox", { name: "Step 2, table" });
+    expect(options("Step 2, table")).toEqual([["Choose a table", true], ["Entries", false], [`Payees (${PAYEES_STOPPED})`, true]]);
+    expect(bridge.dataset).toHaveBeenCalledWith({ workspaceId: "ws-1", datasetPath: "Ledger/dataset.json", expectedDatasetId: LEDGER_ID, action: "describe" });
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(document.activeElement).toBe(table), SLOW);
+    expect(screen.getByText("Choose a table.")).toBeTruthy();
+    await user.selectOptions(table, "Entries");
+    expect(options("Step 2, field 1").map(([name]) => name)).toEqual(["Choose a field", "Memo", "Amount"]);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, field 1" }), "Amount");
+    await user.type(screen.getByRole("textbox", { name: "Step 2, Amount" }), "12");
+    // Entries has no delete, so Undo keeps what the step adds.
+    expect(within(screen.getByTestId("builder-step-1")).getByText(/Undo keeps the records this step adds\. Entries has no delete action/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    // Choosing the table names its operation; main pins the one that fits the step's fields when it saves.
+    expect(written[0]!.automations[0]!.do[1]).toEqual({
+      kind: "add-record", values: [{ field: "Amount", value: { kind: "literal", value: 12 } }], collection: "Ledger", as: null, operation: "entries.create",
+    });
+    expect(bridge.dataset).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it("refuses Save while another dataset's tables load, focusing the step's Collection, and calls no field missing before a table is chosen", async () => {
+    const saved: Automation = { ...stamp, do: [
+      { kind: "add-record", values: [{ field: "Amount", value: { kind: "literal", value: 1 } }], collection: "Ledger", as: null, operation: null },
+    ] };
+    const { bridge } = ledgerBridge(read([summary(saved)]));
+    let describe = (_: { kind: "description"; dataset: DatasetDescription }) => {};
+    bridge.dataset.mockImplementationOnce(() => new Promise((resolve) => { describe = resolve; }));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const collection = await screen.findByRole("combobox", { name: "Step 1, Collection" });
+    await waitFor(() => expect(bridge.dataset).toHaveBeenCalledTimes(1));
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(document.activeElement).toBe(collection), SLOW);
+    expect(document.getElementById(collection.getAttribute("aria-describedby")!)?.textContent)
+      .toBe("dohc is still reading the tables of Ledger. Try again in a moment.");
+    describe({ kind: "description", dataset: LEDGER_DATASET });
+    const table = await screen.findByRole("combobox", { name: "Step 1, table" });
+    expect(collection.getAttribute("aria-describedby")).toBeNull();
+    // Both tables could hold Amount, so nothing says it is missing until a table is chosen.
+    expect(screen.queryByText("Amount is not a field in Ledger.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(document.activeElement).toBe(table), SLOW);
+    expect(screen.getByText("Choose a table.")).toBeTruthy();
+  }, 30_000);
+
+  it("refuses Save while another dataset's actions load, focusing the action, not the step's Remove", async () => {
+    const saved: Automation = { ...stamp, do: [{ kind: "invoke", collection: "Ledger", operation: "entries.post", input: [] }] };
+    const { bridge, written } = ledgerBridge(read([summary(saved)]));
+    bridge.dataset.mockImplementationOnce(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const action = await screen.findByRole("combobox", { name: "Step 1, action" });
+    await waitFor(() => expect(bridge.dataset).toHaveBeenCalledTimes(1));
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(document.activeElement).toBe(action), SLOW);
+    expect(document.getElementById(action.getAttribute("aria-describedby")!)?.textContent)
+      .toBe("dohc is still reading the actions of Ledger. Try again in a moment.");
+    expect(written).toEqual([]);
+  }, 30_000);
+
+  it("calls no field of a Find in another dataset missing while its tables load or before it names a table", async () => {
+    const saved: Automation = { ...stamp, do: [{ kind: "find", condition: 'record.Payee == "rent"', collection: "Ledger", as: "rent", operation: null }] };
+    const { bridge } = ledgerBridge(read([summary(saved)]));
+    let describe = (_: { kind: "description"; dataset: DatasetDescription }) => {};
+    bridge.dataset.mockImplementationOnce(() => new Promise((resolve) => { describe = resolve; }));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    await screen.findByRole("combobox", { name: "Step 1, condition 1, field" });
+    await waitFor(() => expect(bridge.dataset).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("Payee is not a field in Ledger.")).toBeNull();
+    describe({ kind: "description", dataset: LEDGER_DATASET });
+    const table = await screen.findByRole("combobox", { name: "Step 1, table" });
+    expect((table as HTMLSelectElement).value).toBe("");
+    expect(screen.queryByText("Payee is not a field in Ledger.")).toBeNull();
+    // Once a table is chosen, its fields are known: Payee is in Payees, not Entries.
+    await user.selectOptions(table, "Entries");
+    expect(await screen.findByText("Payee is not a field in Ledger.")).toBeTruthy();
+  }, 30_000);
+
+  it("says another dataset's actions are loading, not the action's name, until their labels come", async () => {
+    const saved: Automation = { ...stamp, do: [{ kind: "invoke", collection: "Ledger", operation: "entries.post", input: [] }] };
+    const { bridge } = ledgerBridge(read([summary(saved)]));
+    let describe = (_: { kind: "description"; dataset: DatasetDescription }) => {};
+    bridge.dataset.mockImplementationOnce(() => new Promise((resolve) => { describe = resolve; }));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    await screen.findByRole("combobox", { name: "Step 1, action" });
+    await waitFor(() => expect(bridge.dataset).toHaveBeenCalledTimes(1));
+    expect(options("Step 1, action")).toEqual([["Loading actions", false]]);
+    describe({ kind: "description", dataset: LEDGER_DATASET });
+    await waitFor(() => expect(options("Step 1, action")).toEqual([["Post (Entries)", false], [`Void (Entries) (${VOID_STOPPED})`, true]]));
+  }, 30_000);
+
+  it("finds records in another dataset with is, and sets fields on them from that table", async () => {
+    const saved: Automation = { ...stamp, do: [
+      { kind: "find", condition: 'record.Memo == "rent" && record.Amount == 2', collection: "Ledger", as: "rent", operation: "entries.list" },
+      { kind: "set", values: [{ field: "Amount", value: { kind: "literal", value: 0 } }], records: "rent", operation: "entries.edit" },
+    ] };
+    const { written } = ledgerBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    // A dataset's Find compares several fields with is, so the saved condition reads as rows.
+    const mode = await screen.findByRole("combobox", { name: "Step 1, records to find" }) as HTMLSelectElement;
+    expect(mode.value).toBe("rows");
+    expect(options("Step 1, condition 1, comparison").map(([name]) => name)).toEqual(["is"]);
+    expect((screen.getByRole("combobox", { name: "Step 1, table" }) as HTMLSelectElement).value).toBe("Entries");
+    expect(options("Step 2, record").map(([name]) => name)).toEqual(["The trigger record", "Records found as rent in Ledger"]);
+    expect(options("Step 2, field 1").map(([name]) => name)).toEqual(["Memo", "Amount"]);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual(saved.do);
+  }, 30_000);
+
+  it("runs another dataset's actions by their labels, offers one out of reach disabled, and adds one from a document Collection", async () => {
+    const saved: Automation = { ...stamp, do: [
+      { kind: "invoke", collection: "Ledger", operation: "entries.post", input: [{ key: "id", value: { kind: "literal", value: "e1" } }] },
+    ] };
+    const { written } = ledgerBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const action = await screen.findByRole("combobox", { name: "Step 1, action" });
+    expect(options("Step 1, action")).toEqual([["Post (Entries)", false], [`Void (Entries) (${VOID_STOPPED})`, true]]);
+    expect(options("Step 1, Collection")).toEqual([["Ledger", false]]);
+    // Post has a reverse, so nothing says it can't be undone.
+    expect(screen.queryByText("Post can't be undone.")).toBeNull();
+    expect((action as HTMLSelectElement).value).toBe("entries.post");
+    await user.clear(screen.getByRole("textbox", { name: "Step 1, id" }));
+    await user.type(screen.getByRole("textbox", { name: "Step 1, id" }), "e2");
+    const runs = screen.getAllByRole("button", { name: "Run an action" });
+    await user.click(runs[runs.length - 1]!);
+    expect((screen.getByRole("combobox", { name: "Step 2, action" }) as HTMLSelectElement).value).toBe("entries.post");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual([
+      { kind: "invoke", collection: "Ledger", operation: "entries.post", input: [{ key: "id", value: { kind: "literal", value: "e2" } }] },
+      { kind: "invoke", collection: "Ledger", operation: "entries.post", input: [] },
+    ]);
+  }, 30_000);
+
+  it("keeps a step in a Collection dohc cannot reach as its sentence, with main's reason, and offers it disabled", async () => {
+    const archive: Target = {
+      kind: "dataset", path: "Archive", name: "Archive", datasetId: null, operations: [],
+      stopped: "The dataset host for Archive is unavailable.", findStopped: "The dataset host for Archive is unavailable.", editStopped: "The dataset host for Archive is unavailable.", actionsStopped: "The dataset host for Archive is unavailable.",
+    };
+    const generatedOnly = "Notes's operations were written or changed outside dohc, so Set fields, Add record, and Find steps cannot use them.";
+    const authored: Target = { ...LEDGER, path: "Notes", name: "Notes", datasetId: "00000000-0000-4000-8000-000000000302", stopped: generatedOnly, findStopped: generatedOnly, editStopped: generatedOnly };
+    const saved: Automation = { ...stamp, do: [
+      { kind: "add-record", values: [{ field: "Amount", value: { kind: "literal", value: 1 } }], collection: "Archive", as: null, operation: null },
+    ] };
+    const { bridge } = ledgerBridge(read([summary(saved)]), [...DOCUMENTS, archive, authored]);
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const step = screen.getByTestId("builder-step-0");
+    expect(await within(step).findByText("The dataset host for Archive is unavailable.")).toBeTruthy();
+    expect(within(step).queryByRole("combobox")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Find records" }));
+    expect(options("Step 2, Collection")).toEqual([
+      ["Tasks", false], ["Log", false], ["Archive (The dataset host for Archive is unavailable.)", true], [`Notes (${generatedOnly})`, true],
+    ]);
+    // Notes' actions still run, so a new action step offers them.
+    expect(screen.getByRole("button", { name: "Run an action" })).toBeTruthy();
+    expect(bridge.dataset).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("keeps a Set's saved operation in another dataset, and drops it once the Find it changes moves elsewhere", async () => {
+    // This dataset has an edit of the same name, which says nothing about where the Set's records are.
+    const table: AutomationTable = { name: "Invoices", tables: new Map([["Invoices", datasetTable(FIELDS, "entries.edit:edit")]]), actions: [] };
+    const saved: Automation = { ...stamp, when: { kind: "record-added", table: "Invoices" }, do: [
+      { kind: "find", condition: "true", collection: "Ledger", as: "rent", operation: "entries.list" },
+      { kind: "set", values: [{ field: "Amount", value: { kind: "literal", value: 0 } }], records: "rent", operation: "entries.edit" },
+    ] };
+    const { written } = ledgerBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel table={table} />);
+    await openBuilder(user);
+    await screen.findByRole("combobox", { name: "Step 1, table" });
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual(saved.do);
+
+    await openBuilder(user, "Stamp the finish date!");
+    await screen.findByRole("combobox", { name: "Step 1, table" });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, Collection" }), "Log");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(2), SLOW);
+    expect(written[1]!.automations[0]!.do).toEqual([
+      { ...saved.do[0], collection: "Log", operation: null },
+      { ...saved.do[1], operation: null },
+    ]);
+  }, 30_000);
+
+  it("drops another workspace's answers about Collections and their tables", async () => {
+    const saved: Automation = { ...stamp, do: [
+      { kind: "add-record", values: [{ field: "Amount", value: { kind: "literal", value: 1 } }], collection: "Ledger", as: null, operation: "entries.create" },
+    ] };
+    const { bridge } = ledgerBridge(read([summary(saved)]));
+    let describeFirst: (result: { kind: "description"; dataset: DatasetDescription }) => void = () => undefined;
+    bridge.dataset.mockImplementationOnce(() => new Promise((resolve) => { describeFirst = resolve; }));
+    let listSecond: (result: ListAutomationTargetsResult) => void = () => undefined;
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await waitFor(() => expect(bridge.dataset).toHaveBeenCalledTimes(1));
+    bridge.listAutomationTargets.mockImplementationOnce(() => new Promise((resolve) => { listSecond = resolve; }));
+    rerender(<Panel workspaceId="ws-2" onError={onError} />);
+    await waitFor(() => expect(bridge.listAutomationTargets).toHaveBeenCalledWith({ workspaceId: "ws-2", collectionPath: "Tasks" }));
+    // ws-1's description arrives after the switch: ws-2 has not said what Ledger is, so the step stays its sentence.
+    await act(async () => describeFirst({ kind: "description", dataset: LEDGER_DATASET }));
+    const step = screen.getByTestId("builder-step-0");
+    expect(within(step).queryByRole("combobox")).toBeNull();
+    // ws-2's own answer describes Ledger again, for ws-2.
+    await act(async () => listSecond({ collections: [...DOCUMENTS, LEDGER] }));
+    expect(await within(step).findByRole("combobox", { name: "Step 1, Collection" })).toBeTruthy();
+    expect(bridge.dataset).toHaveBeenLastCalledWith({ workspaceId: "ws-2", datasetPath: "Ledger/dataset.json", expectedDatasetId: LEDGER_ID, action: "describe" });
+    expect(onError).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("finds records in a document Collection from a dataset, with that Collection's fields", async () => {
+    const table: AutomationTable = { name: "Invoices", tables: new Map([["Invoices", datasetTable(FIELDS, "invoices.list:read")]]), actions: [] };
+    const { written } = ledgerBridge(read([summary({ ...stamp, when: { kind: "record-added", table: "Invoices" } })]));
+    const user = userEvent.setup();
+    render(<Panel table={table} />);
+    await openBuilder(user);
+    await user.click(screen.getByRole("button", { name: "Find records" }));
+    await waitFor(() => expect(options("Step 2, Collection").map(([name]) => name)).toEqual(["Tasks", "Log", "Ledger"]));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, Collection" }), "Log");
+    expect(screen.queryByRole("combobox", { name: "Step 2, table" })).toBeNull();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, records to find" }), "rows");
+    expect(options("Step 2, condition 1, comparison").map(([name]) => name)).toEqual(["is", "contains"]);
+    await waitFor(() => expect(options("Step 2, condition 1, field").map(([name]) => name)).toContain("Entry"));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, condition 1, field" }), "Entry");
+    await user.type(screen.getByRole("textbox", { name: "Step 2, condition 1, value" }), "Paid");
+    await user.type(screen.getByRole("textbox", { name: "Step 2, result name" }), "paid");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do[1]).toEqual({ kind: "find", condition: 'record.Entry == "Paid"', collection: "Log", as: "paid", operation: null });
   }, 30_000);
 });
 
@@ -2658,6 +2981,9 @@ describe("the builder", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("A removed record has no fields to set. Choose another trigger, or remove this step.")).toBeTruthy();
     expect(written).toEqual([]);
+    // No control reads that problem, so focus goes into the step, never to a control that moves or removes it.
+    await waitFor(() => expect(screen.getByTestId("builder-step-0").contains(document.activeElement)).toBe(true), SLOW);
+    expect(document.activeElement?.getAttribute("aria-label")).not.toMatch(/^(Move|Remove) step/u);
 
     await user.selectOptions(screen.getByRole("combobox", { name: "Trigger" }), "record-added");
     // A new Add a record step starts with a field to fill in.
@@ -2671,7 +2997,7 @@ describe("the builder", () => {
     expect(written).toEqual([]);
   });
 
-  it("names a missing field, shows each step's reach, and offers only Collections a step can reach", async () => {
+  it("names a missing field, shows each step's reach, and offers a Collection a step cannot reach disabled, with why", async () => {
     const missing: Automation = { ...stamp, do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: "x" } }], records: null, operation: null }] };
     const budget = { kind: "add-record" as const, values: [], collection: "Budget", as: null, operation: null };
     const find = { kind: "find" as const, condition: 'record.Status == "Open"', collection: "Budget", as: "bills", operation: null };
@@ -2689,9 +3015,11 @@ describe("the builder", () => {
 
     expect(screen.getAllByText("Done on is not a field in Tasks.").length).toBeGreaterThan(0);
     expect(screen.getByTestId("builder-step-2").textContent).toContain("ana@dohc.test cannot view Budget.");
-    const collection = screen.getByRole("combobox", { name: "Step 2, Collection" }) as HTMLSelectElement;
+    const collection = await screen.findByRole("combobox", { name: "Step 2, Collection" }) as HTMLSelectElement;
     expect(await screen.findByText("ana@dohc.test cannot edit Budget.")).toBeTruthy();
-    expect([...collection.options].map((option) => option.textContent)).toEqual(["Tasks", "Budget", "Log"]);
+    expect([...collection.options].map((option) => [option.textContent, option.disabled])).toEqual([
+      ["Tasks", false], ["Log", false], ["Budget (ana@dohc.test cannot edit Budget.)", false],
+    ]);
     await user.selectOptions(collection, "Log");
     await user.click(within(screen.getByTestId("builder-step-1")).getByRole("button", { name: "Add field" }));
     expect(await screen.findByRole("option", { name: "Entry" })).toBeTruthy();

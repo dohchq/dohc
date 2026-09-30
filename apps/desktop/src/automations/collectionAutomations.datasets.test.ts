@@ -3399,3 +3399,101 @@ automations:
   expect(f.documents.get("document")!.status).toBe("Source");
   await f.executor.dispose();
 });
+
+it("lists every dataset for the builder with each operation's reach, and names one generic steps cannot use", async () => {
+  const f = await world({ documents: true });
+  await authoredDestination(f);
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await f.executor.open();
+  const targets = await f.executor.targetsFor("Log");
+  expect(targets.map((target) => [target.path, target.kind])).toEqual([["Budget", "dataset"], ["Log", "document"], ["Other", "dataset"]]);
+  const budget = targets.find((target) => target.path === "Budget");
+  expect(budget).toMatchObject({ kind: "dataset", datasetId: BUDGET, stopped: null, findStopped: null, editStopped: null, actionsStopped: "Budget has no approved actions." });
+  expect(budget?.kind === "dataset" ? budget.operations.map(({ name, kind, stopped }) => [name, kind, stopped]) : []).toEqual([
+    ["invoices.list", "read", null], ["invoices.create", "create", null], ["invoices.edit", "edit", null],
+    ["invoices.status", "edit", null], ["invoices.delete", "delete", null],
+  ]);
+  // Operations someone wrote run only as actions, so Add, Find, and Set name why, and actions stay.
+  expect(targets.find((target) => target.path === "Other")).toMatchObject({
+    kind: "dataset", stopped: "Other's operations were written or changed outside dohc, so Set fields, Add record, and Find steps cannot use them.", actionsStopped: null,
+  });
+  // An editor of Log without a data grant in Budget cannot use its operations, so Add and Find there say why.
+  f.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [{ grantId: "log-editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Log"], access: "edit", versionId: null }, channel: null }] });
+  const narrowed = (await f.executor.targetsFor("Log")).find((target) => target.path === "Budget");
+  expect(narrowed?.kind === "dataset" && narrowed.operations.every((operation) => typeof operation.stopped === "string")).toBe(true);
+  expect(narrowed).toMatchObject({ stopped: expect.any(String), findStopped: expect.any(String), actionsStopped: "Budget has no approved actions." });
+  await f.executor.dispose();
+});
+
+it("pins a document Collection's steps in a dataset when the builder saves, marks the fields they set there, and warns a share about them", async () => {
+  const f = await world({ documents: true });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  const add = { kind: "add-record" as const, values: [{ field: "Status", value: { kind: "literal" as const, value: "Logged" } }], collection: "Budget", as: "added", operation: null };
+  const find = { kind: "find" as const, condition: "record.Paid == true", collection: "Budget", as: "paid", operation: null };
+  const set = { kind: "set" as const, values: [{ field: "Notes", value: { kind: "literal" as const, value: "Seen" } }], records: "paid", operation: null };
+  const draft: Automation = { id: "log", name: "Log it", enabled: true, when: { kind: "record-added", table: null }, if: null, do: [add, find, set] };
+  await f.executor.open();
+  const [pinned] = await f.executor.pinOperations("Log", [draft], []);
+  expect(pinned!.do).toEqual([{ ...add, operation: "invoices.create" }, { ...find, operation: "invoices.list" }, { ...set, operation: "invoices.edit" }]);
+  // The builder's check pins as a save does, so a new step there runs.
+  await expect(f.executor.draftCannotRun("Log", draft)).resolves.toBeNull();
+  // A step the file already holds keeps what it names.
+  expect((await f.executor.pinOperations("Log", [draft], [draft]))[0]!.do).toEqual(draft.do);
+
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: log
+    name: Log it
+    when: record-added
+    do:
+      - add-record: {Status: Logged}
+        collection: Budget
+        operation: invoices.create
+      - find: record.Paid == true
+        collection: Budget
+        as: paid
+        operation: invoices.list
+      - set: {Notes: Seen}
+        records: paid
+        operation: invoices.edit
+`);
+  f.executor.handleWatcherEvents([{ operation: "update", path: "Log/automations.yaml" }]);
+  await f.until(async () => (await f.executor.datasetFieldMarks(BUDGET, "Invoices")).length === 2);
+  const marks = await f.executor.datasetFieldMarks(BUDGET, "Invoices");
+  expect(marks.find((mark) => mark.field === "Notes")).toEqual({ field: "Notes", automations: ["Log it"] });
+  expect(marks.find((mark) => mark.field === "Status")?.automations.sort()).toEqual(["Close paid invoices", "Log it"]);
+  // Sharing Log to edit makes a new editor of the automation, who holds no grant in Budget: the warning names Budget.
+  const stops = await f.executor.shareImpact({ paths: ["Log"], versionId: null, access: "edit", recipientEmail: "ana@dohc.test" });
+  expect(stops.length).toBeGreaterThan(0);
+  expect(stops.every((stop) => stop.automationId === "collection:Log#log" && stop.target === "Budget")).toBe(true);
+  await f.executor.dispose();
+});
+
+it("lists a Collection a step names whose dataset.json is broken, with why, for the builder", async () => {
+  const f = await world({ documents: true });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: log
+    name: Log it
+    when: record-added
+    do:
+      - add-record: {Status: Logged}
+        collection: Broken
+`);
+  await mkdir(join(f.root, "Broken"), { recursive: true });
+  await writeFile(join(f.root, "Broken/dataset.json"), "{ not json");
+  await f.executor.open();
+  await f.executor.automationsIn("Log");
+  expect((await f.executor.targetsFor("Log")).find((target) => target.path === "Broken")).toEqual({
+    kind: "dataset", path: "Broken", name: "Broken", datasetId: null, operations: [],
+    stopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
+    findStopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
+    editStopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
+    actionsStopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
+  });
+  await f.executor.dispose();
+});

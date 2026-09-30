@@ -22,7 +22,7 @@ import type {
   DatasetPressInput,
   DatasetRememberedPress,
 } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import type { DatasetDefinition, DatasetDescription } from "@dohc/security-contract/dataset";
+import type { DatasetDefinition, DatasetDescription, DatasetOperationKind } from "@dohc/security-contract/dataset";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   isInvalidInputRefusal,
@@ -88,6 +88,8 @@ import {
 import {
   datasetFieldWritesOf,
   datasetTableNamed,
+  GENERATED_ONLY,
+  recordStepDestinations,
   datasetUndoDeletes,
   pinDatasetOperations,
   type DatasetRecordId,
@@ -479,14 +481,27 @@ export interface CollectionFieldMark {
 }
 
 /** A Collection a step can reach, or why it cannot, for the builder. */
-export interface CollectionAutomationTarget {
+export type CollectionAutomationTarget = {
   path: string;
   name: string;
-  /** Why a step cannot change its records, or null. */
+  /** Why a step cannot add or change its records, or null. */
   stopped: string | null;
   /** Why a Find cannot read its records, or null. */
   findStopped: string | null;
-}
+} & (
+  | { kind: "document" }
+  | {
+      kind: "dataset";
+      /** The dataset's id, which describes its tables; null when dohc cannot resolve the dataset. */
+      datasetId: string | null;
+      /** Why no Set fields step can change its records, or null. */
+      editStopped: string | null;
+      /** Why no action step can run there, or null. */
+      actionsStopped: string | null;
+      /** Each approved operation a step can use, with why the reach check stops it there, or null. */
+      operations: Array<{ name: string; kind: "read" | "create" | "edit" | "delete" | "action"; stopped: string | null }>;
+    }
+);
 
 /**
  * A Group an automation can name: its name, its slug, and `ref`, the text a
@@ -1786,10 +1801,27 @@ export class CollectionAutomations {
   async pinOperations(collectionPath: string, automations: readonly Automation[], saved: readonly Automation[]): Promise<Automation[]> {
     await this.ready();
     await this.openDataset(collectionPath);
-    const dataset = this.datasets.get(collectionPath);
-    if (dataset === undefined || dataset.generated === null) return [...automations];
     const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
-    return automations.map((automation) => pinDatasetOperations(automation, { ...dataset, generated: dataset.generated === true }, (step) => held.has(JSON.stringify(step))));
+    return automations.map((automation) => this.pinned(collectionPath, automation, held));
+  }
+
+  /**
+   * `automation` with its dataset steps pinned as a save pins them: those in
+   * this Collection's own dataset, then those in each other dataset a step
+   * reaches, each against that dataset's approved rules. A step in `held`
+   * stays as the file holds it.
+   */
+  private pinned(collectionPath: string, automation: Automation, held: ReadonlySet<string>): Automation {
+    const kept = (step: object) => held.has(JSON.stringify(step));
+    let pinned = automation;
+    const own = this.datasets.get(collectionPath);
+    if (own !== undefined && own.generated !== null) pinned = pinDatasetOperations(pinned, { ...own, generated: own.generated === true }, kept);
+    for (const path of new Set(recordStepDestinations(automation, collectionPath).values())) {
+      const dataset = path === collectionPath ? undefined : this.datasets.get(path);
+      if (dataset === undefined || dataset.generated === null) continue;
+      pinned = pinDatasetOperations(pinned, { ...dataset, generated: dataset.generated === true, sourceCollection: collectionPath }, kept);
+    }
+    return pinned;
   }
 
   /**
@@ -1808,8 +1840,7 @@ export class CollectionAutomations {
     const held = new Set(indexed?.file.status === "read"
       ? indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? stepsInOrder(entry.automation).map(({ step }) => JSON.stringify(step)) : []))
       : []);
-    const pinned = dataset === undefined ? automation : pinDatasetOperations(automation, { ...dataset, generated: dataset.generated === true }, (step) => held.has(JSON.stringify(step)));
-    return (await this.reasonsIn(collectionPath, false)).reasonOf(pinned);
+    return (await this.reasonsIn(collectionPath, false)).reasonOf(this.pinned(collectionPath, automation, held));
   }
 
   /**
@@ -1978,27 +2009,71 @@ export class CollectionAutomations {
   }
 
   /**
-   * The Collections a step in this Collection's automations can add or
-   * change records in, for the builder's picker: every Collection the
-   * engine lists, with why the reach check (ADR 0012) stops a step there,
-   * or null.
+   * The Collections a step in this Collection's automations can reach, for
+   * the builder's pickers: every document and dataset Collection the index
+   * lists, with why the reach check (ADR 0012) stops a step there, or null.
+   * A dataset also lists its approved operations, each with its own reason.
+   * A Collection this Collection's automations name that the index lacks,
+   * such as a dataset whose dataset.json is broken, comes with why.
    */
   async targetsFor(collectionPath: string): Promise<CollectionAutomationTarget[]> {
     await this.ready();
     const roster = await this.options.cachedRoster();
     const collection = collectionNamed(collectionPath);
-    return [...this.collections.keys()].sort().map((path) => {
+    const reasonOf = (verdict: ReturnType<typeof checkAutomationReach>[number] | undefined) => (verdict && !verdict.allowed ? verdict.reason : null);
+    const documents = [...this.collections.keys()].map((path): CollectionAutomationTarget => {
       const target = collectionNamed(path);
       const [change, find] = checkAutomationReach(roster, {
         id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection: target }, { kind: "find-records", collection: target }],
       });
-      return {
-        path,
-        name: target.name,
-        stopped: change && !change.allowed ? change.reason : null,
-        findStopped: find && !find.allowed ? find.reason : null,
-      };
+      return { kind: "document", path, name: target.name, stopped: reasonOf(change), findStopped: reasonOf(find) };
     });
+    const resolver = this.targetResolver();
+    const datasets: CollectionAutomationTarget[] = [];
+    const indexed = this.files.get(collectionPath);
+    const named = indexed?.file.status === "read"
+      ? indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? [...recordStepDestinations(entry.automation, collectionPath).values()] : []))
+      : [];
+    const unlisted = named.filter((path) => !this.collections.has(path) && !this.datasets.has(path));
+    for (const path of new Set([...this.datasets.keys(), ...unlisted])) {
+      if (this.collections.has(path)) continue;
+      const name = collectionNamed(path).name;
+      let resolved: Awaited<ReturnType<typeof resolver.resolve>>;
+      try {
+        resolved = await resolver.resolve(path);
+      } catch (error) {
+        // One dataset dohc cannot resolve leaves the others listed.
+        resolved = { kind: "problem", code: "host-unavailable", problem: errorText(error) };
+      }
+      if (resolved.kind !== "dataset") {
+        // A folder with no Collection at all stays out; the builder says it cannot find it.
+        if (resolved.kind === "problem" && resolved.code === "missing") continue;
+        const problem = resolved.kind === "problem" ? resolved.problem : `dohc cannot find the Collection ${path}.`;
+        datasets.push({ kind: "dataset", path, name, datasetId: null, stopped: problem, findStopped: problem, editStopped: problem, actionsStopped: problem, operations: [] });
+        continue;
+      }
+      const { approved, grants } = resolved;
+      const operations = approved.definition.operations;
+      const verdicts = checkAutomationReach(roster, {
+        id: "", collection, codeFiles: [], steps: operations.map((operation): ReachStep => ({
+          kind: "dataset-operation", collection: resolved.collection, datasetId: approved.datasetId, grants,
+          operation: { operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access },
+        })),
+      });
+      const listed = operations.map((operation, index) => ({ name: operation.name, kind: operation.kind, stopped: reasonOf(verdicts[index]) }));
+      // Why no operation of `kind` can run for a step: none is approved, or the reach check stops each one.
+      const blocked = (kind: DatasetOperationKind, missing: string) => {
+        const of = listed.filter((operation) => operation.kind === kind);
+        return of.length === 0 ? `${name} has no approved ${missing}.` : of.every((operation) => operation.stopped !== null) ? of[0]!.stopped : null;
+      };
+      const records = resolved.generated ? null : GENERATED_ONLY(name);
+      datasets.push({
+        kind: "dataset", path, name, datasetId: approved.datasetId,
+        stopped: records ?? blocked("create", "way to add records"), findStopped: records ?? blocked("read", "read"),
+        editStopped: records ?? blocked("edit", "edit"), actionsStopped: blocked("action", "actions"), operations: listed,
+      });
+    }
+    return [...documents, ...datasets].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   }
 
   /** Where an automation's Collection is now, once the index has read it, or null when this computer has none. */
@@ -2143,9 +2218,9 @@ export class CollectionAutomations {
   }
 
   /**
-   * The fields in one table of a dataset Collection that its switched-on
-   * automations set. A dataset's automations change only its own records,
-   * so only its own automations.yaml marks them.
+   * The fields in one table of a dataset Collection that switched-on
+   * automations set, from any Collection's automations: each step that
+   * lands in this dataset counts, as its approved rules resolve it.
    */
   async datasetFieldMarks(datasetId: string, table: string): Promise<CollectionFieldMark[]> {
     if (this.opened === null) return [];
@@ -2153,8 +2228,8 @@ export class CollectionAutomations {
     const home = await this.datasetFolder(datasetId);
     const dataset = home === null ? undefined : this.datasets.get(home);
     if (home === null || dataset === undefined || dataset.generated === null) return [];
-    return await this.marksOf(this.writableCollections(), ({ collectionPath, automation }) => collectionPath !== home ? [] :
-      datasetFieldWritesOf(automation, { ...dataset, generated: dataset.generated === true, sourceCollection: home }).flatMap((write) => (write.table === table ? [write.field] : [])));
+    return await this.marksOf(this.writableCollections(), ({ collectionPath, automation }) =>
+      datasetFieldWritesOf(automation, { ...dataset, generated: dataset.generated === true, sourceCollection: collectionPath }).flatMap((write) => (write.table === table ? [write.field] : [])));
   }
 
   /** Each field `fieldsOf` names for a switched-on automation that can run, with those automations' names in file order. */
