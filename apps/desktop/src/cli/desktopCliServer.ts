@@ -1,3 +1,4 @@
+import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
 import { join, resolve } from "node:path";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import {
@@ -24,7 +25,7 @@ import {
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
-import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
+import { requirePublishedWrite, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
@@ -42,16 +43,10 @@ import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
-// The History author of a document an agent creates: the agent under the
-// name it gave, for the person its edit names, at its run's depth. Without a
-// name it has no author, unless an automation started the run: then the MCP
-// server's agent authors it, so a record it adds carries the run's depth.
-function momentAuthorFor(origin: LiveDocumentEditOrigin): MomentWriteAuthor | null {
+export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
   const { depth = 0, onBehalfOf } = origin.attribution;
-  const agentId = origin.actorOriginId ?? (depth > 0 ? "dohc-mcp" : undefined);
-  return agentId === undefined || onBehalfOf === undefined
-    ? null
-    : { kind: "agent", agentId, onBehalfOf, ...(depth > 0 ? { depth } : {}) };
+  if (onBehalfOf === undefined) throw new Error("The agent write has no local person identity.");
+  return { kind: "agent", agentId: origin.actorOriginId ?? "dohc-mcp", onBehalfOf, ...(depth > 0 ? { depth } : {}) };
 }
 
 // With no editor open, the file holds the document's settled text.
@@ -77,7 +72,7 @@ interface DesktopCliServerDependencies<State> {
       WorkspaceEngineCapture,
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
       | "listKeptCopies" | "saveKeptCopy"
-      | "listVersions" | "writeAuthoredTextFile"
+      | "listVersions" | "writeAuthoredFile"
     > | null;
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
@@ -274,6 +269,14 @@ export function createDesktopCliServer<State>(
           return result;
         },
       },
+      writeFiles: (files, origin, requestId) => withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+        if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
+        const current = activity.engineCaptureFor(workspace.workspaceId);
+        if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
+        return writeWorkspaceFilesAs(operation, files, agentWriteAuthor(origin), { capture: current, requestId });
+      }),
       // Document reads and edits go through the desktop's live document
       // sessions, the ones its editor holds, so an agent's edit merges into
       // an open editor instead of racing it on disk.
@@ -312,7 +315,7 @@ export function createDesktopCliServer<State>(
             if (!current) throw new Error("dohc could not start the engine for this workspace, so it cannot create documents. Restart dohc to try again.");
             const absolute = join(operation.workspace.rootPath, path);
             try {
-              await current.writeAuthoredTextFile(absolute, "", momentAuthorFor(origin), { createOnly: true });
+              requirePublishedWrite(path, await current.writeAuthoredFile(absolute, "", agentWriteAuthor(origin), { createOnly: true }));
             } catch (error) {
               if (error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
                 throw new Error(`${path} already exists. Edit it instead.`, { cause: error });

@@ -1,12 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
   CLI_PROTOCOL_VERSION,
+  MAX_FILE_WRITE_FILES,
   cliRequestSchema,
   parseCliResult,
 } from "./protocol";
 
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
+
+it("bounds fileWrite batches to 256 files", () => {
+  const request = (count: number) => ({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+    args: { ...argsBase, requestId: "batch", files: Array.from({ length: count }, (_, n) => ({ path: `${n}.txt`, contentBase64: "" })) } });
+  expect(cliRequestSchema.safeParse(request(MAX_FILE_WRITE_FILES)).success).toBe(true);
+  expect(cliRequestSchema.safeParse(request(MAX_FILE_WRITE_FILES + 1)).success).toBe(false);
+});
+
+it.each(["collectionSetFields", "collectionCreateRecord"])("validates the agent label for %s", verb => {
+  const fields = verb === "collectionSetFields" ? { recordPath: "tasks/a.md", fields: { status: "done" } }
+    : { collectionPath: "tasks", name: "a", fields: {} };
+  const request = (agent: string) => ({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { ...argsBase, ...fields, agent } });
+  expect(cliRequestSchema.safeParse(request("Client")).success).toBe(true);
+  expect(cliRequestSchema.safeParse(request("automation/spoof")).success).toBe(false);
+});
 
 describe("moment author results", () => {
   it.each([
@@ -344,4 +360,15 @@ it("preserves a group's purpose and each thread's lane", () => {
     id: `t:${index}`, title: lane, lane, commentCount: 0, openDecisionCount: 0, unread: false, updatedAtMs: 1,
   }));
   expect(parseCliResult("threads", { group, threads })).toEqual({ group, threads });
+});
+
+
+it("validates file write authors and preserves partial batch results", () => {
+  const input = { token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+    args: { cwd: "/workspace", actor: "agent", agent: "Client", requestId: "batch", files: [{ path: "file.txt", contentBase64: "eA==", createOnly: true }] } };
+  expect(cliRequestSchema.safeParse(input).success).toBe(true);
+  expect(cliRequestSchema.safeParse({ ...input, args: { ...input.args, agent: "automation/spoof" } }).success).toBe(false);
+  expect(cliRequestSchema.safeParse({ ...input, args: { ...input.args, files: [] } }).success).toBe(false);
+  const failed = { ok: false, written: ["1.txt", "2.txt"], path: "3.txt", reason: "Changed. Read again.", currentSha256: "a".repeat(64) };
+  expect(parseCliResult("fileWrite", failed)).toEqual(failed);
 });

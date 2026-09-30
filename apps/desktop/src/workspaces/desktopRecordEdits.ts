@@ -7,12 +7,12 @@ import {
   readWorkspaceText,
   withStaleSensitiveWorkspaceOperation,
 } from "./workspaceAssets";
-import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
+import { requirePublishedWrite, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createFile, CreatedFileWriteError } from "./workspaceFiles";
 
 /** What this desktop's record writes in one workspace run over. Main supplies it. */
 export interface DesktopRecordEditHost {
-  capture: Pick<WorkspaceEngineCapture, "openYDocSession" | "writeAuthoredTextFile">;
+  capture: Pick<WorkspaceEngineCapture, "openYDocSession" | "writeAuthoredFile">;
   workspaceRoot: string;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withAdapter<T>(
@@ -49,10 +49,10 @@ export function desktopRecordEditContext(host: DesktopRecordEditHost): Collectio
       }),
     async createFile(path, text, author) {
       if (author.kind === "automation") {
-        await capture.writeAuthoredTextFile(join(workspaceRoot, path), text, author, {
+        requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, author, {
           createOnly: true,
           signal,
-        });
+        }));
         return path;
       }
       return await withStaleSensitiveWorkspaceOperation(

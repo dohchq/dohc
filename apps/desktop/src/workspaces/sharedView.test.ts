@@ -5,6 +5,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   symlink,
@@ -42,7 +43,7 @@ import {
 } from "./shareViewFiles";
 import type { ShareViewFilesOwnerCapability } from "./shareViewFilesOwner";
 import {
-  withOrderedWorkspaceTextPath,
+  withOrderedWorkspaceTargetPath,
   withStaleSensitiveWorkspaceOperation,
   type WorkspaceTextWriteResult,
 } from "./workspaceAssets";
@@ -6159,9 +6160,9 @@ describe("shared view refresh", () => {
         const holdDeniedPathLock = new Promise<void>((resolve) => {
           releaseDeniedPathLock = resolve;
         });
-        const deniedPathBlocker = withOrderedWorkspaceTextPath(
+        const deniedPathBlocker = withOrderedWorkspaceTargetPath(
           rootDir,
-          deniedPath,
+          await realpath(join(rootDir, deniedPath)),
           async () => {
             markDeniedPathLockHeld();
             await holdDeniedPathLock;
