@@ -50,8 +50,9 @@ function fixture(options: {
   const window = new FakeWindow();
   const pressWindows = createPressWindows<FakeWindow>((sender) => sender.workspaceId);
   const executor = {
-    buttons: vi.fn(async (_path: string, fields: readonly string[]) => fields.map((field) => ({ field, state: { kind: "ready", automationId: `collection:Invoices#${field}` } }))),
-    press: vi.fn(async (_input: unknown, watch: (claimId: string, waiting: "roster" | "held" | "busy" | null) => void, checkNew: () => Promise<void>) => {
+    buttons: vi.fn(async (_path: string, fields: readonly string[], _describe: Parameters<CollectionAutomations["buttons"]>[2]) => fields.map((field) => ({ field, state: { kind: "ready", automationId: `collection:Invoices#${field}`, ...(options.irreversible ? { irreversible: options.irreversible } : {}) } }))),
+    documentPressed: vi.fn(async () => options.remembered ?? false),
+    press: vi.fn(async (_input: unknown, watch: (claimId: string, waiting: "roster" | "held" | "busy" | null) => void, checkNew: () => Promise<void>, _describe: Parameters<CollectionAutomations["press"]>[3]) => {
       await checkNew();
       const pressed = options.pressed ?? { busy: false as const, claimId: "atc_press", settled: null };
       if (!pressed.busy && pressed.settled === null) watch(pressed.claimId, options.waiting ?? null);
@@ -155,7 +156,7 @@ describe("listing a Collection's buttons", () => {
     await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({
       buttons: [{ field: "Mark paid", table: null, state: { kind: "ready", automationId: "collection:Invoices#Mark paid" } }],
     });
-    expect(f.executor.buttons).toHaveBeenCalledWith("Invoices", ["Mark paid"]);
+    expect(f.executor.buttons).toHaveBeenCalledWith("Invoices", ["Mark paid"], expect.any(Function));
   });
 
   it("reads a shared view's buttons from its automations file, or shows them as needing Edit, without asking the executor", async () => {
@@ -183,7 +184,7 @@ describe("listing an open record's buttons", () => {
       record: f.invoice, collectionPath: "Invoices",
       buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#Mark paid" } }],
     });
-    expect(f.executor.buttons).toHaveBeenCalledWith("Invoices", ["Mark paid"]);
+    expect(f.executor.buttons).toHaveBeenCalledWith("Invoices", ["Mark paid"], expect.any(Function));
   });
 
   it("answers no record for a file mounted under shared-with-me, without asking anything", async () => {
@@ -213,7 +214,8 @@ describe("pressing a button", () => {
     await expect(f.press({ pressedBy: "user-someone-else" })).rejects.toThrow();
     await expect(f.press()).resolves.toEqual({ busy: false, claimId: "atc_press", settled: null });
     expect(f.executor.press).toHaveBeenCalledWith(
-      { collectionPath: "Invoices", field: "Mark paid", recordId: "Invoices/12.md", pressId: PRESS_ID, pressedBy: "user-main", by: { kind: "human" } },
+      { collectionPath: "Invoices", field: "Mark paid", recordId: "Invoices/12.md", pressId: PRESS_ID, pressedBy: "user-main", by: { kind: "human" }, confirmed: [] },
+      expect.any(Function),
       expect.any(Function),
       expect.any(Function),
     );
@@ -349,11 +351,42 @@ describe("pressing a button", () => {
 });
 
 describe("pressing a button by its Collection's folder, as the CLI does", () => {
+  it("carries destination confirmations and caller descriptions through document app presses", async () => {
+    const confirmed = [`${id(50)}/sendInvoice`];
+    const f = fixture();
+    await f.press({ confirmed });
+    expect(f.executor.press.mock.calls[0]![0]).toMatchObject({ confirmed });
+    await f.executor.press.mock.calls[0]![3]!(id(50));
+    expect(f.describeDataset).toHaveBeenLastCalledWith(f.window, WORKSPACE_ID, id(50));
+    await f.call(CHANNELS.listAutomationButtons, {});
+    await f.executor.buttons.mock.calls[0]![2]!(id(51));
+    expect(f.describeDataset).toHaveBeenLastCalledWith(f.window, WORKSPACE_ID, id(51));
+  });
+
+  it.each([{ kind: "human" as const }, { kind: "agent" as const, originId: "dohc-mcp", depth: 2 }])("confirms destination actions from a document button for %s", async (by) => {
+    const name = `${id(50)}/sendInvoice`;
+    const irreversible = [{ name, label: "Billing: Send invoice" }];
+    const f = fixture({ irreversible });
+    expect(await f.named({ confirm: ["sendInvoice"] }, by)).toEqual({ confirm: irreversible });
+    expect(f.executor.press).not.toHaveBeenCalled();
+    expect(await f.named({ confirm: [name] }, by)).toMatchObject({ busy: false });
+    expect(f.executor.press.mock.calls[0]![0]).toMatchObject({ confirmed: [name], by });
+    await f.executor.press.mock.calls[0]![3]!(id(50));
+    expect(f.describeDataset).toHaveBeenLastCalledWith(f.window, WORKSPACE_ID, id(50));
+  });
+
+  it("does not reconfirm a remembered document press", async () => {
+    const f = fixture({ remembered: true, irreversible: [{ name: `${id(50)}/sendInvoice`, label: "Send invoice" }] });
+    expect(await f.named()).toMatchObject({ busy: false });
+    expect(f.executor.buttons).not.toHaveBeenCalled();
+  });
+
   it("presses a document Collection's button through the same press, and tells the caller why the run waits", async () => {
     const f = fixture({ waiting: "roster" });
     await expect(f.named({ recordId: "rec_invoice12" })).resolves.toEqual({ busy: false, claimId: "atc_press", settled: null });
     expect(f.executor.press).toHaveBeenCalledWith(
-      { collectionPath: "Invoices", field: "Mark paid", recordId: "rec_invoice12", pressId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u), pressedBy: "user-main", by: { kind: "human" } },
+      { collectionPath: "Invoices", field: "Mark paid", recordId: "rec_invoice12", pressId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u), pressedBy: "user-main", by: { kind: "human" }, confirmed: [] },
+      expect.any(Function),
       expect.any(Function),
       expect.any(Function),
     );
@@ -432,7 +465,7 @@ describe("pressing a button by its Collection's folder, as the CLI does", () => 
     const document = fixture();
     await document.named({ recordId: "rec_invoice12" }, agent);
     expect(document.executor.press).toHaveBeenCalledWith(
-      expect.objectContaining({ pressedBy: "user-main", by: agent }), expect.any(Function), expect.any(Function));
+      expect.objectContaining({ pressedBy: "user-main", by: agent }), expect.any(Function), expect.any(Function), expect.any(Function));
     const dataset = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"] } });
     await dataset.named({}, agent);
     expect(dataset.executor.pressDataset).toHaveBeenCalledWith(

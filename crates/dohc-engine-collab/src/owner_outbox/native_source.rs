@@ -76,6 +76,7 @@ impl OwnerOutboxNativeSource {
                                 .ok_or(OwnerOutboxError::Corrupt)?,
                             on_behalf_of: on_behalf_of.clone(),
                             depth: u32::try_from(*depth).map_err(|_| OwnerOutboxError::Corrupt)?,
+                            run: None,
                         };
                         attribution
                             .validate()

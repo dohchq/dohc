@@ -7,7 +7,8 @@ import { createCollectionRecord, setCollectionRecordFields } from "@dohc/automat
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { replicaRecordEditContext, type ReplicaRecordEngine } from "./automationRecordEdits";
 
-const AUTOMATION = { kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "owner", depth: 1 } as const;
+const AUTOMATION = { kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "owner", depth: 1,
+  run: { claimId: "claim-1", automationName: "Stamp the finish date" } } as const;
 const ONLY = "This server writes records only for automations, and for the owner's Undo of their runs.";
 const RECORD = derivedRecordId("claim-1/0");
 const MAIN: VersionRecord = { id: "main", workspaceId: "workspace-trip", kind: "main", name: "Main", createdAtMs: 1 };
@@ -111,7 +112,7 @@ describe("an automation's record writes on this server's replica", () => {
     })).resolves.toEqual({ path: "Tasks/one.md", replaced: { Status: "Doing" }, kept: {} });
     expect(journaled).toEqual([{
       actorOriginId: AUTOMATION.automationId,
-      attribution: { actorKind: "automation", onBehalfOf: "owner", depth: 1 },
+      attribution: { actorKind: "automation", onBehalfOf: "owner", depth: 1, run: AUTOMATION.run },
       idempotencyKey: "claim-1/1/0/Status",
       armSettle: false,
     }]);
@@ -156,7 +157,8 @@ describe("an automation's record writes on this server's replica", () => {
     await expect(create()).resolves.toEqual({ path: "Tasks/two.md", recordId: RECORD });
     expect(writes).toEqual([expect.objectContaining({
       workspaceId: "workspace-trip", versionId: "main", path: "Tasks/two.md", text: `---\nid: ${RECORD}\n---\n`, publish: true, createOnly: true,
-      author: AUTOMATION, metadata: { origin: "api", summary: "Added two.md" },
+      author: { kind: AUTOMATION.kind, automationId: AUTOMATION.automationId, onBehalfOf: AUTOMATION.onBehalfOf, depth: AUTOMATION.depth },
+      metadata: { origin: "api", summary: "Added two.md" },
     })]);
     // The record exists now, so the same create finds it and writes nothing.
     await expect(create()).resolves.toEqual({ path: "Tasks/two.md", recordId: RECORD });

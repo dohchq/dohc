@@ -267,7 +267,7 @@ describe("a due time on a dataset", () => {
     expect(resumed.sent).toEqual([{ ...edit, signal: expect.any(AbortSignal) }]);
   });
 
-  it("stops a saved code change before it lands once a second table means reach no longer counts that table", async () => {
+  it("revalidates a saved code change by table identity after another table is approved", async () => {
     const coded = automationFrom(`  - id: close
     name: Close
     when: {schedule: day, timezone: UTC}
@@ -282,7 +282,7 @@ describe("a due time on a dataset", () => {
         evaluate: async () => "busy" as const,
         runCode: async () => ({ ok: true as const, value: { records: [{ action: "change" as const, collection: "Budget", id: "a", fields: { Status: "Closed" } }] } }),
       },
-      store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
+      store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing, recipientVerdicts: async () => [],
     });
     const input = (stopped: AbortSignal) => ({
       held: { source: "engine" as const, claim: dueTime, datasetId: definition.datasetId }, automation: coded, collection: { path: "Budget", name: "Budget" },
@@ -293,13 +293,13 @@ describe("a due time on a dataset", () => {
     expect(await runWithRoster(dependencies(first.surface), input(stop.signal))).toEqual({ kind: "wait", reason: "stopped" });
     expect(first.sent.some((sent) => sent.operationId === EDIT)).toBe(true);
 
-    // The owner approves a second table. The saved change is to a table reach no longer counts for the code.
+    // The saved table remains explicit, so a new table cannot redirect the edit.
     const notes = { ...definition.tables[0]!, tableId: id(40), name: "Notes", sqlName: "notes" };
-    const twoTables = host({ resolves: () => true, edit: async () => { throw new Error("The saved change must not land."); } });
+    const twoTables = host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
     const surface: DatasetRunHost = { ...twoTables.surface, revision: () => ({ ...revision, definition: { ...definition, tables: [...definition.tables, notes] } }) };
     expect(await runWithRoster(dependencies(surface), input(new AbortController().signal)))
-      .toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
-    expect(twoTables.sent).toEqual([]);
+      .toEqual({ kind: "done" });
+    expect(twoTables.sent).toMatchObject([{ operationId: EDIT, input: { id: "a" } }]);
   });
 
   it("stops a resumed plan that sends what it read once its Collection keeps another dataset", async () => {
@@ -1192,6 +1192,7 @@ describe("a dataset action a run invokes", () => {
     const run = async (automation: ReturnType<typeof coded>, host: ReturnType<typeof actionHost>) => await runWithRoster({
       withHost: async (work) => await work(host.surface), evaluator: shared.forWorkspace("workspace"),
       store: createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir), nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
+      recipientVerdicts: async () => [],
     }, {
       held: fromLedger(numbered), automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped: new AbortController().signal,

@@ -268,6 +268,16 @@ interface CollectionHistoryValue {
 
 type CollectionChangeActorKind = "human" | "agent" | "automation";
 
+/**
+ * The automation run a write came from: the claim it ran for, and the
+ * automation's name when it ran. The claim names a run only on the computer
+ * that ran it; the name stays readable after the automation changes or goes.
+ */
+export type AutomationRunAttribution = {
+  claimId: string;
+  automationName: string;
+};
+
 interface CollectionFieldHistoryEntry {
   historyId: number;
   field: string;
@@ -281,6 +291,8 @@ interface CollectionFieldHistoryEntry {
   /** Automation-chain depth, `null` for an unattributed write. */
   depth: number | null;
   recordedAtMs: number;
+  /** The run an automation's write came from, `null` for any other write and for one recorded without its run. */
+  automationRun: AutomationRunAttribution | null;
 }
 
 export interface CollectionGetRecordResult {

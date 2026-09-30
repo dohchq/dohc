@@ -1237,6 +1237,20 @@ const DATASET_CASES: AutomationCase[] = [
 ];
 
 describe("dataset entries", () => {
+  it("round trips invoke destinations, including an explicit source path", () => {
+    for (const collection of [null, "Invoices", "Finance/Invoices"]) {
+      const automation = valid({ do: [{ kind: "invoke", collection, operation: "invoices.markPaid", input: [] }] });
+      if (automation.status !== "valid") throw new Error("Expected a valid automation");
+      const text = written([automation]);
+      expect(validAutomations(text)[0]?.do).toEqual(automation.automation.do);
+      expect(text.includes("collection:")).toBe(collection !== null);
+    }
+  });
+
+  it.each(["../Other", "/Other", "Other/../Invoices"])("rejects invoke destination %s outside normalized workspace paths", (collection) => {
+    expect(diagnosticsOf(withStep(`{invoke: invoices.markPaid, collection: '${collection}'}`))).not.toEqual([]);
+  });
+
   it("reads every dataset trigger and step and writes the same text back", () => {
     const parsed = entries(DATASET_KINDS);
     expect(parsed.map((entry) => entry.status)).toEqual(parsed.map(() => "valid"));
@@ -1272,7 +1286,7 @@ describe("dataset entries", () => {
     expect(send?.when).toEqual({ kind: "button", field: "Send", table: "Invoices" });
     expect(markPaid?.do).toEqual([
       {
-        kind: "invoke",
+        kind: "invoke", collection: null,
         operation: "invoices.markPaid",
         input: [
           { key: "id", value: { kind: "formula", expression: "record.id" } },
@@ -1281,7 +1295,7 @@ describe("dataset entries", () => {
           { key: "tags", value: { kind: "literal", value: ["paid", "manual"] } },
         ],
       },
-      { kind: "invoke", operation: "invoices.recount", input: [] },
+      { kind: "invoke", collection: null, operation: "invoices.recount", input: [] },
     ]);
   });
 
@@ -1292,7 +1306,7 @@ describe("dataset entries", () => {
 
   it("refuses to save an action's input past its key bound", () => {
     const input = Array.from({ length: MAX_ACTION_INPUT_KEYS + 1 }, (_, index) => ({ key: `k${index}`, value: { kind: "literal" as const, value: 1 } }));
-    expect(refusal([valid({ do: [{ kind: "invoke", operation: "invoices.markPaid", input }] })]))
+    expect(refusal([valid({ do: [{ kind: "invoke", collection: null, operation: "invoices.markPaid", input }] })]))
       .toEqual([{ code: "too-many-inputs", path: "/automations/0/do/0/input" }]);
   });
 
@@ -1313,7 +1327,7 @@ describe("dataset entries", () => {
       .toEqual([{ code: "too-long", path: "/automations/0/when/table" }]);
     expect(refusal([valid({ do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null, operation: "o".repeat(65) }] })]))
       .toEqual([{ code: "invalid-operation-name", path: "/automations/0/do/0/operation" }]);
-    expect(refusal([valid({ do: [{ kind: "invoke", operation: "mark paid", input: [] }] })]))
+    expect(refusal([valid({ do: [{ kind: "invoke", collection: null, operation: "mark paid", input: [] }] })]))
       .toEqual([{ code: "invalid-operation-name", path: "/automations/0/do/0/invoke" }]);
   });
 

@@ -4,13 +4,51 @@ import { bindingsIn, reachStepsOf, chatReachStepsOf, findQueryOf, shapeProblem, 
 import type { ChatDirectory } from "./automationChat";
 import type { AutomationTarget, AutomationTargets } from "./automationTargets";
 import type { ReachStep } from "./automationReach";
-import { datasetReachSteps, datasetStepsOf, recordStepDestinations, type DatasetRules, type DatasetSteps } from "./datasetAutomationPlan";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import type { IrreversibleAction } from "./automationButtons";
+import { datasetIrreversibleActions, datasetReachSteps, datasetStepsOf, recordStepDestinations, type DatasetRules, type DatasetSteps } from "./datasetAutomationPlan";
 
 export interface AutomationInventory {
   targets: Map<string, AutomationTarget>;
   destinations: Map<number, string>;
   datasets: Map<string, { rules: DatasetRules; steps: DatasetSteps }>;
   reach: ReachStep[];
+}
+
+/** A button's caller must hold every operation, including implicit reads, in its own dataset. */
+export async function canPressInventory(inventory: AutomationInventory, describe?: (datasetId: string) => Promise<DatasetDescription>): Promise<boolean> {
+  const operations = new Map<string, Set<string>>();
+  for (const step of inventory.reach) {
+    if (step.kind !== "dataset-operation") continue;
+    const ids = operations.get(step.datasetId) ?? new Set<string>();
+    ids.add(step.operation.operationId);
+    operations.set(step.datasetId, ids);
+  }
+  for (const [datasetId, ids] of operations) {
+    if (describe === undefined) return false;
+    try {
+      const access = await describe(datasetId);
+      const approved = [...inventory.targets.values()].find((target) => target.kind === "dataset" && target.approved.datasetId === datasetId);
+      if (approved?.kind !== "dataset" || access.datasetId !== datasetId ||
+        [...ids].some((id) => !access.operations.some((operation) => operation.operationId === id))) return false;
+    } catch { return false; }
+  }
+  return true;
+}
+
+/** Destination-qualified confirmations cannot authorize an identically named action elsewhere. */
+export function irreversibleActionsOf(automation: Automation, source: string, inventory: AutomationInventory): IrreversibleAction[] {
+  const actions = new Map<string, IrreversibleAction>();
+  for (const { ordinal, step } of stepsInOrder(automation)) {
+    if (step.kind !== "invoke") continue;
+    const path = inventory.destinations.get(ordinal)!;
+    const dataset = inventory.datasets.get(path)!;
+    const [action] = datasetIrreversibleActions({ ...automation, do: [step] }, dataset.rules.definition);
+    if (action === undefined) continue;
+    const name = path === source ? action.name : `${dataset.rules.definition.datasetId}/${action.name}`;
+    actions.set(name, { name, label: path === source ? action.label : `${path}: ${action.label}` });
+  }
+  return [...actions.values()];
 }
 
 /** Metadata and operation inventory. This never grants access to records. */

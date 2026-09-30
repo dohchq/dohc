@@ -991,6 +991,7 @@ fn own_draft_attribution(
                 .ok_or(ApplicationError::Corrupt)?,
             on_behalf_of,
             depth: u32::try_from(depth).map_err(|_| ApplicationError::Corrupt)?,
+            run: None,
         }),
         _ => None,
     };

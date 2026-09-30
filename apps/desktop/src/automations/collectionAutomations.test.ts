@@ -851,7 +851,7 @@ describe("Collection automations", () => {
     ]);
     // Nobody is known to have made the change, so the run's writes name nobody.
     expect(w.journaled[0]).toMatchObject({ actorOriginId: "collection:Tasks#stamp" });
-    expect(w.journaled[0]?.attribution).toEqual({ actorKind: "automation", depth: 1 });
+    expect(w.journaled[0]?.attribution).toEqual({ actorKind: "automation", depth: 1, run: { claimId: claim.claimId, automationName: "Stamp" } });
   });
 
   it("gives a record change's person to formulas and to the run's own writes", async () => {
@@ -874,11 +874,12 @@ describe("Collection automations", () => {
     for (const claim of claims) await w.settledClaim(claim);
     expect(claims.map((claim) => claim.state)).toEqual(["done", "done", "done", "done"]);
     expect([typed, byAgent, byFile].map((record) => w.fieldsOf(record).Note)).toEqual(["Ice", "Ice", "nobody"]);
+    const run = (index: number) => ({ claimId: claims[index]!.claimId, automationName: "Note" });
     expect(w.journaled.map((entry) => entry.attribution)).toEqual([
-      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1 },
-      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1 },
-      { actorKind: "automation", depth: 1 },
-      { actorKind: "automation", onBehalfOf: "user-ana", depth: 1 },
+      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1, run: run(0) },
+      { actorKind: "automation", onBehalfOf: "user-ice", depth: 1, run: run(1) },
+      { actorKind: "automation", depth: 1, run: run(2) },
+      { actorKind: "automation", onBehalfOf: "user-ana", depth: 1, run: run(3) },
     ]);
   });
 
@@ -1447,6 +1448,7 @@ describe("Collection automations", () => {
     // record's claim carries the automation and never triggers itself.
     expect(w.authored).toEqual([{ path: added.path, author: {
       kind: "automation", automationId: "collection:Tasks#sweep", depth: 1,
+      run: { claimId: claim.claimId, automationName: "Sweep" },
     } }]);
     const [run] = (await w.executor.runs("collection:Tasks#sweep")).runs;
     expect(run!.writes).toContainEqual({ kind: "field", recordId: sibling.id, path: sibling.path, field: "Points", before: 5, after: 10 });
@@ -1458,8 +1460,8 @@ describe("Collection automations", () => {
     w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Tasks"])] });
     await w.executor.open();
     await expect(w.executor.targetsFor("Tasks")).resolves.toEqual([
-      { path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget.", findStopped: "ana@dohc.test cannot view Budget." },
-      { path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
+      { kind: "document", path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget.", findStopped: "ana@dohc.test cannot view Budget." },
+      { kind: "document", path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
     ]);
   });
 
@@ -1468,7 +1470,7 @@ describe("Collection automations", () => {
     await w.executor.open();
     const draft: Automation = {
       id: "settle", name: "Settle", enabled: true, when: { kind: "record-added", table: null }, if: null,
-      do: [{ kind: "invoke", operation: "tasks.settle", input: [] }],
+      do: [{ kind: "invoke", collection: null, operation: "tasks.settle", input: [] }],
     };
     await expect(w.executor.draftCannotRun("Tasks", draft)).resolves.toBe("Only a dataset Collection has actions.");
     await expect(w.executor.draftCannotRun("Tasks", { ...draft, do: [{ kind: "set", values: [{ field: "Points", value: { kind: "literal", value: 1 } }], records: null, operation: null }] }))
@@ -1616,7 +1618,7 @@ describe("Collection automations", () => {
     await reopened.dispose();
   });
 
-  it.each([false, true])("refuses an approved dataset through the document write path (code: %s)", async (code) => {
+  it.each([false, true])("uses approved dataset operations for code and refuses document writes (code: %s)", async (code) => {
     const w = await world({ automations: { Tasks: [
       "  - id: donate",
       "    name: Donate",
@@ -1646,12 +1648,16 @@ describe("Collection automations", () => {
       const claim = w.claim("collection:Tasks#donate", task);
       await executor.open();
       await w.settledClaim(claim);
-      expect(claim).toMatchObject({
-        state: "failed",
-        error: code
-          ? "The code in step 1 changes records in Donations. Automations cannot use Donations yet, because its records change only through its Collection actions."
-          : "Name the approved operation step 1 uses, such as donations.create.",
-      });
+      if (code) {
+        expect(claim.state).toBe("done");
+        expect(host.history({ datasetId: id(1) }).entries).toMatchObject([{
+          operation: "donations.create",
+          automation: { automationId: "collection:Tasks#donate", depth: 1 },
+        }]);
+      } else {
+        expect(claim).toMatchObject({ state: "failed", error: "Name the approved operation step 1 uses, such as donations.create." });
+        expect(host.history({ datasetId: id(1) }).entries).toEqual([]);
+      }
       expect(w.authored).toEqual([]);
     } finally {
       await executor.dispose();
@@ -4161,7 +4167,7 @@ describe("Collection automations that a Group message starts", () => {
     expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
     // The record it adds is made for the message's author, so its claims name them.
     expect(w.authored.map((entry) => entry.author)).toEqual([
-      { kind: "automation", automationId: "collection:Tasks#task", onBehalfOf: "user-ana", depth: 1 },
+      { kind: "automation", automationId: "collection:Tasks#task", onBehalfOf: "user-ana", depth: 1, run: { claimId: claim.claimId, automationName: "Add a task" } },
     ]);
   });
 
@@ -5706,7 +5712,7 @@ describe("code steps", () => {
     w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Tasks"])] });
     await w.makeExecutor().open();
     await w.settledClaim(claim);
-    expect(claim).toMatchObject({ state: "failed", error: "The code in step 1 changes records in Log. ana@dohc.test cannot edit Log." });
+    expect(claim).toMatchObject({ state: "failed", error: "The code in step 1 changes records. This automation cannot use the requested Collection or fields." });
     expect([...w.records.values()].filter((record) => record.collection === "Log")).toEqual([]);
   });
 
@@ -5734,7 +5740,7 @@ describe("code steps", () => {
     const claim = w.claim(CODE, task);
     await w.executor.open();
     await w.settledClaim(claim);
-    expect(claim).toMatchObject({ state: "failed", error: "The code in step 1 changes records in Budget. ana@dohc.test cannot edit Budget." });
+    expect(claim).toMatchObject({ state: "failed", error: "The code in step 1 changes records. This automation cannot use the requested Collection or fields." });
     expect(w.fieldsOf(task)).toEqual({ Status: "Done" });
     expect(w.journaled).toEqual([]);
 

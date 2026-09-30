@@ -6,9 +6,11 @@ import {
   ReadEngineMomentPayload, ReadEngineMomentResult, RestoreEngineMomentFilePayload,
   RestoreEngineMomentFileResult, RetryCloudSyncPayload, WorkspaceIdPayload, SyncStatusResult,
   RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
+  GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, RECORD_HISTORY_PAGE,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { engineMomentDetailForIpc, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
+import { recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
 import { rebuildEngineStoreRequest, type moveEngineStoreAside } from "../workspaces/engineStoreRebuild";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import type { WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
@@ -38,7 +40,7 @@ export function createWorkspaceEngineIpc<
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceForRegistered">;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
-    work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus">) => Promise<Result>,
+    work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord">) => Promise<Result>,
   ): Promise<Result | null>;
   requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
@@ -49,6 +51,8 @@ export function createWorkspaceEngineIpc<
   automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
   /** A person the owner shared with, as History names their direct write. */
   namedAuthorLabel(workspaceId: string, author: Parameters<EngineMomentAuthorNames["named"]>[0]): string;
+  /** Whether this computer keeps an automation's run, so a record's history can open it. */
+  automationRunOnThisComputer(workspaceId: string, automationId: string, claimId: string): Promise<boolean>;
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
@@ -74,6 +78,7 @@ export function createWorkspaceEngineIpc<
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, automationAuthor, namedAuthorLabel,
+    automationRunOnThisComputer,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
@@ -136,6 +141,37 @@ export function createWorkspaceEngineIpc<
           );
           if (!result) throw new Error("The workspace engine is not running.");
           return QueryCollectionRecordsResult.parse(result);
+        },
+      );
+    });
+
+    // A document record's History, a page at a time. Authors are named as
+    // the file timeline names them; an automation by its name when it ran.
+    registerHandler(CHANNELS.getCollectionRecordHistory, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = GetCollectionRecordHistoryPayload.parse(payload);
+      return withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "Record history stopped loading because this window changed workspaces.",
+        async (operation) => {
+          const result = await withEngineAdapter(
+            receivedShareEngine.workspaceForRegistered(operation.workspace),
+            async (adapter) => await adapter.getCollectionRecord({
+              collectionPath: input.collectionPath,
+              recordId: input.recordId,
+              historyLimit: RECORD_HISTORY_PAGE,
+              ...(input.beforeHistoryId === undefined ? {} : { beforeHistoryId: input.beforeHistoryId }),
+            }),
+          );
+          if (!result) throw new Error("The workspace engine is not running.");
+          const { workspaceId } = operation.workspace;
+          const authors: RecordHistoryAuthors = {
+            agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
+            automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
+            runOnThisComputer: (automationId, claimId) => automationRunOnThisComputer(workspaceId, automationId, claimId),
+          };
+          return GetCollectionRecordHistoryResult.parse(await recordHistoryForIpc(result, authors));
         },
       );
     });

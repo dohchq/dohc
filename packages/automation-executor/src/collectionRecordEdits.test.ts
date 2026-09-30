@@ -30,6 +30,7 @@ const AUTOMATION = {
   automationId: "collection:tasks#finished-date",
   onBehalfOf: "local",
   depth: 1,
+  run: { claimId: "claim-7", automationName: "Stamp the finish date" },
 } as const;
 
 interface FakeSessionLog {
@@ -300,7 +301,7 @@ describe("setCollectionRecordFields", () => {
     expect(frontmatter.get("estimate")).toBe(3);
   });
 
-  it("records an automation author under its subscription id with its depth and claim key", async () => {
+  it("records an automation author under its subscription id with its depth, run, and claim key", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
 
@@ -316,7 +317,7 @@ describe("setCollectionRecordFields", () => {
     expect(log.journaled).toEqual([
       {
         actorOriginId: AUTOMATION.automationId,
-        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1 },
+        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1, run: { claimId: "claim-7", automationName: "Stamp the finish date" } },
         idempotencyKey: "claim-7/1/0/status",
       },
     ]);

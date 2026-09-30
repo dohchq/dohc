@@ -1925,7 +1925,7 @@ describe("Button fields", () => {
     expect(button.getAttribute("aria-busy")).toBe("true");
     await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1));
     const pressed = bridge.pressAutomationButton.mock.calls[0]![0];
-    expect(pressed).toEqual({ workspaceId: "ws-1", collectionPath: "tasks", field: "Mark paid", recordId: "rec-1", pressId: expect.any(String) });
+    expect(pressed).toEqual({ workspaceId: "ws-1", collectionPath: "tasks", field: "Mark paid", recordId: "rec-1", pressId: expect.any(String), confirmed: [] });
     expect(pressed.pressId).toMatch(/^[0-9a-f-]{36}$/);
     act(() => bridge.emitRunWaiting({ workspaceId: "ws-1", claimId: "atc_press", reason: "roster" }));
     expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent)

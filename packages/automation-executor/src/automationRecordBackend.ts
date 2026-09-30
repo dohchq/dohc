@@ -1,6 +1,6 @@
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { StoredRun } from "./automationRunStore";
-import { datasetUndoDeletes } from "./datasetAutomationPlan";
+import { datasetUndoDeletes, datasetCodeTable, datasetCodeOperation, datasetTableNamed, datasetStepsOf } from "./datasetAutomationPlan";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
@@ -9,6 +9,7 @@ import {
   parseCollectionAutomationId,
   codeFilesOf,
   codeStepOrdinals,
+  codeRecordKey,
   definitionHash,
   findOverflowError,
   findQueryOf,
@@ -19,9 +20,10 @@ import {
   type RunContext,
   type RunRecord,
   type RunClaim,
+  type PlannedEffect,
 } from "./automationPlan";
 import { chatNeedsOf } from "./automationChat";
-import { checkAutomationReach, datasetFieldKey, type ReachStep, type ReachRoster } from "./automationReach";
+import { automationTargetPathProblem, checkAutomationReach, datasetFieldKey, personHoldsOperation, reachStepId, type ReachStep, type ReachRoster } from "./automationReach";
 import {
   applyDocumentEffect,
   applyChatEffect,
@@ -42,7 +44,7 @@ import {
 import {
   applyDatasetEffect,
   ACCESS_NARROWED_ERROR,
-  codeStepProblem,
+  datasetRecordIdOf,
   datasetRunRecordOf,
   datasetStepEffects,
   findValueProblem,
@@ -63,11 +65,12 @@ import {
 import type { DatasetTable, DatasetOperation } from "@dohc/security-contract/dataset";
 import { AutomationRunWait } from "./automationRunWait";
 import { resolveAutomationInventory, type AutomationInventory } from "./automationInventory";
+import type { AutomationTarget } from "./automationTargets";
 
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
   "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
 > & Partial<Pick<CollectionAutomationRunDependencies,
-  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach"
+  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach" | "localPersonId"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
 export type RecordRunInput = Omit<CollectionAutomationRunInput, "claim"> & {
   claim: Pick<AutomationClaim, "automationId" | "claimId" | "run" | "depth" | "createdAtMs">;
@@ -76,7 +79,6 @@ export interface RecordReads {
   document(path: string, id: string): Promise<RunRecord | null>;
   dataset(path: string, operation: DatasetOperation, table: DatasetTable, id: DatasetRecordId): Promise<DatasetRow | null>;
   remember(path: string, row: DatasetRow, table: DatasetTable): RunRecord;
-  snapshots: ReadonlyMap<string, RunRecord>;
 }
 export interface RunSource {
   kind: "document" | "dataset";
@@ -85,9 +87,7 @@ export interface RunSource {
   writeAuthorId: string | null;
   engineClaim: AutomationClaim | null;
   decode(inventory: AutomationInventory, readable: ReadonlySet<string>, resuming: boolean): RunClaim | { outcome: CollectionAutomationRunOutcome };
-  reads(access: RecordReads, inventory: AutomationInventory, readable: ReadonlySet<string>): Pick<StepReads, "trigger" | "codeRecords">;
-  validate?(inventory: AutomationInventory, run: StoredRun | null): Promise<CollectionAutomationRunOutcome | null> | CollectionAutomationRunOutcome | null;
-  checkEffect?(effect: import("./automationRunStore").StoredStep["effects"][number], ordinal: number, roster: Exclude<ReachRoster, { kind: "unknown" }>): Promise<CollectionAutomationRunOutcome | null>;
+  reads(access: RecordReads, inventory: AutomationInventory, readable: ReadonlySet<string>): Pick<StepReads, "trigger">;
 }
 const failed = (error: string): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut: false });
 
@@ -116,7 +116,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     if (result.lost) return { outcome: failed(LOST_COLLECTION_ERROR) };
     moved = result.moved;
     for (const { ordinal, step } of stepsInOrder(located)) {
-      if ((step.kind === "find" || step.kind === "add-record") && current.steps.some((saved) => saved.ordinal === ordinal)) {
+      if ((step.kind === "find" || step.kind === "add-record" || step.kind === "invoke") && current.steps.some((saved) => saved.ordinal === ordinal)) {
         step.collection = current.steps.find((saved) => saved.ordinal === ordinal)?.destinations?.[0]?.path ?? step.collection;
       }
     }
@@ -143,8 +143,6 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     ])];
     if (!await resolves(...savedRules)) return { outcome: failed(RULES_CHANGED_ERROR) };
   }
-  const problem = await source.validate?.(inventory, current);
-  if (problem != null) return { outcome: problem };
   const readable = new Set<string>();
   const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: inventory.reach });
   if (await deps.checkReach?.(inventory.reach, roster)) return { outcome: { kind: "wait", reason: "held" } };
@@ -154,7 +152,6 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       if (verdict.allowed) readable.add(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId));
     } else if (!verdict.allowed) return { outcome: failed(verdict.reason) };
   }
-  if (current?.readableFields?.some((field) => !readable.has(field))) return { outcome: failed(ACCESS_NARROWED_ERROR) };
   const visible = current === null ? readable : new Set(current.readableFields ?? []);
   const decoded = source.decode(inventory, visible, current !== null);
   if ("outcome" in decoded) return decoded;
@@ -174,14 +171,168 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     key: { claimId: claim.claimId, hash: state.keySeed },
     ...(origin.kind === "dataset" && !origin.generated ? { recordKeys: ["id"] } : {}),
   };
+  // Record history names the automation as it was called when it ran, and opens this run.
   const author: ChangeAuthor = { kind: "automation", automationId: claim.automationId, depth: claim.depth + 1,
-    ...(source.writeAuthorId === null ? {} : { onBehalfOf: source.writeAuthorId }) };
+    ...(source.writeAuthorId === null ? {} : { onBehalfOf: source.writeAuthorId }),
+    run: { claimId: claim.claimId, automationName: automation.name } };
   const ordered = new Map(stepsInOrder(automation).map(({ ordinal, step }) => [ordinal, step]));
   const pathOf = (ordinal: number) => inventory.destinations.get(ordinal) ?? collection.path;
   const association = (path: string) => {
     const target = inventory.targets.get(path)!;
     return { path, rules: target.kind === "dataset" ? { datasetId: target.approved.datasetId, revision: target.approved.revision, revisionSha256: target.approved.revisionSha256 } : null };
   };
+  const codeOrdinals = codeStepOrdinals(automation);
+  type CodeTarget = { ordinal: number; collection: string; table?: string; tableId?: string; recordPath?: string; action: "add" | "change"; fields: readonly string[]; fieldIds?: readonly string[]; operationId?: string };
+  const codeReach = new Map<string, { ordinal: number; reach: ReachStep }>();
+  let recordReadable = visible;
+  const loadCodeTarget = async (path: string) => {
+    const problem = automationTargetPathProblem(path);
+    if (problem !== null) throw new Error(problem);
+    if (inventory.targets.has(path)) return inventory.targets.get(path)!;
+    const target = await deps.targets.resolve(path);
+    if (target.kind === "problem") {
+      if (target.code === "host-unavailable") throw new AutomationRunWait(target.problem);
+      throw new Error(target.problem);
+    }
+    inventory.targets.set(path, target);
+    if (target.kind === "dataset") {
+      const rules = { definition: target.approved.definition, generated: target.generated, sourceCollection: collection.path };
+      inventory.datasets.set(path, { rules, steps: datasetStepsOf(automation, rules) });
+    }
+    return target;
+  };
+  const codeTable = (target: Extract<AutomationTarget, { kind: "dataset" }>, request: CodeTarget) => {
+    const definition = target.approved.definition;
+    const table = request.tableId !== undefined ? definition.tables.find((table) => table.tableId === request.tableId)
+      : request.table !== undefined ? datasetTableNamed(definition, request.table)
+      : request.collection === collection.path ? datasetCodeTable(automation, definition) : datasetTableNamed(definition, null);
+    if (table === undefined) throw new Error(request.table !== undefined
+      ? `${request.collection} has no table named ${request.table}. Check the table name in step ${request.ordinal + 1}.`
+      : request.tableId !== undefined ? RULES_CHANGED_ERROR
+      : `The code in step ${request.ordinal + 1} changes records in ${request.collection}. Name its table when the Collection has several tables.`);
+    return table;
+  };
+  const authorizeCode = async (requests: readonly CodeTarget[]) => {
+    const authorized = new Map<CodeTarget, { table: DatasetTable; operation: DatasetOperation; reader?: DatasetOperation }>();
+    if (requests.length === 0) return authorized;
+    const currentRoster = await deps.cachedRoster?.() ?? roster;
+    if (currentRoster.kind === "unknown") throw new AutomationRunWait("The workspace roster is unavailable.", "roster");
+    const checkedReach = new Map<string, { ordinal: number; reach: ReachStep }>();
+    const addReach = (ordinal: number, reach: ReachStep) => checkedReach.set(JSON.stringify([ordinal, reachStepId(reach, 0)]), { ordinal, reach });
+    const grantsByPath = new Map<string, Extract<AutomationTarget, { kind: "dataset" }>["grants"]>();
+    const fieldsRead: string[] = [];
+    const problems: string[] = [];
+    for (const request of requests) {
+      const pathReach: ReachStep = { kind: "change-records", collection: { path: request.collection, name: request.collection.split("/").at(-1)! }, identity: JSON.stringify(["code", request.ordinal, request.collection]) };
+      const [pathVerdict] = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: [pathReach] });
+      let target: Exclude<AutomationTarget, { kind: "problem" }>;
+      try { target = await loadCodeTarget(request.collection); }
+      catch (error) {
+        addReach(request.ordinal, pathReach);
+        if (error instanceof AutomationRunWait) throw error;
+        problems.push(pathVerdict!.allowed
+          ? `The code in step ${request.ordinal + 1} changes records in ${request.collection}. ${error instanceof Error ? error.message : String(error)}`
+          : "This automation cannot use the requested Collection or fields.");
+        continue;
+      }
+      if (target.kind === "document") {
+        addReach(request.ordinal, pathReach);
+        if (!pathVerdict!.allowed) continue;
+        if (request.table !== undefined || request.tableId !== undefined) problems.push("Only a dataset Collection has named tables.");
+        const missing = target.fields === null ? undefined : request.fields.find((field) => !target.fields!.has(field));
+        if (missing !== undefined) problems.push(`The code in step ${request.ordinal + 1} sets ${missing}, which is not a field in ${target.collection.name}.`);
+        continue;
+      }
+      const grants = grantsByPath.get(request.collection) ?? await deps.withHost?.((host) => host.dataGrants(target.approved.datasetId));
+      if (grants == null) throw new AutomationRunWait("The dataset host is unavailable.");
+      grantsByPath.set(request.collection, grants);
+      try {
+        if (!target.generated) throw new Error(`The code in step ${request.ordinal + 1} changes records in ${request.collection}. Its operations were written or changed outside dohc, so only an action can change its records. Run one with an invoke step.`);
+        const table = codeTable(target, request);
+        const names = request.fieldIds === undefined ? request.fields : request.fieldIds.map((id) => table.fields.find((field) => field.fieldId === id && field.type !== "button")?.name);
+        if (names.some((name) => name === undefined)) throw new Error(RULES_CHANGED_ERROR);
+        const fields = names as readonly string[];
+        const missing = fields.find((name) => !table.fields.some((field) => field.name === name && field.type !== "button"));
+        if (missing !== undefined) throw new Error(`The code in step ${request.ordinal + 1} sets ${missing}, which is not a field in ${table.name}.`);
+        const operations: DatasetOperation[] = [];
+        for (const kind of request.action === "add" ? ["create"] as const : ["edit", "read"] as const) {
+          const operation = kind !== "read" && request.operationId !== undefined
+            ? target.approved.definition.operations.find((operation) => operation.operationId === request.operationId && operation.tableId === table.tableId && operation.kind === kind && request.fieldIds!.every((id) => operation.fieldIds.includes(id)))
+            : datasetCodeOperation(target.approved.definition, table, kind, fields);
+          if (operation === undefined || "problem" in operation) throw new Error(operation === undefined ? RULES_CHANGED_ERROR : `The code in step ${request.ordinal + 1} changes records in ${table.name}. ${operation.problem}`);
+          operations.push(operation);
+        }
+        authorized.set(request, { table, operation: operations[0]!, ...(operations[1] === undefined ? {} : { reader: operations[1] }) });
+        for (const operation of operations) addReach(request.ordinal, { kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, grants, operation });
+        for (const operation of operations) if (operation.kind === "read") {
+          fieldsRead.push(...operation.fieldIds.map((fieldId) => datasetFieldKey(target.approved.datasetId, table.tableId, fieldId)));
+        }
+      } catch (error) {
+        // Schema errors disclose nothing until every editor can use the destination's operations.
+        const schema = target.approved.definition.operations.map((operation): Extract<ReachStep, { kind: "dataset-operation" }> => ({ kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, grants, operation }));
+        const allowed = schema.length > 0 && checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: schema }).every((verdict) => verdict.allowed) &&
+          (automation.when.kind !== "button" || schema.every((step) => personHoldsOperation(currentRoster, source.personId, step, deps.localPersonId?.())));
+        addReach(request.ordinal, allowed ? pathReach : { kind: "unavailable", reason: "This automation cannot use the requested Collection or fields.", identity: pathReach.identity });
+        problems.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    const checks = [...checkedReach.values()];
+    const verdicts = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: checks.map(({ reach }) => reach) });
+    const staticIds = new Set(inventory.reach.map(reachStepId));
+    const recipients = checks.flatMap(({ ordinal, reach }, index) => {
+      if (reach.kind !== "change-records" && reach.kind !== "unavailable" && (reach.kind !== "dataset-operation" || staticIds.has(reachStepId(reach, index)))) return [];
+      const verdict = verdicts[index]!;
+      const operation = reach.kind === "dataset-operation" ? reach.operation as DatasetOperation : null;
+      return [{ step: ordinal, id: reach.kind === "change-records" ? reach.collection.path : reachStepId(reach, index),
+        name: reach.kind === "unavailable" ? "Requested Collection" : !verdict.allowed || operation === null ? reach.collection.name : `${reach.collection.name}: ${operation.label}`,
+        action: verdict.allowed && operation?.kind === "read" ? "find" as const : "change" as const,
+        reach: verdict.allowed ? verdict : { ...verdict, reason: "This automation cannot use the requested Collection or fields." } }];
+    });
+    const kept = recipients.length === 0 ? [] : await deps.recipientVerdicts({ automationId: claim.automationId, definitionHash: definitionHash(automation), recipients });
+    for (const [index, entry] of checks.entries()) codeReach.set(JSON.stringify([entry.ordinal, reachStepId(entry.reach, index)]), entry);
+    for (const [index, { ordinal, reach }] of checks.entries()) {
+      const verdict = verdicts[index]!;
+      if (!verdict.allowed) throw new Error(`The code in step ${ordinal + 1} changes records. This automation cannot use the requested Collection or fields.`);
+      if (automation.when.kind === "button" && reach.kind === "dataset-operation" && !personHoldsOperation(currentRoster, source.personId, reach, deps.localPersonId?.())) throw new Error("The person who pressed this button cannot use its destination operation.");
+    }
+    if (kept.includes("held")) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
+    if (problems.length > 0) throw new Error(problems[0]);
+    for (const field of fieldsRead) if (!recordReadable.has(field)) {
+      if (recordReadable === visible) recordReadable = new Set(visible);
+      recordReadable.add(field);
+    }
+    return authorized;
+  };
+  const savedCodeTargets = (step: StoredRun["steps"][number]): CodeTarget[] => !codeOrdinals.has(step.ordinal) ? [] : step.effects.flatMap((effect): CodeTarget[] => {
+    if (effect.kind === "add") return [{ ordinal: step.ordinal, collection: effect.collectionPath, action: "add", fields: effect.fields.map(({ field }) => field) }];
+    if (effect.kind === "set") return [{ ordinal: step.ordinal, collection: effect.target.collectionPath, action: "change", fields: effect.fields.map(({ field }) => field) }];
+    if (effect.kind === "dataset-edit" || effect.kind === "dataset-create") return [{ ordinal: step.ordinal, collection: effect.collectionPath ?? collection.path,
+      action: effect.kind === "dataset-create" ? "add" : "change", tableId: effect.tableId, operationId: effect.operationId,
+      fields: (effect.kind === "dataset-create" ? effect.values : effect.fields).map(({ field }) => field),
+      fieldIds: (effect.kind === "dataset-create" ? effect.values : effect.fields).map(({ fieldId }) => fieldId) }];
+    return [];
+  });
+  for (const step of state.steps) {
+    for (const target of step.destinations ?? []) await loadCodeTarget(target.path);
+  }
+  // A saved field keeps its identity even when a new table changes implicit table selection.
+  const resumeReach: Extract<ReachStep, { kind: "dataset-field" }>[] = [];
+  if (current !== null) for (const target of inventory.targets.values()) {
+    if (target.kind !== "dataset") continue;
+    for (const table of target.approved.definition.tables) for (const field of table.fields) {
+      const key = datasetFieldKey(target.approved.datasetId, table.tableId, field.fieldId);
+      if (field.type === "button" || readable.has(key) || !visible.has(key)) continue;
+      const reach: Extract<ReachStep, { kind: "dataset-field" }> = { kind: "dataset-field", collection: target.collection, datasetId: target.approved.datasetId, tableId: table.tableId,
+        grants: target.grants, field: { fieldId: field.fieldId, name: field.name },
+        reads: target.approved.definition.operations.filter((operation) => operation.kind === "read" && operation.tableId === table.tableId && operation.fieldIds.includes(field.fieldId)) };
+      resumeReach.push(reach);
+    }
+  }
+  checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: resumeReach })
+    .forEach((verdict, index) => { const step = resumeReach[index]!; if (verdict.allowed) readable.add(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)); });
+  inventory.reach.push(...resumeReach);
+  await authorizeCode(state.steps.flatMap(savedCodeTargets));
+  if (current?.readableFields?.some((field) => !readable.has(field))) return { outcome: failed(ACCESS_NARROWED_ERROR) };
   for (const step of state.steps) {
     for (const target of step.destinations ?? []) {
       if (!inventory.targets.has(target.path)) return { outcome: failed(RULES_CHANGED_ERROR) };
@@ -204,20 +355,21 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     checkLocations();
     const currentRoster = (await deps.cachedRoster?.()) ?? roster;
     if (currentRoster.kind === "unknown") throw new AutomationRunWait("The workspace roster is unavailable.", "roster");
-    const steps = inventory.datasets.size === 0 ? inventory.reach : await deps.withHost?.((host) => {
+    const allReach = [...inventory.reach, ...[...codeReach.values()].map(({ reach }) => reach)];
+    const steps = inventory.datasets.size === 0 ? allReach : await deps.withHost?.((host) => {
       const grants = new Map<string, ReturnType<typeof host.dataGrants>>();
       for (const [path, target] of inventory.targets) {
         if (target.kind !== "dataset") continue;
         if (!host.resolves(association(path).rules!)) throw new Error(RULES_CHANGED_ERROR);
         grants.set(target.approved.datasetId, host.dataGrants(target.approved.datasetId));
       }
-      return inventory.reach.map((step): ReachStep => step.kind === "dataset-operation" || step.kind === "dataset-field"
+      return allReach.map((step): ReachStep => step.kind === "dataset-operation" || step.kind === "dataset-field"
         ? { ...step, grants: grants.get(step.datasetId)! } : step);
     });
     if (steps == null && inventory.datasets.size > 0) throw new AutomationRunWait("The dataset host is unavailable.");
-    const fresh = { reach: steps ?? inventory.reach };
+    const fresh = { reach: steps ?? allReach };
     const checks = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: fresh.reach });
-    if (recordVerdicts && await deps.checkReach?.(fresh.reach, currentRoster)) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
+    if (recordVerdicts && await deps.checkReach?.(fresh.reach.slice(0, inventory.reach.length), currentRoster)) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
     for (const [index, verdict] of checks.entries()) {
       const step = fresh.reach[index]!;
       if (!verdict.allowed && (step.kind !== "dataset-field" || visible.has(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)))) throw new Error(verdict.reason);
@@ -226,15 +378,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   };
   const verifyTarget = async (path: string) => {
     const before = inventory.targets.get(path);
-    if (before === undefined) {
-      const resolved = await deps.targets.resolve(path);
-      if (resolved.kind === "problem") {
-        if (resolved.code === "host-unavailable") throw new AutomationRunWait(resolved.problem);
-        throw new Error(resolved.problem);
-      }
-      if (resolved.kind !== "document") throw new Error(RULES_CHANGED_ERROR);
-      return;
-    }
+    if (before === undefined) throw new Error(RULES_CHANGED_ERROR);
     const fresh = await (deps.targets.validate ? deps.targets.validate(before) : deps.targets.resolve(path));
     if (fresh.kind === "problem") {
       if (fresh.code === "host-unavailable") throw new AutomationRunWait(fresh.problem);
@@ -246,6 +390,9 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   const backend: StepBackend = {
     async step(work) {
       await checkNow(true);
+      const priorCodeReach = new Map(codeReach);
+      const priorReadable = recordReadable;
+      let codeOperations = new Map<CodeTarget, { table: DatasetTable; operation: DatasetOperation; reader?: DatasetOperation }>();
       const checked = new Set<string>();
       const ensure = async (path: string) => { if (!checked.has(path)) { await verifyTarget(path); checked.add(path); } };
       const versions = new Map<string, { id: DatasetRecordId; version: number }>();
@@ -253,7 +400,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       const remember = (path: string, row: DatasetRow, table: DatasetTable) => {
         const target = inventory.targets.get(path)!;
         if (target.kind !== "dataset") throw new Error(RULES_CHANGED_ERROR);
-        const record = datasetRunRecordOf(row, target.approved.datasetId, table, visible);
+        const record = datasetRunRecordOf(row, target.approved.datasetId, table, recordReadable);
         if (versions.has(record.path) && versions.get(record.path)!.version !== row.version) throw new StepRecordChanged();
         versions.set(record.path, { id: row.id, version: row.version });
         const prior = snapshots.get(record.path);
@@ -279,16 +426,66 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
           await ensure(path);
           const key = JSON.stringify([path, id]);
           if (snapshots.has(key)) return snapshots.get(key)!;
-          if (reads === null) throw new AutomationRunWait("The workspace engine is unavailable.");
-          const record = await readDocumentRecord(reads, path, id);
+          const found = reads === null ? await deps.withReads?.(async (reader) => ({ record: await readDocumentRecord(reader, path, id) }))
+            : { record: await readDocumentRecord(reads, path, id) };
+          if (found == null) throw new AutomationRunWait("The workspace engine is unavailable.");
+          const record = found.record;
           if (record !== null) snapshots.set(key, record);
           return record;
         };
         try {
           return await work({
-            ...source.reads({ document, snapshots, remember,
+            ...source.reads({ document, remember,
               dataset: (path, operation, table, id) => readDatasetRecord((op, value) => call(path, op, value), operation, table, id),
             }, inventory, visible),
+            async codeRecords(changes, { record }) {
+              const requests: CodeTarget[] = [];
+              const changed = new Map<string, { request: CodeTarget; table: DatasetTable; id: DatasetRecordId; keys: string[] }>();
+              for (const change of changes) {
+                const request = { ...change, fields: Object.keys(change.fields) };
+                let target: Exclude<AutomationTarget, { kind: "problem" }>;
+                let table: DatasetTable;
+                try {
+                  target = await loadCodeTarget(change.collection);
+                  if (target.kind === "dataset") table = codeTable(target, request);
+                } catch { requests.push(request); continue; }
+                if (target.kind === "document" || change.action === "add") { requests.push(request); continue; }
+                const id = change.id === null ? record?.key ?? null : datasetRecordIdOf(table!, change.id);
+                if (id === null) { requests.push(request); continue; }
+                const key = datasetRecordKey(target.approved.datasetId, table!.tableId, id);
+                const entry = changed.get(key) ?? { request: { ...request, tableId: table!.tableId, recordPath: key }, table: table!, id, keys: new Array<string>() };
+                entry.request.fields = [...new Set([...entry.request.fields, ...request.fields])];
+                if (change.id !== null) entry.keys.push(codeRecordKey(change.collection, change.id, change.table));
+                changed.set(key, entry);
+              }
+              codeOperations = await authorizeCode([...requests, ...[...changed.values()].map(({ request }) => request)]);
+              await checkNow();
+              const records = new Map<string, RunRecord>();
+              // Check every returned destination before reading the first requested record.
+              for (const change of changes) await ensure(change.collection);
+              for (const change of changes) {
+                const target = inventory.targets.get(change.collection)!;
+                if (target.kind === "document" && change.action === "change" && change.id !== null) {
+                  const key = codeRecordKey(change.collection, change.id, change.table);
+                  if (!records.has(key)) {
+                    const found = await document(change.collection, change.id);
+                    if (found !== null) records.set(key, found);
+                  }
+                }
+              }
+              for (const [key, { request, table, id, keys }] of changed) {
+                const target = inventory.targets.get(request.collection)!;
+                if (target.kind !== "dataset") throw new Error(RULES_CHANGED_ERROR);
+                const reader = codeOperations.get(request)!.reader!;
+                let snapshot = snapshots.get(key);
+                if (snapshot === undefined || request.fields.some((field) => !Object.hasOwn(snapshot!.values, field))) {
+                  const row = await readDatasetRecord((op, value) => call(request.collection, op, value), reader, table, id);
+                  snapshot = row === null ? undefined : remember(request.collection, row, table);
+                }
+                if (snapshot !== undefined) for (const key of keys) records.set(key, snapshot);
+              }
+              return { records };
+            },
             async bound(ordinal, refs) {
               const path = pathOf(ordinal);
               const target = inventory.targets.get(path)!;
@@ -364,23 +561,45 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
               return rowsOf(result).map((row) => remember(path, row, table));
             },
             effects(ordinal, planned) {
-              const path = pathOf(ordinal);
-              const dataset = inventory.datasets.get(path);
-              if (dataset === undefined && codeStepOrdinals(automation).has(ordinal)) return [...planned];
-              if (dataset === undefined) return planned.map((effect) => effect.kind === "set" ? { ...effect, target: { ...effect.target, collectionPath: path } } : effect.kind === "add" ? { ...effect, collectionPath: path } : effect);
-              const effects = datasetStepEffects(automation, ordinal, planned, dataset.steps, dataset.rules.definition, codeStepOrdinals(automation).has(ordinal), association(path).rules!, versions, path,
-                (tableId) => datasetUndoDeletes(roster, collection, dataset.rules.definition, tableId,
-                  (inventory.targets.get(path) as Extract<import("./automationTargets").AutomationTarget, { kind: "dataset" }>).grants,
-                  ).map((operation) => operation.operationId));
-              if (!("problem" in effects)) {
-                const problem = codeStepProblem(automation, dataset.rules.definition, [{ ordinal, effects }]);
-                if (problem !== null) return { problem };
+              const convert = (planned: readonly PlannedEffect[], path: string) => {
+                const dataset = inventory.datasets.get(path);
+                if (dataset === undefined && codeOrdinals.has(ordinal)) return [...planned];
+                if (dataset === undefined) return planned.map((effect) => effect.kind === "set" ? { ...effect, target: { ...effect.target, collectionPath: path } } : effect.kind === "add" ? { ...effect, collectionPath: path } : effect);
+                const target = inventory.targets.get(path) as Extract<AutomationTarget, { kind: "dataset" }>;
+                const effects = datasetStepEffects(ordinal, planned, dataset.steps, codeOrdinals.has(ordinal) ? (effect) => {
+                  const selected = [...codeOperations].find(([request]) => request.collection === path && request.action === (effect.kind === "add" ? "add" : "change") &&
+                    (effect.kind === "set" ? request.recordPath === effect.target.path :
+                      request.table === effect.table && request.fields.length === effect.fields.length && effect.fields.every(({ field }) => request.fields.includes(field))));
+                  if (selected === undefined) throw new Error(RULES_CHANGED_ERROR);
+                  return selected[1];
+                } : null, association(path).rules!, versions, path,
+                  (tableId) => datasetUndoDeletes(roster, collection, dataset.rules.definition, tableId, target.grants, codeFilesOf(automation, collection.path))
+                    .map((operation) => operation.operationId));
+                return "problem" in effects ? effects : effects.map((effect) => effect.kind === "dataset-edit" || effect.kind === "dataset-create" ? { ...effect, collectionPath: path } : effect);
+              };
+              if (!codeOrdinals.has(ordinal)) return convert(planned, pathOf(ordinal));
+              const effects: StoredRun["steps"][number]["effects"] = [];
+              for (const effect of planned) {
+                const path = effect.kind === "set" ? effect.target.collectionPath : effect.kind === "add" ? effect.collectionPath : collection.path;
+                const converted = convert([effect], path);
+                if ("problem" in converted) return converted;
+                effects.push(...converted);
               }
-              return "problem" in effects ? effects : effects.map((effect) => effect.kind === "dataset-edit" || effect.kind === "dataset-create" ? { ...effect, collectionPath: path } : effect);
+              return effects;
             },
-            destinations: (ordinal) => [association(pathOf(ordinal))],
+            destinations: (ordinal) => codeOrdinals.has(ordinal)
+              ? [...new Set([...codeReach.values()].filter((entry) => entry.ordinal === ordinal).flatMap(({ reach }) => "collection" in reach ? [reach.collection.path] : []))].map(association)
+              : [association(pathOf(ordinal))],
           });
-        } catch (error) { if (error instanceof StepRecordChanged) return "changed" as const; throw error; }
+        } catch (error) {
+          if (error instanceof StepRecordChanged) {
+            codeReach.clear();
+            for (const [key, reach] of priorCodeReach) codeReach.set(key, reach);
+            recordReadable = priorReadable;
+            return "changed" as const;
+          }
+          throw error;
+        }
       };
       if (!deps.withReads || ![...inventory.targets.values()].some((target) => target.kind === "document")) return execute(null);
       const result = await deps.withReads(async (reads) => ({ value: await execute(reads) }));
@@ -402,13 +621,12 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       return null;
     },
     async apply(run, effect, place, chat) {
-      const currentRoster = await checkNow();
-      const stopped = await source.checkEffect?.(effect, place.ordinal, currentRoster);
-      if (stopped != null) return { outcome: stopped };
-      const effectPath = effect.kind === "set" ? effect.target.collectionPath : effect.kind === "add" ? effect.collectionPath : pathOf(place.ordinal);
+      await authorizeCode(savedCodeTargets({ ordinal: place.ordinal, effects: [effect] }));
+      await checkNow();
+      const effectPath = effect.kind === "set" ? effect.target.collectionPath : "collectionPath" in effect ? effect.collectionPath ?? pathOf(place.ordinal) : pathOf(place.ordinal);
       await verifyTarget(effectPath);
       if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") {
-        const path = pathOf(place.ordinal);
+        const path = effectPath;
         const dataset = inventory.datasets.get(path)!;
         if (effect.rules.datasetId !== association(path).rules?.datasetId || !await resolves(effect.rules)) return { outcome: failed(RULES_CHANGED_ERROR) };
         const result = await deps.withHost?.((host) => applyDatasetEffect({

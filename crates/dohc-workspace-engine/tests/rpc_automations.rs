@@ -78,6 +78,7 @@ fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {
             actor_kind: ChangeActorKind::Human,
             on_behalf_of: None,
             depth: 0,
+            run: None,
         }),
         source: Some(("origin-a".to_owned(), origin_seq)),
         recorded_at_ms: 40,
@@ -119,6 +120,7 @@ fn seed_claims(scratch: &ScratchDir) {
                 actor_kind: ChangeActorKind::Automation,
                 on_behalf_of: None,
                 depth: AUTOMATION_CHAIN_DEPTH_CAP,
+                run: None,
             });
             claim_automation_triggers_in_tx(tx, WORKSPACE_ID, &stopped, 40)?;
             Ok::<_, dohc_engine_domain::DomainError>(())

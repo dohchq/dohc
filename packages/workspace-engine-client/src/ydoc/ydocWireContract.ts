@@ -3,6 +3,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import type { JsonValue } from "../protocol";
+import type { AutomationRunAttribution } from "@dohc/workspace-contracts/collection";
 
 export const YDOC_METHOD = {
   open: "ydoc.open",
@@ -38,13 +39,14 @@ export type YdocOpenParams = JsonObject & {
 
 // Declared write provenance beside the actor origin: the kind of actor that
 // wrote (a human, an agent, or an automation), the principal it acted for,
-// and its automation-chain depth. Optional provenance, never a second authority; the
-// engine records it on the update row and every history row the apply
-// derives, and replicates it with the update.
+// its automation-chain depth, and for an automation the run that wrote it.
+// Optional provenance, never a second authority; the engine records it on
+// every history row the apply derives, and replicates it with the update.
 export type ChangeAttributionWire = JsonObject & {
   actorKind: "human" | "agent" | "automation";
   onBehalfOf?: string;
   depth?: number;
+  run?: AutomationRunAttribution;
 };
 
 export type YdocRecordUpdateParams = JsonObject & {

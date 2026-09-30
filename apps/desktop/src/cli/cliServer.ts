@@ -2473,6 +2473,7 @@ async function dispatchWorkspace(
             onBehalfOf: entry.onBehalfOf,
             depth: entry.depth,
             recordedAtMs: entry.recordedAtMs,
+            automationRun: entry.automationRun,
           })),
         };
       } catch (error) {

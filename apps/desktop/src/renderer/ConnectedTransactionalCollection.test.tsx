@@ -19,6 +19,7 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined),
   checkCollectionAutomation: vi.fn(async () => ({ diagnostics: [], formulaProblems: [], cannotRun: null, missingFiles: [] })),
   listAutomationGroups: vi.fn(async () => ({ groups: [] })),
+  listAutomationTargets: vi.fn(async () => ({ collections: [] })),
   listAutomationPeople: vi.fn(async () => ({ status: "listed", people: [] })),
   readScheduleHost: vi.fn(async () => ({ kind: "this-computer" })), onScheduleHostChanged: vi.fn(() => () => undefined),
   onCloudSessionChanged: vi.fn(() => () => undefined),

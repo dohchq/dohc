@@ -1340,6 +1340,7 @@ describe("CLI socket server", () => {
               onBehalfOf: "person-local",
               depth: 0,
               recordedAtMs: SERVER_NOW_MS,
+              automationRun: null,
             },
           ],
           nextBeforeHistoryId: null,

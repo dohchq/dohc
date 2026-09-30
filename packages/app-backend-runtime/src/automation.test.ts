@@ -437,10 +437,20 @@ describe("code steps", () => {
       .toEqual({ code: "invalid_result", message: expect.stringContaining("records.0.id") });
     expect(await invalid('return { records: [{ action: "remove", collection: "Tasks", id: "a", fields: {} }] }'))
       .toEqual({ code: "invalid_result", message: expect.stringContaining("records.0.action") });
+    expect(await invalid('return { records: [{ action: "add", collection: "Tasks", table: "", fields: {} }] }'))
+      .toEqual({ code: "invalid_result", message: expect.stringContaining("records.0.table") });
     expect(await invalid('return { set: { "": 1 } }')).toEqual({ code: "invalid_result", message: expect.stringContaining("set") });
     expect(await invalid("return 5")).toEqual({ code: "invalid_result", message: expect.stringContaining("expected object") });
     expect(await invalid("return (async () => ({}))()"))
       .toEqual({ code: "invalid_result", message: "The code must finish without waiting. Remove async and await." });
+  });
+
+  it("preserves an explicit destination table on code changes", async () => {
+    const records = [
+      { action: "add", collection: "Other", table: "Notes", fields: { Text: "New" } },
+      { action: "change", collection: "Other", table: "Tasks", id: "7", fields: { Status: "Done" } },
+    ];
+    expect(await evaluator.runCode(scope, `return ${JSON.stringify({ records })};`)).toEqual({ ok: true, value: { records } });
   });
 
   it("report thrown values, syntax errors, and attempts to change ctx", async () => {

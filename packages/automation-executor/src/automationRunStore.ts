@@ -81,6 +81,7 @@ const EffectSchema = z.union([
   // sent so a resumed run sends the same input under the same key.
   z.object({
     kind: z.literal("dataset-action"),
+    collectionPath: z.string().optional(),
     rules: DatasetRulesSchema,
     operationId: z.string(),
     tableId: z.string(),
