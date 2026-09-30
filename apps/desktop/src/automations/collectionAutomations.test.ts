@@ -5214,24 +5214,46 @@ describe("Collection automations that a Group message starts", () => {
       const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
       let host = 3;
       let record: { generation: number; reach: null; everShared: boolean } = { generation: 3, reach: null, everShared: true };
-      const executor = w.makeExecutor({ groupHost: async () => host, reachRelayRecord: async () => record });
+      const secondTakeover = Promise.withResolvers<void>();
+      const executor = w.makeExecutor({
+        groupHost: async () => host,
+        reachRelayRecord: async () => record,
+        store: {
+          ...w.baseStore,
+          saveReachVerdicts: async (reach) => {
+            try {
+              await w.baseStore.saveReachVerdicts(reach);
+              if (reach.taken === 4 && reach.hostRecord === 4 && reach.unprovenAll) secondTakeover.resolve();
+            } catch (error) {
+              if (reach.pending === 4 || reach.taken === 4) secondTakeover.reject(error);
+              throw error;
+            }
+          },
+        },
+      });
       await executor.open();
       expect((await w.baseStore.readReachVerdicts()).unprovenAll, "the first take over's mark").toBe(true);
 
       // The listing for that mark waits on the engine while a second take over sets a new one.
-      let release: () => void = () => undefined;
-      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const blocked = Promise.withResolvers<void>();
+      const listingEntered = Promise.withResolvers<void>();
       const list = w.engine.listTextFileMetadata;
-      w.engine.listTextFileMetadata = async (input) => { await blocked; return await list(input); };
-      executor.relayAnswered();
-      host = 4;
-      record = { generation: 4, reach: null, everShared: true };
-      w.claim("collection:Tasks#seen", w.addRecord("Tasks", "one", { Status: "Done" }));
-      executor.notifyClaimed();
-      await vi.waitFor(async () => expect((await w.baseStore.readReachVerdicts()).taken).toBe(4));
-      release();
-      await executor.automationsIn("Tasks");
-      expect((await w.baseStore.readReachVerdicts()).unprovenAll, "the second mark stays until a later pull").toBe(true);
+      w.engine.listTextFileMetadata = async (input) => { listingEntered.resolve(); await blocked.promise; return await list(input); };
+      try {
+        executor.relayAnswered();
+        await vi.waitFor(() => listingEntered.promise);
+        host = 4;
+        record = { generation: 4, reach: null, everShared: true };
+        w.claim("collection:Tasks#seen", w.addRecord("Tasks", "one", { Status: "Done" }));
+        executor.notifyClaimed();
+        await vi.waitFor(() => secondTakeover.promise);
+        blocked.resolve();
+        await executor.automationsIn("Tasks");
+        expect(await w.baseStore.readReachVerdicts(), "the second mark stays until a later pull").toMatchObject({ taken: 4, unprovenAll: true });
+      } finally {
+        blocked.resolve();
+        await executor.dispose();
+      }
     });
 
     it("runs claims after a restart with the relay out of reach, having taken the verdicts before", async () => {
