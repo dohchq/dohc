@@ -7,7 +7,7 @@ use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, NoFaults, StorageError, TxnOutcome,
 };
 use dohc_engine_sync::{SyncError, project_and_write_in_tx};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path, try_make_file_symlink};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path, try_make_dir_alias};
 use std::{path::Path, sync::Arc};
 
 const WS: &str = "coverage-regression";
@@ -368,7 +368,7 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
             &state.key.object_id,
             dohc_engine_sync::ResultingHead::Text {
                 path: FILE,
-                text: "a",
+                text: "not the ordered rewrite",
             },
             5,
         )
@@ -376,13 +376,13 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
     assert!(matches!(
         imported,
         Err(SyncError::RetryableState {
-            reason: "settlement-materialization-pending"
+            reason: "ydoc-resulting-head-pending"
         })
     ));
     assert_eq!(
         coverage(&store, &state.key),
         pending,
-        "equal imported head cannot discard a pending attempt"
+        "a mismatched imported head must wait for its rewrite"
     );
     let refused = store.write_with(&NoFaults, |tx| {
         project_and_write_in_tx(
@@ -757,112 +757,169 @@ fn credits(history: &[String], author: &str) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn symlink_blocked_settlement_yields_to_a_captured_outside_edit() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let elsewhere = ScratchDir::new().expect("outside the workspace");
-    let db = engine_db_path(&scratch).expect("database");
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).expect("actor").actor;
-    let state = open(&actor).await;
-    let doc = Ydoc::wire();
-    append(&actor, &state.key, doc.plaintext_insert(0, "a"), "alice").await;
-    settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
-        .await
-        .expect("first settlement");
-    append(&actor, &state.key, doc.plaintext_insert(1, "b"), "bob").await;
-    assert!(
-        settle(
+async fn directory_blocked_settlement_yields_to_a_captured_outside_edit() {
+    for operation in ["capture", "conflict-resolution", "imported"] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let elsewhere = ScratchDir::new().expect("outside directory");
+        let db = engine_db_path(&scratch).expect("database");
+        let supervisor = WorkspaceSupervisor::new();
+        let mut actor = supervisor.open(&db, 1).expect("actor").actor;
+        let state = open(&actor).await;
+        let doc = Ydoc::wire();
+        append(&actor, &state.key, doc.plaintext_insert(0, "a"), "alice").await;
+        settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
+            .await
+            .expect("first settlement");
+        append(&actor, &state.key, doc.plaintext_insert(1, "b"), "bob").await;
+        assert!(
+            settle(
+                &actor,
+                scratch.path(),
+                &state,
+                ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+            )
+            .await
+            .is_err()
+        );
+        let file = scratch.path().join(FILE);
+        std::fs::remove_file(&file).expect("remove settled file");
+        assert!(
+            try_make_dir_alias(elsewhere.path(), &file).expect("directory alias"),
+            "host must create the directory alias; this regression cannot skip"
+        );
+        actor
+            .materialize_replay_pending(scratch.path().into(), WS.into(), 4)
+            .await
+            .expect("replay reaches the directory");
+        let store = EngineStore::open(&db, 5).expect("inspect blocked attempt");
+        let (status, _) = settlement_job_and_history(&store, &state.key);
+        assert_eq!(
+            status, "pending",
+            "the directory blocks the settlement write"
+        );
+        assert!(coverage(&store, &state.key).3.is_some());
+        drop(store);
+
+        // The person replaces the blocking directory with their own file.
+        #[cfg(windows)]
+        std::fs::remove_dir(&file).expect("remove blocking junction");
+        #[cfg(not(windows))]
+        std::fs::remove_file(&file).expect("remove blocking directory symlink");
+        let resulting_text = if operation == "imported" {
+            "ab"
+        } else {
+            "outside"
+        };
+        std::fs::write(&file, resulting_text).expect("new artifact");
+        if operation == "capture" {
+            actor
+                .capture_ingest(
+                    CaptureIngest {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        path: FILE.into(),
+                        text: "outside".into(),
+                        metadata_origin: "capture".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 6,
+                        request_id: None,
+                        claim_foreign_head: true,
+                    },
+                    dohc_engine_collab::LeaseRegistry::new(),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("outside edit captured");
+        } else {
+            supervisor
+                .close(&db)
+                .expect("stop before direct transaction");
+            drop(actor);
+            let mut store = EngineStore::open(&db, 6).expect("resulting head store");
+            store
+                .write_with(&NoFaults, |tx| {
+                    if operation == "conflict-resolution" {
+                        dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
+                            tx,
+                            WS,
+                            "main",
+                            &state.key.object_id,
+                            FILE,
+                            resulting_text,
+                            6,
+                        )
+                    } else {
+                        dohc_engine_sync::reconcile_imported_resulting_head_in_tx(
+                            tx,
+                            WS,
+                            "main",
+                            &state.key.object_id,
+                            dohc_engine_sync::ResultingHead::Text {
+                                path: FILE,
+                                text: resulting_text,
+                            },
+                            6,
+                        )
+                    }
+                })
+                .expect("new head supersedes blocked settlement");
+            drop(store);
+            actor = supervisor.open(&db, 7).expect("restart").actor;
+        }
+        let store = EngineStore::open(&db, 7).expect("inspect captured edit");
+        let captured = coverage(&store, &state.key);
+        assert_eq!(captured.3, None, "the captured head resolves the attempt");
+        assert_eq!(captured.2, "[]");
+        let (status, history) = settlement_job_and_history(&store, &state.key);
+        assert_eq!(status, "cancelled", "the superseded write cannot replay");
+        assert_eq!(credits(&history, "alice"), 1);
+        assert_eq!(
+            credits(&history, "bob"),
+            1,
+            "the blocked settlement moment keeps its credit"
+        );
+        assert!(
+            store
+                .read_with(|conn| author_coverage::interval_in(conn, &state.key, i64::MAX))
+                .expect("interval")
+                .is_empty(),
+            "no later settlement can credit bob again"
+        );
+        drop(store);
+
+        let reopened = open(&actor).await;
+        let doc = Ydoc::wire();
+        doc.apply(&reopened.initial_update)
+            .expect("captured lineage");
+        assert_eq!(doc.plaintext_string(), resulting_text);
+        append(
             &actor,
-            scratch.path(),
-            &state,
-            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+            &state.key,
+            doc.plaintext_insert(resulting_text.len() as u32, "c"),
+            "carol",
         )
-        .await
-        .is_err()
-    );
-    let file = scratch.path().join(FILE);
-    let target = elsewhere.path().join("target.txt");
-    std::fs::write(&target, "a").expect("symlink target");
-    std::fs::remove_file(&file).expect("remove settled file");
-    if !try_make_file_symlink(&target, &file).expect("symlink") {
-        eprintln!("skipping: this host cannot create file symlinks");
-        return;
-    }
-    actor
-        .materialize_replay_pending(scratch.path().into(), WS.into(), 4)
-        .await
-        .expect("replay reaches the symlink");
-    let store = EngineStore::open(&db, 5).expect("inspect blocked attempt");
-    let (status, _) = settlement_job_and_history(&store, &state.key);
-    assert_eq!(status, "pending", "the symlink blocks the settlement write");
-    assert!(coverage(&store, &state.key).3.is_some());
-    drop(store);
-
-    // The person replaces the symlink with their own file.
-    std::fs::remove_file(&file).expect("remove symlink");
-    std::fs::write(&file, "outside").expect("outside edit");
-    actor
-        .capture_ingest(
-            CaptureIngest {
-                workspace_id: WS.into(),
-                version_id: "main".into(),
-                path: FILE.into(),
-                text: "outside".into(),
-                metadata_origin: "capture".into(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 6,
-                request_id: None,
-                claim_foreign_head: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("outside edit captured");
-    let store = EngineStore::open(&db, 7).expect("inspect captured edit");
-    let captured = coverage(&store, &state.key);
-    assert_eq!(captured.3, None, "the captured head resolves the attempt");
-    assert_eq!(captured.2, "[]");
-    let (status, history) = settlement_job_and_history(&store, &state.key);
-    assert_eq!(status, "cancelled", "the superseded write cannot replay");
-    assert_eq!(credits(&history, "alice"), 1);
-    assert_eq!(
-        credits(&history, "bob"),
-        1,
-        "the blocked settlement moment keeps its credit"
-    );
-    assert!(
-        store
-            .read_with(|conn| author_coverage::interval_in(conn, &state.key, i64::MAX))
-            .expect("interval")
-            .is_empty(),
-        "no later settlement can credit bob again"
-    );
-    drop(store);
-
-    let reopened = open(&actor).await;
-    let doc = Ydoc::wire();
-    doc.apply(&reopened.initial_update)
-        .expect("captured lineage");
-    assert_eq!(doc.plaintext_string(), "outside");
-    append(&actor, &state.key, doc.plaintext_insert(7, "c"), "carol").await;
-    settle(&actor, scratch.path(), &reopened, Arc::new(NoFaults))
-        .await
-        .expect("settlement after the capture");
-    actor
-        .materialize_replay_pending(scratch.path().into(), WS.into(), 8)
-        .await
-        .expect("cancelled write stays cancelled");
-    supervisor.close(&db).expect("stop");
-    drop(actor);
-    assert_eq!(std::fs::read_to_string(&file).expect("disk"), "outsidec");
-    let store = EngineStore::open(&db, 9).expect("inspect later settlement");
-    let (_, history) = settlement_job_and_history(&store, &state.key);
-    for author in ["alice", "bob", "carol"] {
-        assert_eq!(credits(&history, author), 1, "{author} is credited once");
+        .await;
+        settle(&actor, scratch.path(), &reopened, Arc::new(NoFaults))
+            .await
+            .expect("settlement after the capture");
+        actor
+            .materialize_replay_pending(scratch.path().into(), WS.into(), 8)
+            .await
+            .expect("cancelled write stays cancelled");
+        supervisor.close(&db).expect("stop");
+        drop(actor);
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("disk"),
+            format!("{resulting_text}c")
+        );
+        let store = EngineStore::open(&db, 9).expect("inspect later settlement");
+        let (_, history) = settlement_job_and_history(&store, &state.key);
+        for author in ["alice", "bob", "carol"] {
+            assert_eq!(credits(&history, author), 1, "{author} is credited once");
+        }
     }
 }
 

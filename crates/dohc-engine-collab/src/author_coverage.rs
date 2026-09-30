@@ -11,7 +11,8 @@ pub use dohc_engine_domain::MAX_AUTHOR_ENTRY_BYTES;
 
 /// A settlement moment names every author of its interval.
 pub const MAX_INTERVAL_AUTHORS: usize = dohc_engine_domain::MAX_MOMENT_AUTHORS;
-pub const SETTLE_AUTHOR_THRESHOLD: usize = MAX_INTERVAL_AUTHORS - 4;
+pub const MAX_INTERVAL_AUTHOR_BYTES: usize = dohc_engine_domain::MAX_AUTHOR_JSON_BYTES;
+pub const SETTLE_AUTHOR_BYTE_THRESHOLD: usize = 96 * 1024;
 
 fn sql(error: rusqlite::Error) -> CollabError {
     StorageError::persist_public(error).into()
@@ -50,6 +51,16 @@ impl Authors {
             .get(field)
             .and_then(Value::as_str)
             .ok_or_else(|| corrupt("author has no identity"))?;
+        if author.as_object().is_some_and(|fields| {
+            fields
+                .values()
+                .filter_map(Value::as_str)
+                .any(|value| value.chars().any(char::is_control))
+        }) {
+            return Err(CollabError::InvalidIdentifier {
+                reason: "author ids and names must contain no control characters".into(),
+            });
+        }
         let scope = author.get("onBehalfOf").and_then(Value::as_str);
         let identity = serde_json::json!([kind, scope, id]).to_string();
         let prior_depth = self
@@ -79,6 +90,30 @@ impl Authors {
 
     pub fn json(&self) -> String {
         Value::Array(self.0.values().cloned().collect()).to_string()
+    }
+
+    /// Escaped JSON bytes as embedded in moment.append, including punctuation.
+    pub fn journal_bytes(&self) -> usize {
+        self.json().len()
+    }
+
+    // Known ids and scopes cannot grow. Reserve their depth's largest encoding
+    // so a known author remains admissible even at capacity, without truncation.
+    fn admission_bytes(&self) -> usize {
+        self.journal_bytes()
+            + self
+                .0
+                .values()
+                .map(|author| {
+                    let kind = author.get("kind").and_then(Value::as_str);
+                    let depth = author.get("depth").map(Value::to_string);
+                    match (kind, depth) {
+                        (Some("agent"), None) => r#","depth":64"#.len(),
+                        (Some("agent" | "automation"), Some(depth)) => 2 - depth.len().min(2),
+                        _ => 0,
+                    }
+                })
+                .sum::<usize>()
     }
 
     pub fn moment_json(&self) -> Option<String> {
@@ -208,15 +243,14 @@ pub fn check_admission_in(
         .keys()
         .next()
         .ok_or_else(|| corrupt("attribution has no identity"))?;
-    let covered = reserved_in(conn, key)?;
+    let mut covered = reserved_in(conn, key)?;
     let known = covered.0.contains_key(identity);
-    if !known && covered.len() >= MAX_INTERVAL_AUTHORS {
+    covered.union_json(&json)?;
+    let bytes = covered.admission_bytes();
+    if !known && (covered.len() > MAX_INTERVAL_AUTHORS || bytes > MAX_INTERVAL_AUTHOR_BYTES) {
         return Err(CollabError::AuthorCapacity);
     }
-    Ok(
-        covered.len() + usize::from(!known) >= SETTLE_AUTHOR_THRESHOLD
-            && !unresolved_in(conn, key)?,
-    )
+    Ok(bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD && !unresolved_in(conn, key)?)
 }
 
 fn unresolved_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabError> {

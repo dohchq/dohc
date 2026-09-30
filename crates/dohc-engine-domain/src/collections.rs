@@ -3037,7 +3037,8 @@ impl ChangeAttribution {
     pub fn validate(&self) -> Result<(), &'static str> {
         if let Some(on_behalf_of) = &self.on_behalf_of
             && (on_behalf_of.is_empty()
-                || on_behalf_of.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES)
+                || on_behalf_of.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+                || on_behalf_of.chars().any(char::is_control))
         {
             return Err("attribution onBehalfOf must be non-empty and bounded");
         }
@@ -3050,11 +3051,13 @@ impl ChangeAttribution {
             }
             if run.claim_id.is_empty()
                 || run.claim_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+                || run.claim_id.chars().any(char::is_control)
             {
                 return Err("attribution run claim id must be non-empty and bounded");
             }
             if run.automation_name.trim().is_empty()
                 || run.automation_name.len() > MAX_AUTOMATION_RUN_NAME_BYTES
+                || run.automation_name.chars().any(char::is_control)
             {
                 return Err("attribution run automation name must be non-empty and bounded");
             }
@@ -6416,6 +6419,29 @@ mod attribution_tests {
     use serde_json::json;
 
     use super::{AutomationRunAttribution, ChangeActorKind, ChangeAttribution};
+
+    #[test]
+    fn attribution_ids_and_names_refuse_control_characters() {
+        let valid = ChangeAttribution {
+            actor_kind: ChangeActorKind::Automation,
+            on_behalf_of: Some("person".into()),
+            depth: 0,
+            run: Some(AutomationRunAttribution {
+                claim_id: "claim".into(),
+                automation_name: "Build".into(),
+            }),
+        };
+        assert!(valid.validate().is_ok());
+        for field in ["scope", "claim", "name"] {
+            let mut invalid = valid.clone();
+            match field {
+                "scope" => invalid.on_behalf_of = Some("person\n".into()),
+                "claim" => invalid.run.as_mut().expect("run").claim_id = "claim\u{0085}".into(),
+                _ => invalid.run.as_mut().expect("run").automation_name = "Build\t".into(),
+            }
+            assert!(invalid.validate().is_err(), "{field}");
+        }
+    }
 
     /// The run rides the replicated update beside the attribution, so a peer
     /// records it too; a write that names none sends what it sent before.

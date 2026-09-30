@@ -5984,7 +5984,13 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
     let doc = Ydoc::wire();
     call(&transport, &handle, 3, "ydoc.recordUpdate", json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"a")),"actorOriginId":"first","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     let raw = rusqlite::Connection::open(&db).expect("coverage fixture");
-    let folded:Vec<Value>=(0..dohc_engine_collab::author_coverage::SETTLE_AUTHOR_THRESHOLD-1).map(|i|json!({"kind":"agent","agentId":if i==0 {"first".to_owned()} else {format!("folded-{i}")},"onBehalfOf":"person"})).collect();
+    let mut folded = vec![json!({"kind":"agent","agentId":"first","onBehalfOf":"person"})];
+    while json!(&folded).to_string().len()
+        < dohc_engine_collab::author_coverage::SETTLE_AUTHOR_BYTE_THRESHOLD
+    {
+        folded.push(json!({"kind":"automation","automationId":format!("folded-{:04}-{}", folded.len(), "x".repeat(480)),"onBehalfOf":"person","depth":64}));
+    }
+    let expected_authors = folded.len() + 1;
     raw.execute(
         "UPDATE ydoc_docs SET pending_authors_json=?1",
         [json!(folded).to_string()],
@@ -6024,7 +6030,7 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
             .as_array()
             .expect("authors")
             .len(),
-        dohc_engine_collab::author_coverage::SETTLE_AUTHOR_THRESHOLD
+        expected_authors
     );
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }

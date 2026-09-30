@@ -444,7 +444,7 @@ fn already_admitted_remote_authors_never_wedge_coverage_readers() {
                 author_coverage::reserved_in(conn, &key)?.len(),
                 remote_count
             );
-            assert!(author_coverage::check_admission_in(
+            assert!(!author_coverage::check_admission_in(
                 conn,
                 &key,
                 Some("remote-0"),
@@ -486,7 +486,7 @@ fn remote_admission_enforces_capacity_and_scoped_identity_encoding() {
         |_, _, _| Ok(()),
     )
     .expect("marker");
-    let scope = "scope-雪-\u{0001}";
+    let scope = "scope-雪-quote-\"";
     let limit = author_coverage::MAX_INTERVAL_AUTHORS as u32;
     for index in 0..limit {
         dohc_engine_collab::apply_remote_update(
@@ -511,7 +511,7 @@ fn remote_admission_enforces_capacity_and_scoped_identity_encoding() {
         &key,
         &dohc_engine_collab::RemoteUpdate {
             origin_id: "peer".into(),
-            origin_seq: 100,
+            origin_seq: i64::from(limit) + 2,
             bytes: peer.plaintext_insert(limit + 1, "x"),
         },
         Some("new-author"),
@@ -530,7 +530,7 @@ fn remote_admission_enforces_capacity_and_scoped_identity_encoding() {
         &key,
         &dohc_engine_collab::RemoteUpdate {
             origin_id: "peer".into(),
-            origin_seq: 101,
+            origin_seq: i64::from(limit) + 3,
             bytes: peer.plaintext_insert(limit + 1, "z"),
         },
         Some("agent-0"),
@@ -538,7 +538,7 @@ fn remote_admission_enforces_capacity_and_scoped_identity_encoding() {
         &NoFaults,
         5,
     )
-    .expect("known Unicode/control scope remains admissible");
+    .expect("known Unicode scope remains admissible");
     maybe_compact(&mut ts.store, &key, 0, &NoFaults, 6).expect("coverage can still compact");
     let authors = ts
         .store
@@ -571,9 +571,8 @@ fn every_author_field_at_its_maximum_fits_one_entry() {
         |_, _, _| Ok(()),
     )
     .expect("marker");
-    // A remote actor id and every onBehalfOf may hold control characters,
-    // the longest escape JSON writes.
-    let longest = "\u{0001}".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES);
+    // Quotes take the longest allowed JSON escape.
+    let longest = "\"".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES);
     let kinds = [
         ChangeActorKind::Agent,
         ChangeActorKind::Automation,
@@ -670,4 +669,123 @@ fn retained_rebase_keeps_only_uncovered_identities() {
     assert_eq!(covered.len(), 1);
     assert!(covered.json().contains("bob"));
     assert!(!covered.json().contains("alice"));
+}
+
+#[test]
+fn byte_budget_refuses_new_identity_before_admission_and_queues_early() {
+    let mut ts = fresh_store("author-byte-capacity");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    let scope = "person-00000000-0000-0000-0000-000000000000".repeat(5);
+    let mut admitted = 0u32;
+    let mut queued_before_budget = false;
+    loop {
+        let id = format!("agent-{admitted:04}-{}", "x".repeat(80));
+        let attribution = ChangeAttribution {
+            depth: 64,
+            ..author(&scope)
+        };
+        let before = ts
+            .store
+            .read_with(|conn| author_coverage::reserved_in(conn, &key))
+            .expect("coverage");
+        let incoming =
+            dohc_engine_domain::moment_author_json(Some(&id), Some(&attribution)).expect("author");
+        let entry_bytes = incoming.len() - 2;
+        let prospective_bytes =
+            before.journal_bytes() + entry_bytes + usize::from(!before.is_empty());
+        let result = record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &doc.plaintext_insert(admitted, "x"),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some("authors.txt"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                actor_origin_id: Some(&id),
+                attribution: Some(&attribution),
+                ..LocalAppend::default()
+            },
+            &NoFaults,
+            1,
+            |_, _, _| Ok(()),
+        );
+        if prospective_bytes > author_coverage::MAX_INTERVAL_AUTHOR_BYTES {
+            assert!(matches!(result, Err(CollabError::AuthorCapacity)));
+            assert_eq!(
+                dohc_engine_collab::read_marker(&ts.store, &key)
+                    .expect("marker")
+                    .expect("exists")
+                    .head_update_seq,
+                i64::from(admitted)
+            );
+            assert_eq!(
+                before.json(),
+                ts.store
+                    .read_with(|conn| author_coverage::reserved_in(conn, &key))
+                    .expect("unchanged")
+                    .json()
+            );
+            break;
+        }
+        let TxnOutcome::Committed(outcome) = result.expect("within budget") else {
+            panic!("admission did not commit");
+        };
+        queued_before_budget |= outcome.settlement_requested
+            && prospective_bytes < author_coverage::MAX_INTERVAL_AUTHOR_BYTES;
+        admitted += 1;
+    }
+    let peer = dohc_engine_collab::load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("doc")
+        .doc;
+    let id = format!("agent-0000-{}", "x".repeat(80));
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &peer.plaintext_insert(admitted, "z"),
+        LocalAppend {
+            actor_origin_id: Some(&id),
+            attribution: Some(&ChangeAttribution {
+                depth: 64,
+                ..author(&scope)
+            }),
+            ..LocalAppend::default()
+        },
+        &NoFaults,
+        2,
+        |_, _, _| Ok(()),
+    )
+    .expect("known author remains admitted at the byte limit");
+    assert!(admitted > 300 && admitted < author_coverage::MAX_INTERVAL_AUTHORS as u32);
+    assert!(queued_before_budget);
+}
+
+#[test]
+fn control_character_author_fields_are_refused_before_admission() {
+    let mut ts = fresh_store("author-control-refusal");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    for (id, scope) in [("agent\n", "person"), ("agent", "person\u{0085}")] {
+        assert!(matches!(
+            record(
+                &mut ts.store,
+                &mut ts.cache,
+                &key,
+                &doc.plaintext_insert(0, "x"),
+                id,
+                scope
+            ),
+            Err(CollabError::InvalidIdentifier { .. })
+        ));
+    }
+    assert!(dohc_engine_collab::read_marker(&ts.store, &key)
+        .expect("marker query")
+        .is_none());
 }

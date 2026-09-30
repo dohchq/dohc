@@ -2061,6 +2061,8 @@ pub fn fold_resolution_into_ydoc_in_tx(
         key,
         state: complete,
     };
+    dohc_engine_collab::author_coverage::supersede_in(tx, &complete.key, now_ms)
+        .map_err(map_collab_hard_error)?;
     fold_complete_ydoc_lineage_in_tx(
         tx,
         &complete,
@@ -2228,7 +2230,10 @@ fn settle_ydoc_marker_to_text(
     text: &str,
     now_ms: i64,
 ) -> Result<(), SyncError> {
-    require_resolved_local_settlement(tx, key, now_ms)?;
+    // A verified resulting head replaces this attempt's obsolete disk write.
+    // Its committed moment retains credit; advance consumes only the new interval.
+    dohc_engine_collab::author_coverage::supersede_in(tx, key, now_ms)
+        .map_err(map_collab_hard_error)?;
     dohc_engine_collab::author_coverage::advance_in(tx, key, false)
         .map_err(map_collab_hard_error)?;
     // The lineage at its current head projects to `text`, the head it settles

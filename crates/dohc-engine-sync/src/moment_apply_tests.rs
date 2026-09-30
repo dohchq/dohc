@@ -56,30 +56,32 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
     let mut authors = dohc_engine_collab::author_coverage::Authors::default();
     let field = dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
     for index in 0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS {
-        // Distinct control-character ids at full length take the longest escape.
-        let id = format!(
-            "{}\u{2}{}",
-            "\u{1}".repeat(index),
-            "\u{1}".repeat(field - index - 1)
-        );
+        let id = format!("{index:04}{}", "\"".repeat(field - 4));
         let entry = dohc_engine_domain::moment_author_json(
             Some(&id),
             Some(&dohc_engine_domain::ChangeAttribution {
                 actor_kind: dohc_engine_domain::ChangeActorKind::Automation,
-                on_behalf_of: Some("\u{1}".repeat(field)),
+                on_behalf_of: Some("\"".repeat(field)),
                 depth: dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH,
                 run: None,
             }),
         )
         .expect("entry");
-        assert_eq!(
-            entry.len(),
-            dohc_engine_collab::author_coverage::MAX_AUTHOR_ENTRY_BYTES + 2
-        );
-        authors.union_json(&entry).expect("bounded entry");
+        let mut next = dohc_engine_collab::author_coverage::Authors::default();
+        next.union_json(&authors.json()).expect("prior authors");
+        next.union_json(&entry).expect("bounded entry");
+        if next.journal_bytes() > dohc_engine_domain::MAX_AUTHOR_JSON_BYTES {
+            break;
+        }
+        authors = next;
     }
     let author_json = authors.json();
-    assert_eq!(author_json.len(), dohc_engine_domain::MAX_AUTHOR_JSON_BYTES);
+    assert!(
+        author_json.len()
+            > dohc_engine_domain::MAX_AUTHOR_JSON_BYTES
+                - dohc_engine_domain::MAX_AUTHOR_ENTRY_BYTES
+                - 1
+    );
     VersionedTextStore::new(&mut store)
         .write_text(
             &WriteText {
@@ -109,7 +111,7 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
         [], |row| row.get(0),
     ).map_err(dohc_engine_storage::StorageError::persist_public)).expect("payload bytes");
     assert!(bytes < crate::MAX_PAYLOAD_JSON_BYTES as i64);
-    assert!(crate::MAX_PAYLOAD_JSON_BYTES as i64 - bytes > 128 * 1024);
+    assert!(crate::MAX_PAYLOAD_JSON_BYTES as i64 - bytes > 120 * 1024);
 }
 
 #[test]
