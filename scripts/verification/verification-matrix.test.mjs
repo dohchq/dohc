@@ -1,10 +1,12 @@
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import fs from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Writable } from "node:stream";
 import { repoRoot, run } from "./process.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 
@@ -14,9 +16,43 @@ async function runFixture(command, args, { timeout, signal, ...options }) {
     return { status: result.code, error: undefined, stdout: result.stdout, stderr: result.stderr };
   } catch (failure) {
     return { status: failure.exitCode, signal: failure.signal, stdout: failure.stdout, stderr: failure.stderr,
-      error: typeof failure.exitCode === "number" && !failure.interrupted && !failure.timedOut ? undefined : failure };
+      error: failure.commandExitFailure ? undefined : failure };
   }
 }
+
+test("fixture preserves a failed final log write after command success", { timeout: 20_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-fixture-log-error-"));
+  const failure = Object.assign(new Error("fixture log final write failed"), { code: "EIO" });
+  const output = new Writable({
+    write(_chunk, _encoding, done) { done(); },
+    final(done) { done(failure); },
+  });
+  const mocked = mock.method(fs, "createWriteStream", () => output);
+  syncBuiltinESMExports();
+  try {
+    const result = await runFixture(process.execPath, ["-e", "console.log('command succeeded')"], {
+      timeout: 15_000, log: join(root, "command.log"),
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.signal, null);
+    assert.match(result.stdout, /command succeeded/);
+    assert.equal(result.error, failure);
+    assert.equal(result.error.commandExitFailure, false);
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+    output.destroy();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fixture reports an ordinary nonzero command exit as status", { timeout: 20_000 }, async () => {
+  const result = await runFixture(process.execPath, ["-e", "console.error('ordinary failure');process.exitCode=7"], { timeout: 15_000 });
+  assert.equal(result.status, 7);
+  assert.equal(result.signal, null);
+  assert.equal(result.error, undefined);
+  assert.match(result.stderr, /ordinary failure/);
+});
 
 test("verification selects packages and proofs and prepares before parallel jobs", { concurrency: 2 }, async (t) => {
   const siteFiles = ["src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"];

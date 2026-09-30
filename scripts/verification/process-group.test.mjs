@@ -34,6 +34,105 @@ test("an already aborted command starts no process and creates no log", async ()
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("abort during onSpawn is observed after registering the listener", { timeout: 20_000 }, async () => {
+  const controller = new AbortController();
+  const listeners = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+  await assert.rejects(run(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+    signal: controller.signal, timeoutMs: 15_000, onSpawn: () => controller.abort(),
+  }), error => {
+    assert.equal(error.interrupted, true);
+    assert.equal(error.timedOut, false);
+    return true;
+  });
+  assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], listeners);
+});
+
+test("POSIX abort waits for an ignored-stdio descendant after its leader closes", {
+  skip: process.platform === "win32" ? "POSIX process-group lifecycle" : false, timeout: 30_000,
+}, async context => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-abort-closed-leader-"));
+  const controller = new AbortController();
+  const listeners = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+  let owner, descendantSocket, descendantPid, cleaning = false, socketClosed = false;
+  let command;
+  const abortReady = () => {
+    if (descendantPid && descendantSocket && !controller.signal.aborted) controller.abort();
+  };
+  const server = createServer(socket => {
+    descendantSocket = socket;
+    socket.on("error", () => {});
+    socket.once("close", () => { socketClosed = true; });
+    socket.resume();
+    if (cleaning) socket.end();
+    else abortReady();
+  });
+  const stop = () => {
+    cleaning = true;
+    controller.abort();
+    // This retained socket belongs to the fixture and asks only that descendant to exit.
+    descendantSocket?.end();
+  };
+  context.signal.addEventListener("abort", stop, { once: true });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    writeFileSync(join(root, "descendant.mjs"), `
+      import {connect} from 'node:net';
+      const socket=connect(${server.address().port},'127.0.0.1');
+      socket.on('end',()=>process.exit(0));
+      socket.on('error',()=>process.exit(1));
+      socket.resume();
+      process.on('SIGTERM',()=>{});
+      socket.once('connect',()=>process.send({pid:process.pid}));
+    `);
+    writeFileSync(join(root, "leader.mjs"), `
+      import {spawn} from 'node:child_process';
+      import {join} from 'node:path';
+      process.on('SIGTERM',()=>process.exit(0));
+      const child=spawn(process.execPath,[join(process.argv[2],'descendant.mjs')],{
+        detached:false,stdio:['ignore','ignore','ignore','ipc'],
+      });
+      child.once('message',({pid})=>{
+        child.disconnect();child.unref();console.log('descendant ready '+pid);
+      });
+      setInterval(()=>{},1000);
+    `);
+    let observed = "";
+    command = run(process.execPath, [join(root, "leader.mjs"), root], {
+      signal: controller.signal, timeoutMs: 20_000, quietStdout: true,
+      onSpawn: child => {
+        owner = child;
+        child.stdout.on("data", chunk => {
+          observed += chunk;
+          const ready = /descendant ready (\d+)\n/u.exec(observed);
+          if (ready) {
+            descendantPid = Number(ready[1]);
+            abortReady();
+          }
+        });
+      },
+    });
+    await assert.rejects(command, error => {
+      assert.equal(error.interrupted, true);
+      assert.equal(error.timedOut, false);
+      assert.equal(owner.exitCode, 0, "the leader exits normally on SIGTERM");
+      assert.ok(descendantPid && descendantSocket);
+      assert.equal(socketClosed, true, "caller cleanup cannot start while a descendant still owns its socket");
+      assert.equal(descendantSocket.destroyed, true);
+      return true;
+    });
+    assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], listeners);
+  } finally {
+    context.signal.removeEventListener("abort", stop);
+    stop();
+    await command?.catch(() => {});
+    await new Promise(resolve => server.close(resolve));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test(`${process.platform === "win32" ? "Windows job" : "POSIX group"} abort closes active descendants before caller cleanup`, {
   timeout: 30_000,
 }, async context => {

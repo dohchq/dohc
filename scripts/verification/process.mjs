@@ -1,11 +1,35 @@
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 import { createWriteStream, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { StringDecoder } from "node:string_decoder";
+import { promisify } from "node:util";
 
 export const repoRoot = resolve(import.meta.dirname, "../..");
 const require = createRequire(resolve(repoRoot, "apps/desktop/package.json"));
+const execFileAsync = promisify(execFile);
+
+async function waitForGroupExit(group) {
+  const deadline = Date.now() + 5000;
+  while (true) {
+    let stdout;
+    try {
+      ({ stdout } = await execFileAsync("ps", ["-A", "-o", "pgid=", "-o", "stat="], {
+        encoding: "utf8", timeout: 1000, maxBuffer: 32 * 1024 * 1024,
+      }));
+    } catch (cause) {
+      throw new Error(`Cannot confirm process group ${group} stopped.`, { cause });
+    }
+    const members = stdout.trim().split("\n").filter(Boolean).map(line => line.trim().split(/\s+/u));
+    if (members.some(([pgid, state]) => !/^\d+$/u.test(pgid) || !state)) {
+      throw new Error(`Cannot read process group ${group} state.`);
+    }
+    // Zombies retain a group ID but have already released their files and sockets.
+    if (!members.some(([pgid, state]) => Number(pgid) === group && !state.startsWith("Z"))) return;
+    if (Date.now() >= deadline) throw new Error(`Process group ${group} still has live members after SIGKILL.`);
+    await new Promise(done => setTimeout(done, 20));
+  }
+}
 
 export function pnpm(args) {
   const manifest = require.resolve("pnpm");
@@ -53,7 +77,20 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
     let timedOut = false;
     let outputError;
     let escalation;
+    let cancellation;
+    let cancellationError;
     let completed = false;
+    const stopGroup = () => {
+      if (cancellation) return cancellation;
+      clearTimeout(escalation);
+      cancellation = (async () => {
+        try { process.kill(-child.pid, "SIGKILL"); }
+        catch (error) { if (error.code === "ESRCH") return; throw error; }
+        await waitForGroupExit(child.pid);
+      })();
+      cancellation.catch(() => {});
+      return cancellation;
+    };
     const interrupt = () => {
       if (interrupted || !child.pid || completed) return;
       interrupted = true;
@@ -62,10 +99,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
         child.kill("SIGKILL");
       } else {
         try { process.kill(-child.pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
-        escalation = setTimeout(() => {
-          if (completed) return;
-          try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") console.error(error.message); }
-        }, 5000);
+        escalation = setTimeout(stopGroup, 5000);
         escalation.unref();
       }
     };
@@ -88,13 +122,18 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       reject(Object.assign(error, { exitCode: null, signal: null, stdout, stderr, interrupted, timedOut }));
     });
     child.once("close", async (code, signal) => {
+      clearTimeout(deadline);
+      if (interrupted && !windows) {
+        try { await stopGroup(); } catch (error) { cancellationError = error; }
+      }
       cleanup();
       stdout = (stdout + stdoutDecoder.end()).slice(-16 * 1024 * 1024);
       stderr = (stderr + stderrDecoder.end()).slice(-1024 * 1024);
-      if (output && !output.destroyed) await new Promise((done) => output.end(done));
-      const failure = outputError ?? (code !== 0 || interrupted || timedOut
+      if (output && !output.destroyed) await new Promise((done) => output.end(error => { outputError ??= error; done(); }));
+      const failure = outputError ?? cancellationError ?? (code !== 0 || interrupted || timedOut
         ? new Error(`${command} failed (${timedOut ? `timed out after ${timeoutMs}ms` : interrupted ? "interrupted" : signal ?? code}).${log ? ` Log: ${log}` : `\n${stderr.slice(-4000)}`}`) : null);
-      if (failure) reject(Object.assign(failure, { exitCode: code, signal, stdout, stderr, interrupted, timedOut }));
+      if (failure) reject(Object.assign(failure, { exitCode: code, signal, stdout, stderr, interrupted, timedOut,
+        commandExitFailure: !outputError && !cancellationError && typeof code === "number" && code !== 0 && !interrupted && !timedOut }));
       else resolveRun({ pid: child.pid, code, stdout, stderr });
     });
   });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -256,8 +256,9 @@ test("canonical repository checks include every script contract except the Docke
   const listed = new Set([...manifest.scripts["test:repo"].matchAll(/[^\s]+\.test\.mjs/gu),
     ...manifest.scripts["test:repo:source"].matchAll(/[^\s]+\.test\.mjs/gu)].map(([path]) => path));
   const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs"]);
-  for (const file of globSync(["scripts/**/*.test.mjs", "tools/**/*.test.mjs"], { cwd: root })) {
-    const path = file.replaceAll("\\", "/");
+  const tracked = execFileSync("git", ["ls-files", "-z", "--", "scripts/**/*.test.mjs", "tools/**/*.test.mjs"],
+    { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).split("\0").filter(Boolean);
+  for (const path of tracked) {
     assert.ok(listed.has(path) || optIn.has(path), `Missing canonical repository contract: ${path}`);
   }
 });
