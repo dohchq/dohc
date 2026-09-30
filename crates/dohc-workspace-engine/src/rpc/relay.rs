@@ -37,6 +37,10 @@ pub(crate) struct PendingCursor {
     pub(super) cursor: IssuedCursor,
     pub(super) materialization_paths: Vec<dohc_engine_sync::MomentMaterializationChange>,
     pub(super) materialized: bool,
+    /// The terminal page of a pull in a workspace that keeps its Collections
+    /// itself: they reconcile once this cursor commits, after the page's files
+    /// landed, as a capture pass reconciles after it applies what it scanned.
+    pub(super) reconcile_collections: bool,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -526,6 +530,7 @@ impl EngineService {
                     cursor,
                     materialization_paths: Vec::new(),
                     materialized: false,
+                    reconcile_collections: false,
                 },
             );
             return Ok(json!({ "kind": wire_kind, "token": token }));
@@ -542,7 +547,7 @@ impl EngineService {
         workspace_id: &str,
         kind: PendingCursorKind,
         token: &str,
-    ) -> Result<IssuedCursor, WireError> {
+    ) -> Result<(IssuedCursor, bool), WireError> {
         let mut pending = lock(&self.pending_cursors);
         let valid = pending.get(token).is_some_and(|issued| {
             issued.handle == *handle
@@ -561,7 +566,7 @@ impl EngineService {
         }
         pending
             .remove(token)
-            .map(|issued| issued.cursor)
+            .map(|issued| (issued.cursor, issued.reconcile_collections))
             .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-pending-cursor"))
     }
 
@@ -748,14 +753,18 @@ impl EngineService {
         // be on a later page, and dangling-link cleanup must not observe the
         // pull's partial state. The bounded outcome does not expose whether an
         // earlier page applied a collection change, so the terminal page
-        // queues one reconciliation even when that page itself was empty.
-        if matches!(
+        // queues one reconciliation even when that page itself was empty. A
+        // workspace that keeps its Collections itself reconciles when the
+        // page's cursor commits.
+        let terminal = matches!(
             &outcome,
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 has_more: false,
                 ..
             })
-        ) {
+        );
+        let reconcile_at_commit = terminal && self.reconciles_collections_itself(&open);
+        if terminal && !reconcile_at_commit {
             open.request_collection_reconcile();
         }
         // Post-commit: every applied envelope's record changes are durable,
@@ -806,11 +815,18 @@ impl EngineService {
             let token = issued["token"]
                 .as_str()
                 .ok_or_else(|| WireError::new(ErrorCode::Internal, "invalid issued cursor"))?;
-            lock(&self.pending_cursors)
-                .get_mut(token)
-                .ok_or_else(|| WireError::new(ErrorCode::Internal, "issued cursor disappeared"))?
-                .materialization_paths = materialization_paths;
+            {
+                let mut pending = lock(&self.pending_cursors);
+                let entry = pending.get_mut(token).ok_or_else(|| {
+                    WireError::new(ErrorCode::Internal, "issued cursor disappeared")
+                })?;
+                entry.materialization_paths = materialization_paths;
+                entry.reconcile_collections = reconcile_at_commit;
+            }
             result["pendingCursor"] = issued;
+        } else if reconcile_at_commit {
+            // Nothing to materialize or commit: the page's changes are in place.
+            self.collections_changed(ctx, &open).await?;
         }
         Ok(result)
     }
@@ -954,7 +970,8 @@ impl EngineService {
                 "ordinary cursor materialization is incomplete",
             ));
         }
-        let issued = self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
+        let (issued, reconcile_collections) =
+            self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
         let operation = match issued {
             IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
                 workspace_id: open.workspace_id.clone(),
@@ -973,6 +990,9 @@ impl EngineService {
         let (_, declined) = self.originate_live_sessions(ctx, &open).await?;
         if let RelayOperationOutcome::CursorCommitted { sharing_declined } = &mut outcome {
             sharing_declined.extend(declined);
+            if reconcile_collections {
+                self.collections_changed(ctx, &open).await?;
+            }
         }
         relay_outcome_json(outcome)
     }
