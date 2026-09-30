@@ -101,6 +101,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   beforeQuit(event: QuitEvent): void;
   shutdown: {
     budgetMs: number;
+    deadlineExitCode: 0 | 1;
     beginEngineShutdown(): void;
     stopSearch(): Promise<void>;
     stopSitePreviews(): Promise<void>;
@@ -169,7 +170,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       }),
     ]).finally(() => {
       clearTimeout(shutdownTimer);
-      app.exit(budgetExpired ? 1 : 0);
+      app.exit(budgetExpired ? shutdown.deadlineExitCode : 0);
     });
   });
 

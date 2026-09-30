@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
 import { createExitRounds, createQuitGuard } from "./quitGuard";
-import { QUIT_ASK_TIMEOUT_MS, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
+import { QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
 import { closeElectronApplication } from "../../../scripts/verification/close-electron.mjs";
 import { DESKTOP_CLOSE_GRACE_MS } from "../../../scripts/verification/desktop-close-policy.mjs";
 import { beginLaunch, finishLaunch, type MarkerFileSystem } from "./launch/launchMarker";
@@ -104,6 +104,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     beforeQuit: vi.fn(),
     shutdown: {
       budgetMs: 3000,
+      deadlineExitCode: 0,
       beginEngineShutdown: vi.fn(() => { log.push("begin-shutdown"); }),
       stopSearch: vi.fn(async () => { log.push("search-stop"); }),
       stopSitePreviews: vi.fn(async () => { log.push("site-previews-stop"); }),
@@ -537,6 +538,17 @@ describe("desktop open intents", () => {
 });
 
 describe("desktop shutdown", () => {
+  it.each([
+    { desktopTest: undefined, isPackaged: false, expected: 0 },
+    { desktopTest: "1", isPackaged: false, expected: 1 },
+    { desktopTest: undefined, isPackaged: true, expected: 0 },
+    { desktopTest: "1", isPackaged: true, expected: 0 },
+    { desktopTest: "0", isPackaged: false, expected: 0 },
+    { desktopTest: "true", isPackaged: false, expected: 0 },
+  ])("reports deadline failure only for an unpackaged test app: %j", ({ desktopTest, isPackaged, expected }) => {
+    expect(resolveShutdownDeadlineExitCode({ desktopTest, isPackaged })).toBe(expected);
+  });
+
   it("lets renderer approval and accepted-write drain finish beyond the old helper deadline", async () => {
     vi.useFakeTimers();
     const heldWrite = deferred();
@@ -544,6 +556,7 @@ describe("desktop shutdown", () => {
     const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null });
     const f = fixture((d) => {
       d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = 1;
       d.shutdown.settleYDocs = () => heldWrite.promise;
     });
     const rounds = createExitRounds({
@@ -553,7 +566,7 @@ describe("desktop shutdown", () => {
       confirmProceed: async () => false,
     });
     const guard = createQuitGuard({
-      ask: () => { void rounds.begin("quit").outcome.then(() => guard.resume()); },
+      ask: () => { void rounds.begin("quit").outcome.then((outcome) => { if (outcome === "proceed") guard.resume(); }); },
       quit: () => f.app.quit(),
       forceQuit: vi.fn(),
     });
@@ -701,11 +714,12 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).toHaveBeenCalledWith(0);
   });
 
-  it("exits once at the shutdown budget without closing a store beneath a held producer", async () => {
+  it.each([0, 1] as const)("exits once with deadline status %s without closing a store beneath a held producer", async (deadlineExitCode) => {
     vi.useFakeTimers();
     const held = deferred();
     const f = fixture((d) => {
       d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = deadlineExitCode;
       d.shutdown.settleYDocs = () => held.promise;
     });
     f.app.emit("will-quit", event());
@@ -715,7 +729,7 @@ describe("desktop shutdown", () => {
     await vi.advanceTimersByTimeAsync(WILL_QUIT_BUDGET_MS - 1);
     expect(f.app.exit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(1);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(deadlineExitCode);
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     held.resolve();
     await vi.advanceTimersByTimeAsync(0);
