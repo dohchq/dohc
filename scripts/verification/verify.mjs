@@ -177,7 +177,8 @@ export async function verify(args) {
   }
   let database;
   let lane;
-  let desktopEnvironment = {...process.env, DOHC_TEST_ENGINE_BINARY: stagedEnginePath};
+  const previousIncremental = process.env.CARGO_INCREMENTAL;
+  let desktopEnvironment;
   async function checkedStep(row, action) {
     await cancellation.checkpoint();
     report.steps.push(row); save();
@@ -192,6 +193,8 @@ export async function verify(args) {
   save();
   const cancellation = cancellationScope("Verification");
   try {
+    if (mode === "pr") process.env.CARGO_INCREMENTAL = "0";
+    desktopEnvironment = {...process.env, DOHC_TEST_ENGINE_BINARY: stagedEnginePath};
     const {workflow, gates, javascript} = await measure("selection", () => {
       const selected = selection();
       Object.assign(report, {baseCommit: selected.baseCommit, files: selected.files, requiredGates: selected.requiredGates, gates: selected.gates,
@@ -308,6 +311,10 @@ export async function verify(args) {
     const interrupted = await cancellation.dispose();
     lane?.release();
     if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
+    if (mode === "pr") {
+      if (previousIncremental === undefined) delete process.env.CARGO_INCREMENTAL;
+      else process.env.CARGO_INCREMENTAL = previousIncremental;
+    }
     finishTiming(); Object.assign(report, total);
     save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
   }

@@ -426,6 +426,8 @@ test("verification selects packages and proofs and prepares before parallel jobs
     const prepare = desktop || nativeProof;
     const database = js && (desktop || nativeProof || accounts);
     const browser = js && (desktop || accounts);
+    const previousIncremental = fault === "source" || full && !job ? undefined : "1";
+    const expectedIncremental = mode === "pr" ? "0" : previousIncremental;
     const root = mkdtempSync(join(tmpdir(), "dohc-verify-build-order-"));
     const put = (path, contents) => {
       mkdirSync(dirname(join(root, path)), { recursive: true });
@@ -490,6 +492,10 @@ test("verification selects packages and proofs and prepares before parallel jobs
         export async function run(command,args,options={}) {
           const {enginePath,stagedEnginePath,assertPrepared,hashFile}=await import('./build.mjs');
           appendFileSync(join(repoRoot,'.dohc-dev/all-calls.jsonl'),JSON.stringify({command,args})+'\\n');
+          if(command==='cargo' || args[0]==='tools/rust-engine-program/run-rust-checks.mjs') {
+            assert.equal(process.env.CARGO_INCREMENTAL,${JSON.stringify(expectedIncremental)},'Verifier compilation policy');
+            assert.equal(options.env.CARGO_INCREMENTAL,${JSON.stringify(expectedIncremental)},'Build child compilation policy');
+          }
           if(args[0]==='apps/desktop/scripts/ensure-electron-installed.mjs') {
             assert.ok(${desktop},'Unselected Electron installation');
             writeFileSync(join(repoRoot,'.dohc-dev/electron-installed'),'yes');
@@ -649,6 +655,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
         : mode === "e2e" ? [mode, "--", "--project", "fixture"] : [mode];
       const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
       const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import assert from 'node:assert/strict';
         import cp from 'node:child_process';
         import {syncBuiltinESMExports} from 'node:module';
         import {readFileSync,readdirSync,writeFileSync} from 'node:fs';
@@ -656,6 +663,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
         cp.execFileSync=(command,...args)=>{
           if(command==='rustc') {
             if(!${rust || prepare})throw Error('Native tools unavailable for this JavaScript change');
+            assert.equal(process.env.CARGO_INCREMENTAL,${JSON.stringify(expectedIncremental)},'Source fingerprint compilation policy');
             return Buffer.from('fixture rustc');
           }
           return exec(command,...args);
@@ -669,11 +677,15 @@ test("verification selects packages and proofs and prepares before parallel jobs
         finally {
           const output='.agent-artifacts/verification';
           writeFileSync('.dohc-dev/report.json',readFileSync(output+'/'+readdirSync(output)[0]+'/result.json'));
+          writeFileSync('.dohc-dev/incremental.json',JSON.stringify({value:process.env.CARGO_INCREMENTAL??null,present:Object.hasOwn(process.env,'CARGO_INCREMENTAL')}));
         }
       `, ...args], { cwd: root, encoding: "utf8", timeout: 120_000, env: { ...process.env,
         NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "",
+        CARGO_INCREMENTAL: previousIncremental,
         POSTGRES_URL:"postgres://must-not-use-inherited-database/foreign" } });
       assert.equal(result.error, undefined, result.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(join(root, ".dohc-dev/incremental.json"), "utf8")),
+        { value: previousIncremental ?? null, present: previousIncremental !== undefined }, "Verifier must restore the caller's compilation policy");
       const report = JSON.parse(readFileSync(join(root, ".dohc-dev/report.json"), "utf8"));
       if (fault) {
         assert.equal(result.status, fault === "rust-cancel" ? 143 : 1, result.stderr);
