@@ -288,7 +288,6 @@ export async function verify(args) {
           report.postgres = { id: database.id }; save();
         }
         const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
-        desktopEnvironment = env;
         await step("typecheck", ...pnpm(["run", "typecheck"]), env);
         report.jsTests = join(output, "js-tests", "result.json");
         // Keep package groups under this owner so cancellation finishes their
