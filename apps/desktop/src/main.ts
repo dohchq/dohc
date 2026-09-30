@@ -214,7 +214,8 @@ import {
   recipientShareNeedsRecheck,
   readReceivedShareListing,
 } from "./workspaces/recipientShareReconciliation";
-import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
+import { createShareRosters, rosterAuthorLabel } from "./automations/shareRoster";
+import { listRosterGrants } from "@dohc/automation-executor/roster-listing";
 import {
   CollectionAutomations,
   type AutomationSwitchedOff,
