@@ -171,7 +171,12 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
         }
         _ => false,
     };
-    if !valid {
+    if !valid
+        || object
+            .values()
+            .filter_map(Value::as_str)
+            .any(|value| value.chars().any(char::is_control))
+    {
         return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
     }
     Ok(Some(dohc_engine_domain::moment_author_list_json(value)))
@@ -236,6 +241,22 @@ impl EngineService {
 mod tests {
     use super::validated_author;
     use serde_json::json;
+
+    #[test]
+    fn locally_supplied_author_fields_refuse_control_characters() {
+        let agent = json!({"kind":"agent", "agentId":"runner", "onBehalfOf":"person"});
+        assert!(validated_author(Some(&agent)).is_ok());
+        for field in ["agentId", "onBehalfOf", "agentRunId", "name"] {
+            for control in ['\0', '\n', '\u{0085}', '\u{009f}'] {
+                let mut invalid = agent.clone();
+                invalid[field] = json!(format!("local{control}author"));
+                let error = validated_author(Some(&invalid)).expect_err("local controls refused");
+                assert_eq!(error.message, "invalid-metadata");
+            }
+        }
+        let automation = json!({"kind":"automation", "automationId":"stamp\u{0085}", "depth":1});
+        assert!(validated_author(Some(&automation)).is_err());
+    }
 
     #[test]
     fn an_agent_author_may_name_a_bounded_chain_depth() {
