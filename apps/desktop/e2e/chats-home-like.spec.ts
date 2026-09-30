@@ -47,17 +47,17 @@ test("Home Like works by keyboard and pointer and persists across reopen in both
     const chosenAt = performance.now();
     await page.keyboard.press("Enter");
     await expect(pill).toHaveAttribute("aria-pressed", "true");
+    await expect(pill).toContainText("1");
+    await expect(page.getByTestId("chats-feed-reaction-picker")).toHaveCount(0);
+    // The write settles: focus stays on the trigger and the controls accept
+    // the next write. The time is taken once they do.
+    await expect(like).toBeFocused();
+    await expect(like).not.toHaveAttribute("aria-disabled", "true");
+    await expect(pill).not.toHaveAttribute("aria-disabled", "true");
     testInfo.annotations.push({
       type: "home-like-settled-ms",
       description: String(Math.round(performance.now() - chosenAt)),
     });
-    await expect(pill).toContainText("1");
-    await expect(page.getByTestId("chats-feed-reaction-picker")).toHaveCount(0);
-    // The write settles: focus stays on the trigger and the controls accept
-    // the next write.
-    await expect(like).toBeFocused();
-    await expect(like).not.toHaveAttribute("aria-disabled", "true");
-    await expect(pill).not.toHaveAttribute("aria-disabled", "true");
 
     for (const theme of ["light", "dark"] as const) {
       await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
@@ -69,15 +69,31 @@ test("Home Like works by keyboard and pointer and persists across reopen in both
     const removedAt = performance.now();
     await pill.click();
     await expect(pill).toHaveCount(0);
+    await expect(like).not.toHaveAttribute("aria-disabled", "true");
     testInfo.annotations.push({
       type: "home-unlike-settled-ms",
       description: String(Math.round(performance.now() - removedAt)),
     });
-    await expect(like).not.toHaveAttribute("aria-disabled", "true");
     await like.click();
     await search.fill("👍");
     await page.getByRole("button", { name: "👍", exact: true }).click();
     await expect(pill).toHaveAttribute("aria-pressed", "true");
+    await expect(like).not.toHaveAttribute("aria-disabled", "true");
+
+    // Keyboard on the pill itself: the viewer is its only reactor, so it
+    // unmounts, and focus moves to Add reaction instead of the page body.
+    // From there the keyboard adds it back.
+    await pill.focus();
+    await page.keyboard.press("Enter");
+    await expect(pill).toHaveCount(0);
+    await expect(like).toBeFocused();
+    await expect(like).not.toHaveAttribute("aria-disabled", "true");
+    await page.keyboard.press("Enter");
+    await expect(search).toBeFocused();
+    await search.fill("👍");
+    await page.keyboard.press("Enter");
+    await expect(pill).toHaveAttribute("aria-pressed", "true");
+    await expect(like).toBeFocused();
     await expect(like).not.toHaveAttribute("aria-disabled", "true");
 
     // The like is the server's, not only the paint. Close the Home tab, so

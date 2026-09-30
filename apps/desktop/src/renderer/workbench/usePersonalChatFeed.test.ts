@@ -221,6 +221,41 @@ describe("usePersonalChatFeed reactions", () => {
     expect(result.current.personalFeed).toEqual([]);
   });
 
+  it("keeps the prior rows when a mid-write page settles in the same turn as the write's rejection", async () => {
+    // Raw deferreds: both settle inside one act, with no wait between them.
+    const write = deferred<unknown>();
+    const refresh = deferred<unknown>();
+    const peer = row({ reactionId: "reaction-peer", authorId: "author-peer", authorDisplayName: "Peer" });
+    const mineParty = row({ reactionId: "reaction-party", emoji: "🎉" });
+    bridgeMock.listPersonalChatFeed
+      .mockResolvedValueOnce({ items: [item("message-1", [peer, mineParty])] })
+      .mockImplementationOnce(() => refresh.promise);
+    bridgeMock.setChatReaction.mockImplementationOnce(() => write.promise);
+    const { result, toggle, onError } = setup();
+    await act(() => result.current.loadPersonalFeed());
+
+    await toggle();
+    act(() => void result.current.loadPersonalFeed());
+    expect(result.current.personalFeed[0]?.reactions).toEqual([
+      peer,
+      mineParty,
+      expect.objectContaining({ reactionId: "optimistic:message-1:👍:author-you" }),
+    ]);
+
+    // The rejection paints first, then the page lands, then the chain ends.
+    await act(async () => {
+      write.reject(new Error("ECONNRESET"));
+      refresh.resolve({ items: [item("message-1", [peer, mineParty])] });
+      await refresh.promise;
+      await write.promise.catch(() => undefined);
+    });
+    expect(result.current.personalFeed[0]?.reactions).toEqual([peer, mineParty]);
+    expect(onError).toHaveBeenCalledWith("Could not update that reaction.", expect.any(Error));
+    await waitFor(() => expect(result.current.pendingReactionMessageIds.size).toBe(0));
+    expect(result.current.personalFeed[0]?.reactions).toEqual([peer, mineParty]);
+    expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
+  });
+
   it("writes without a paint when the item names no viewer, and lets the listing name them", async () => {
     const write = answer<unknown>();
     const listing = answer<unknown>();

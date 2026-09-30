@@ -378,6 +378,9 @@ export function MessageReactions(props: {
   hoverToolbar?: boolean;
   actionTestId?: string;
   pickerOnly?: boolean;
+  // The add trigger's element, for a parent whose own pill is about to
+  // unmount and needs somewhere in the same message to put focus.
+  triggerRef?: (node: HTMLButtonElement | null) => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -393,8 +396,12 @@ export function MessageReactions(props: {
     ...EMOJI_DATA.map(({ emoji, shortcode }) => [emoji, shortcode] as const),
   ]), [catalog]);
   useEffect(() => {
-    if (props.controls.readOnly) setPickerOpen(false);
-  }, [props.controls.readOnly]);
+    if (!props.controls.readOnly && !props.controls.pending) return;
+    // A write began from another control on this message, so the picker's
+    // choices would do nothing. It closes; focus moves only if it was inside.
+    if (pickerRef.current?.contains(document.activeElement)) triggerRef.current?.focus();
+    setPickerOpen(false);
+  }, [props.controls.pending, props.controls.readOnly]);
   useEffect(() => {
     if (!pickerOpen) return;
     let current = true;
@@ -501,7 +508,10 @@ export function MessageReactions(props: {
 
   const trigger = (
     <button
-      ref={triggerRef}
+      ref={(node) => {
+        triggerRef.current = node;
+        props.triggerRef?.(node);
+      }}
       type="button"
       data-testid={props.actionTestId ?? `${props.testIdPrefix}-add-reaction`}
       aria-label="Add reaction"

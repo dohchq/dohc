@@ -240,6 +240,12 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
       const entry: PendingReaction = { cell };
       pendingReactions.current.set(messageId, entry);
       syncPending();
+      // Only this write's own claim ends here, never a newer one's.
+      const retire = () => {
+        if (pendingReactions.current.get(messageId) !== entry) return;
+        pendingReactions.current.delete(messageId);
+        syncPending();
+      };
       void bridge()
         .setChatReaction({ workspaceId, threadId, messageId, emoji, state: input.nextState })
         .then(
@@ -272,17 +278,15 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
               );
           },
           (error: unknown) => {
+            // Retire before painting: a page that settles in this same turn
+            // must not lay the failed cell back over the restored rows.
+            retire();
             if (!isCurrent()) return;
             if (cell) paintCell(cell, cell.prior, cell.priorAt);
             onError(ipcErrorMessage(error, "Could not update that reaction."), error);
           },
         )
-        .finally(() => {
-          // Only this write's own claim ends here, never a newer one's.
-          if (pendingReactions.current.get(messageId) !== entry) return;
-          pendingReactions.current.delete(messageId);
-          syncPending();
-        });
+        .finally(retire);
     },
     [liveToken, loadPersonalFeed, onError, paintCell, setMessageReactions, syncPending, workspaceId],
   );

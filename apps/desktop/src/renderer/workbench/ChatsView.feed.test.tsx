@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { type ChatsNav } from "./ChatsView";
@@ -352,6 +352,111 @@ describe("ChatsView hybrid feed", () => {
     });
     await waitFor(() => expect(isPending(likeB!)).toBe(false));
     expect(document.activeElement).toBe(commentA);
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("moves keyboard focus from a vanishing sole pill to Add reaction and never steals it later", async () => {
+    const writeA = deferred<unknown>();
+    const writeB = deferred<unknown>();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        { ...homeItem("Only mine", "message-a"), reactions: [like("message-a")] },
+        { ...homeItem("Mine and a peer", "message-b"), reactions: [like("message-b"), like("message-b", "author-peer")] },
+      ],
+    });
+    bridgeMock.setChatReaction
+      .mockImplementationOnce(() => writeA.promise)
+      .mockImplementationOnce(() => writeB.promise);
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [like("message-b"), like("message-b", "author-peer")],
+      viewerAuthorId: "author-you",
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const [itemA, itemB] = await screen.findAllByTestId("chats-feed-item");
+    const likeA = screen.getAllByTestId("chats-feed-like")[0]!;
+
+    // A: the viewer is the only reactor, so Enter unmounts the pill. Focus
+    // moves to this post's Add reaction, not the page body.
+    const pillA = within(itemA!).getByTestId("chats-feed-reaction-pill");
+    pillA.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(within(itemA!).queryByTestId("chats-feed-reaction-pill")).toBeNull();
+    expect(document.activeElement).toBe(likeA);
+    expect(isPending(likeA)).toBe(true);
+    // Settling with the row gone leaves focus where it is.
+    await act(async () => {
+      writeA.resolve({ reaction: { ...like("message-a"), state: "removed" }, viewerAuthorId: "author-you" });
+      await writeA.promise;
+    });
+    await waitFor(() => expect(isPending(likeA)).toBe(false));
+    expect(within(itemA!).queryByTestId("chats-feed-reaction-pill")).toBeNull();
+    expect(document.activeElement).toBe(likeA);
+
+    // B: a peer keeps the pill, so focus stays on it. The user moves on, and
+    // the failed write restores the row without pulling focus back.
+    const pillB = within(itemB!).getByTestId("chats-feed-reaction-pill");
+    pillB.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(pillB.textContent).toContain("1");
+    expect(pillB.getAttribute("aria-pressed")).toBe("false");
+    expect(document.activeElement).toBe(pillB);
+    const commentB = within(itemB!).getByRole("button", { name: "Comment" });
+    commentB.focus();
+    await act(async () => {
+      writeB.reject(wireFailure());
+      await writeB.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(pillB.textContent).toContain("2"));
+    expect(pillB.getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(commentB);
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes an open picker when a same-message pill starts a write, keeping the user's focus", async () => {
+    const firstWrite = deferred<unknown>();
+    const secondWrite = deferred<unknown>();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [{ ...homeItem("Mine and a peer", "message-1"), reactions: [like("message-1"), like("message-1", "author-peer")] }],
+    });
+    bridgeMock.setChatReaction
+      .mockImplementationOnce(() => firstWrite.promise)
+      .mockImplementationOnce(() => secondWrite.promise);
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [like("message-1", "author-peer")],
+      viewerAuthorId: "author-you",
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const trigger = await screen.findByTestId("chats-feed-like");
+    const pill = feedPill();
+
+    // Keyboard: the user leaves the open picker for the pill and activates it.
+    // The picker closes, since its choices would do nothing, and focus stays
+    // on the pill.
+    await openPicker(trigger);
+    pill.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.queryByTestId("chats-feed-reaction-picker")).toBeNull();
+    expect(document.activeElement).toBe(pill);
+    expect(isPending(trigger)).toBe(true);
+    expect(pill.textContent).toContain("1");
+    await act(async () => {
+      firstWrite.resolve({ reaction: { ...like("message-1"), state: "removed" }, viewerAuthorId: "author-you" });
+      await firstWrite.promise;
+    });
+    await waitFor(() => expect(isPending(trigger)).toBe(false));
+    expect(document.activeElement).toBe(pill);
+
+    // A pill press that leaves focus in the picker's search: the picker
+    // closes and focus goes to the trigger, not the page body.
+    const picker = await openPicker(trigger);
+    const search = within(picker).getByLabelText("Search emoji or paste any emoji");
+    search.focus();
+    fireEvent.click(pill);
+    expect(screen.queryByTestId("chats-feed-reaction-picker")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(isPending(trigger)).toBe(true);
     expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
   });
 

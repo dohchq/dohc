@@ -690,6 +690,9 @@ export function ChatsView(props: {
   // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
+  // Each Home item's Add reaction trigger, by message id: where focus goes
+  // when the activated pill was the viewer's only row and unmounts.
+  const homeLikeTriggers = useRef(new Map<string, HTMLButtonElement>());
   const threadComposerRef = useRef<HTMLDivElement | null>(null);
   const flatChatListRef = useRef<ChatMessageListHandle | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
@@ -3797,9 +3800,15 @@ export function ChatsView(props: {
                             aria-disabled={reactionPending || undefined}
                             aria-label={`${emoji} ${count}`}
                             aria-pressed={itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer)}
-                            onClick={() => {
+                            onClick={(event) => {
                               if (reactionPending) return;
-                              toggleHomeReaction(item, emoji, itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer) ? "removed" : "added");
+                              const mine = itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer);
+                              // Removing the only row unmounts this pill. Focus
+                              // that came with the activation stays in the post.
+                              if (mine && count === 1 && document.activeElement === event.currentTarget) {
+                                homeLikeTriggers.current.get(item.message.id)?.focus();
+                              }
+                              toggleHomeReaction(item, emoji, mine ? "removed" : "added");
                             }}
                             key={emoji}
                             data-testid="chats-feed-reaction-pill"
@@ -3817,6 +3826,10 @@ export function ChatsView(props: {
                     <div className="flex items-center gap-2 border-t border-line py-1.5">
                       <MessageReactions testIdPrefix="chats-feed" actionTestId="chats-feed-like" pickerOnly flush
                         messageId={item.message.id} records={itemReactions}
+                        triggerRef={(node) => {
+                          if (node) homeLikeTriggers.current.set(item.message.id, node);
+                          else homeLikeTriggers.current.delete(item.message.id);
+                        }}
                         controls={{ reactions: itemReactions, viewerAuthorId: itemViewer, readOnly: locked, pending: reactionPending,
                           onToggle: ({ emoji, nextState }) => toggleHomeReaction(item, emoji, nextState) }} />
                       <ActionButton
