@@ -1886,6 +1886,39 @@ describe("VersionedLiveAdapter", () => {
     } satisfies Partial<DaemonRefusalError>);
   });
 
+  it("refuses local author controls and byte budgets before rename, delete, or rollback", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    const adapter = new VersionedLiveAdapter({
+      sendRequest: request => loopback.sendRequest(request), close: () => undefined,
+    }, WORKSPACE, { workspaceId: WORKSPACE });
+    const main = await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+    const input = { workspaceId: WORKSPACE, versionId: main.id, path: "a.txt" };
+    const seed = await adapter.writeTextFile({ ...input, text: "kept", metadata: { origin: "api" } });
+    const valid = { kind: "agent" as const, agentId: "agent", onBehalfOf: "person" };
+    const invalid = [
+      { ...valid, agentId: "é".repeat(257) },
+      { ...valid, onBehalfOf: "x".repeat(513) },
+      { ...valid, agentRunId: "x".repeat(513) },
+      { ...valid, agentId: "agent\n" },
+      { ...valid, onBehalfOf: "person\u0085" },
+      { ...valid, name: "agent\u009f" },
+      { ...valid, name: "x".repeat(128 * 1024) },
+    ];
+    for (const author of invalid) {
+      await expect(adapter.renameTextFile({ ...input, fromPath: input.path, toPath: "b.txt",
+        metadata: { origin: "api" }, author })).rejects.toThrow("invalid-metadata");
+      await expect(adapter.deleteTextFile({ ...input, metadata: { origin: "api" }, author }))
+        .rejects.toThrow("invalid-metadata");
+      await expect(adapter.rollbackTextFileMutation({ ...input, mutationMomentId: seed.moment.momentId,
+        origin: "api", author })).rejects.toThrow("invalid-metadata");
+    }
+    expect((await adapter.readTextFile(input))?.text).toBe("kept");
+    expect((await adapter.listMoments({ workspaceId: WORKSPACE })).moments).toHaveLength(1);
+    const moved = await adapter.renameTextFile({ ...input, fromPath: input.path, toPath: "b.txt",
+      metadata: { origin: "api" }, author: { ...valid, agentId: "é".repeat(256) } });
+    expect(moved.moment.authors).toEqual([{ ...valid, agentId: "é".repeat(256) }]);
+  });
+
   it("decodes loopback responses through the live adapter", async () => {
     const loopback = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter(

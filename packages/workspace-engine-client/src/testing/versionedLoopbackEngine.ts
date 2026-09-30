@@ -2926,7 +2926,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
   private writeAuthorFingerprint(params: JsonObject): string | null {
     this.validatedAuthorValue(params);
     if (params.author !== undefined && params.author !== null) {
-      return stableJsonStringify(params.author);
+      return stableJsonStringify([params.author]);
     }
     return null;
   }
@@ -3019,6 +3019,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const value = params.author;
     if (value === undefined || value === null) return undefined;
     if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-metadata");
+    if (Object.values(value).some(field => typeof field === "string" && /\p{Cc}/u.test(field)) ||
+        ["agentId", "automationId", "humanId", "onBehalfOf", "agentRunId", "principalId", "grantId"]
+          .some(field => typeof value[field] === "string" && utf8Length(value[field]) > 512) ||
+        utf8Length(JSON.stringify([value])) > 128 * 1024) {
+      throw new Error("invalid-metadata");
+    }
     const { kind, agentId, onBehalfOf, agentRunId, depth } = value;
     if (
       kind !== "agent" ||

@@ -179,7 +179,28 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
     {
         return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
     }
-    Ok(Some(dohc_engine_domain::moment_author_list_json(value)))
+    for field in [
+        "agentId",
+        "automationId",
+        "humanId",
+        "onBehalfOf",
+        "agentRunId",
+        "principalId",
+        "grantId",
+    ] {
+        if object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.len() > dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES)
+        {
+            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
+        }
+    }
+    let authors = dohc_engine_domain::moment_author_list_json(value);
+    if authors.len() > dohc_engine_domain::MAX_AUTHOR_JSON_BYTES {
+        return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
+    }
+    Ok(Some(authors))
 }
 
 pub(super) fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
@@ -256,6 +277,29 @@ mod tests {
         }
         let automation = json!({"kind":"automation", "automationId":"stamp\u{0085}", "depth":1});
         assert!(validated_author(Some(&automation)).is_err());
+    }
+
+    #[test]
+    fn locally_supplied_authors_fit_the_moment_identity_and_json_budgets() {
+        let agent = json!({"kind":"agent", "agentId":"runner", "onBehalfOf":"person"});
+        for field in [
+            "agentId",
+            "onBehalfOf",
+            "agentRunId",
+            "principalId",
+            "grantId",
+        ] {
+            let mut bounded = agent.clone();
+            bounded[field] = json!("é".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES / 2));
+            assert!(validated_author(Some(&bounded)).is_ok());
+            bounded[field] = json!(format!("{}x", bounded[field].as_str().unwrap()));
+            assert!(validated_author(Some(&bounded)).is_err(), "{field}");
+        }
+        let automation = json!({"kind":"automation", "automationId":"x".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES + 1), "depth":1});
+        assert!(validated_author(Some(&automation)).is_err());
+        let mut oversized = agent;
+        oversized["name"] = json!("x".repeat(dohc_engine_domain::MAX_AUTHOR_JSON_BYTES));
+        assert!(validated_author(Some(&oversized)).is_err());
     }
 
     #[test]

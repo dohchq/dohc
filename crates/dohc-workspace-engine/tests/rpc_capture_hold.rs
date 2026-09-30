@@ -94,7 +94,8 @@ async fn held_capture_leaves_one_authored_row_per_moved_or_deleted_file() {
             continue;
         }
         assert_eq!(
-            row["author"], author,
+            row["authors"],
+            json!([author]),
             "every new row names the agent: {row}"
         );
         let operation = row["operation"].as_str().expect("operation");
@@ -196,7 +197,8 @@ async fn a_binary_delete_rolled_back_after_its_file_returns_keeps_its_bytes_with
     for row in moment_rows(&transport, &handle, 17).await {
         if !seen.contains(&moment_id(&row)) {
             assert_eq!(
-                row["author"], author,
+                row["authors"],
+                json!([author]),
                 "capture recorded a row of its own: {row}"
             );
         }
@@ -221,7 +223,7 @@ async fn a_change_made_during_a_hold_is_captured_after_release_and_close_does_no
         .find(|row| row["path"] == json!("outside.txt"))
         .expect("the outside edit is captured after release");
     assert!(
-        outside["author"].is_null(),
+        outside["authors"].is_null(),
         "an outside edit stays neutral: {outside}"
     );
 

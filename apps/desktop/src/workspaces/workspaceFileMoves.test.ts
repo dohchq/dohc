@@ -93,7 +93,7 @@ async function fixture(options: {
     return new Set((await rows()).map(row => row.id));
   };
   const added = async (seen: ReadonlySet<string>) => (await rows()).filter(row => !seen.has(row.id))
-    .map(row => ({ operation: row.operation, path: row.path, agentId: row.author?.kind === "agent" ? row.author.agentId : undefined }))
+    .map(row => ({ operation: row.operation, path: row.path, agentId: row.authors?.find(author => author.kind === "agent")?.agentId }))
     .sort((a, b) => a.path.localeCompare(b.path) || a.operation.localeCompare(b.operation));
   const workspaceTrash = async () => existsSync(join(rootPath, ".dohc/trash")) ? await readdir(join(rootPath, ".dohc/trash")) : [];
   // The system trash keeps the workspace trash's entry name, which ends with the file's own name.
@@ -151,7 +151,7 @@ describe("agent moves and deletes", () => {
     await f.settle();
     const outside = (await f.rows()).filter(row => !seen.has(row.id));
     expect(outside.length).toBeGreaterThan(0);
-    expect(outside.every(row => row.author === undefined)).toBe(true);
+    expect(outside.every(row => row.authors === undefined)).toBe(true);
     for (const row of outside) seen.add(row.id);
 
     expect(await f.move("person.txt", "agent.txt")).toEqual({ ok: true, fromPath: "person.txt", toPath: "agent.txt" });
