@@ -132,10 +132,13 @@ type VersionedBinaryWriteBlobParams = MutationMetadata & {
   momentId?: string;
 };
 
+// `captureHoldId` names the `capture.hold` the change records under. The
+// engine refuses it once that hold ended.
 type VersionedTextRenameParams = MutationMetadata & {
   versionId: string;
   fromPath: string;
   toPath: string;
+  captureHoldId?: string;
 };
 
 type VersionedTextDeleteParams = MutationMetadata & {
@@ -143,6 +146,7 @@ type VersionedTextDeleteParams = MutationMetadata & {
   path: string;
   expectedObjectId?: string;
   onlyIfAbsentOnDisk?: boolean;
+  captureHoldId?: string;
 };
 
 type VersionedTextRollbackParams = Omit<MutationMetadata, "nowMs"> & {

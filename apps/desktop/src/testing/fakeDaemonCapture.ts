@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
@@ -79,8 +79,12 @@ export function createFakeDaemonCapture(input: {
   // on its path and `ydoc.close`/`ydoc.evict` release it, so capture skips
   // the path while a session is live, as the daemon's lease registry does.
   ydoc?: Pick<EngineTransport, "sendRequest">;
+  // Answers `capture.moveFile` with a rename on the scratch disk, as the
+  // daemon does where the filesystem has a rename that refuses to replace.
+  // Off, the lifecycle default answers that no such rename exists.
+  nativeMove?: boolean;
 }): FakeDaemonCapture {
-  const { rootPath, workspaceId, loopback, ydoc } = input;
+  const { rootPath, workspaceId, loopback, ydoc, nativeMove } = input;
   async function writeDisk(absolutePath: string, bytes: Uint8Array | string): Promise<void> {
     await mkdir(dirname(absolutePath), { recursive: true });
     await writeFile(absolutePath, bytes);
@@ -372,6 +376,17 @@ export function createFakeDaemonCapture(input: {
             else await removePath(path);
           }
           return response;
+        }
+        case "capture.moveFile": {
+          if (!nativeMove) return null;
+          // A fixture's check-then-rename: nothing races it on a test's scratch disk.
+          const from = join(rootPath, String(params.fromPath));
+          const to = join(rootPath, String(params.toPath));
+          const present = (absolute: string) => lstat(absolute).then(() => true, () => false);
+          if (await present(to)) return { id: request.id, result: { moved: false, reason: "destination-exists" } };
+          if (!(await present(from))) return { id: request.id, result: { moved: false, reason: "source-missing" } };
+          await rename(from, to);
+          return { id: request.id, result: { moved: true } };
         }
         case "ydoc.open": {
           if (!ydoc) return null;

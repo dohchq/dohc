@@ -21,7 +21,8 @@ import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import { createChatWrites } from "../workspaces/chatWrites";
 import type { CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
 import { desktopRecordEditContext } from "../workspaces/desktopRecordEdits";
-import type { WorkspaceEngineMomentSummary, WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
+import type { AuthoredPathChanges, WorkspaceEngineMomentSummary, WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
+import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 
@@ -71,6 +72,13 @@ function fixture(rootPath = resolve("cli-workspace")) {
       }
       return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
     }),
+    // Runs the move or delete as the capture does, with no live documents to
+    // settle: the policy is read once the change runs, History holds every
+    // regular file, and the disk has no rename that refuses to replace.
+    changePathsAs: vi.fn(async (_paths: readonly string[], _authored: unknown, work: (engine: AuthoredPathChanges) => Promise<unknown>) =>
+      await work({ policy: await readWorkspaceEnginePolicy(rootPath), recordDisk: async (_path, files) => [...files],
+        moveFile: async () => false, rename: async () => undefined, delete: async () => "moment",
+        undoDelete: async () => undefined })) as Capture["changePathsAs"],
   };
   const requestWorkspace = vi.fn(async (_root: string, _id: string, method: string, _input: unknown) =>
     method === WORKSPACE_METHOD.searchQueryChatMessagesGranular
@@ -112,6 +120,8 @@ function fixture(rootPath = resolve("cli-workspace")) {
       readDocument: vi.fn<Dependencies["liveDocuments"]["readDocument"]>(async ({ path }) => ({ path, state: null })),
       editDocument: vi.fn<Dependencies["liveDocuments"]["editDocument"]>(async ({ path }) => ({ path, changed: false })),
     },
+    trashItem: vi.fn(async () => { throw new Error("No system trash in tests"); }),
+    markDeletedUnderPath: vi.fn(),
     documentProjection: directDocumentProjection,
     chatWrites,
     startCliServer: vi.fn(async (input) => { options = input; return handle; }),
@@ -600,6 +610,7 @@ describe("raw fileWrite socket requests", () => {
     };
     return { ...f, invoke };
   }
+
   it("refuses a human actor and a shared view before capture", async () => {
     const f = await setup();
     const files = [{ path: "plain.txt", contentBase64: "bmV3" }];
@@ -659,4 +670,87 @@ describe("raw fileWrite socket requests", () => {
     expect(await readFile(join(f.workspace.rootPath, "plain.txt"), "utf8")).toBe("original");
   });
 
+});
+
+describe("raw fileMove and fileDelete socket requests", () => {
+  async function setup() {
+    const root = await createTestScratch("dohc-cli-file-move-");
+    await mkdir(join(root, ".dohc"));
+    const f = fixture(root);
+    await f.create().startDesktopCliServer();
+    const invoke = async (verb: "fileMove" | "fileDelete", args: Record<string, unknown>, actor = "agent") => {
+      const line = await handleCliRequestLine(JSON.stringify({
+        token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor, requestId: "raw", ...args },
+      }), "a".repeat(64), f.options());
+      const transport = cliTransportResponseSchema.parse(JSON.parse(line));
+      return transport.ok ? parseCliResult(verb, transport.result) : { ok: false, reason: transport.error };
+    };
+    return { ...f, root, invoke };
+  }
+
+  it.each(["delete", "overwrite"] as const)("a hung trash during %s holds neither file verbs nor workspace close", async change => {
+    const f = await setup();
+    await writeFile(join(f.root, "first.txt"), "first");
+    await writeFile(join(f.root, "source.txt"), "source");
+    await writeFile(join(f.root, "next.txt"), "next");
+    const entered = deferred(), released = deferred();
+    vi.mocked(f.dependencies.trashItem).mockImplementationOnce(async () => {
+      entered.release();
+      await released.promise;
+    });
+    const pending = change === "delete" ? f.invoke("fileDelete", { path: "first.txt" })
+      : f.invoke("fileMove", { fromPath: "source.txt", toPath: "first.txt", overwrite: true });
+    await entered.promise;
+    try {
+      expect(await f.invoke("fileMove", { fromPath: "next.txt", toPath: "after.txt" })).toMatchObject({ ok: true });
+      await f.authorities.close();
+    } finally {
+      released.release();
+      expect(await pending).toMatchObject({ ok: true });
+    }
+  });
+
+  it("refuses a human actor and a shared view before capture", async () => {
+    const f = await setup();
+    await writeFile(join(f.root, "plain.txt"), "original");
+    expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: "moved.txt" }, "human")).toMatchObject({ ok: false, reason: expect.stringContaining('actor "agent"') });
+    expect(await f.invoke("fileDelete", { path: "plain.txt" }, "human")).toMatchObject({ ok: false, reason: expect.stringContaining('actor "agent"') });
+    f.options().listWorkspaces = () => [{ ...f.workspace, readOnly: true }];
+    expect(await f.invoke("fileDelete", { path: "plain.txt" })).toMatchObject({ ok: false, reason: expect.stringContaining("read-only") });
+    expect(f.capture.changePathsAs).not.toHaveBeenCalled();
+    expect(await readFile(join(f.root, "plain.txt"), "utf8")).toBe("original");
+  });
+
+  it("refuses traversal, reserved, secret, and excluded paths, spelled or inside a folder", async () => {
+    const f = await setup();
+    await writeFile(join(f.root, ".dohc/files.toml"), '[[rule]]\npath = "hidden/**"\ntracked = false\n');
+    await mkdir(join(f.root, "hidden"));
+    await writeFile(join(f.root, "hidden/a.txt"), "hidden");
+    await mkdir(join(f.root, "app"));
+    await writeFile(join(f.root, "app/.env"), "TOKEN=1");
+    await writeFile(join(f.root, "plain.txt"), "original");
+    for (const path of ["../escape.txt", ".dohc/files.toml", ".env", "hidden", "app"]) {
+      expect(await f.invoke("fileDelete", { path })).toMatchObject({ ok: false });
+      expect(await f.invoke("fileMove", { fromPath: path, toPath: "elsewhere" })).toMatchObject({ ok: false });
+      expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: path === "app" ? "app/.env" : path })).toMatchObject({ ok: false });
+    }
+    // Every refusal leaves the disk as it was.
+    expect(await readFile(join(f.root, "app/.env"), "utf8")).toBe("TOKEN=1");
+    expect(await readFile(join(f.root, "hidden/a.txt"), "utf8")).toBe("hidden");
+    expect(await readFile(join(f.root, "plain.txt"), "utf8")).toBe("original");
+  });
+
+  it.each([undefined, "Client name"])("records the %s handshake name at the run depth", async agent => {
+    const f = await setup();
+    vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
+    await writeFile(join(f.root, "plain.txt"), "original");
+    expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: "moved.txt", ...(agent ? { agent } : {}) }))
+      .toEqual({ ok: true, fromPath: "plain.txt", toPath: "moved.txt" });
+    expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//) });
+    const author = { kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
+    expect(vi.mocked(f.capture.changePathsAs).mock.calls.map(call => call[1])).toEqual([
+      { operation: "move", author, correlationId: "fileMove:raw" }, { operation: "delete", author, correlationId: "fileDelete:raw" },
+    ]);
+    expect(f.dependencies.markDeletedUnderPath).toHaveBeenCalledWith(expect.any(Symbol), "moved.txt");
+  });
 });

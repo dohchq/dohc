@@ -1,4 +1,5 @@
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
+import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "../workspaces/workspaceFileMoves";
 import { join, resolve } from "node:path";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import {
@@ -73,6 +74,7 @@ interface DesktopCliServerDependencies<State> {
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
       | "listKeptCopies" | "saveKeptCopy"
       | "listVersions" | "writeAuthoredFile"
+      | "changePathsAs"
     > | null;
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
@@ -94,6 +96,9 @@ interface DesktopCliServerDependencies<State> {
     work: (adapter: VersionedLiveAdapter) => Promise<Result>,
   ): Promise<Result | null>;
   liveDocuments: LiveDocumentSessions;
+  // The OS trash, and the editor sessions to tell when an agent deletes their file.
+  trashItem(absolutePath: string): Promise<void>;
+  markDeletedUnderPath(attachmentId: symbol, path: string): void;
   documentProjection: DocumentProjection;
   chatWrites: ChatWrites;
   startCliServer: typeof startCliServerImplementation;
@@ -179,6 +184,22 @@ export function createDesktopCliServer<State>(
         if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
         return operation.signal;
       });
+    // A move or delete holds the workspace operation fileWrite holds.
+    const withPathChange = async <Result>(requestId: string, work: (
+      operation: WorkspaceAuthorityOperation<RegistryEntry, State>, options: PathChangeOptions) => Promise<() => Promise<Result>>) => {
+      const finish = await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+        if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
+        const current = activity.engineCaptureFor(workspace.workspaceId);
+        if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
+        return work(operation, {
+          capture: current, requestId, trashItem: dependencies.trashItem,
+          markDeleted: path => dependencies.markDeletedUnderPath(operation.workspace.attachmentId, path),
+        });
+      });
+      return finish();
+    };
     return {
       workspaceId: workspace.workspaceId,
       ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
@@ -277,6 +298,10 @@ export function createDesktopCliServer<State>(
         if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
         return writeWorkspaceFilesAs(operation, files, agentWriteAuthor(origin), { capture: current, requestId });
       }),
+      movePath: (input, origin, requestId) => withPathChange(requestId, (operation, options) =>
+        prepareMoveWorkspacePathAs(operation, input, agentWriteAuthor(origin), options)),
+      deletePath: (path, origin, requestId) => withPathChange(requestId, (operation, options) =>
+        prepareDeleteWorkspacePathAs(operation, path, agentWriteAuthor(origin), options)),
       // Document reads and edits go through the desktop's live document
       // sessions, the ones its editor holds, so an agent's edit merges into
       // an open editor instead of racing it on disk.

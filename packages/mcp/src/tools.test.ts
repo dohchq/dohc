@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { randomUUID } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -7,6 +6,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -39,51 +39,16 @@ import {
 import {
   DOHC_METADATA_GUARD,
   discoverSites,
-  entryCharBudget,
-  nameUnitFor,
   notARealFolderRefusal,
-  trashEntryPlan,
 } from "@dohc/workspace-core";
 import { DEFAULT_WORKSPACE_SETTINGS } from "@dohc/workspace-contracts/workspace-settings";
 
-// The trash destination carries a uuid, so a test that needs to pre-create it
-// has to know it. Pass-through until a test arms it; only the rename-failure
-// test below does.
-const uuidOverride = vi.hoisted(() => ({ value: null as string | null }));
-vi.mock("node:crypto", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:crypto")>();
-  return {
-    ...actual,
-    randomUUID: () => uuidOverride.value ?? actual.randomUUID(),
-  };
-});
-
-// A delete looks at its path twice -- before the move, and after the move
-// fails -- and both looks must be able to fail on demand, on a host where a
-// real unreadable directory is not arrangeable. Each armed entry is consumed
-// by one matching call: null passes through, an error is thrown.
-// `inodes` substitutes the ino a matching call reports, likewise one entry per
-// call. NTFS always supplies a real file index, so a filesystem that has none
-// to give -- some network shares, FAT -- is not arrangeable on this host.
+// A path check must be able to fail on demand, on a host where a real
+// unreadable directory is not arrangeable. Each armed entry is consumed by
+// one matching call: null passes through, an error is thrown.
 const lstatOverride = vi.hoisted(() => ({
   path: null as string | null,
   results: [] as (NodeJS.ErrnoException | null)[],
-  inodes: [] as (bigint | null)[],
-}));
-// A path another process changes between the check and the rename. It happens
-// inside the rename call, which is the race itself. `replaceWith` names an
-// entry to move ON TOP of the path.
-// Without it the path is simply removed. `failWith` names an errno code the
-// mock throws instead of calling the real rename -- for a failure a real
-// filesystem will not reproduce on demand, such as a length rejection whose
-// exact errno depends on what the host decides to say. The ladder then sees a
-// rename that moved nothing, exactly as the real failure it stands in for
-// would leave it. Each armed entry is a one-shot: `path` is nulled the moment
-// it matches, which is also how a test proves the race actually ran.
-const renameRace = vi.hoisted(() => ({
-  path: null as string | null,
-  replaceWith: null as string | null,
-  failWith: null as string | null,
 }));
 // realpath can fail where the lstat just before it succeeded: a permission
 // change, or another process moving the path in the gap between the two calls.
@@ -107,37 +72,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         const failure = lstatOverride.results.shift();
         if (failure) throw failure;
       }
-      const stats = await actual.lstat(path, options);
-      if (armed && lstatOverride.inodes.length > 0) {
-        const ino = lstatOverride.inodes.shift();
-        // Copy through the prototype so the Stats methods survive.
-        if (ino !== null && ino !== undefined) {
-          return Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { ino });
-        }
-      }
-      return stats;
+      return actual.lstat(path, options);
     },
     realpath: async (path: Parameters<typeof actual.realpath>[0]) => {
       if (realpathOverride.path === String(path) && realpathOverride.error) {
         throw realpathOverride.error;
       }
       return actual.realpath(path);
-    },
-    rename: async (
-      from: Parameters<typeof actual.rename>[0],
-      to: Parameters<typeof actual.rename>[1],
-    ) => {
-      if (renameRace.path === String(from)) {
-        const replaceWith = renameRace.replaceWith;
-        const failWith = renameRace.failWith;
-        renameRace.path = null;
-        renameRace.replaceWith = null;
-        renameRace.failWith = null;
-        if (replaceWith) await actual.rename(replaceWith, from);
-        else await actual.rm(from);
-        if (failWith) throw errnoError(failWith);
-      }
-      return actual.rename(from, to);
     },
   };
 });
@@ -168,6 +109,16 @@ const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (r
       written.push(file.path);
     }
     return { ok: true, written };
+  }
+  // The desktop records the move or delete in History; here only the disk changes.
+  if (request.verb === "fileMove") {
+    await mkdir(dirname(join(request.args.cwd, request.args.toPath)), { recursive: true });
+    await rename(join(request.args.cwd, request.args.fromPath), join(request.args.cwd, request.args.toPath));
+    return { ok: true, fromPath: request.args.fromPath, toPath: request.args.toPath };
+  }
+  if (request.verb === "fileDelete") {
+    await rm(join(request.args.cwd, request.args.path), { recursive: true });
+    return { ok: true, path: request.args.path, trashed: true };
   }
   if (request.verb === "moments") {
     return {
@@ -464,516 +415,7 @@ describe("mcp tool path containment", () => {
       ).resolves.toMatchObject({ ok: false, reason: refusal });
       await expect(stat(join(ctx.root, "notes"))).rejects.toThrow();
 
-      await writeFile(join(ctx.root, "keep.txt"), "still here");
-      await expect(deleteWorkspacePath(ctx, { path: "keep.txt" })).resolves.toMatchObject({
-        ok: false,
-        reason: refusal,
-      });
-      await expect(readFile(join(ctx.root, "keep.txt"), "utf8")).resolves.toBe("still here");
-
       await rm(outside, { recursive: true, force: true });
-    });
-  });
-
-  // The trash name joined a ~51-byte timestamp+uuid prefix onto an
-  // untruncated basename. A 230-character name is legal on NTFS, ext4 and
-  // APFS, so the file exists and the DELETE is what fails -- with "ENOENT: no
-  // such file or directory, rename ...", which an agent would reasonably read
-  // as a delete that did not happen.
-  it("deletes a file whose legal 230-character name the prefix would overflow", async () => {
-    await withWorkspace(async (ctx) => {
-      const name = `${"a".repeat(226)}.txt`;
-      expect(name).toHaveLength(230);
-      await writeFile(join(ctx.root, name), "keep me recoverable");
-
-      await expect(
-        deleteWorkspacePath(ctx, { path: name }),
-      ).resolves.toMatchObject({ ok: true, path: name, trashed: true });
-
-      // Gone from the workspace, and recoverable from the trash under a name
-      // the filesystem could actually hold.
-      await expect(readFile(join(ctx.root, name), "utf8")).rejects.toThrow();
-      const trashed = await readdir(join(ctx.root, ".dohc", "trash"));
-      expect(trashed).toHaveLength(1);
-      const entry = trashed[0]!;
-      expect(entry.length).toBeLessThanOrEqual(255);
-      expect(new TextEncoder().encode(entry).length).toBeLessThanOrEqual(255);
-      expect(
-        await readFile(join(ctx.root, ".dohc", "trash", entry), "utf8"),
-      ).toBe("keep me recoverable");
-    });
-  });
-
-  // The other half of #613, and the mirror of its first fix. A name the
-  // filesystem will take must not be shortened for a limit that did not
-  // apply: the trash keeps no record of the original name, so a character
-  // dropped here cannot be restored. The tool asks the filesystem rather than
-  // predicting, so this holds wherever the suite runs -- the same delete is a
-  // single rename on a host that accepts the name whole.
-  // A workspace nested deep enough that the legacy MAX_PATH budget leaves no
-  // room for the ~51-character unique prefix. An earlier revision of this fix
-  // refused the delete outright on that arithmetic, which took deletion away
-  // from deep workspaces that had been working.
-  //
-  // The right answer depends on the host, so the test asks it rather than
-  // assuming, exactly as the tool now does: where a past-MAX_PATH path can be
-  // written, the delete must still happen; where it cannot, the refusal must
-  // name the limit and leave the file alone.
-  it("keeps deleting in a deep workspace wherever the host allows it", async () => {
-    const base = await mkdtemp(join(tmpdir(), "dohc-deep-"));
-    try {
-      const root = join(
-        base,
-        ...Array.from({ length: 12 }, (_, index) => `nested-folder-${index}`),
-      );
-      await mkdir(root, { recursive: true });
-      const trashDir = join(root, ".dohc", "trash");
-      // The premise: the legacy budget cannot hold the prefix.
-      expect(259 - trashDir.length - 1).toBeLessThan(51);
-
-      // Ask the host whether the legacy limit binds at all.
-      const probe = join(trashDir, "p".repeat(80));
-      const longPathsWork = await mkdir(trashDir, { recursive: true })
-        .then(() => writeFile(probe, "probe"))
-        .then(() => true)
-        .catch(() => false);
-      expect(probe.length).toBeGreaterThan(259);
-      await rm(probe, { force: true }).catch(() => undefined);
-
-      await writeFile(join(root, "note.md"), "still here");
-      const result = await deleteWorkspacePath(
-        { root, home: join(base, "home") },
-        { path: "note.md" },
-      );
-
-      if (longPathsWork) {
-        expect(result).toMatchObject({ ok: true, trashed: true });
-        await expect(readFile(join(root, "note.md"), "utf8")).rejects.toThrow();
-      } else {
-        expect(refusalReason(result)).toContain("leaves no room for a trash entry name");
-        expect(await readFile(join(root, "note.md"), "utf8")).toBe("still here");
-      }
-    } finally {
-      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
-        () => undefined,
-      );
-    }
-  });
-
-  // The needless-truncation case, and the one that pins the ladder itself: a
-  // basename that fits the per-component limit whole, inside a workspace deep
-  // enough that the composed path passes the legacy MAX_PATH limit. Where the
-  // host allows the long path, the name must be stored whole -- truncating it
-  // would drop characters for a limit that did not apply, and the trash keeps
-  // no record of the original to restore them from.
-  it("does not shorten a fitting name for a composed limit the host ignores", async () => {
-    const base = await mkdtemp(join(tmpdir(), "dohc-longpath-"));
-    try {
-      const root = join(
-        base,
-        ...Array.from({ length: 5 }, (_, index) => `nested-folder-${index}`),
-      );
-      await mkdir(root, { recursive: true });
-      const trashDir = join(root, ".dohc", "trash");
-      const name = `${"n".repeat(146)}.md`;
-      // Fits one component with the prefix, but not the whole legacy path.
-      expect(name.length + 51).toBeLessThan(255);
-      expect(trashDir.length + 1 + name.length + 51).toBeGreaterThan(259);
-
-      const probe = join(trashDir, "p".repeat(name.length + 51));
-      const longPathsWork = await mkdir(trashDir, { recursive: true })
-        .then(() => writeFile(probe, "probe"))
-        .then(() => true)
-        .catch(() => false);
-      await rm(probe, { force: true }).catch(() => undefined);
-
-      await writeFile(join(root, name), "keep me whole");
-      await expect(
-        deleteWorkspacePath({ root, home: join(base, "home") }, { path: name }),
-      ).resolves.toMatchObject({ ok: true, trashed: true });
-
-      const trashed = await readdir(trashDir);
-      expect(trashed).toHaveLength(1);
-      // Whole where the host takes it; shortened only where it will not.
-      expect(trashed[0]!.endsWith(name)).toBe(longPathsWork);
-      expect(
-        await readFile(join(trashDir, trashed[0]!), "utf8"),
-      ).toBe("keep me whole");
-    } finally {
-      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
-        () => undefined,
-      );
-    }
-  });
-
-  // The ladder is several renames, and nothing serializes them. A rename that
-  // failed for length leaves a window in which another process can REPLACE the
-  // source -- and the next rung would move the replacement into the trash and
-  // report success for a file the agent never named.
-  //
-  // The identity check that guarded the failure path now guards each retry
-  // too, against the identity captured before the first attempt. A wrong
-  // refusal costs a retry; a wrong success trashes the wrong file and says it
-  // is done.
-  it("refuses rather than trashing a file that replaced the source mid-ladder", async () => {
-    await withWorkspace(async (ctx) => {
-      // Long enough that the plan below must yield more than one rung; the
-      // errno thrown when the race fires, below, is synthetic and stands in
-      // for whatever a real over-long rename would report, not a prediction
-      // of what this name's length does on its own.
-      const name = `${"a".repeat(226)}.txt`;
-      // Precondition, not assumption: rung > 0 is what runs the retry loop,
-      // and the identity guard inside it is the thing this test is for.
-      const plan = trashEntryPlan(name, `${Date.now()}-${randomUUID()}-`, {
-        unit: nameUnitFor(process.platform),
-        maxEntryChars: entryCharBudget(join(ctx.root, ".dohc", "trash"), process.platform),
-      });
-      expect(plan.candidates.length).toBeGreaterThan(1);
-      await writeFile(join(ctx.root, name), "the entry the agent asked about");
-      await writeFile(join(ctx.root, "replacement.md"), "a different entry entirely");
-      renameRace.path = join(ctx.root, name);
-      renameRace.replaceWith = join(ctx.root, "replacement.md");
-      renameRace.failWith = "ENAMETOOLONG";
-      try {
-        const result = await deleteWorkspacePath(ctx, { path: name });
-
-        // The mock nulls renameRace.path the moment the one-shot fires; null
-        // here proves the race actually ran instead of the ladder simply
-        // succeeding against the untouched real file.
-        expect(renameRace.path).toBeNull();
-        expect(result).toMatchObject({ ok: false });
-        expect(refusalReason(result)).toContain("something replaced it while dohc worked");
-        // The point: the replacement is still where it was, not in the trash.
-        expect(await readFile(join(ctx.root, name), "utf8")).toBe(
-          "a different entry entirely",
-        );
-        const trashed = await readdir(join(ctx.root, ".dohc", "trash")).catch(() => []);
-        expect(trashed).toEqual([]);
-      } finally {
-        renameRace.path = null;
-        renameRace.replaceWith = null;
-        renameRace.failWith = null;
-      }
-    });
-  });
-
-  it("keeps every character of a name the filesystem accepts", async () => {
-    await withWorkspace(async (ctx) => {
-      // 40 CJK characters: 40 UTF-16 units, but 120 UTF-8 bytes. With the
-      // ~51-character prefix that fits every platform's component limit in
-      // its own unit, so nothing may be truncated anywhere.
-      const name = `${"中".repeat(40)}.md`;
-      await writeFile(join(ctx.root, name), "keep me whole");
-
-      await expect(deleteWorkspacePath(ctx, { path: name })).resolves.toMatchObject({
-        ok: true,
-        trashed: true,
-      });
-
-      const trashed = await readdir(join(ctx.root, ".dohc", "trash"));
-      expect(trashed).toHaveLength(1);
-      expect(trashed[0]!.endsWith(name)).toBe(true);
-      expect(
-        await readFile(join(ctx.root, ".dohc", "trash", trashed[0]!), "utf8"),
-      ).toBe("keep me whole");
-    });
-  });
-
-  // The other raw errno this surface emitted: lstat's, naming an absolute host
-  // path the agent never gave and cannot use.
-  it("says nothing is there instead of handing back an lstat errno", async () => {
-    await withWorkspace(async (ctx) => {
-      const result = await deleteWorkspacePath(ctx, { path: "notes/gone.md" });
-      expect(result).toMatchObject({
-        ok: false,
-        reason:
-          "dohc could not delete notes/gone.md. Nothing is at that path in this workspace. List the folder to see what is there.",
-      });
-      expect(refusalReason(result)).not.toMatch(/ENOENT|lstat/);
-      expect(refusalReason(result)).not.toContain(ctx.root);
-    });
-  });
-
-  // A failing rename must say what happened and what did not. rename is
-  // atomic, so a failed one moved nothing -- and an agent that cannot tell a
-  // refused delete from a silent one cannot decide what to do next. Note what
-  // this does not say: that the file is unchanged. Two lstat readings cannot
-  // establish that, so the sentence stays inside the rename contract.
-  it("names the failure and says dohc moved nothing when the move fails", async () => {
-    await withWorkspace(async (ctx) => {
-      const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
-      const now = 1785780488421;
-      uuidOverride.value = uuid;
-      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
-      try {
-        await writeFile(join(ctx.root, "note.md"), "still here");
-        // A DIRECTORY sitting at the exact destination: rename refuses to
-        // replace it on every platform this ships to.
-        const trashDir = join(ctx.root, ".dohc", "trash");
-        await mkdir(trashDir, { recursive: true });
-        await mkdir(join(trashDir, `${now}-${uuid}-note.md`));
-
-        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
-        // The errno code varies by platform; everything around it does not.
-        expect(refusalReason(result)).toMatch(
-          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\.$/,
-        );
-        expect(result.ok).toBe(false);
-        // The claim the message makes, checked.
-        expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe(
-          "still here",
-        );
-        // And the claim it deliberately stops short of making.
-        expect(refusalReason(result)).not.toContain("is unchanged");
-      } finally {
-        clock.mockRestore();
-        uuidOverride.value = null;
-      }
-    });
-  });
-
-  // Only ENOENT is absence. A parent directory without search permission
-  // answers EACCES about a file that is right there, and "nothing is at that
-  // path" would send the agent away from a file it merely cannot reach -- the
-  // same lie, pointing the other way.
-  // The trash folder is prepared with mkdir + lstat, and every errno from
-  // those reached the agent raw -- absolute host path and all -- while the
-  // arms either side of it were being translated. A guard refusal is an
-  // Error this code wrote and still passes through whole; an errno does not.
-  it("translates an errno from preparing the trash folder", async () => {
-    await withWorkspace(async (ctx) => {
-      await writeFile(join(ctx.root, "note.md"), "still here");
-      // The trash folder specifically: .dohc itself is checked earlier, by
-      // the recordability boundary, which has a refusal of its own.
-      lstatOverride.path = join(ctx.root, ".dohc", "trash");
-      lstatOverride.results = [errnoError("EPERM")];
-      try {
-        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
-        expect(result).toMatchObject({
-          ok: false,
-          reason:
-            "dohc could not delete note.md. Preparing the workspace trash folder failed (EPERM). dohc did not move it.",
-        });
-        expect(refusalReason(result)).not.toContain(ctx.root);
-      } finally {
-        lstatOverride.path = null;
-        lstatOverride.results = [];
-      }
-      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("still here");
-    });
-  });
-
-  it("keeps an unreachable path's own failure instead of calling it absent", async () => {
-    await withWorkspace(async (ctx) => {
-      await writeFile(join(ctx.root, "note.md"), "still here");
-      lstatOverride.path = join(ctx.root, "note.md");
-      lstatOverride.results = [errnoError("EACCES")];
-      try {
-        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
-        expect(result).toMatchObject({
-          ok: false,
-          reason:
-            "dohc could not delete note.md. The check on that path failed (EACCES). dohc did not move it.",
-        });
-        expect(refusalReason(result)).not.toContain("Nothing is at that path");
-      } finally {
-        lstatOverride.path = null;
-        lstatOverride.results = [];
-      }
-      // The claim the message makes, checked.
-      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("still here");
-    });
-  });
-
-  // "is unchanged" has to be looked at, not assumed. Nothing serializes these
-  // mutations, so the desktop, another MCP call, or any local process can move
-  // the path away between the check and the rename -- and then the rename
-  // fails ENOENT with the source genuinely gone.
-  it("does not claim the path is unchanged when the move lost a race", async () => {
-    await withWorkspace(async (ctx) => {
-      await writeFile(join(ctx.root, "note.md"), "about to vanish");
-      renameRace.path = join(ctx.root, "note.md");
-      try {
-        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
-        expect(result).toMatchObject({
-          ok: false,
-          reason:
-            "dohc could not delete note.md. The move to the workspace trash failed (ENOENT). dohc did not move it. note.md is no longer in this workspace: something else moved or deleted it.",
-        });
-      } finally {
-        renameRace.path = null;
-      }
-      await expect(readFile(join(ctx.root, "note.md"), "utf8")).rejects.toThrow();
-    });
-  });
-
-  // A racing process can REPLACE the path rather than empty it, and then
-  // something is at the name while the entry the agent asked about is gone.
-  // The probe's whole remaining job is to warn about that: a retry would
-  // delete the replacement.
-  it("warns that a replaced path is not the entry the agent asked about", async () => {
-    await withWorkspace(async (ctx) => {
-      const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
-      const now = 1785780488421;
-      uuidOverride.value = uuid;
-      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
-      try {
-        await writeFile(join(ctx.root, "note.md"), "the entry the agent asked about");
-        await writeFile(join(ctx.root, "replacement.md"), "a different entry entirely");
-        // A directory at the destination makes the rename fail; the race moves
-        // a second, real file onto the source while that happens.
-        const trashDir = join(ctx.root, ".dohc", "trash");
-        await mkdir(trashDir, { recursive: true });
-        await mkdir(join(trashDir, `${now}-${uuid}-note.md`));
-        renameRace.path = join(ctx.root, "note.md");
-        renameRace.replaceWith = join(ctx.root, "replacement.md");
-
-        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
-        expect(refusalReason(result)).toMatch(
-          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\. A different entry is at note\.md now: something replaced it while dohc worked\.$/,
-        );
-        // Something IS at the path -- which is exactly why presence could not
-        // answer this -- and it is not what the agent asked to delete.
-        expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe(
-          "a different entry entirely",
-        );
-      } finally {
-        clock.mockRestore();
-        uuidOverride.value = null;
-        renameRace.path = null;
-        renameRace.replaceWith = null;
-      }
-    });
-  });
-
-  // And when the look itself fails there is no evidence to warn on, so the
-  // refusal stops at the rename contract rather than guessing a claim.
-  it("says it could not check, which is not the same as looking the same", async () => {
-    await withWorkspace(async (ctx) => {
-      const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
-      const now = 1785780488421;
-      uuidOverride.value = uuid;
-      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
-      try {
-        await writeFile(join(ctx.root, "note.md"), "still here");
-        const trashDir = join(ctx.root, ".dohc", "trash");
-        await mkdir(trashDir, { recursive: true });
-        await mkdir(join(trashDir, `${now}-${uuid}-note.md`));
-        // The check passes; the look after the failed rename does not.
-        lstatOverride.path = join(ctx.root, "note.md");
-        lstatOverride.results = [null, errnoError("EACCES")];
-
-        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
-        // "dohc could not check it" rather than silence: that dohc could not
-        // look is itself provable, and it is a different state from "the entry
-        // looks the same", which renders with no trailing sentence at all.
-        expect(refusalReason(result)).toMatch(
-          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\. dohc could not check note\.md afterwards\.$/,
-        );
-      } finally {
-        clock.mockRestore();
-        uuidOverride.value = null;
-        lstatOverride.path = null;
-        lstatOverride.results = [];
-      }
-    });
-  });
-
-  // A filesystem with no inode to give reports 0, and 0 is not evidence of
-  // anything. Comparing it against a real inode would read as "replaced" and
-  // warn about a replacement that never happened -- the warning has to rest on
-  // positive evidence, in both directions.
-  it("does not warn about a replacement when the filesystem reports no inode", async () => {
-    await withWorkspace(async (ctx) => {
-      const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
-      const now = 1785780488421;
-      uuidOverride.value = uuid;
-      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
-      try {
-        await writeFile(join(ctx.root, "note.md"), "still here");
-        const trashDir = join(ctx.root, ".dohc", "trash");
-        await mkdir(trashDir, { recursive: true });
-        await mkdir(join(trashDir, `${now}-${uuid}-note.md`));
-        // Both looks, one at a time, because the guard has two sides and an
-        // earlier version of this test only armed the first -- which left
-        // `before.ino === 0` alone as a surviving mutant. The second look is
-        // the likelier zero in practice: a failed rename is often a sharing
-        // violation, which is what makes libuv fall back to a directory stat
-        // and report a FileId of 0.
-        lstatOverride.path = join(ctx.root, "note.md");
-        lstatOverride.inodes = [null, 0n];
-
-        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
-        expect(refusalReason(result)).toMatch(
-          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\.$/,
-        );
-        expect(refusalReason(result)).not.toContain("replaced");
-      } finally {
-        clock.mockRestore();
-        uuidOverride.value = null;
-        lstatOverride.path = null;
-        lstatOverride.inodes = [];
-      }
-    });
-  });
-
-  // dohc_delete_path is the tool that moves a user's file into.dohc/trash, so
-  // a squatter there is reachable from an ordinary agent request. Every squat
-  // used to reach the agent as a raw errno from mkdir: "EEXIST:
-  // file already exists, mkdir …" names no constraint and no next step. The
-  // three squat shapes below are one test because they must all answer the
-  // same way -- and because a dangling link raises a different errno than the
-  // other two, which is exactly what an errno allowlist would get wrong.
-  describe("a squatted .dohc/trash", () => {
-    async function deleteThrough(squat: (trash: string) => Promise<void>) {
-      return await withWorkspace(async (ctx) => {
-        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-        await squat(join(ctx.root, ".dohc", "trash"));
-        await writeFile(join(ctx.root, "keep.txt"), "still here");
-        const result = await deleteWorkspacePath(ctx, { path: "keep.txt" });
-        // Whatever the refusal said, the user's file never moved.
-        expect(await readFile(join(ctx.root, "keep.txt"), "utf8")).toBe("still here");
-        return result;
-      });
-    }
-
-    it("names a FILE squatter instead of handing the agent a raw errno", async () => {
-      await expect(
-        deleteThrough((trash) => writeFile(trash, "squatting")),
-      ).resolves.toMatchObject({
-        ok: false,
-        reason:
-          "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file. Then retry.",
-      });
-    });
-
-    it("names a dangling link squatter, which an errno allowlist would miss", async () => {
-      await expect(
-        deleteThrough((trash) => symlink(join(trash, "..", "nowhere"), trash, "dir")),
-      ).resolves.toMatchObject({
-        ok: false,
-        reason:
-          "dohc could not move this to the workspace trash. A link is at .dohc/trash, which must be a real folder. Remove or rename that link. Then retry.",
-      });
-    });
-
-    it("names a link to a real outside folder and lands nothing there", async () => {
-      const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-trash-outside-"));
-      try {
-        await expect(
-          deleteThrough((trash) => symlink(outside, trash, "dir")),
-        ).resolves.toMatchObject({
-          ok: false,
-          reason:
-            "dohc could not move this to the workspace trash. A link is at .dohc/trash, which must be a real folder. Remove or rename that link. Then retry.",
-        });
-        // Why the guard runs after mkdir: mkdir{recursive} no-ops on an
-        // existing symlink-to-dir, so a pre-check would see nothing. Drop
-        // both this lstat and the containment check and keep.txt lands here.
-        expect(await readdir(outside)).toEqual([]);
-      } finally {
-        await rm(outside, { recursive: true, force: true });
-      }
     });
   });
 });
@@ -1382,8 +824,6 @@ describe("mcp tools operate on allowed paths", () => {
       await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toMatchObject({
         code: "ENOENT",
       });
-      const trash = await readdir(join(ctx.root, ".dohc", "trash"));
-      expect(trash.some((name) => name.endsWith("-todo.txt"))).toBe(true);
 
       // None of the mutations wrote a legacy change set.
       expect(moved).not.toHaveProperty("recordedBy");
@@ -2180,30 +1620,6 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
   const BLOCKED =
     "dohc could not open this workspace's .dohc folder. A file is at .dohc, which must be a real folder. Remove or rename that file. Then retry.";
 
-  // Delete is the one case with a second boundary behind this one:
-  // safeTrashDir checks .dohc again on its way to the trash folder, so
-  // removing the change-record boundary alone still leaves this passing.
-  it("refuses the delete, and the file is still where it was", async () => {
-    await withBlockedMetadataDir(async (ctx) => {
-      await writeFile(join(ctx.root, "note.txt"), "still here");
-
-      expect(await deleteWorkspacePath(ctx, { path: "note.txt" })).toMatchObject({ ok: false, reason: BLOCKED });
-      expect(await readFile(join(ctx.root, "note.txt"), "utf8")).toBe("still here");
-    });
-  });
-
-  it("refuses the move, and both paths are where they were", async () => {
-    await withBlockedMetadataDir(async (ctx) => {
-      await writeFile(join(ctx.root, "note.txt"), "still here");
-
-      expect(
-        await moveWorkspacePath(ctx, { fromPath: "note.txt", toPath: "notes/moved.md" }),
-      ).toMatchObject({ ok: false, reason: BLOCKED });
-      expect(await readFile(join(ctx.root, "note.txt"), "utf8")).toBe("still here");
-      await expect(stat(join(ctx.root, "notes", "moved.md"))).rejects.toThrow();
-    });
-  });
-
   it("refuses the directory, and no directory appears", async () => {
     await withBlockedMetadataDir(async (ctx) => {
       expect(await createWorkspaceDirectory(ctx, { path: "notes/2026" })).toMatchObject({ ok: false, reason: BLOCKED });
@@ -2491,11 +1907,7 @@ describe("a symlink cannot alias a reserved area", () => {
           ok: true,
           trashed: true,
         });
-        // The link entry is gone. `.dohc` exists only because the delete's own
-        // ensureRecordable made it -- which is the check-then-create window the
-        // refusal guards, and renaming the entry closes it without following.
         await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
-        expect((await stat(join(ctx.root, ".dohc"))).isDirectory()).toBe(true);
       });
     });
 
@@ -2506,7 +1918,6 @@ describe("a symlink cannot alias a reserved area", () => {
         ).resolves.toMatchObject({ ok: true });
         await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
         expect((await lstat(join(ctx.root, "broken"))).isSymbolicLink()).toBe(true);
-        expect((await stat(join(ctx.root, ".dohc"))).isDirectory()).toBe(true);
       });
     });
 

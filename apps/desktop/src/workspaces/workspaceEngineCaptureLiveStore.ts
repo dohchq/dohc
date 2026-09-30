@@ -32,6 +32,7 @@ import {
   type VersionedTextListEntry,
   type VersionedTextReadValue,
   type KeptCopy,
+  type CaptureMoveFileResult,
   type KeptCopySaveResult,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
@@ -169,6 +170,13 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
+  // Capture records nothing from hold to release, or until the hold's lease
+  // runs out unrenewed or the workspace closes.
+  holdCapture?(): Promise<{ holdId: string; leaseMs: number }>;
+  renewCapture?(holdId: string): Promise<boolean>;
+  releaseCapture?(holdId: string): Promise<boolean>;
+  // One rename that refuses to replace, of a visible regular file, under a hold.
+  moveFileUnderHold?(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult>;
 };
 
 export interface CaptureLiveStores {
@@ -1000,6 +1008,7 @@ export function createCaptureLiveStores(
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       momentId?: string;
+      captureHoldId?: string;
     }) {
       const { metadata, author, ...deleteInput } = input;
       const raw = await runMutation(
@@ -1046,6 +1055,8 @@ export function createCaptureLiveStores(
       fromPath: string;
       toPath: string;
       metadata: ActorNeutralWriteMetadata;
+      author?: MomentWriteAuthor;
+      captureHoldId?: string;
     }) {
       const before = await store.readTextFile({
         workspaceId: input.workspaceId,
@@ -1055,10 +1066,12 @@ export function createCaptureLiveStores(
       if (!before) {
         throw new Error(`Engine text head for ${input.fromPath} disappeared before rename.`);
       }
+      const { author, ...renameInput } = input;
       const raw = await runMutation(
         async (adapter) =>
           await adapter.renameTextFile({
-            ...input,
+            ...renameInput,
+            ...(author ? { author: adapterAuthor(author) } : {}),
             metadata: adapterMetadata(input.metadata),
           }),
       );
@@ -1082,14 +1095,19 @@ export function createCaptureLiveStores(
       };
     },
 
-    rollbackTextFileMutation: (input: {
+    rollbackTextFileMutation: ({ author, ...input }: {
       workspaceId: string;
       versionId: string;
       path: string;
       mutationMomentId: string;
+      origin: ActorNeutralWriteMetadata["origin"];
+      author?: MomentWriteAuthor;
     }) =>
       runMutation(
-        async (adapter) => await adapter.rollbackTextFileMutation(input),
+        async (adapter) => await adapter.rollbackTextFileMutation({
+          ...input,
+          ...(author ? { author: adapterAuthor(author) } : {}),
+        }),
       ),
 
     async listMoments(input: {
@@ -1406,6 +1424,17 @@ export function createCaptureLiveStores(
     async saveKeptCopy(id: number) {
       return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
     },
+
+    holdCapture: async () => await runMutation(async (adapter) => await adapter.holdCapture()),
+
+    renewCapture: async (holdId: string) =>
+      await runMutation(async (adapter) => await adapter.renewCapture(holdId)),
+
+    releaseCapture: async (holdId: string) =>
+      await runMutation(async (adapter) => await adapter.releaseCapture(holdId)),
+
+    moveFileUnderHold: async (input: { holdId: string; fromPath: string; toPath: string }) =>
+      await runMutation(async (adapter) => await adapter.moveFileUnderHold(input)),
 
     async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {
       const desired = author === null ? null : captureAuthor(author);

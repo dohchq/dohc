@@ -7,7 +7,10 @@ use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::request::validated_author;
+use crate::rpc::workspace::CaptureHold;
+use crate::rpc::workspace::CaptureHolds;
 use crate::rpc::workspace::OpenWorkspace;
+use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -15,14 +18,174 @@ use dohc_engine_protocol::wire::WorkspaceHandle;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::HashMap;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+use tokio::time::Instant;
 
 pub(super) const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
+
+/// How long a hold lasts without a renewal. The holder renews well inside
+/// this while its change runs, so a hold whose reply was lost, or whose
+/// holder died with the connection up, ends on its own.
+pub(super) const CAPTURE_HOLD_LEASE: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CaptureSetAuthorParams {
     author: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaptureHoldIdParams {
+    hold_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaptureMoveFileParams {
+    hold_id: String,
+    from_path: String,
+    to_path: String,
+}
+
+static NEXT_CAPTURE_HOLD: AtomicU64 = AtomicU64::new(1);
+
+/// Whether the hold is still running. An expired hold ends here, before its
+/// timer gets to it, so nothing records under a lease that already ran out.
+fn hold_is_live(holds: &mut HashMap<String, CaptureHold>, hold_id: &str, now: Instant) -> bool {
+    match holds.get(hold_id) {
+        Some(hold) if hold.expires_at > now => true,
+        Some(_) => {
+            holds.remove(hold_id);
+            false
+        }
+        None => false,
+    }
+}
+
+/// A write that names a hold refuses once the hold ended, for example because
+/// its lease ran out, the workspace closed or the engine restarted, so the
+/// caller restores disk instead of recording a change capture may already
+/// have seen.
+pub(super) fn require_capture_hold(
+    open: &OpenWorkspace,
+    hold_id: Option<&str>,
+) -> Result<(), WireError> {
+    match hold_id {
+        Some(id) if !hold_is_live(&mut lock(&open.capture_holds), id, Instant::now()) => Err(
+            WireError::new(ErrorCode::InvalidParams, "capture-hold-ended"),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Ends the hold when its lease runs out. A renewal moves the end later; the
+/// timer reads the current end each time it wakes, so it never ends a hold
+/// that was renewed since it was armed.
+fn expire_capture_hold(holds: CaptureHolds, hold_id: String, first: Instant) {
+    tokio::spawn(async move {
+        let mut wake = first;
+        loop {
+            tokio::time::sleep_until(wake).await;
+            let next = {
+                let mut live = lock(&holds);
+                let Some(expires_at) = live.get(&hold_id).map(|hold| hold.expires_at) else {
+                    return;
+                };
+                if expires_at <= Instant::now() {
+                    live.remove(&hold_id);
+                    return;
+                }
+                expires_at
+            };
+            wake = next;
+        }
+    });
+}
+
+fn tracked_relative_path(path: &str) -> Result<String, WireError> {
+    match classify_engine_file_path_normalized(path) {
+        (PathClassification::Tracked, Some(normalized)) if normalized == path => Ok(normalized),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "capture.moveFile needs tracked workspace paths",
+        )),
+    }
+}
+
+/// Why `capture.moveFile` left the file where it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotMoved {
+    DestinationExists,
+    SourceMissing,
+    NoReplaceUnsupported,
+}
+
+impl NotMoved {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DestinationExists => "destination-exists",
+            Self::SourceMissing => "source-missing",
+            Self::NoReplaceUnsupported => "no-replace-unsupported",
+        }
+    }
+}
+
+/// Moves one visible regular file inside `root` to an empty name in one
+/// rename that refuses to replace. Both parents must exist and resolve
+/// inside the canonical root, and the source must be a regular file, never a
+/// link: this moves the entry the caller admitted, not what a link reaches.
+fn move_visible_file(root: &Path, from: &str, to: &str) -> Result<Option<NotMoved>, WireError> {
+    let invalid = |message: &'static str| WireError::new(ErrorCode::InvalidParams, message);
+    let from_abs = root.join(from);
+    let to_abs = root.join(to);
+    for absolute in [&from_abs, &to_abs] {
+        let Some(parent) = absolute.parent() else {
+            return Err(invalid("capture.moveFile paths need a parent folder"));
+        };
+        let resolved = std::fs::canonicalize(parent)
+            .map_err(|_| invalid("capture.moveFile parent folder does not resolve"))?;
+        if !resolved.starts_with(root) {
+            return Err(invalid(
+                "capture.moveFile parent folder leads outside the workspace",
+            ));
+        }
+        let relative = resolved
+            .strip_prefix(root)
+            .map_err(|_| invalid("capture.moveFile parent folder leads outside the workspace"))?;
+        let leaf = absolute
+            .file_name()
+            .ok_or_else(|| invalid("capture.moveFile paths need a file name"))?;
+        tracked_relative_path(&relative.join(leaf).to_string_lossy().replace('\\', "/"))?;
+    }
+    match std::fs::symlink_metadata(&from_abs) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err(invalid("capture.moveFile moves regular files only")),
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Some(NotMoved::SourceMissing)),
+        Err(err) => {
+            return Err(WireError::new(
+                ErrorCode::Internal,
+                format!("capture.moveFile could not read the source: {err}"),
+            ));
+        }
+    }
+    match dohc_engine_files::move_file_no_replace(&from_abs, &to_abs) {
+        Ok(()) => Ok(None),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(Some(NotMoved::DestinationExists)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(Some(NotMoved::SourceMissing)),
+        Err(err) if err.kind() == ErrorKind::Unsupported => {
+            Ok(Some(NotMoved::NoReplaceUnsupported))
+        }
+        Err(err) => Err(WireError::new(
+            ErrorCode::Internal,
+            format!("capture.moveFile could not move the file: {err}"),
+        )),
+    }
 }
 
 pub(super) fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireError> {
@@ -229,6 +392,129 @@ impl EngineService {
         driver.set_author_json(author_json);
         Ok(json!({ "updated": true }))
     }
+
+    /// Keep capture from recording anything until `capture.release`, so a
+    /// caller can change the disk and record that change under its own
+    /// author before capture sees it. Capture then finds each change already
+    /// recorded. The hold is a lease of `leaseMs`: the holder renews it with
+    /// `capture.renew` while its change runs, and a hold nobody renews ends
+    /// on its own, so a lost reply or a holder that died with the connection
+    /// up cannot keep capture out for good. It also ends when the workspace
+    /// closes, and with this process, which exits when its one client does.
+    pub(super) async fn capture_hold(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "capture.hold needs the workspace's owning handle",
+            ));
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let guard = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("capture.hold (queued)"));
+            }
+            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+        };
+        let hold_id = format!(
+            "hold-{:016x}",
+            NEXT_CAPTURE_HOLD.fetch_add(1, Ordering::Relaxed)
+        );
+        let expires_at = Instant::now() + CAPTURE_HOLD_LEASE;
+        lock(&open.capture_holds).insert(
+            hold_id.clone(),
+            CaptureHold {
+                _guard: guard,
+                expires_at,
+            },
+        );
+        expire_capture_hold(Arc::clone(&open.capture_holds), hold_id.clone(), expires_at);
+        Ok(json!({
+            "holdId": hold_id,
+            "leaseMs": u64::try_from(CAPTURE_HOLD_LEASE.as_millis()).unwrap_or(u64::MAX),
+        }))
+    }
+
+    /// Start the hold's lease again from now. `renewed: false` means the hold
+    /// had already ended, and every write that names it refuses.
+    pub(super) async fn capture_renew(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CaptureHoldIdParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "capture.renew needs the workspace's owning handle",
+            ));
+        }
+        let now = Instant::now();
+        let mut holds = lock(&open.capture_holds);
+        let renewed = hold_is_live(&mut holds, &params.hold_id, now);
+        if let Some(hold) = holds.get_mut(&params.hold_id) {
+            hold.expires_at = now + CAPTURE_HOLD_LEASE;
+        }
+        Ok(json!({ "renewed": renewed }))
+    }
+
+    /// End a hold. `released: false` means it had already ended.
+    pub(super) async fn capture_release(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CaptureHoldIdParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "capture.release needs the workspace's owning handle",
+            ));
+        }
+        let mut holds = lock(&open.capture_holds);
+        let released = hold_is_live(&mut holds, &params.hold_id, Instant::now())
+            && holds.remove(&params.hold_id).is_some();
+        Ok(json!({ "released": released }))
+    }
+
+    /// Move one visible regular file to an empty name in one rename that
+    /// refuses to replace, while the caller's hold keeps capture out. The
+    /// caller records the rename under its author afterwards. `moved: false`
+    /// names why the file stayed: the destination is taken, the source is
+    /// gone, or this filesystem has no such rename, in which case the caller
+    /// moves the file its own way.
+    pub(super) async fn capture_move_file(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CaptureMoveFileParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "capture.moveFile needs the workspace's owning handle",
+            ));
+        }
+        require_capture_hold(&open, Some(&params.hold_id))?;
+        let from = tracked_relative_path(&params.from_path)?;
+        let to = tracked_relative_path(&params.to_path)?;
+        let root = open.root.clone();
+        let outcome = tokio::task::spawn_blocking(move || move_visible_file(&root, &from, &to))
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "capture.moveFile worker failed"))??;
+        Ok(match outcome {
+            None => json!({ "moved": true }),
+            Some(reason) => json!({ "moved": false, "reason": reason.as_str() }),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -416,6 +702,103 @@ mod tests {
             refused.is_err(),
             "a captured workspace already reconciles through its driver"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_move_refuses_aliases_into_reserved_folders_and_outside_the_workspace() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = std::fs::canonicalize(scratch.path()).expect("root");
+        std::fs::create_dir(root.join(".dohc")).expect("metadata");
+        std::fs::write(root.join("good.txt"), "mine").expect("source");
+        std::fs::write(root.join(".dohc/state"), "engine").expect("reserved source");
+        std::os::unix::fs::symlink(root.join(".dohc"), root.join("alias")).expect("alias");
+        assert!(super::move_visible_file(&root, "good.txt", "alias/target").is_err());
+        assert!(super::move_visible_file(&root, "alias/state", "visible.txt").is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("good.txt")).expect("source"),
+            "mine"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(".dohc/state")).expect("reserved source"),
+            "engine"
+        );
+        let outside = ScratchDir::new().expect("outside");
+        std::os::unix::fs::symlink(outside.path(), root.join("escape")).expect("outside alias");
+        assert!(super::move_visible_file(&root, "good.txt", "escape/target").is_err());
+        assert!(!outside.path().join("target").exists());
+    }
+
+    async fn lease_fixture() -> (ScratchDir, EngineService, WorkspaceHandle) {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "capture-hold-lease",
+                    "captureMode": "none",
+                }),
+            )
+            .await
+            .expect("open");
+        let handle = serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        (scratch, service, handle)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lost_capture_hold_reply_expires_and_releases_the_apply_gate() {
+        let (_scratch, service, handle) = lease_fixture().await;
+        let open = service.open(Some(&handle)).expect("open handle");
+        let reply = service
+            .capture_hold(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .expect("hold");
+        assert_eq!(reply["leaseMs"], json!(30_000));
+        drop(reply); // The connection stays open but no caller received the hold id.
+        assert!(open.capture_apply_gate.try_lock().is_err());
+        tokio::time::advance(super::CAPTURE_HOLD_LEASE).await;
+        let guard = open.capture_apply_gate.lock().await;
+        assert!(lock(&open.capture_holds).is_empty());
+        drop(guard);
+        service.workspace_close(Some(handle)).await.expect("close");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn renewed_capture_hold_survives_its_first_deadline_then_expires() {
+        let (_scratch, service, handle) = lease_fixture().await;
+        let open = service.open(Some(&handle)).expect("open handle");
+        let reply = service
+            .capture_hold(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .expect("hold");
+        let half = super::CAPTURE_HOLD_LEASE / 2;
+        tokio::time::advance(half).await;
+        assert_eq!(
+            service
+                .capture_renew(Some(handle.clone()), json!({ "holdId": reply["holdId"] }))
+                .await
+                .expect("renew"),
+            json!({ "renewed": true })
+        );
+        tokio::time::advance(half).await;
+        assert!(open.capture_apply_gate.try_lock().is_err());
+        tokio::time::advance(half).await;
+        let guard = open.capture_apply_gate.lock().await;
+        assert!(lock(&open.capture_holds).is_empty());
+        drop(guard);
+        assert_eq!(
+            service
+                .capture_renew(Some(handle.clone()), json!({ "holdId": reply["holdId"] }))
+                .await
+                .expect("late renew"),
+            json!({ "renewed": false })
+        );
+        assert!(super::require_capture_hold(&open, reply["holdId"].as_str()).is_err());
+        service.workspace_close(Some(handle)).await.expect("close");
     }
 
     async fn capture_mode_none_adoption(reconcile: bool, publish: bool, create_only: bool) {

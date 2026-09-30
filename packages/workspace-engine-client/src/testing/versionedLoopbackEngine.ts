@@ -192,15 +192,16 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.textReadBlob]: {
     requiredStrings: ["workspaceId", "sha256"],
   },
+  // A loopback has no capture, so it accepts a hold id without checking it.
   [VERSIONED_METHOD.textRename]: {
     requiredStrings: ["versionId", "fromPath", "toPath"],
-    optionalStrings: MUTATION_OPTIONAL_STRINGS,
+    optionalStrings: [...MUTATION_OPTIONAL_STRINGS, "captureHoldId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
   },
   [VERSIONED_METHOD.textDelete]: {
     requiredStrings: ["versionId", "path"],
-    optionalStrings: [...MUTATION_OPTIONAL_STRINGS,"expectedObjectId"],
+    optionalStrings: [...MUTATION_OPTIONAL_STRINGS, "expectedObjectId", "captureHoldId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
     // The engine checks the disk; a loopback has none, so it only validates.
