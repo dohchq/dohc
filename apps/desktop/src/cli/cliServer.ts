@@ -172,7 +172,7 @@ export interface CliRegistryWorkspace {
 
 // The desktop's one collection write seam. The shapes mirror
 // `setCollectionRecordFields` / `createCollectionRecord` in
-// `apps/desktop/src/workspaces/collectionRecordEdits.ts` exactly, so main's
+// `packages/automation-executor/src/collectionRecordEdits.ts` exactly, so main's
 // wiring is a closure over that module's workspace-scoped edit context. The
 // author is derived here, main-side, from the workspace identity plus the
 // behavior-bearing actor kind; the request never supplies one. Field values

@@ -2,6 +2,7 @@ import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, X, Zap } from "lucide-react";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
+import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ListCollectionAutomationsResult,
@@ -10,6 +11,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
+import { computerInSentence, shownScheduleHost } from "../scheduleHost";
 import { SwitchControl } from "../settings/SettingRow";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { IconButton, SecondaryButton } from "../ui/controls";
@@ -228,8 +230,11 @@ function ReachStatus(props: {
         step.verdict === "held" ? (
           <StatusLine key={index} tone="warning" icon={AlertTriangle} label="Waiting for you">
             <p className="m-0">
-              A step can now {automationReachCopy(step)}.{" "}
-              {step.stoppedFor ? `It stopped before because ${step.stoppedFor} could not.` : "It could not before."}
+              {step.stoppedFor
+                ? `A step can now ${automationReachCopy(step)}. It stopped before because ${step.stoppedFor} could not.`
+                : step.fileUnread
+                  ? `A step can ${automationReachCopy(step)}. dohc cannot read the automations file in one version of the workspace. New steps here wait for you.`
+                  : `A step can now ${automationReachCopy(step)}. It could not before.`}
             </p>
             <SecondaryButton size="compact" className="mt-1" onClick={() => props.onAllow(step.step, step.seq)}>
               Allow
@@ -364,11 +369,13 @@ function useScheduleHost(workspaceId: string, wanted: boolean, onError: ErrorRep
   return { host, read };
 }
 
-/** The name of the computer that runs schedules when it is another one, or null. */
+/** The name of the computer that runs schedules when it is another one, such as "this server", or null. */
 function otherHostName(relay: RelayHost | null): string | null {
-  if (relay === null || relay.hostInstallId === null) return null;
-  const computer = relay.computers.find((entry) => entry.installId === relay.hostInstallId);
-  return computer?.thisComputer ? null : computer?.label ?? "another computer";
+  const hostInstallId = relay === null ? null : shownScheduleHost(relay).hostInstallId;
+  if (relay === null || hostInstallId === null) return null;
+  const computer = relay.computers.find((entry) => entry.installId === hostInstallId);
+  if (computer === undefined) return "another computer";
+  return computer.thisComputer ? null : computerInSentence(computer);
 }
 
 /** A schedule's next run, and the computer that runs it when that is not this one. */
@@ -383,13 +390,15 @@ function NextRun(props: { at: string | undefined; runsOn: string | null }) {
 
 /**
  * Says once, above the list, what stops or delays this workspace's
- * schedules: no computer runs them, a handover waits, or dohc could not
- * check. Each offers its way forward.
+ * schedules: no computer runs them, the server named to run them does not
+ * run automations, a handover waits, or dohc could not check. Each offers
+ * its way forward.
  */
 function ScheduleHostNote(props: { host: ScheduleHostView | null; onCheckAgain: () => void; onChooseComputer: () => void }) {
   const relay = props.host?.relay ?? null;
   const note = props.host?.note ?? null;
-  const from = relay?.computers.find((computer) => computer.installId === relay.handoverFrom);
+  const shown = relay === null ? null : shownScheduleHost(relay);
+  const from = relay?.computers.find((computer) => computer.installId === shown?.handoverFrom);
   const choose = (
     <SecondaryButton size="compact" className="mt-1.5" onClick={props.onChooseComputer}>Choose a computer</SecondaryButton>
   );
@@ -401,14 +410,14 @@ function ScheduleHostNote(props: { host: ScheduleHostView | null; onCheckAgain: 
           <SecondaryButton size="compact" className="mt-1.5" onClick={props.onCheckAgain}>Check again</SecondaryButton>
         </div>
       )}
-      {relay?.hostInstallId === null ? (
+      {shown?.hostInstallId === null ? (
         <div data-testid="schedule-host-missing" className="border-b border-line px-3 py-2 text-[12px] text-muted">
-          <p className="m-0">No computer runs this workspace's schedules.</p>
+          <p className="m-0">{shown.serverOff ? AUTOMATION_SERVER_OFF : "No computer runs this workspace's schedules."}</p>
           {choose}
         </div>
       ) : from ? (
         <div data-testid="schedule-host-handover" className="border-b border-line px-3 py-2 text-[12px] text-muted">
-          <p className="m-0">Schedules wait for {from.thisComputer ? "this computer" : from.label} to hand over.</p>
+          <p className="m-0">Schedules wait for {computerInSentence(from)} to hand over.</p>
           {choose}
         </div>
       ) : null}
@@ -503,7 +512,7 @@ export function AutomationsPanel(props: {
   const scheduleHost = useScheduleHost(workspaceId, nextRuns.size > 0 || editing !== null, onError);
   const relayHost = scheduleHost.host?.relay ?? null;
   // Without a computer to run them, schedules have no next run to show.
-  const noHost = relayHost?.hostInstallId === null;
+  const noHost = relayHost !== null && shownScheduleHost(relayHost).hostInstallId === null;
   const runsOn = otherHostName(relayHost);
   const editingRef = useRef(editing);
   editingRef.current = editing;
@@ -580,7 +589,7 @@ export function AutomationsPanel(props: {
   }, [props.closeAsk]);
 
   const requestRetry = useCallback(
-    (target: { automationId: string; claimId: string }, startOver: boolean) =>
+    (target: { automationId: string; claimId: string; onServer: boolean }, startOver: boolean) =>
       bridge().retryCollectionAutomation({ workspaceId, ...target, startOver }),
     [workspaceId],
   );
@@ -697,7 +706,7 @@ export function AutomationsPanel(props: {
   const allow = (automationId: string, definitionHash: string, step: string, seq: number) => {
     const epoch = scope.current();
     void bridge()
-      .confirmCollectionAutomationStep({ workspaceId, automationId, definitionHash, step, seq })
+      .confirmCollectionAutomationStep({ workspaceId, automationId, definitionHash, step, seq, onServer: false })
       .then(() => {
         if (scope.isCurrent(epoch)) void load();
       })

@@ -29,7 +29,7 @@ export interface AgentWakeDependencies {
   /** Queues the message as the agent's trigger; a message is queued once. */
   recordTrigger(input: { triggerMessageId: string; threadId: string }): unknown;
   /** Asks the dispatch to run what is queued. */
-  scan(): void;
+  scan(): void | Promise<void>;
 }
 
 /** Posts the automation's message to its person's agent and queues the wake. */
@@ -49,5 +49,5 @@ export async function wakeAgent(dependencies: AgentWakeDependencies, message: Au
     await dependencies.start({ channelId: await dependencies.agentChannelId(), message });
   }
   await dependencies.recordTrigger({ triggerMessageId: message.messageId, threadId: message.threadId });
-  dependencies.scan();
+  await dependencies.scan();
 }

@@ -489,7 +489,7 @@ describe("a run and its Undo", () => {
     expect(runs[0]!.applied).toEqual([]);
     const undone = await undoCollectionAutomationRuns(space.undo([]), runs, signal);
     expect(space.records.get("rec_t")!.values).toEqual({ Count: 1 });
-    expect(undone).toMatchObject({ reverted: 1, changedSince: 0 });
+    expect(undone).toMatchObject({ undone: { reverted: 1, changedSince: 0 } });
   });
 
   it("undoes a recorded change whether or not the next change, which the run saved but did not record, landed", async () => {
@@ -506,7 +506,7 @@ describe("a run and its Undo", () => {
     };
     for (const count of [2, 3]) {
       const space = workspace([task("rec_t", { Count: count })]);
-      await expect(undoCollectionAutomationRuns(space.undo([]), [run], signal), `at ${count}`).resolves.toMatchObject({ reverted: 1, changedSince: 0 });
+      await expect(undoCollectionAutomationRuns(space.undo([]), [run], signal), `at ${count}`).resolves.toMatchObject({ undone: { reverted: 1, changedSince: 0 } });
       expect(space.records.get("rec_t")!.values, `at ${count}`).toEqual({ Count: 1 });
     }
   });
@@ -520,7 +520,7 @@ describe("a run and its Undo", () => {
     const newer = { ...base, keySeed: `${base.keySeed}-2`, startedAtMs: 2, outcome: { state: "done" as const },
       applied: [{ ordinal: 0, writes: [{ kind: "field" as const, recordId: "rec_t", path: "Tasks/rec_t.md", field: "Count", before: 2, after: 3 }] }] };
     const space = workspace([task("rec_t", { Count: 3 })]);
-    await expect(undoCollectionAutomationRuns(space.undo([]), [newer, older], signal)).resolves.toMatchObject({ reverted: 1, changedSince: 0 });
+    await expect(undoCollectionAutomationRuns(space.undo([]), [newer, older], signal)).resolves.toMatchObject({ undone: { reverted: 1, changedSince: 0 } });
     expect(space.records.get("rec_t")!.values).toEqual({ Count: 1 });
   });
 
@@ -532,19 +532,19 @@ describe("a run and its Undo", () => {
     const older = { ...base, startedAtMs: 1, superseded: true, applied: [{ ordinal: 0, writes: [write(1, 2)] }] };
     const newer = { ...base, keySeed: `${base.keySeed}-2`, startedAtMs: 2, outcome: { state: "done" as const }, applied: [{ ordinal: 0, writes: [write(10, 3)] }] };
     const space = workspace([task("rec_t", { Count: 2 })]);
-    await expect(undoCollectionAutomationRuns(space.undo([]), [newer, older], signal)).resolves.toMatchObject({ reverted: 0, changedSince: 1 });
+    await expect(undoCollectionAutomationRuns(space.undo([]), [newer, older], signal)).resolves.toMatchObject({ undone: { reverted: 0, changedSince: 1 } });
     expect(space.records.get("rec_t")!.values).toEqual({ Count: 2 });
     // A person who sets a value a run's write passed through keeps it too.
     const third = { ...base, keySeed: `${base.keySeed}-3`, startedAtMs: 3, applied: [{ ordinal: 0, writes: [write(3, 4)] }] };
     const chained = { ...newer, applied: [{ ordinal: 0, writes: [write(2, 3)] }] };
     const passedThrough = workspace([task("rec_t", { Count: 2 })]);
-    await expect(undoCollectionAutomationRuns(passedThrough.undo([]), [third, chained, older], signal)).resolves.toMatchObject({ reverted: 0, changedSince: 1 });
+    await expect(undoCollectionAutomationRuns(passedThrough.undo([]), [third, chained, older], signal)).resolves.toMatchObject({ undone: { reverted: 0, changedSince: 1 } });
     expect(passedThrough.records.get("rec_t")!.values).toEqual({ Count: 2 });
     // Undo writes each field once, straight back, so one that stopped left it where it was or where it goes.
     const stopped = workspace([task("rec_t", { Count: 1 })]);
-    await expect(undoCollectionAutomationRuns(stopped.undo([]), [third, chained, older], signal)).resolves.toMatchObject({ reverted: 0, changedSince: 0 });
+    await expect(undoCollectionAutomationRuns(stopped.undo([]), [third, chained, older], signal)).resolves.toMatchObject({ undone: { reverted: 0, changedSince: 0 } });
     const whole = workspace([task("rec_t", { Count: 4 })]);
-    await expect(undoCollectionAutomationRuns(whole.undo([]), [third, chained, older], signal)).resolves.toMatchObject({ reverted: 1, changedSince: 0 });
+    await expect(undoCollectionAutomationRuns(whole.undo([]), [third, chained, older], signal)).resolves.toMatchObject({ undone: { reverted: 1, changedSince: 0 } });
     expect(whole.records.get("rec_t")!.values).toEqual({ Count: 1 });
   });
 
@@ -561,7 +561,7 @@ describe("a run and its Undo", () => {
     const { runs } = await store.runsOf("collection:Tasks#chain", "atc_one");
     expect(runs[0]!.created).toEqual([]);
     const trashed: string[] = [];
-    await expect(undoCollectionAutomationRuns(space.undo(trashed), runs, signal)).resolves.toMatchObject({ removed: 1 });
+    await expect(undoCollectionAutomationRuns(space.undo(trashed), runs, signal)).resolves.toMatchObject({ undone: { removed: 1 } });
     expect(trashed).toEqual([expect.stringMatching(/^Log\/chain-/u)]);
   });
 

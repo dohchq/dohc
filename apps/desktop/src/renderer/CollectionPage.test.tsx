@@ -443,6 +443,7 @@ describe("CollectionPage", () => {
       }] })),
       listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [], next: null })),
       onAutomationRunsChanged: () => () => undefined,
+      listServerAutomationRuns: vi.fn(async () => ({ runs: null })),
       onAutomationHoldsChanged: () => () => undefined,
     });
     vi.stubGlobal("dohcDesktop", bridge);
@@ -1980,7 +1981,7 @@ describe("Button fields", () => {
     expect(onError).toHaveBeenCalledWith("Mark paid did not finish.", new Error("Total is not a number."), expect.any(Function));
     act(() => (onError.mock.calls[0]![2] as () => void)());
     await waitFor(() => expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith({
-      workspaceId: "ws-1", automationId: "collection:tasks#paid", claimId: "atc_press", startOver: false,
+      workspaceId: "ws-1", automationId: "collection:tasks#paid", claimId: "atc_press", startOver: false, onServer: false,
     }));
     expect(button.getAttribute("aria-busy")).toBe("true");
   });

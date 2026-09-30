@@ -45,7 +45,8 @@ const RECEIVED = {
 
 const getRelayReceivedShare = vi.fn();
 const retryAutomationNotice = vi.fn();
-beforeEach(() => vi.stubGlobal("dohcDesktop", { getRelayReceivedShare, retryAutomationNotice }));
+const retryCollectionAutomation = vi.fn(async () => ({ status: "queued", press: false }));
+beforeEach(() => vi.stubGlobal("dohcDesktop", { getRelayReceivedShare, retryAutomationNotice, retryCollectionAutomation }));
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -100,7 +101,7 @@ describe("opening a sent notice", () => {
     const here = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
     const { result, sentNotices, openFile, onSwitchWorkspace } = setup([notice()], [here]);
     // The file comes from someone else's workspace, so the row says where.
-    expect(result.current.sentNotices).toEqual([{ notice: notice(), folder: "Japan", openable: true }]);
+    expect(result.current.sentNotices).toEqual([{ notice: notice(), folder: "Japan", openable: true, retryable: false }]);
     await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
     expect(sentNotices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "n1" }]);
     expect(openFile).toHaveBeenCalledWith("shared-with-me/owner/Trips/Japan/report.md");
@@ -162,7 +163,7 @@ describe("opening a sent notice", () => {
   it("says access ended when the target was cleared or the share is gone", async () => {
     const ended = notice({ target: null });
     const { result, sentNotices, openFile } = setup([ended], [workspace("notes")]);
-    expect(result.current.sentNotices[0]).toEqual({ notice: ended, folder: null, openable: true });
+    expect(result.current.sentNotices[0]).toEqual({ notice: ended, folder: null, openable: true, retryable: false });
     await expect(result.current.onOpenSentNotice(ended, live())).resolves.toBe(ACCESS_ENDED_NOTE);
     expect(sentNotices.read).toHaveBeenCalledTimes(1);
     expect(openFile).not.toHaveBeenCalled();
@@ -270,5 +271,35 @@ describe("the list itself", () => {
     const error = new Error("notices file unreadable");
     const { reportShellError, sentNotices } = setup([], [workspace("notes")], "notes", { listFailure: { error } });
     expect(reportShellError).toHaveBeenCalledWith("dohc could not read notices sent to you.", error, sentNotices.relist);
+  });
+});
+
+describe("Try again on a failed run of the owner's server", () => {
+  const failed = (overrides: Partial<NoticeRow> = {}) => notice({
+    noticeId: "server-automation-failed:abc", kind: "automation-failed", workspaceId: "notes", recipientShareId: null,
+    target: { path: "Tasks", automation: "collection:Tasks#stamp", run: "claim-1" }, ...overrides,
+  });
+
+  it("runs it again on the server from this workspace", async () => {
+    const { result } = setup([failed()], [workspace("notes")]);
+    expect(result.current.sentNotices[0]?.retryable).toBe(true);
+    await act(async () => result.current.onRetrySentNotice(failed()));
+    expect(retryCollectionAutomation).toHaveBeenCalledWith({ workspaceId: "notes", startOver: false, automationId: "collection:Tasks#stamp", claimId: "claim-1", onServer: true });
+  });
+
+  it("offers it only for the server's own notice, in the workspace it names", async () => {
+    const others = [
+      failed({ workspaceId: "home" }),
+      failed({ noticeId: "automation-failed:local-computer" }),
+      failed({ noticeId: "from:owner:automation-failed:abc" }),
+      failed({ store: "local" }),
+      failed({ kind: "automation-notify" }),
+      failed({ target: { path: "Tasks", automation: "collection:Tasks#stamp" } }),
+    ];
+    const { result } = setup(others, [workspace("notes"), workspace("home")]);
+    expect(result.current.sentNotices.map((row) => row.retryable)).toEqual([false, false, false, false, false, false]);
+    retryAutomationNotice.mockResolvedValue({ status: "refused", reason: "Another computer holds this run." });
+    await act(async () => { for (const other of others) result.current.onRetrySentNotice(other); });
+    expect(retryCollectionAutomation).not.toHaveBeenCalled();
   });
 });

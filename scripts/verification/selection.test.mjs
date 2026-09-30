@@ -37,7 +37,7 @@ test("site changes select desktop tests without inventing a desktop production c
 test("desktop changes cover the site consumer and native delivery test inputs", () => {
   const plan = select(["apps/desktop/src/workspaces/nativeOwnerDelivery.ts"]);
   assert.deepEqual(plan.affected, ["@dohc/desktop", "@dohc/site"]);
-  assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/share-web", "@dohc/site", "@dohc/ydoc-projection"]);
+  assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/share-web", "@dohc/site", "@dohc/sync-relay", "@dohc/ydoc-projection"]);
   assert.deepEqual(plan.proofs, { accounts: false, selfHostNative: true, desktop: true });
   assert.deepEqual(plan.testFiles, {"@dohc/ydoc-projection": ["src/liveRestoreDrain.test.ts", "src/ownerDesktopTransport.test.ts"]});
 });

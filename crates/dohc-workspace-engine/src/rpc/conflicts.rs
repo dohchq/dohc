@@ -675,8 +675,12 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            if matches!(&result.primary, ApplyDisposition::Applied(_)) {
-                open.request_collection_reconcile();
+            // Without capture nothing keeps a reconcile that failed, so a
+            // replay reconciles too.
+            if matches!(&result.primary, ApplyDisposition::Applied(_))
+                || self.reconciles_collections_itself(&open)
+            {
+                self.collections_changed(ctx, &open).await?;
             }
             return Ok(replicated_conflict_json(result));
         }
@@ -692,8 +696,8 @@ impl EngineService {
             .conflict_open(Box::new(conflict), Arc::new(NoFaults), cancellation.token())
             .await
             .map_err(map_runtime)?;
-        if inserted {
-            open.request_collection_reconcile();
+        if inserted || self.reconciles_collections_itself(&open) {
+            self.collections_changed(ctx, &open).await?;
         }
         Ok(json!({ "inserted": inserted }))
     }
@@ -729,8 +733,12 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            if matches!(&result.primary, ApplyDisposition::Applied(_)) {
-                open.request_collection_reconcile();
+            // Without capture nothing keeps a reconcile that failed, so a
+            // replay reconciles too.
+            if matches!(&result.primary, ApplyDisposition::Applied(_))
+                || self.reconciles_collections_itself(&open)
+            {
+                self.collections_changed(ctx, &open).await?;
             }
             return Ok(replicated_conflict_json(result));
         }
@@ -836,7 +844,7 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        open.request_collection_reconcile();
+        self.collections_changed(ctx, &open).await?;
         let mut answer = json!({
             "conflict": settled_conflict_json(&result.conflict),
             "write": result.write.as_ref().map(|write| json!({

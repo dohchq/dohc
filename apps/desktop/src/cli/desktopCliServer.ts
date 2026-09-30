@@ -33,7 +33,7 @@ import {
   runCollectionRecordCreation,
   setCollectionRecordFields,
   type CollectionRecordEditContext,
-} from "../workspaces/collectionRecordEdits";
+} from "@dohc/automation-executor/collection-record-edits";
 import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentEditOrigin, LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";

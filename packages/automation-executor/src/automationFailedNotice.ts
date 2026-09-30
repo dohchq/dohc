@@ -145,7 +145,7 @@ export function automationFailedNotice(input: {
   const where = failure.neverStarted ? ` This happened on ${label}.` : ` It ran on ${label}.`;
   let title: string;
   let what: string;
-  if (failure.chainStopped) {
+  if (failure.chainStopped && (failure.datasetInstance === null || failure.error === AUTOMATION_CHAIN_STOPPED)) {
     title = "An automation chain stopped";
     what = chainStopped(failure, input.name);
   } else if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
@@ -153,7 +153,12 @@ export function automationFailedNotice(input: {
     what = "dohc stopped retrying a run that did not finish.";
   } else {
     title = `Automation ${quoted(NOTICE_TITLE_MAX_CHARS - "Automation  failed".length)} failed`;
-    what = sentence(failure.error);
+    const reason = failure.datasetInstance !== null && failure.chainStopped
+      ? failure.error === "claim-limit" ? "This change triggered too many automation runs. Make a smaller change."
+        : failure.error === "record-id-too-long" ? "This record's ID is too long for an automation run. Use a shorter ID."
+          : `The automation could not read this change. ${failure.error || "Check the Collection's records."}`
+      : failure.error;
+    what = sentence(reason);
   }
   const room = NOTICE_BODY_MAX_CHARS - [...count].length - [...where].length;
   return {

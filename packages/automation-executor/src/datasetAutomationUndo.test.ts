@@ -55,8 +55,8 @@ const withAna: DatasetUndoReach = { roster: { ...OWNER, grants: [ANA] }, collect
 const anaMayDelete: ReachDatasetGrants = { workspaceId: "workspace", grants: [{ principalKey: datasetPrincipalKey("workspace", ANA.grantId, ANA.recipientUserId), operationIds: [REMOVE] }] };
 
 const run = (operationId: string): StoredRun => ({
-  version: 7, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
-  steps: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, settled: true, outcome: { state: "done" },
+  version: 8, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
+  steps: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], settled: true, outcome: { state: "done" },
   applied: [{ ordinal: 0, writes: [
     { kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId: "a", expectedVersion: 1, version: 2,
       fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }] },
@@ -66,10 +66,10 @@ const run = (operationId: string): StoredRun => ({
 
 // An Undo as the executor makes it: a request sent again is saved with the claim's newest run.
 // It reads who can edit before each delete, as `reach` says then.
-const undo = (host: DatasetUndoHost, runs: StoredRun[], reach: DatasetUndoReach | (() => DatasetUndoReach) = alone) =>
-  undoDatasetAutomationRuns(host, collection, async () => (typeof reach === "function" ? reach() : reach).roster, "claim", runs, async (request) => {
+const undo = async (host: DatasetUndoHost, runs: StoredRun[], reach: DatasetUndoReach | (() => DatasetUndoReach) = alone) =>
+  (await undoDatasetAutomationRuns(host, collection, async () => (typeof reach === "function" ? reach() : reach).roster, "claim", runs, async (request) => {
     runs.at(-1)!.undoRequests.push(request);
-  }, new AbortController().signal);
+  }, new AbortController().signal)).undone;
 const preview = async (host: DatasetUndoHost, runs: StoredRun[], reach = alone) =>
   (await planDatasetUndo(host, reach, "claim", runs, runs, new AbortController().signal)).preview;
 const shown = (counts: Partial<DatasetUndoPreview>) =>
@@ -157,7 +157,10 @@ describe("undo of a dataset run", () => {
     const records = { a: { version: 4, values: { [STATUS]: "Paid" } } };
     const { writes, host } = recordsHost(records);
     const runs = [runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Paid", 2)]), runOf("h-2", 2, [edit(EDIT, "a", STATUS, "Paid", "Closed", 3)])];
-    expect(await undo(host, runs)).toEqual({ ...none, changedSince: 1 });
+    const { undone, keptFields } = await undoDatasetAutomationRuns(host, collection, async () => OWNER, "claim", runs, async () => undefined, new AbortController().signal);
+    expect(undone).toEqual({ ...none, changedSince: 1 });
+    // Named with its dataset and table, so another dataset's field with the same ids is another field.
+    expect(keptFields).toEqual([{ recordId: JSON.stringify([rules.datasetId, TABLE, "a"]), field: STATUS }]);
     expect(records.a.values[STATUS]).toBe("Paid");
     expect(writes).toEqual([]);
   });

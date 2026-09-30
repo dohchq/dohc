@@ -54,6 +54,13 @@ import {
   parseAutomationHostAction,
   type AutomationHostRoute,
 } from "./automationHostRoutes";
+import {
+  createAutomationServerRoutes,
+  isAutomationServerPath,
+  parseAutomationServerAction,
+  type AutomationServerRoute,
+  type ServerRuns,
+} from "./automationServerRoutes";
 import { createWorkspaceBlobRoutes, type WorkspaceBlobRoute } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
@@ -171,10 +178,13 @@ export interface CreateSyncRelayHandlerOptions {
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
   // Posts of notices to other people, keyed by sender.
   noticePostRateLimiter?: TokenBucketLimiter;
-  // Changes to a workspace's automation host, keyed by owner.
+  // Changes to a workspace's automation host, and to the server's runs, keyed by owner.
   automationHostRateLimiter?: TokenBucketLimiter;
   // This server while it runs workspaces' automations; absent when it does not.
   automationServer?: AutomationServer;
+  pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
+  // This server's runs, for their owners; undefined while it runs no automations.
+  serverRuns?: () => ServerRuns | undefined;
   // Button presses from shared views, per grant, and the host's answers, per owner.
   automationPressRateLimiters?: ReturnType<typeof createAutomationPressRateLimiters>;
   linkFreshnessPageSize?: number;
@@ -186,7 +196,7 @@ export interface CreateSyncRelayHandlerOptions {
 type SyncRelayRoute =
   | AppBackendRoute
   | DatasetRoute
-  | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" }
+  | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" | "press" }
   | DatasetReplicaRoute
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
@@ -204,6 +214,7 @@ type SyncRelayRoute =
   | { route: "workspaces" }
   | NoticeRoute
   | AutomationHostRoute
+  | AutomationServerRoute
   | AutomationPressRoute
   | WorkspaceBlobRoute
   | WorkspaceReplicationRoute
@@ -286,11 +297,14 @@ export function createSyncRelayHandler({
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
   automationServer,
+  pressDataset,
+  serverRuns = () => undefined,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
   const publicEditRelease = parsePublicEditRelease(releaseInput);
-  const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, pressDataset}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetExport = datasetHost ? createDatasetRecoveryExport(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, shareSenderLabel}) : undefined;
@@ -461,6 +475,7 @@ export function createSyncRelayHandler({
   const respondToAutomationHost = createAutomationHostRoutes(
     storage, nowMs, automationHostRateLimiter, automationServer ?? null,
   );
+  const respondToAutomationServer = createAutomationServerRoutes(storage, serverRuns, nowMs, automationHostRateLimiter);
   const automationPresses = createAutomationPressRoutes({
     storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
   });
@@ -507,10 +522,10 @@ export function createSyncRelayHandler({
     namedBrowserInvitation,
   } = createShareSummaries((shareId) => storage.getShareLabels(shareId), lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
 
-  const { respondToShareInventory, respondToWorkspaceLinkInventory } = createShareInventoryRoutes(
+  const shareInventoryRoutes = (claim: (userId: string) => Promise<void>) => createShareInventoryRoutes(
     storage,
     nowMs,
-    claimPendingShares,
+    claim,
     lookupUserEmail,
     requireShareAction,
     grantedShareSummary,
@@ -520,6 +535,11 @@ export function createSyncRelayHandler({
     publicEditRelease,
     shareSenderLabel,
   );
+  const { respondToShareInventory, respondToWorkspaceLinkInventory } = shareInventoryRoutes(claimPendingShares);
+  // The server reads the owner's shares without the owner there, so it
+  // binds none of the owner's pending invites; the roster reads only the
+  // shares the owner granted.
+  const ownerShareReads = shareInventoryRoutes(async () => undefined);
 
   const { respondToShareGrantTransition, respondToWorkspaceShareCreation } = createShareGrantRoutes(
     storage,
@@ -859,6 +879,16 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await respondToAutomationHost(request, route, actor.userId);
       }
+      if (route.route === "automation-server") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToAutomationServer(request, route, actor.userId);
+      }
       if (route.route === "notices" || route.route === "notice-marks") {
         // Desktop and agent credentials only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
@@ -992,6 +1022,31 @@ export function createSyncRelayHandler({
   };
   return Object.assign(handle, {
     resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
+    /**
+     * A GET of the owner's share listings, answered in process as the
+     * routes answer the owner, so the server's automations find a
+     * workspace's editors the way the owner's computers do. Only
+     * `/sync/shares` and `/sync/:workspaceId/shares/links` are served.
+     */
+    async readOwnerShares(ownerUserId: string, path: string) {
+      const request = new Request(new URL(path, "http://relay.invalid"));
+      const url = new URL(request.url);
+      let response: Response;
+      try {
+        const parts = url.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+        const actor = { userId: ownerUserId };
+        if (url.pathname === "/sync/shares") {
+          response = await ownerShareReads.respondToShareInventory(request, { route: "shares-list" }, actor);
+        } else if (parts.length === 4 && parts[0] === "sync" && parts[2] === "shares" && parts[3] === "links") {
+          response = await ownerShareReads.respondToWorkspaceLinkInventory(request, parseWorkspaceId(parts[1]), actor);
+        } else {
+          throw notFound();
+        }
+      } catch (error) {
+        response = errorResponse(error);
+      }
+      return { status: response.status, body: await response.json().catch(() => undefined) };
+    },
   });
 }
 
@@ -1080,7 +1135,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
       const datasetId = parts[4];
       if (!datasetId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw notFound();
       if (parts.length === 5) return { route: "named-dataset", shareId, datasetId, action: "describe" };
-      if (parts.length === 6 && ["invoke", "upload", "file"].includes(parts[5]!)) return { route: "named-dataset", shareId, datasetId, action: parts[5] as "invoke" | "upload" | "file" };
+      if (parts.length === 6 && ["invoke", "upload", "file", "press"].includes(parts[5]!)) return { route: "named-dataset", shareId, datasetId, action: parts[5] as "invoke" | "upload" | "file" | "press" };
       throw notFound();
     }
     if (parts.length === 3) return { route: "share", shareId };
@@ -1162,7 +1217,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 6 && parts[4] === "replica" && ["capture","page","blob"].includes(parts[5]!)) return {route:"dataset-replica",workspaceId,datasetId,action:parts[5] as DatasetReplicaRoute["action"]};
     if (parts.length === 6 && parts[4] === "imports" && /^[A-Za-z0-9_-]{1,128}$/.test(parts[5]!)) return {route: "dataset", workspaceId, datasetId, action: "import", transferId: parts[5]};
     if (parts.length === 4) return {route:"dataset", workspaceId, datasetId, action:"describe"};
-    if (parts.length === 5 && ["activate","artifacts","invoke","prepare-migration","approve-migration","discard-migration","migration-preview-page","permissions","upload","file","history","history-revision","export","lifecycle","archive","restore","pending-attempts","reconcile-attempt","cancel-attempt","delete-preview","delete","deletion-status"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
+    if (parts.length === 5 && ["press","activate","artifacts","invoke","prepare-migration","approve-migration","discard-migration","migration-preview-page","permissions","upload","file","history","history-revision","export","lifecycle","archive","restore","pending-attempts","reconcile-attempt","cancel-attempt","delete-preview","delete","deletion-status"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
     if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
     if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
     throw notFound();
@@ -1171,6 +1226,11 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     const action = parseAutomationPressAction(parts[3]);
     if (!action) throw notFound();
     return { route: "automation-presses", workspaceId, action };
+  }
+  if (isAutomationServerPath(parts)) {
+    const action = parseAutomationServerAction(parts[3]);
+    if (!action) throw notFound();
+    return { route: "automation-server", workspaceId, action };
   }
   if (isAutomationHostPath(parts)) {
     const action = parseAutomationHostAction(parts[3]);

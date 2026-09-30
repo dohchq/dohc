@@ -344,6 +344,25 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
       },
     };
   })();
+  const withRecordWrites: ConstructorParameters<typeof CollectionAutomations>[0]["withRecordWrites"] = async (_signal, work) => {
+      if (!options.documents) throw new Error("Dataset runs write through their own operations.");
+      return work({
+        create: async ({ recordId, collectionPath, name }) => {
+          if (collectionPath !== documentPath) throw new Error("Wrong Collection.");
+          documents.set(recordId, { id: recordId, path: documentPath + "/" + name + ".md", status: "" });
+          return { recordId, path: documents.get(recordId)!.path };
+        },
+        setFields: async ({ recordPath, fields, expectedBefore }) => {
+          const record = [...documents.values()].find((record) => record.path === recordPath)!;
+          const before = record.status;
+          if (expectedBefore !== undefined && expectedBefore.Status !== (before || null)) {
+            return { replaced: {}, kept: { Status: before || null } };
+          }
+          record.status = String(fields.Status);
+          return { replaced: { Status: before || null }, kept: {} };
+        },
+      });
+    };
   const makeExecutor = () => executor = new CollectionAutomations({
     personName: (userId) => `Person ${userId}`,
     mayRetryPress: async () => options.mayRetryPress ?? false,
@@ -351,6 +370,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     onPressWaiting: (event) => { waiting.push(event); wake(); },
     groupHost: async () => (options.groups ? 0 : null),
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
+    reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
     groupMessagesSkipped: async () => undefined,
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("These test messages carry their whole body."); },
@@ -360,22 +380,8 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
       write: async (_signal, message) => { await options.onMessage?.(message); messages.push(message); wake(); },
     },
     withEngine: async (work) => await work(engine),
-    withRecordWrites: async (_signal, work) => {
-      if (!options.documents) throw new Error("Dataset runs write through their own operations.");
-      return work({
-        create: async ({ recordId, collectionPath, name }) => {
-          if (collectionPath !== documentPath) throw new Error("Wrong Collection.");
-          documents.set(recordId, { id: recordId, path: documentPath + "/" + name + ".md", status: "" });
-          return { recordId, path: documents.get(recordId)!.path };
-        },
-        setFields: async ({ recordPath, fields }) => {
-          const record = [...documents.values()].find((record) => record.path === recordPath)!;
-          const before = record.status;
-          record.status = String(fields.Status);
-          return { replaced: { Status: before || null }, kept: {} };
-        },
-      });
-    },
+    withRecordWrites,
+    withUndoWrites: withRecordWrites,
     readText: async (path) => {
       try {
         const text = await readFile(join(root, path), "utf8");
@@ -1050,6 +1056,20 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
+  it("names held dataset operations by their label", async () => {
+    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+    const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
+    await f.executor.open();
+    await f.executor.automationsIn("Budget");
+    f.setRoster(OWNER);
+    f.executor.rosterChanged();
+    await f.until(() => f.executor.holds().some((hold) => hold.step === JSON.stringify(["operation", definition.datasetId, STATUS_ONLY])));
+    expect(f.executor.holds()).toEqual(expect.arrayContaining([expect.objectContaining({
+      step: JSON.stringify(["operation", definition.datasetId, STATUS_ONLY]), operationName: "Set status",
+    })]));
+    await f.executor.dispose();
+  });
+
   it("holds a run when a field becomes readable only because an editor left, until a current editor allows it", async () => {
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     const withAna: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [ana] };
@@ -1161,9 +1181,12 @@ describe("Collection automations on a dataset", () => {
     expect((await f.records()).some((row) => row.values[NOTES] === "Log")).toBe(false);
     // The owner undid it, not the automation.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).not.toHaveProperty("automation");
-    // Run history shows it undone, and neither Undo nor Try again runs it again.
-    expect((await f.executor.runs(AUTOMATION)).runs).toEqual([expect.objectContaining({ claimId, undone: true })]);
-    expect(await f.executor.undo({ automationId: AUTOMATION, claimId, deletes: null }, trash)).toEqual({ status: "refused", reason: "You already undid this run." });
+    // Run history does not show it fully undone, since Notes kept a later
+    // value; Undo points to History, and Try again does not run it again.
+    expect((await f.executor.runs(AUTOMATION)).runs).toEqual([expect.objectContaining({ claimId, undone: false })]);
+    expect(await f.executor.undo({ automationId: AUTOMATION, claimId, deletes: null }, trash)).toEqual({
+      status: "refused", reason: "dohc kept the fields someone changed after this run. Restore them from each record's History.",
+    });
     expect(await f.executor.retry({ automationId: AUTOMATION, claimId, startOver: false })).toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
     expect((await f.record(invoice))?.values).toMatchObject({ [STATUS]: "Open", [NOTES]: "mine" });
     await f.executor.dispose();
@@ -1216,12 +1239,30 @@ describe("Collection automations on a dataset", () => {
     if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
     const hash = definitionHash(summary.automations[0].automation);
     const trash = async () => { throw new Error("A dataset's added records stay."); };
-    await expect(f.executor.undoRunsOf([{ collectionPath: "Budget", id: "close-paid", definitionHash: hash }], trash)).resolves.toMatchObject({ undone: 1, left: 0, errorMessage: null });
+    await expect(f.executor.undoRunsOf([{ collectionPath: "Budget", id: "close-paid", definitionHash: hash }], trash)).resolves.toMatchObject({ undone: 1, left: 0, keptFields: [], errorMessage: null });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     expect((await f.executor.runs(AUTOMATION)).runs).toEqual([expect.objectContaining({ undone: true })]);
     await f.executor.dispose();
   });
 
+  it("counts one dataset field changed since the run once when stopping and restoring", async () => {
+    const f = await world();
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    await f.edit(invoice, { [STATUS]: "Changed later" });
+    const summary = await f.executor.automationsIn("Budget");
+    if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
+    const result = await f.executor.undoRunsOf([
+      { collectionPath: "Budget", id: "close-paid", definitionHash: definitionHash(summary.automations[0].automation) },
+    ], async () => { throw new Error("Nothing moves to the trash."); });
+    expect(result).toMatchObject({ undone: 1, left: 0, reverted: 0, missing: 0, otherKept: 0, errorMessage: null });
+    expect(result.keptFields).toHaveLength(1);
+    expect(result.keptFields.length + result.missing + result.otherKept).toBe(1);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Changed later");
+    await f.executor.dispose();
+  });
   it("refuses to undo a run whose rules no longer resolve, before it saves or sends anything", async () => {
     const f = await world();
     await f.executor.open();
@@ -1991,7 +2032,7 @@ describe("dataset automation claims in both ledgers", () => {
     if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
     const trash = async () => { throw new Error("A dataset's added records stay."); };
     await expect(f.executor.undoRunsOf([{ collectionPath: "Budget", id: "close-paid", definitionHash: definitionHash(summary.automations[0].automation) }], trash))
-      .resolves.toMatchObject({ undone: 1, left: 0, errorMessage: null });
+      .resolves.toEqual({ undone: 1, left: 0, reverted: 1, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     await f.executor.dispose();
   });
@@ -2002,9 +2043,9 @@ describe("dataset automation claims in both ledgers", () => {
     const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
     const saved = (claimId: string, outcome: StoredRun["outcome"], rest: Partial<StoredRun> = {}): StoredRun => ({
-      version: 7, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
+      version: 8, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
       applied: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null,
-      superseded: false, undo: null, settled: outcome?.state === "done", outcome, ...rest,
+      superseded: false, undo: null, undoKept: [], settled: outcome?.state === "done", outcome, ...rest,
     });
     const failed = { state: "failed" as const, error: "Not yet.", run: 1, step: 0 };
     await store.save(saved("atc_done", { state: "done" }));
@@ -3084,5 +3125,53 @@ it("refuses a viewer who can write only the source button table when its automat
     viewer, () => undefined)).rejects.toThrow("Only people who can edit Invoices can use this button.");
   expect(described.sort()).toEqual([definition.datasetId, other.definition.datasetId].sort());
   expect(f.host.automations.claims(`collection:${BUDGET}#cross-button`).claims).toEqual([]);
+  await f.executor.dispose();
+});
+
+it("retries a mixed run's document fields while keeping its dataset Undo counts", async () => {
+  const f = await world({ documents: true });
+  const invoice = await f.create({ [STATUS]: "Open" });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Status:\n    type: text\n");
+  await writeFile(join(f.root, "Log/automations.yaml"), `version: 1
+automations:
+  - id: mixed
+    name: Mixed
+    when: record-added
+    do:
+      - set: {Status: Closed}
+      - find: record.Status == "Open"
+        collection: Budget
+        operation: invoices.list
+        as: invoices
+      - set: {Status: Closed}
+        records: invoices
+        operation: invoices.status
+`);
+  const document = { id: "document", path: "Log/document.md", status: "Original" };
+  f.documents.set(document.id, document);
+  await f.executor.open();
+  const automationId = "collection:Log#mixed";
+  const claim: AutomationClaim = { ...engineClaim("mixed-undo", "pending", Date.now(), automationId),
+    collectionPath: "Log", recordId: document.id, trigger: { historyId: 1 },
+    change: { kind: "added", authorOriginId: null, actorKind: "human", onBehalfOf: null,
+      sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 } };
+  f.engineClaims.push(claim);
+  f.executor.notifyClaimed();
+  await f.until(() => claim.state === "done" || claim.state === "failed");
+  expect(claim.state).toBe("done");
+  expect(document.status).toBe("Closed");
+  expect((await f.record(invoice.id))?.values[STATUS]).toBe("Closed");
+  document.status = "Someone else's edit";
+  await f.edit(invoice.id, { [STATUS]: "Someone else's edit" });
+  const undo = () => f.executor.undo({ automationId, claimId: claim.claimId, deletes: null }, async () => { throw new Error("No record should be removed."); });
+  expect(await undo()).toMatchObject({ status: "undone", reverted: 0, changedSince: 2 });
+  const before = f.host.history({ datasetId: definition.datasetId }).entries;
+  document.status = "Closed";
+  expect(await undo()).toMatchObject({ status: "undone", reverted: 1, changedSince: 1 });
+  expect(document.status).toBe("Original");
+  expect((await f.record(invoice.id))?.values[STATUS]).toBe("Someone else's edit");
+  expect(f.host.history({ datasetId: definition.datasetId }).entries).toEqual(before);
+  expect(await undo()).toMatchObject({ status: "refused", reason: expect.stringContaining("History") });
   await f.executor.dispose();
 });

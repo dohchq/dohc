@@ -12,6 +12,7 @@ import {
   HANDOVER_READ_MAX_MS,
   HOST_FRESH_MS,
   hostOfAnswer,
+  refusalOfAnswer,
   automationHostGeneration,
   isAutomationHost,
   relayUnreachable,
@@ -27,6 +28,8 @@ const host = (installId: string, generation: number, handoverFrom: string | null
 
 // The Group handover this computer's engine answers when it releases.
 const GROUPS = { floorMs: 1, automations: [] };
+// This computer's reach verdicts, released with it.
+const REACH = { version: 1, verdicts: [] };
 
 const answer = (row: RelayAutomationHost | null): HostAnswer => ({ status: 200, body: { ok: true, host: row, computers: [] } });
 
@@ -76,7 +79,7 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
     finishHere: async (_workspaceId, stillHandingOver) => {
       finishes += 1;
       whileFinishing?.(stillHandingOver);
-      return finish === null ? null : { throughMs: finish, groups: GROUPS, groupsWatched: 2 };
+      return finish === null ? null : { throughMs: finish, groups: GROUPS, groupsWatched: 2, reach: REACH };
     },
     logError: (_workspaceId, error) => { errors.push(error); },
     monotonicMs: () => clock,
@@ -169,7 +172,7 @@ describe("automation hosts", () => {
     await w.settle();
     expect(w.requests[1], "the release carries the Group handover").toEqual({
       action: "release",
-      body: { installId: ME, generation: 3, releasedThroughMs: 5_000, groups: GROUPS, groupsWatched: 2 },
+      body: { installId: ME, generation: 3, releasedThroughMs: 5_000, groups: GROUPS, groupsWatched: 2, reach: REACH },
     });
     expect(w.relay()).toEqual(host(OTHER, 4, null, 5_000));
     expect(await w.hosts.runsHere("ws")).toBe(false);
@@ -555,6 +558,17 @@ describe("host answers and labels", () => {
     expect(of([server, { ...laptop, extra: 1 }])).toEqual([server, laptop]);
     expect(of([{ ...laptop, kind: undefined }])).toBeUndefined();
     expect(of([{ ...laptop, kind: "phone" }])).toBeUndefined();
+  });
+
+  it("takes the relay's reason for refusing the server, and no other refusal", () => {
+    const refused = (error: string, status = 400) => refusalOfAnswer({ status, body: { ok: false, error, code: "bad_request" } });
+    const full = "This server is running automations for as many workspaces as it can. Choose one of your computers.";
+    const off = "This server does not run automations.";
+    expect(refused(full)).toBe(full);
+    expect(refused(off)).toBe(off);
+    expect(refused("installId is not one of this workspace's computers")).toBeUndefined();
+    expect(refused(off, 409)).toBeUndefined();
+    expect(refusalOfAnswer({ status: 400, body: undefined })).toBeUndefined();
   });
 
   it("tells a relay that did not answer from a failure", () => {

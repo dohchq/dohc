@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
-import type { RosterListing } from "../automations/shareRoster";
+import type { RosterListing } from "@dohc/automation-executor/roster-listing";
 import {
   createRegistryStore,
   type JoinedSharedChannel,

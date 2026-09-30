@@ -11,14 +11,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const request = (target: { automationId: string; claimId: string }, startOver: boolean) =>
+const request = (target: { automationId: string; claimId: string; onServer: boolean }, startOver: boolean) =>
   bridge().retryCollectionAutomation({ workspaceId: "ws-a", ...target, startOver });
 
 function Retry(props: { workspaceId: string; onError: () => void; onQueued: () => void }) {
   const { retry, dialog } = useAutomationRetry({ ...props, request });
   return (
     <>
-      <button type="button" onClick={() => retry({ automationId: "collection:Tasks#stamp", claimId: "atc_1" })}>
+      <button type="button" onClick={() => retry({ automationId: "collection:Tasks#stamp", claimId: "atc_1", onServer: false })}>
         Try again
       </button>
       {dialog}
@@ -40,7 +40,7 @@ describe("Try again for an automation run", () => {
     act(() => screen.getByRole("button", { name: "Try again" }).click());
     act(() => screen.getByRole("button", { name: "Try again" }).click());
     expect(retryCollectionAutomation).toHaveBeenCalledWith({
-      workspaceId: "ws-a", automationId: "collection:Tasks#stamp", claimId: "atc_1", startOver: false,
+      workspaceId: "ws-a", automationId: "collection:Tasks#stamp", claimId: "atc_1", startOver: false, onServer: false,
     });
     rerender(<Retry workspaceId="ws-b" onError={onError} onQueued={onQueued} />);
     await act(async () => {

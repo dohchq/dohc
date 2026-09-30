@@ -77,3 +77,17 @@ describe("waking a person's agent", () => {
     expect(wake.recordTrigger).not.toHaveBeenCalled();
   });
 });
+
+
+it("keeps a background wake open until dispatch has scanned its trigger", async () => {
+  const scanned = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const wake = dependencies({ scan: () => { entered.resolve(); return scanned.promise; } });
+  let done = false;
+  const run = wakeAgent(wake, message).then(() => { done = true; });
+  await entered.promise;
+  expect(done).toBe(false);
+  scanned.resolve();
+  await run;
+  expect(done).toBe(true);
+});

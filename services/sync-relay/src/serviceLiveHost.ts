@@ -12,6 +12,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { createEngineClient, type EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { VersionedLiveAdapter, type Event } from "@dohc/workspace-engine-client";
+import type { LiveClaimLedger } from "./automationLiveClaims.js";
 import { parseLiveDocumentKey, parseLiveUpdateIdentifier, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { LiveCommittedDelivery, type CommittedDeliveryOutcome } from "./liveCommittedDelivery.js";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
@@ -131,6 +133,7 @@ export async function startServiceLiveHost(options: {
   const ordinary = new Map<string, ServiceOrdinaryReplication>();
   const documents = new LiveDocumentWork();
   const attachments=new Map<string,{handle:string;ordinary:ServiceOrdinaryReplication}>();
+  const ledgers = new Map<string, LiveClaimLedger>();
   let activation:ServiceActivationDriver|undefined,activationTimer:ReturnType<typeof setTimeout>|undefined,activationPass:Promise<void>|undefined;
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let client: EngineClient | undefined, temporary: string | undefined, registered = false, closing: Promise<void> | undefined;
@@ -287,6 +290,25 @@ export async function startServiceLiveHost(options: {
       isDocumentReady(document: LiveDocumentKey): boolean {
         try { check(); return consumerFor(parseLiveDocumentKey(document)) !== undefined; }
         catch { return false; }
+      },
+      /**
+       * The claim ledger of a workspace this host replicates as its owner,
+       * where it claims each accepted frame's field changes, for the relay's
+       * automations. Null for any other workspace, or once this host retired.
+       */
+      automationLedger(workspaceId: string): LiveClaimLedger | null {
+        const attached = attachments.get(workspaceId);
+        if (!attached || signal.aborted) return null;
+        let ledger = ledgers.get(workspaceId);
+        if (!ledger) {
+          ledger = Object.freeze({engine: new VersionedLiveAdapter(client!, attached.handle, {workspaceId}), incarnation: coordinate.connectionId});
+          ledgers.set(workspaceId, ledger);
+        }
+        return ledger;
+      },
+      /** The engine's events, such as a claim it made for an accepted frame. */
+      onEvent(handler: (event: Event) => void): () => void {
+        return client!.onEvent(handler);
       },
       async prepareOrdinary(workspaceId: string, callerSignal?: AbortSignal) {
         if(config.activation)throw new Error("The activation driver owns ordinary replication on this host.");

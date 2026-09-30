@@ -13,7 +13,7 @@ const testInputs = {
   "@dohc/workspace-auth": ["@dohc/workspace-postgres"],
   "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop"],
   "@dohc/share-web": ["@dohc/desktop", "@dohc/mcp", "@dohc/cli", "@dohc/workspace-postgres", "@dohc/workspace-engine-client"],
-  "@dohc/sync-relay": ["@dohc/share-web"],
+  "@dohc/sync-relay": ["@dohc/share-web", "@dohc/desktop"],
   "@dohc/workspace-api": ["@dohc/workspace-postgres"],
 };
 // Desktop changes affect these compatibility tests, not the storage-only suite.

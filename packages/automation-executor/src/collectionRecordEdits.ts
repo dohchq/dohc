@@ -1,16 +1,11 @@
-import { requirePublishedWrite } from "./workspaceEngineCapture";
 import { CreationPartialError, type CreationPartial, type CreationStage } from "@dohc/cli/creation";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { randomBytes } from "node:crypto";
-import { recordIdFromBytes } from "@dohc/automation-executor/record-ids";
-import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { errorMessage } from "./workspaceError";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import { isIdempotencyKeyReuseRefusal } from "@dohc/workspace-engine-client";
-import type { CollectionRecordWrites } from "@dohc/automation-executor/collection-automation-run";
 import {
   RECORD_ID_FRONTMATTER_KEY,
   isRecordId,
@@ -21,24 +16,20 @@ import {
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import * as Y from "yjs";
 import {
+  FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEditsRefused,
   patchFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
-import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../renderer/markdown/frontmatter";
+import type { CollectionRecordWrites } from "./collectionAutomationRun";
+import { recordIdFromBytes } from "./recordIds";
 
-import {
-  readWorkspaceText,
-  withStaleSensitiveWorkspaceOperation,
-} from "./workspaceAssets";
-import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
-import { createFile, CreatedFileWriteError } from "./workspaceFiles";
-
-// The one main-side collection write seam. Every agent surface (MCP/CLI) and
-// Collection automations set record fields and create records through these
-// two functions, so attribution, session ownership, and settle behavior cannot
-// drift between surfaces. The record's live-document frontmatter map is the
-// storage path — the same one the desktop PropertiesPanel and collection
-// views write through.
+// The one collection write seam. Every agent surface (MCP/CLI) and Collection
+// automations, on the desktop and on a server, set record fields and create
+// records through these two functions, so attribution, session ownership, and
+// settle behavior cannot drift between surfaces or hosts. The record's
+// live-document frontmatter map is the storage path, the same one the desktop
+// PropertiesPanel and collection views write through. Each host supplies a
+// CollectionRecordEditContext over its own engine.
 //
 // Both writes are safe to run again. A field that already holds the
 // requested value is not written, so a re-run journals only what still
@@ -55,7 +46,7 @@ const RECORD_NOT_FOUND = "collection-record-not-found";
 
 // The longest a create waits for the engine to adopt its file, when the
 // caller's own signal allows longer. A healthy engine adopts within one
-// capture pass.
+// Collection reconcile.
 const ADOPTION_DEADLINE_MS = 15_000;
 
 /** The engine adapter subset the seam reads through. VersionedLiveAdapter satisfies it. */
@@ -65,20 +56,58 @@ export interface CollectionRecordEditAdapter {
   ): Promise<CollectionGetRecordResult>;
 }
 
-/** Workspace-scoped authority the caller (main) supplies. The CLI/MCP caller never sees it. */
+/** How one update is recorded: its author, its declared provenance, and its idempotency key. */
+export interface RecordUpdateOptions {
+  actorOriginId?: string;
+  attribution?: ChangeAttributionWire;
+  idempotencyKey?: string;
+}
+
+/** A record's live document session, as a write uses it. */
+export interface RecordEditSession {
+  /**
+   * Journals one update, decided on the session's chain against its
+   * canonical doc as it stands then; null journals nothing. Resolves whether
+   * an update was journaled. A keyed update rejects when the engine did not
+   * record it, saying whether it may have been recorded.
+   */
+  applyDecidedLocalUpdate(
+    decide: (doc: Y.Doc) => Uint8Array | null,
+    onArmed: () => void,
+    options: RecordUpdateOptions,
+  ): Promise<boolean>;
+  /** Settles the journaled updates, so they are durable and the file is written. Throws when it cannot. */
+  settleNow(options: { summary: string }): Promise<unknown>;
+  close(): Promise<void>;
+}
+
+/** Workspace-scoped authority the host supplies. The CLI/MCP caller never sees it. */
 export interface CollectionRecordEditContext {
-  capture: Pick<WorkspaceEngineCapture, "openYDocSession" | "writeAuthoredFile">;
-  workspaceRoot: string;
+  /** Opens the live document session of a record in the workspace's active version. */
+  openRecord(path: string): Promise<RecordEditSession>;
+  /**
+   * Creates a file that does not exist yet, as `author`, and answers the
+   * workspace path it created, as the host spells it. A taken path throws
+   * VersionedTextStoreError "target-path-exists", or an error with code
+   * EEXIST. An automation's file must name the automation as the author of
+   * the moment that created it (see createRecordFile).
+   */
+  createFile(path: string, text: string, author: ChangeAuthor): Promise<string>;
+  /** Whether a failed create left a file that must be removed before retrying. */
+  isIncompleteFileWrite?(error: unknown): boolean;
+  /** A file's text in the active version. Throws when there is none. */
+  readText(path: string): Promise<{ text: string; truncated: boolean }>;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withAdapter<T>(
     work: (adapter: CollectionRecordEditAdapter) => Promise<T>,
   ): Promise<T | null>;
   /**
-   * Subscribes to the engine's announcement of each settled capture pass in
-   * this workspace: the paths the pass captured or reconciled, or null when
-   * the announcement did not list them all. Returns the unsubscribe.
+   * Subscribes to the engine's news that it may have adopted records: the
+   * paths it reconciled, or null when the news did not list them all.
+   * Returns the unsubscribe. A host whose engine adopts a record before its
+   * create returns never needs to call the listener.
    */
-  onCaptureSettled(listener: (paths: readonly string[] | null) => void): () => void;
+  onRecordsChanged(listener: (paths: readonly string[] | null) => void): () => void;
   /**
    * The caller's lifetime and deadline. A create stops waiting for the
    * engine to adopt its file when this aborts, and no write starts after it.
@@ -279,15 +308,7 @@ export async function setCollectionRecordFields(
   }
   throwIfAborted(context.signal);
   input.onStage?.("bind");
-  const session = await context.capture.openYDocSession({
-    path: input.recordPath,
-    // A record file is a live Markdown document.
-    contentKind: "richdoc",
-    onRemoteUpdate: () => {
-      // The capture already folds remote updates into the session's canonical
-      // doc; this seam holds no second replica to notify.
-    },
-  });
+  const session = await context.openRecord(input.recordPath);
   let failed = false;
   try {
     // The caller can end while the session opens (an automation run's
@@ -345,6 +366,9 @@ export async function setCollectionRecordFields(
           const current = doc.getMap(FRONTMATTER_FIELD).get(field);
           kept[field] = (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;
           return null;
+        }, () => {}, {
+          ...(actorOriginId === undefined ? {} : { actorOriginId }),
+          attribution: attributionFor(input.author),
         });
       });
     }));
@@ -378,9 +402,9 @@ export async function setCollectionRecordFields(
 
 /**
  * Creates one record: writes `${collectionPath}/${name}.md` with only its
- * record id in the frontmatter, through the same createFile path the
- * desktop's createWorkspaceFile IPC uses, waits for the engine to adopt the
- * file, seeds `fields` (when given) through setCollectionRecordFields so
+ * record id in the frontmatter, through the host's createFile, waits for
+ * the engine to adopt the file, seeds `fields` (when given) through
+ * setCollectionRecordFields so
  * initial values land as attributed field history, and returns the record's
  * path and id. The engine keeps the file's id unless another record, now or
  * in its history, holds it; then it adopts the file under a new id, and that
@@ -457,13 +481,13 @@ export async function createCollectionRecord(
   } catch (error) {
     // A transport or lease can fail after the write landed.
     const diskId = await fileRecordId(context, path).catch(() => null);
-    if (!durable && diskId !== requestedId && !(error instanceof CreatedFileWriteError)) throw error;
+    if (!durable && diskId !== requestedId && context.isIncompleteFileWrite?.(error) !== true) throw error;
     if (diskId !== null && ["write", "capture", "index"].includes(failedStage)) recordId = diskId;
     return {
-      kind: "partial", created: [path], failedStage, reason: errorMessage(error),
+      kind: "partial", created: [path], failedStage, reason: (error instanceof Error ? error.message : String(error)),
       retry: {
-        mode: error instanceof CreatedFileWriteError ? "remove-and-retry" : "resume", recordId,
-        instruction: error instanceof CreatedFileWriteError
+        mode: context.isIncompleteFileWrite?.(error) === true ? "remove-and-retry" : "resume", recordId,
+        instruction: context.isIncompleteFileWrite?.(error) === true
           ? "Review the listed file in Files, then remove it. Create the record again."
           : "Try again with the same record ID and fields to finish this record without creating another.",
       },
@@ -487,7 +511,7 @@ export async function runCollectionRecordCreation(
     if (!result) throw error;
     if ("kind" in result) return result;
     return {
-      kind: "partial", created: [result.path], failedStage: "scope", reason: errorMessage(error),
+      kind: "partial", created: [result.path], failedStage: "scope", reason: (error instanceof Error ? error.message : String(error)),
       retry: { mode: "resume", recordId: result.recordId,
         instruction: "Reopen this workspace. Try again with the same record ID and fields to confirm the saved record." },
     };
@@ -541,22 +565,7 @@ async function createRecordFile(
 ): Promise<string> {
   const text = `---\n${RECORD_ID_FRONTMATTER_KEY}: ${recordId}\n---\n`;
   try {
-    if (author.kind === "automation") {
-      requirePublishedWrite(requestedPath, await context.capture.writeAuthoredFile(
-        join(context.workspaceRoot, requestedPath),
-        text,
-        author,
-        { createOnly: true, signal: context.signal },
-      ));
-      return requestedPath;
-    }
-    return await withStaleSensitiveWorkspaceOperation(
-      context.workspaceRoot,
-      async () =>
-        await createFile(context.workspaceRoot, requestedPath, text, {
-          exclusive: true,
-        }),
-    );
+    return await context.createFile(requestedPath, text, author);
   } catch (error) {
     const collision = error instanceof VersionedTextStoreError
       ? error.code === "target-path-exists"
@@ -577,7 +586,7 @@ async function fileRecordId(
   context: CollectionRecordEditContext,
   path: string,
 ): Promise<string | null> {
-  const read = await readWorkspaceText(context.workspaceRoot, path);
+  const read = await context.readText(path);
   const id = read.truncated
     ? undefined
     : parseCollectionRecordFields(read.text)?.[RECORD_ID_FRONTMATTER_KEY];
@@ -611,10 +620,10 @@ async function recordPathFor(
 
 /**
  * Resolves once the engine has adopted the file at `path`, with the id it
- * adopted it under. The engine announces each capture pass after it
- * reconciles the Collections it touched, and a new id it gives the file
- * lands in the file itself. So each check reads the file's id and looks
- * that id up, once now and once for each announcement that names the path.
+ * adopted it under. The engine says when it reconciled the Collections a
+ * change touched, and a new id it gives the file lands in the file itself.
+ * So each check reads the file's id and looks that id up, once now and once
+ * for each announcement that names the path.
  * The wait ends at the caller's signal or ADOPTION_DEADLINE_MS, whichever
  * comes first.
  */
@@ -677,7 +686,7 @@ function waitForRecord(
     let unsubscribe = () => {};
     onStage("capture");
     try {
-      unsubscribe = context.onCaptureSettled((paths) => {
+      unsubscribe = context.onRecordsChanged((paths) => {
         if (paths === null || paths.includes(path)) void check();
       });
     } catch (error) {

@@ -331,6 +331,14 @@ fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static s
     }
 }
 
+/// Whether a text write can need a Collection reconcile: a new record to
+/// adopt, or a schema. An edit to an existing record needs none.
+fn can_move_collections(path: &str, created: bool) -> bool {
+    (created && dohc_engine_domain::collections::is_collection_markdown_path(path))
+        || path.rsplit('/').next()
+            == Some(dohc_engine_domain::collections::COLLECTION_SCHEMA_FILENAME)
+}
+
 impl EngineService {
     pub(super) async fn versioned_text_write(
         &self,
@@ -441,6 +449,15 @@ impl EngineService {
             &open.workspace_id,
             &result.automation_claims,
         );
+        // With capture, the pass that sees the file adopts a new record or
+        // reads a changed schema. Without it, that happens now. A replay of the
+        // same request reconciles too, so retrying a write whose reconcile
+        // failed heals it; an unkeyed retry waits for the next pull's.
+        if self.reconciles_collections_itself(&open)
+            && can_move_collections(&result.snapshot.path, !result.moment.before_present)
+        {
+            self.collections_changed(ctx, &open).await?;
+        }
         Ok(json!({
             "object": file_object_json(&result.object),
             "snapshot": crate::rpc::reads::settled_snapshot_json(&result.snapshot),
