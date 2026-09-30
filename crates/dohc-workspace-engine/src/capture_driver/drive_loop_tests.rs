@@ -23,6 +23,10 @@ enum Script {
     PolicyChangedIdle,
     /// The policy files cannot be read right now (transient lock).
     PolicyUnreadable,
+    /// The sink holds work after the loop already read a valid fingerprint.
+    SinkPolicyHeld,
+    /// Policy is unreadable at the loop sample, but recovers before the sink.
+    PolicyRecoversDuringApply,
 }
 
 struct FakeLayer {
@@ -89,7 +93,7 @@ impl DriverEnv for FakeEnv {
     fn policy_fingerprint(&self) -> Option<u64> {
         match self.current() {
             Script::PolicyChanged | Script::PolicyChangedIdle => Some(self.policy + 1),
-            Script::PolicyUnreadable => None,
+            Script::PolicyUnreadable | Script::PolicyRecoversDuringApply => None,
             _ => Some(self.policy),
         }
     }
@@ -147,6 +151,11 @@ impl DriverEnv for FakeEnv {
                 // its ops (POLICY_UNAVAILABLE), so the apply reports
                 // failures — the tick is degraded, not clean.
                 self.status.mark_degraded();
+                TickIo::Applied { clean: false }
+            }
+            Script::SinkPolicyHeld => {
+                self.status.mark_degraded();
+                self.status.arm_policy_hold();
                 TickIo::Applied { clean: false }
             }
             Script::Disrupted => {
@@ -575,6 +584,34 @@ async fn policy_recovery_after_an_unknown_window_reoffers_held_paths() {
         "recovering from an unknown policy while degraded must rebuild: {} starts",
         journal.starts.len()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sink_policy_hold_rebuilds_when_the_loop_fingerprint_stays_readable() {
+    let (journal, status) = drive_for(
+        vec![Script::Healthy, Script::SinkPolicyHeld, Script::Healthy],
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(journal.starts.len(), 2, "the sink hold must rebuild once");
+    assert!(!status.degraded());
+}
+
+#[tokio::test(start_paused = true)]
+async fn policy_recovery_during_apply_needs_no_rebuild_after_the_hold_clears() {
+    let (journal, status) = drive_for(
+        vec![
+            Script::Healthy,
+            Script::SinkPolicyHeld,
+            Script::PolicyRecoversDuringApply,
+            Script::Healthy,
+        ],
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(journal.starts.len(), 1, "the clean apply already recovered");
+    assert!(journal.degraded_seen.contains(&true));
+    assert!(!status.degraded());
 }
 
 #[tokio::test(start_paused = true)]
