@@ -20,6 +20,9 @@ import { readDatasetResponse } from "../ipc/readDatasetResponse";
 import { createDatasetReplica } from "@dohc/app-backend-runtime/replica";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import type { AppRuntimeLauncher } from "@dohc/app-backend-runtime";
+import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+
+const compileFixture = createDatasetFixtureCompiler();
 
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -59,7 +62,7 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", ...extra});
+  const host = await createLocalDatasetHost({workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture, ...extra});
   hosts.push(host); return {host, workspaceRoot};
 }
 async function activate(host: LocalDatasetHost, fixture = sources()) {
