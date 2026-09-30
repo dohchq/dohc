@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -10,6 +10,7 @@ import { cancellationScope } from "./cancellation.mjs";
 
 export const receiptPath = join(repoRoot, ".dohc-dev/verification/build.json");
 export const enginePath = join(repoRoot, "target/debug", `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`);
+export const stagedEnginePath = join(repoRoot, "apps/desktop/target/debug", enginePath.split(/[\\/]/).at(-1));
 const configFiles = {
   engine: [".cargo/config", ".cargo/config.toml"],
   desktop: [
@@ -115,13 +116,13 @@ function artifactFingerprint(kind) {
   ].map((path) => [path, directoryFingerprint(join(repoRoot, path))]))).digest("hex");
 }
 
-export function preparedStatus(kind, receipt = readJson(receiptPath)) {
+export function preparedStatus(kind, receipt = readJson(receiptPath), engineBinary = enginePath) {
   try {
     if (kind === "desktop" && process.platform !== "win32") {
       for (const name of ["dohc", "dohc-mcp"]) accessSync(join(repoRoot, "apps/desktop/resources/cli-bin", name), constants.X_OK);
     }
     return receipt?.[kind]?.source === sourceFingerprint(kind)
-      && (kind === "engine" ? engineArtifactMatches(enginePath, receipt[kind].artifact)
+      && (kind === "engine" ? engineArtifactMatches(engineBinary, receipt[kind].artifact)
         : receipt[kind].artifact === artifactFingerprint(kind));
   } catch (error) {
     if (["ENOENT", "EACCES", "EPERM"].includes(error.code)) return false;
@@ -129,17 +130,24 @@ export function preparedStatus(kind, receipt = readJson(receiptPath)) {
   }
 }
 
-export function assertPrepared({ engineOnly = false } = {}) {
+export function assertPrepared({ engineOnly = false, engineBinary = process.env.DOHC_TEST_ENGINE_BINARY?.trim() || enginePath } = {}) {
   const receipt = readJson(receiptPath);
-  if (!preparedStatus("engine", receipt) || !engineOnly && !preparedStatus("desktop", receipt)) {
+  if (!preparedStatus("engine", receipt, engineBinary) || !engineOnly && !preparedStatus("desktop", receipt)) {
     throw new Error("The desktop or engine does not match this checkout. Run pnpm qa:prepare before driving it.");
   }
   if (engineOnly) return { version: receipt.version, engine: receipt.engine };
-  const staged = join(repoRoot, "apps/desktop/target/debug", enginePath.split(/[\\/]/).at(-1));
-  if (!engineArtifactMatches(staged, receipt.engine.artifact)) {
+  if (!engineArtifactMatches(stagedEnginePath, receipt.engine.artifact)) {
     throw new Error("The staged engine differs from the prepared engine. Run pnpm qa:prepare.");
   }
   return receipt;
+}
+
+export function assertIndependentStagedEngine() {
+  const built = statSync(enginePath, {bigint: true});
+  const staged = statSync(stagedEnginePath, {bigint: true});
+  if (built.dev === staged.dev && built.ino === staged.ino) {
+    throw new Error("Parallel verification requires an independent staged engine copy, not a link to the Cargo output.");
+  }
 }
 
 export function buildEnvironment(maxJobs, source = process.env) {
