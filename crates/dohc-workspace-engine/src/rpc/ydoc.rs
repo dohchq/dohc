@@ -1193,9 +1193,12 @@ impl EngineService {
                     session.first_update_pending = false;
                     session.lineage_claim_id = append.lineage_claim_id.clone();
                 }
-                let queue_settlement = outcome
-                    .as_ref()
-                    .is_ok_and(|append| append.settlement_requested)
+                let settlement_requested = match &outcome {
+                    Ok(append) => append.settlement_requested,
+                    Err(RuntimeError::Collab(CollabError::AuthorCapacity)) => true,
+                    Err(_) => false,
+                };
+                let queue_settlement = settlement_requested
                     && lock(&sessions)
                         .get_mut(&session_id)
                         .is_some_and(|session| session.author_settlement.try_queue(Instant::now()));
@@ -1814,6 +1817,136 @@ mod tests {
             queue.try_queue(now + AUTHOR_SETTLEMENT_RETRY_DELAY),
             "success clears backoff"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capacity_refusals_retry_failed_queued_settlement_after_backoff() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let opened = service.workspace_open(&RequestContext::unbounded(), json!({
+            "rootDir":scratch.path().to_string_lossy(),"workspaceId":"capacity-retry","captureMode":"none"
+        })).await.unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let (session, egress) = service.ydoc_open(
+            &RequestContext::unbounded(), Some(handle.clone()),
+            json!({"versionId":"main","path":"authors.txt","contentKind":"plaintext","seedFromArtifact":false}), 1,
+        ).await.unwrap();
+        drop(egress);
+        let id = session["sessionId"].as_str().unwrap();
+        let doc = dohc_engine_collab::Ydoc::wire();
+        let params = |author: &str, update: &[u8]| {
+            json!({
+                "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update),
+                "actorOriginId":author,"attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}
+            })
+        };
+        service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params("first", &doc.plaintext_insert(0, "a")),
+            )
+            .await
+            .unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        let folded: Vec<_> = (0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS - 1)
+            .map(|i| json!({"kind":"agent","agentId":format!("folded-{i}"),"onBehalfOf":"person"}))
+            .collect();
+        raw.execute(
+            "UPDATE ydoc_docs SET pending_authors_json=?1",
+            [json!(folded).to_string()],
+        )
+        .unwrap();
+        raw.execute_batch("CREATE TRIGGER refuse_settlement BEFORE INSERT ON moments BEGIN SELECT RAISE(ABORT, 'settlement fixture'); END;").unwrap();
+        // The known author fills the last slot and queues a real failing settle.
+        service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params("first", &doc.plaintext_insert(1, "b")),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if lock(&service.sessions)
+                    .get(id)
+                    .unwrap()
+                    .author_settlement
+                    .retry_after
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        raw.execute_batch("DROP TRIGGER refuse_settlement").unwrap();
+        let update = doc.plaintext_insert(2, "c");
+        for author in ["new-before-backoff", "another-before-backoff"] {
+            let error = service
+                .ydoc_record_update(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    None,
+                    params(author, &update),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.message, "ydoc-author-capacity");
+        }
+        {
+            let mut sessions = lock(&service.sessions);
+            let queue = &mut sessions.get_mut(id).unwrap().author_settlement;
+            assert!(!queue.queued, "refusals must respect the retry delay");
+            assert!(queue.retry_after.is_some());
+            // Expire the real queue's backoff without sleeping in the test.
+            queue.retry_after = Some(Instant::now());
+        }
+        let error = service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params("new-after-backoff", &update),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "ydoc-author-capacity");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if lock(&service.sessions)
+                    .get(id)
+                    .unwrap()
+                    .last_settled_sha
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params("admitted-after-retry", &update),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("authors.txt")).unwrap(),
+            "ab"
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

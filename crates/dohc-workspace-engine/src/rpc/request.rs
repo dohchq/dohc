@@ -171,6 +171,7 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
         }
         _ => false,
     };
+    // Local author ids and names appear in History; reject Unicode controls.
     if !valid
         || object
             .values()
@@ -268,7 +269,7 @@ mod tests {
         let agent = json!({"kind":"agent", "agentId":"runner", "onBehalfOf":"person"});
         assert!(validated_author(Some(&agent)).is_ok());
         for field in ["agentId", "onBehalfOf", "agentRunId", "name"] {
-            for control in ['\0', '\n', '\u{0085}', '\u{009f}'] {
+            for control in ['\0', '\n'].into_iter().chain('\u{0080}'..='\u{009f}') {
                 let mut invalid = agent.clone();
                 invalid[field] = json!(format!("local{control}author"));
                 let error = validated_author(Some(&invalid)).expect_err("local controls refused");
