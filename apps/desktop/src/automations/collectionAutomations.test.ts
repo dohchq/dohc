@@ -5241,12 +5241,12 @@ describe("Collection automations that a Group message starts", () => {
       w.engine.listTextFileMetadata = async (input) => { listingEntered.resolve(); await blocked.promise; return await list(input); };
       try {
         executor.relayAnswered();
-        await listingEntered.promise;
+        await vi.waitFor(() => listingEntered.promise);
         host = 4;
         record = { generation: 4, reach: null, everShared: true };
         w.claim("collection:Tasks#seen", w.addRecord("Tasks", "one", { Status: "Done" }));
         executor.notifyClaimed();
-        await secondTakeover.promise;
+        await vi.waitFor(() => secondTakeover.promise);
         blocked.resolve();
         await executor.automationsIn("Tasks");
         expect(await w.baseStore.readReachVerdicts(), "the second mark stays until a later pull").toMatchObject({ taken: 4, unprovenAll: true });
