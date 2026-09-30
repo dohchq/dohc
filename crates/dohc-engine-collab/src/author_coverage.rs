@@ -221,12 +221,28 @@ pub fn check_admission_in(
     Ok(!unresolved && count + usize::from(!known) >= SETTLE_AUTHOR_THRESHOLD)
 }
 
+/// Rebuild identities after retained raw rows have been removed.
+pub fn refresh_identities_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+    conn.execute("DELETE FROM ydoc_author_identities WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id,key.version_id,key.object_id]).map_err(sql)?;
+    conn.execute("INSERT OR IGNORE INTO ydoc_author_identities SELECT * FROM ydoc_covered_identities WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id,key.version_id,key.object_id]).map_err(sql)?;
+    Ok(())
+}
+
 /// Consume the current interval with its boundary, reserving a materialization attempt if needed.
 pub fn advance_in(
     conn: &Connection,
     key: &DocKey,
     reserve_attempt: bool,
 ) -> Result<(), CollabError> {
+    let unresolved: bool = conn.query_row(
+        "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
+    ).map_err(sql)?;
+    if unresolved {
+        return Err(CollabError::UnsettledClose);
+    }
     conn.execute(
         "UPDATE ydoc_docs SET settled_update_seq=head_update_seq,pending_authors_json='[]', \
          settle_prior_update_seq=CASE WHEN ?4 THEN COALESCE(settled_update_seq,-1) ELSE NULL END \

@@ -26,8 +26,8 @@ use crate::doc_cache::{GateBaseSource, RemoteAppendProbe, ServedGateBase};
 use dohc_engine_domain::ChangeAttribution;
 
 use crate::durable::{
-    append_validated_and_index_update, blob_seq_in_log, load_doc_in, maybe_compact, read_marker_in,
-    validate_update_bytes, CompactOutcome, Regime,
+    CompactOutcome, Regime, append_validated_and_index_update, blob_seq_in_log, load_doc_in,
+    maybe_compact, read_marker_in, validate_update_bytes,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
@@ -256,6 +256,7 @@ fn apply_remote_update_in_transaction(
     if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
         return Ok((ReplicationApplyOutcome::Deduped { seq: existing }, None));
     }
+    crate::author_coverage::check_admission_in(tx, key, origin.actor_id(), attribution)?;
     let base = load_doc_in(tx, key)?;
     *candidate = Some(crate::replay_parity::validate_replay_parity_with_delta(
         &base,
@@ -330,6 +331,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
         });
     }
 
+    crate::author_coverage::check_admission_in(tx, key, origin.actor_id(), attribution)?;
     let (projection, validation, source, seq, record_facts) = match cache
         .base_frontier_and_scratch_for_gate(tx, key, &marker)?
     {
@@ -431,7 +433,7 @@ mod dedupe_hoist_tests {
 
     use super::*;
     use crate::durable::{
-        claim_base, record_local_update, CompactOutcome, LocalAppend, MarkerCreation,
+        CompactOutcome, LocalAppend, MarkerCreation, claim_base, record_local_update,
     };
     use crate::replay_parity::with_armed_gate;
     use crate::ydoc::{ContentKind, Ydoc};

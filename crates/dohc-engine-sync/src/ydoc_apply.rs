@@ -2184,6 +2184,7 @@ fn settle_ydoc_marker_to_text(
     text: &str,
     now_ms: i64,
 ) -> Result<(), SyncError> {
+    require_resolved_local_settlement(tx, key, now_ms)?;
     dohc_engine_collab::author_coverage::advance_in(tx, key, false)
         .map_err(map_collab_hard_error)?;
     // The lineage at its current head projects to `text`, the head it settles
@@ -2449,7 +2450,7 @@ fn preserve_incomplete_base_in_tx(
             },
             &payload.lineage_claim_id,
             &preserved,
-            None,
+            (open && pending_authors != "[]").then_some(pending_authors.as_str()),
             origin_id,
             origin_seq,
             now_ms,
@@ -2490,7 +2491,7 @@ fn preserve_incomplete_base_in_tx(
         key,
         &payload.path,
         &local,
-        None,
+        (pending_authors != "[]").then_some(pending_authors.as_str()),
         snapshot.map(|snapshot| snapshot.blob_sha256.as_str()),
         &incoming,
         origin_id,
@@ -2525,6 +2526,12 @@ fn preserve_incomplete_base_in_tx(
         .as_deref()
         .unwrap_or(&unpublished_claim);
     let local_sha = hex_sha256(local.as_bytes());
+    let interval_named_or_noop = open || opened > 0;
+    let retained_authors = if interval_named_or_noop {
+        "[]"
+    } else {
+        pending_authors.as_str()
+    };
     put_projection_text_blob(tx, &local, &local_sha)?;
     tx.execute(
         "INSERT INTO ydoc_inactive_lineages (workspace_id,version_id,object_id,lineage_claim_id, \
@@ -2533,7 +2540,7 @@ fn preserve_incomplete_base_in_tx(
          VALUES (?1,?2,?3,?4,?5,'rejected-base',?6,?7,?8,?9,?10,?11,?12,?13,?13,?14)",
         params![key.workspace_id,key.version_id,key.object_id,claim,marker.lineage_parent_claim_id,
             marker.content_kind.as_str(),payload.path,marker.lineage_epoch_tag,full_sha,vector_sha,
-            local_sha,open_sync_conflict_id(tx,key)?,now_ms,pending_authors],
+            local_sha,open_sync_conflict_id(tx,key)?,now_ms,retained_authors],
     ).map_err(SyncError::persist)?;
     if marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed {
         dohc_engine_collab::author_coverage::reset_in(tx, key, false)
@@ -4759,6 +4766,12 @@ fn refuse_ydoc_with_reason(
 
 fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncError {
     match error {
+        CollabError::AuthorCapacity => SyncError::RetryableState {
+            reason: "ydoc-author-capacity",
+        },
+        CollabError::AuthorEntryTooLarge => SyncError::InvalidInput {
+            reason: "Y.Doc author entry exceeds its metadata limit",
+        },
         CollabError::MalformedUpdate { .. }
         | CollabError::ReplayParityViolation { .. }
         | CollabError::EmptyUpdate

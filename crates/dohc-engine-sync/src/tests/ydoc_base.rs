@@ -5944,7 +5944,7 @@ fn local_unpublished_authors_survive_compaction_base_replacement_and_local_choic
 }
 
 #[test]
-fn incomplete_local_side_retains_authors_until_its_recovery_moment() {
+fn incomplete_local_side_credits_preservation_before_later_recovery() {
     use dohc_engine_collab::{ContentKind, DocKey, LocalAppend, Regime, WriterDocCache, Ydoc};
     use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
     for deferred in [false, true] {
@@ -5954,6 +5954,7 @@ fn incomplete_local_side_retains_authors_until_its_recovery_moment() {
             .unwrap();
         let path = "notes/pending-author.md";
         let key = DocKey::new("ws", "main", "pending-author").unwrap();
+        seed_text_head(&mut engine, &key.object_id, path, "external head");
         dohc_engine_collab::ensure_marker(
             &mut engine,
             &key,
@@ -6024,7 +6025,18 @@ fn incomplete_local_side_retains_authors_until_its_recovery_moment() {
             })
             .unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&pending).unwrap()[0]["agentId"],
+            pending, "[]",
+            "the local preservation moment already names this interval"
+        );
+        let original_authors: String = engine
+            .read_with(|conn| {
+                conn.query_row(
+            "SELECT m.author_json FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+             WHERE m.object_id=?1 AND b.text=''", [&key.object_id], |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&original_authors).unwrap()[0]["agentId"],
             "bob"
         );
         drop(engine);
@@ -6055,7 +6067,10 @@ fn incomplete_local_side_retains_authors_until_its_recovery_moment() {
              WHERE b.text='first Bob'", [], |row| row.get(0))
             })
             .unwrap();
-        assert_eq!(authors, pending);
+        assert_eq!(
+            authors, None,
+            "the earlier preservation already credited this interval"
+        );
         let remaining: String = engine
             .read_with(|conn| {
                 conn.query_row(
@@ -6064,5 +6079,176 @@ fn incomplete_local_side_retains_authors_until_its_recovery_moment() {
             })
             .unwrap();
         assert_eq!(remaining, "[]");
+    }
+}
+
+#[test]
+fn incomplete_preserved_local_side_credits_authors_before_choice_or_noop_completion() {
+    use dohc_engine_collab::{ContentKind, DocKey, LocalAppend, Regime, WriterDocCache, Ydoc};
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+    for deferred in [false, true] {
+        for complete_before_choice in [false, true] {
+            let (_scratch, db, mut engine) = open_store();
+            VersionedTextStore::new(&mut engine)
+                .ensure_main_version("ws", "main", 1_000, &NoFaults)
+                .unwrap();
+            let path = "notes/partial-preserved.md";
+            let key = DocKey::new("ws", "main", "partial-preserved").unwrap();
+            dohc_engine_collab::ensure_marker(
+                &mut engine,
+                &key,
+                ContentKind::Plaintext,
+                Regime::LocalOnly,
+                &NoFaults,
+                1_100,
+            )
+            .unwrap();
+            let local = Ydoc::wire();
+            let ready = local.plaintext_insert(0, "local content");
+            dohc_engine_collab::record_local_update(
+                &mut engine,
+                &mut WriterDocCache::new(),
+                &key,
+                &ready,
+                LocalAppend {
+                    ensure_parent_row: true,
+                    ..Default::default()
+                },
+                &NoFaults,
+                1_150,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+            let dependency = Ydoc::wire();
+            let first = dependency.plaintext_insert(0, "temporary");
+            let pending = dependency.plaintext_delete(0, 9);
+            let attribution = ChangeAttribution {
+                actor_kind: ChangeActorKind::Agent,
+                on_behalf_of: None,
+                depth: 0,
+            };
+            dohc_engine_collab::record_local_update(
+                &mut engine,
+                &mut WriterDocCache::new(),
+                &key,
+                &pending,
+                LocalAppend {
+                    actor_origin_id: Some("bob"),
+                    attribution: Some(&attribution),
+                    ..Default::default()
+                },
+                &NoFaults,
+                1_200,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+            let remote = Ydoc::wire();
+            remote.plaintext_insert(0, "remote");
+            let sha = engine.put_binary_blob(&remote.encode_full_state()).unwrap();
+            let mut op = envelope(
+                "remote",
+                0,
+                "ydoc.update",
+                json!({
+                    "versionId":"main", "objectId":key.object_id, "path":path,
+                    "contentKind":"plaintext", "updateBlobSha256":sha,
+                    "lineageClaimId":sha, "isBaseState":true,
+                }),
+            );
+            op.relay_seq = Some(10);
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                if deferred { &AlwaysLive } else { &NoLiveLeases },
+            )
+            .unwrap();
+            if deferred {
+                drain_deferred_ydoc_for_key(
+                    &mut engine,
+                    &mut WriterDocCache::new(),
+                    &key,
+                    &NoFaults,
+                )
+                .unwrap();
+            }
+            let authors: String = engine
+                .read_with(|conn| {
+                    conn.query_row(
+                "SELECT m.author_json FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+                 WHERE b.text='local content'", [], |row| row.get(0))
+                })
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&authors).unwrap()[0]["agentId"],
+                "bob"
+            );
+            let (claim, pending): (String, String) =
+                engine
+                    .read_with(|conn| {
+                        conn.query_row(
+                "SELECT lineage_claim_id,pending_authors_json FROM ydoc_inactive_lineages \
+                 WHERE object_id=?1", [&key.object_id], |row| Ok((row.get(0)?,row.get(1)?)))
+                    })
+                    .unwrap();
+            assert_eq!(
+                pending, "[]",
+                "the preservation moment consumed the kept side's authors"
+            );
+            drop(engine);
+            let mut engine = EngineStore::open(&db, 2_000).unwrap();
+            if complete_before_choice {
+                let first_sha = engine.put_binary_blob(&first).unwrap();
+                let predecessor = envelope(
+                    "predecessor",
+                    0,
+                    "ydoc.update",
+                    json!({
+                        "versionId":"main", "objectId":key.object_id, "path":path,
+                        "contentKind":"plaintext", "updateBlobSha256":first_sha,
+                        "lineageClaimId":claim, "isBaseState":false,
+                    }),
+                );
+                apply_ydoc_envelope(
+                    &mut engine,
+                    &mut WriterDocCache::new(),
+                    &predecessor,
+                    &NoFaults,
+                    &NoLiveLeases,
+                )
+                .unwrap();
+                let recovery_count: i64 = engine
+                    .read_with(|conn| {
+                        conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE object_id LIKE 'ydoc-recovery-object-%'",
+                    [], |row| row.get(0))
+                    })
+                    .unwrap();
+                assert_eq!(
+                    recovery_count, 0,
+                    "completion has the already preserved bytes"
+                );
+            }
+            resolve_seed_conflict(&mut engine, &key, true);
+            let kept = VersionedTextStore::new(&mut engine)
+                .read_text("ws", "main", path)
+                .unwrap()
+                .unwrap();
+            assert_eq!(kept.text, "local content");
+            let credited: i64 = engine
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM moments WHERE author_json=?1",
+                        [&authors],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                credited, 1,
+                "the kept side's original author survives without a predecessor or after no-op completion"
+            );
+        }
     }
 }

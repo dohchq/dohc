@@ -357,6 +357,30 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
     let _remote_update = remote_doc.plaintext_insert(1, "remote");
     let pending = coverage(&store, &state.key);
     assert!(pending.3.is_some());
+    let imported = store.write_with(&NoFaults, |tx| {
+        dohc_engine_sync::reconcile_imported_resulting_head_in_tx(
+            tx,
+            WS,
+            "main",
+            &state.key.object_id,
+            dohc_engine_sync::ResultingHead::Text {
+                path: FILE,
+                text: "a",
+            },
+            5,
+        )
+    });
+    assert!(matches!(
+        imported,
+        Err(SyncError::RetryableState {
+            reason: "settlement-materialization-pending"
+        })
+    ));
+    assert_eq!(
+        coverage(&store, &state.key),
+        pending,
+        "equal imported head cannot discard a pending attempt"
+    );
     let refused = store.write_with(&NoFaults, |tx| {
         project_and_write_in_tx(
             tx,
