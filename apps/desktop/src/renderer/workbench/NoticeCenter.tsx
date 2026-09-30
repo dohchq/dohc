@@ -1529,7 +1529,8 @@ export function NoticeCenter(props: {
                         : undefined;
                       const copies = notice.kind === "automation-failed";
                       const running = runningKey === key;
-                      const dismissNotice = props.onDismissSentNotice
+                      // A wake from the server waits for one of this person's computers to run it; dismissing it would cancel it.
+                      const dismissNotice = props.onDismissSentNotice && notice.kind !== "automation-wake"
                         ? () => {
                             cancelOpen(key);
                             props.onDismissSentNotice?.(notice);

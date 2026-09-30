@@ -41,7 +41,7 @@ import {
   type Event,
   type JsonValue,
 } from "@dohc/workspace-engine-client";
-import { replicaAutomationChat, replicaChatStore, replicaNoticePoster, WAKE_ON_SERVER } from "./automationChatWrites";
+import { replicaAutomationChat, replicaChatStore, replicaNoticePoster } from "./automationChatWrites";
 import { ServerClaimEngine, type LiveClaimLedger } from "./automationLiveClaims";
 import { replicaRecordEditContext, replicaRecordEngine } from "./automationRecordEdits";
 import { startAutomationReplicas, type AutomationReplica } from "./automationReplicas";
@@ -509,7 +509,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   function executorOptions(ws: WorkspaceState, self: () => Hosted): CollectionAutomationsOptions {
     const { replica, adapter } = ws;
     const { workspaceId, ownerUserId } = replica;
-    const chat = replicaAutomationChat({ replica, store: replicaChatStore(replica), ownerName: () => ownerName(ws) });
+    const runStore = createAutomationRunStore(replica.root, metadataDirOf(replica.metadataDir));
+    const chat = replicaAutomationChat({ runStore, replica, store: replicaChatStore(replica), storage, nowMs, ownerName: () => ownerName(ws) });
     return {
       withEngine: async (work) => replica.signal.aborted ? null : await work(adapter),
       withRecordWrites: async (signal, work) => {
@@ -545,12 +546,12 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       roster: () => roster(ws),
       cachedRoster: () => roster(ws),
       evaluator: evaluator.forWorkspace(workspaceId),
-      store: createAutomationRunStore(replica.root, metadataDirOf(replica.metadataDir)),
+      store: runStore,
       chat: {
         directory: chat.directory,
-        write: async (signal, message) => {
+        write: async (signal, message, run) => {
           try {
-            return await chat.write(signal, message);
+            return await chat.write(signal, message, run);
           } finally {
             syncSoon(ws);
           }
@@ -603,7 +604,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       onSchedulesChanged: () => scheduler.wake(),
       hostCanRun: async () => true,
       personName: (userId) => ws.names.get(userId) ?? userId,
-      wakeUnavailable: WAKE_ON_SERVER,
       // Only the owner's routes ask for Try again here.
       mayRetryPress: async () => true,
       onPressSettled: (event) => self().presses.runSettled(event),

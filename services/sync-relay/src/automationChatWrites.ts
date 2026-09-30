@@ -1,5 +1,7 @@
+import type { AutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import {
   NoticeNotSentError,
+  AutomationWakeSent,
   readChatDirectory,
 } from "@dohc/automation-executor/automation-chat";
 import type {AutomationChatDependencies} from "@dohc/automation-executor/collection-automation-run";
@@ -30,11 +32,6 @@ export function replicaChatStore(replica: Pick<AutomationReplica, "client" | "wo
   };
 }
 
-// A wake needs the person's own computer: their agent and its "My agent"
-// thread live there, and this server has neither.
-export const WAKE_ON_SERVER =
-  "This server cannot wake your agent. Choose one of your computers under Schedules run on in Settings.";
-
 /**
  * Where an automation on this server posts, and how it writes, in its
  * replica of the workspace. It reaches only what the replica holds: the
@@ -52,6 +49,9 @@ export const WAKE_ON_SERVER =
 export function replicaAutomationChat(input: {
   replica: Pick<AutomationReplica, "workspaceId" | "ownerUserId" | "signal">;
   store: ReplicaChatStore;
+  storage: Pick<SyncRelayStorage, "postAutomationWake">;
+  runStore: Pick<AutomationRunStore, "supersedeWake">;
+  nowMs(): number;
   /** The owner's name, shown beside the automation's messages. */
   ownerName(): Promise<string>;
 }): AutomationChatDependencies {
@@ -60,12 +60,24 @@ export function replicaAutomationChat(input: {
   return {
     directory: async (roster, needs) =>
       replica.signal.aborted ? null : await readChatDirectory(store, workspaceId, roster, needs),
-    async write(signal, message) {
-      if (message.target.kind === "agent") throw new Error(WAKE_ON_SERVER);
+    async write(signal, message, savedRun) {
       const run = AbortSignal.any([signal, replica.signal]);
       run.throwIfAborted();
       const authorOwnerDisplayName = await input.ownerName();
       run.throwIfAborted();
+      if (message.target.kind === "agent") {
+        const posted = input.storage.postAutomationWake({
+          workspaceId, ownerUserId: replica.ownerUserId, effectId: message.effectId,
+          claimId: savedRun.claimId, keySeed: savedRun.keySeed,
+          wake: { ...message.automation, body: message.body },
+          senderLabel: authorOwnerDisplayName, nowMs: input.nowMs(), startedAtMs: savedRun.startedAtMs,
+        });
+        for (const older of posted.superseded) {
+          await input.runStore.supersedeWake(message.automation.automationId, older.claimId, older.keySeed, older.noticeId, posted.noticeId);
+        }
+        return new AutomationWakeSent(posted.noticeId, posted.supersededBy
+          ? authorOwnerDisplayName + "; agent wake superseded by a later run" : authorOwnerDisplayName, posted.supersededBy ?? undefined);
+      }
       const fields = {
         workspaceId,
         messageId: message.messageId,

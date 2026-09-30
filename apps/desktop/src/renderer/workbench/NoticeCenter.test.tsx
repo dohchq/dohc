@@ -1757,6 +1757,20 @@ describe("notices sent to you", () => {
     expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
+  it("offers no dismiss on a wake from the server, since dismissing it would cancel the wake", async () => {
+    const onDismissSentNotice = vi.fn();
+    renderNotices({
+      sentNotices: [sentRow("wake", { kind: "automation-wake", senderKind: "automation" }), sentRow("b")],
+      onDismissSentNotice,
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("sent-notice-wake-dismiss")).toBeNull();
+    expect(screen.getByTestId("sent-notice-b-dismiss")).toBeTruthy();
+    screen.getByTestId("sent-notice-wake").focus();
+    await userEvent.keyboard("{Delete}");
+    expect(onDismissSentNotice).not.toHaveBeenCalled();
+  });
+
   it("shows no All clear before the first list of sent notices answers", async () => {
     const { rerender } = renderNotices({ sentNotices: [], sentNoticesLoading: true });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));

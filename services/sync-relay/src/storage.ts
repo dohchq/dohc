@@ -532,6 +532,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
   }
 
+  postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
+    return noticeStorage.postAutomationWake(this, input);
+  }
+
   postNotice(input: noticeStorage.PostNoticeInput): void {
     noticeStorage.postNotice(this, input);
   }

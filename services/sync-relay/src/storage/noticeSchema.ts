@@ -138,4 +138,30 @@ function initializeSchema(db: SqliteDb, schema: Record<string, string>, tables: 
 export function initializeNoticeSchema(db: SqliteDb): void {
   initializeSchema(db, NOTICE_SCHEMA, [NOTICE_LISTS, NOTICES], MARKER);
   initializeSchema(db, DISMISSAL_SCHEMA, [NOTICE_DISMISSALS, NOTICE_DISMISSAL_FLOORS], DISMISSALS_MARKER);
+  initializeSchema(db, {
+    sync_relay_automation_wakes: `CREATE TABLE sync_relay_automation_wakes (
+      recipient_user_id TEXT NOT NULL,
+      notice_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      claim_id TEXT NOT NULL,
+      key_seed TEXT NOT NULL,
+      PRIMARY KEY (recipient_user_id, notice_id),
+      FOREIGN KEY (recipient_user_id, notice_id)
+        REFERENCES sync_relay_notices(recipient_user_id, notice_id) ON DELETE CASCADE
+    ) STRICT`,
+    // Receipts cover the server wake retry window, including superseded runs.
+    sync_relay_automation_wake_receipts: `CREATE TABLE sync_relay_automation_wake_receipts (
+      recipient_user_id TEXT NOT NULL,
+      notice_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      claim_id TEXT,
+      key_seed TEXT,
+      superseded_by TEXT,
+      dismissed_at_ms INTEGER NOT NULL,
+      winner_install_id TEXT,
+      PRIMARY KEY (recipient_user_id, notice_id)
+    ) STRICT`,
+    idx_sync_relay_wake_receipts_age: `CREATE INDEX idx_sync_relay_wake_receipts_age ON sync_relay_automation_wake_receipts(dismissed_at_ms)`,
+    idx_sync_relay_wake_superseded: `CREATE INDEX idx_sync_relay_wake_superseded ON sync_relay_automation_wake_receipts(recipient_user_id, superseded_by)`,
+  }, ["sync_relay_automation_wakes", "sync_relay_automation_wake_receipts"], "automation-wakes-v1");
 }

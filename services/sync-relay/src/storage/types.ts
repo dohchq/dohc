@@ -585,6 +585,7 @@ export interface SyncRelayStorage {
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   postNotice(input: import("./notices").PostNoticeInput): void;
+  postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
   markNotices(input: import("./notices").MarkNoticesInput): string[];
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
