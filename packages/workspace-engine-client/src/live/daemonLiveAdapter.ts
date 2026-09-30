@@ -241,7 +241,6 @@ export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
     message !== null && (
       message.startsWith("attribution ") ||
       message === "only an automation's attribution names a run" ||
-      message.startsWith("invalid identifier: actor_origin_id ") ||
       message === "Y.Doc replay parity violation" ||
       message === "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
     )

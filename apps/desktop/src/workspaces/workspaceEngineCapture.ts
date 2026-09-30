@@ -2378,9 +2378,17 @@ export function createWorkspaceEngineCapture(
             // from durable state before replaying the remaining originals.
             openingRemoteUpdates.delete(replacement);
             await replacement.evict();
-            markDead(null);
             handedOff = true;
-            const clean = await openGeneration(false, { retryTransportErrors: false });
+            current = null;
+            canonicalLineageClaimId = replacementClaimId;
+            recordedStateVector = Y.encodeStateVector(doc);
+            let clean: EngineYdocProviderSession;
+            try {
+              clean = await openGeneration(false, { retryTransportErrors: false });
+            } catch (openError) {
+              markDead(null);
+              throw openError;
+            }
             await adoptGeneration(doc, clean, onReplayArmed);
             return;
           }
@@ -2535,16 +2543,17 @@ export function createWorkspaceEngineCapture(
           if (current === null) {
             sent = true;
             await reviveDeadSession(doc, armed);
-            if (record.acknowledged) return;
-            if (record.refusal !== null) throw record.refusal.error;
-            if (!pendingRecords.has(record)) {
-              throw new YdocAdapterError("lineage-changed",
-                "The document lineage changed before the write was acknowledged.");
-            }
           }
         } catch (error) {
+          if (record.acknowledged) return;
           if (record.refusal !== null) throw record.refusal.error;
           throw unanswered(error);
+        }
+        if (record.acknowledged) return;
+        if (record.refusal !== null) throw record.refusal.error;
+        if (!pendingRecords.has(record)) {
+          throw new YdocAdapterError("lineage-changed",
+            "The document lineage changed before the write was acknowledged.");
         }
         if (current === null) throw unanswered(closedError());
         const generation = current;
