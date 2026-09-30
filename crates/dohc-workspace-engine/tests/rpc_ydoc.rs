@@ -6024,7 +6024,7 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
             .as_array()
             .expect("authors")
             .len(),
-        960
+        dohc_engine_collab::author_coverage::SETTLE_AUTHOR_THRESHOLD
     );
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }

@@ -471,7 +471,8 @@ async fn pending_attempt_reserves_capacity_without_requeueing_settlement() {
         .await
         .is_err()
     );
-    for index in 1..1024 {
+    let capacity = dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS as u32;
+    for index in 1..capacity {
         let result = actor
             .ydoc_record_update(
                 state.key.clone(),
@@ -507,7 +508,7 @@ async fn pending_attempt_reserves_capacity_without_requeueing_settlement() {
             FILE.into(),
             ContentKind::Plaintext,
             Regime::LocalOnly,
-            doc.plaintext_insert(1024, "y"),
+            doc.plaintext_insert(capacity, "y"),
             Some("new-agent".into()),
             Some(ChangeAttribution {
                 actor_kind: ChangeActorKind::Agent,
@@ -540,11 +541,11 @@ async fn pending_attempt_reserves_capacity_without_requeueing_settlement() {
     append(
         &actor,
         &state.key,
-        peer.plaintext_insert(1024, "z"),
+        peer.plaintext_insert(capacity, "z"),
         "reserved",
     )
     .await;
-    assert_eq!(coverage(&db).0, 1025);
+    assert_eq!(coverage(&db).0, i64::from(capacity) + 1);
     assert!(coverage(&db).3.is_some());
     assert!(
         actor
@@ -570,7 +571,7 @@ async fn pending_attempt_reserves_capacity_without_requeueing_settlement() {
             .as_array()
             .expect("authors")
             .len(),
-        1024
+        capacity as usize
     );
     assert_eq!(coverage(&db).3, None);
     supervisor.close(&db).expect("stop");
