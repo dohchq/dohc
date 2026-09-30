@@ -463,6 +463,118 @@ fn collection_adoption_cases() -> impl Strategy<Value = GeneratedAdoptionCase> {
         )
 }
 
+fn copied_collection_adoption_sink(
+    scratch: &ScratchDir,
+    supervisor: &WorkspaceSupervisor,
+) -> (PathBuf, StoreCaptureSink) {
+    // These cases vary record adoption, not schema creation. Copy only the
+    // closed empty schema; each case still opens its own actor and root guard.
+    static IMAGE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let bytes = IMAGE.get_or_init(|| {
+        let scratch = ScratchDir::new().expect("schema scratch");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("schema db path");
+        let store = EngineStore::open(&db, 1).expect("create empty schema");
+        assert!(store.was_freshly_created());
+        drop(store);
+        assert!(!db.with_file_name("engine.db-wal").exists());
+        assert!(!db.with_file_name("engine.db-shm").exists());
+        std::fs::read(db).expect("read closed empty schema")
+    });
+    let db = dohc_engine_testkit::engine_db_path(scratch).expect("case db path");
+    assert!(!db.exists(), "a copied case requires a new database");
+    std::fs::write(db, bytes).expect("copy empty schema");
+    sink_for(scratch, supervisor)
+}
+
+#[test]
+fn copied_collection_adoption_stores_are_isolated_and_survive_reopen() {
+    let first = ScratchDir::new().expect("first scratch");
+    let second = ScratchDir::new().expect("second scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (first_db, mut first_sink) = copied_collection_adoption_sink(&first, &supervisor);
+    let (second_db, mut second_sink) = copied_collection_adoption_sink(&second, &supervisor);
+    assert_eq!(supervisor.actor_count(), 2);
+    assert_ne!(
+        file_id::get_file_id(&first_db).expect("first physical database"),
+        file_id::get_file_id(&second_db).expect("second physical database"),
+    );
+    for (scratch, db, sink) in [
+        (&first, &first_db, &first_sink),
+        (&second, &second_db, &second_sink),
+    ] {
+        assert!(
+            sink.captured_root()
+                .expect("bound root")
+                .still_names(scratch.path())
+        );
+        let store = EngineStore::open_read_only(db).expect("read empty copied database");
+        for table in [
+            "shadow_clone",
+            "versioned_workspaces",
+            "file_objects",
+            "ydoc_docs",
+            "collection_records",
+            "sync_identity",
+        ] {
+            let count: i64 = store
+                .read_with(|conn| {
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                })
+                .expect("count empty case rows");
+            assert_eq!(count, 0, "copied {table} must start empty");
+        }
+    }
+    assert!(
+        !first_sink
+            .captured_root()
+            .expect("first root")
+            .still_names(second.path())
+    );
+    let mut expected = Vec::new();
+    for (scratch, sink, title) in [
+        (&first, &mut first_sink, "First"),
+        (&second, &mut second_sink, "Second"),
+    ] {
+        write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(scratch.path(), "tasks/record.md", title.as_bytes());
+        ingest(sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(sink, "tasks/record.md").expect("capture record");
+        sink.reconcile_collections().expect("first adoption pass");
+        seed_captured_richdoc_lineage(sink, "tasks/record.md");
+        sink.reconcile_collections().expect("seeded adoption pass");
+        expected.push(
+            std::fs::read_to_string(scratch.path().join("tasks/record.md")).expect("adopted bytes"),
+        );
+    }
+    let first_id = adopted_record_id(&first_db, "tasks/record.md");
+    let second_id = adopted_record_id(&second_db, "tasks/record.md");
+    assert_ne!(first_id, second_id);
+    assert_eq!(expected[0], format!("---\nid: {first_id}\n---\n\nFirst"));
+    assert_eq!(expected[1], format!("---\nid: {second_id}\n---\n\nSecond"));
+    drop(first_sink);
+    drop(second_sink);
+    supervisor.close(&first_db).expect("close first actor");
+    supervisor.close(&second_db).expect("close second actor");
+    assert_eq!(supervisor.actor_count(), 0);
+    for (db, expected) in [(&first_db, &expected[0]), (&second_db, &expected[1])] {
+        let reopened = supervisor.open(db, 100).expect("reopen actor");
+        assert!(!reopened.store_freshly_created);
+        let mut store = EngineStore::open_read_only(db).expect("read reopened case");
+        assert_eq!(
+            snapshot_from_store(&mut store, "tasks/record.md")
+                .expect("durable record")
+                .text,
+            *expected
+        );
+        assert_eq!(ydoc_update_count_from_store(&store, "tasks/record.md"), 2);
+        drop(store);
+        drop(reopened);
+        supervisor.close(db).expect("close reopened actor");
+    }
+}
+
 proptest! {
     // The repository default is 256 cases and honors PROPTEST_CASES.
     #![proptest_config(ProptestConfig::default())]
@@ -473,7 +585,7 @@ proptest! {
     ) {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
-        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        let (db, mut sink) = copied_collection_adoption_sink(&scratch, &supervisor);
         write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
         write_file(scratch.path(), "tasks/generated.md", case.markdown.as_bytes());
         ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
