@@ -11,6 +11,9 @@ import { generateDatasetSources } from "./datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { datasetDefinitionFromDrafts } from "../renderer/collections/datasetDefinitionFromDrafts";
+import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+
+const compileFixture = createDatasetFixtureCompiler();
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js",
@@ -27,7 +30,7 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const run of cleanup.splice(0).reverse()) await run(); });
 async function fixture(initial: DatasetDefinition = definition, remote = false) {
   const root = await mkdtemp(join(tmpdir(), "dohc-schema-evolution-"));
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024 });
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024, compile: compileFixture });
   cleanup.push(async () => { await host.close(); await rm(root, { recursive: true, force: true }); });
   const files = new Map(Object.entries(generateDatasetSources(initial).files));
   const adapter = sourceCaptureAdapter(files);

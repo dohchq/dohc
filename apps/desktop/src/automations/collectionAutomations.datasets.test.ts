@@ -9,7 +9,7 @@ import {
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
+import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { JsonValue } from "@dohc/app-backend-runtime";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
@@ -89,18 +89,7 @@ ${step}`;
 const sharedEvaluator = createAutomationFormulaEvaluator();
 afterAll(() => sharedEvaluator.close());
 
-// Reuse compiled bytes; each case still approves and executes in its own host.
-const compiledSources = new Map<string, string>();
-async function compileFixture(source: string, path: string, signal: AbortSignal): Promise<string> {
-  signal.throwIfAborted();
-  const key = JSON.stringify([path, source]);
-  const existing = compiledSources.get(key);
-  if (existing !== undefined) return existing;
-  const compiled = await compileDatasetOperations(source, path, { signal });
-  signal.throwIfAborted();
-  compiledSources.set(key, compiled);
-  return compiled;
-}
+const compileFixture = createDatasetFixtureCompiler();
 const hosts: LocalDatasetHost[] = [];
 const drains: Array<() => Promise<void>> = [];
 afterEach(async () => {
