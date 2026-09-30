@@ -4849,14 +4849,18 @@ mod tests {
         let source = scratch.root.join("source.bin");
         let target = scratch.root.join("target.bin");
         std::fs::write(&source, b"mine").expect("source");
-        let mut permissions = std::fs::metadata(&source).expect("metadata").permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&source, permissions).expect("readonly");
+        let original = std::fs::metadata(&source).expect("metadata").permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&source, readonly).expect("readonly");
         move_file_no_replace(&source, &target).expect("move readonly file");
-        let mut permissions = std::fs::metadata(&target).expect("metadata").permissions();
-        assert!(permissions.readonly());
-        permissions.set_readonly(false);
-        std::fs::set_permissions(&target, permissions).expect("cleanup attributes");
+        assert!(
+            std::fs::metadata(&target)
+                .expect("metadata")
+                .permissions()
+                .readonly()
+        );
+        std::fs::set_permissions(&target, original).expect("cleanup attributes");
     }
 
     #[cfg(windows)]
