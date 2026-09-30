@@ -3,13 +3,14 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CollectionRecord } from "@dohc/workspace-contracts";
 import type {
-  AutomationRunSettledEvent, GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, ListRecordButtonsResult, RecordHistoryEntry, WorkspaceActivityEvent,
+  AutomationRunSettledEvent, GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, ListRecordButtonsResult,
+  LocateRecordHistoryRunPayload, LocateRecordHistoryRunResult, RecordHistoryEntry, WorkspaceActivityEvent,
 } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { useShellError } from "../shell/useShellError";
 import { RecordButtonsRow } from "./RecordButtonsRow";
 import { RecordHistoryDialog } from "./RecordHistoryDialog";
-import { useRecordHistory } from "./useRecordHistory";
+import { RUN_NOT_CHECKED, useRecordHistory } from "./useRecordHistory";
 import { resetAutomationButtonsForTests } from "./useAutomationButtons";
 
 // The shell opens the ⚡ panel at a run; these tests open none.
@@ -194,17 +195,19 @@ describe("RecordButtonsRow", () => {
 
 const paidByRun: RecordHistoryEntry = {
   historyId: 3, field: "Paid", previous: { present: false, value: null }, next: { present: true, value: true }, recordedAtMs: Date.now(),
-  author: { kind: "automation", automationId: "collection:invoices-id#paid", name: "Mark paid", run: { claimId: "atc_1", onThisComputer: true } },
+  author: { kind: "automation", automationId: "collection:invoices-id#paid", name: "Mark paid", run: { claimId: "atc_1", location: "available" } },
 };
 
 // The shell's part: its Notices, the History it holds, and the record view.
 function shellWith(
   read: (payload: GetCollectionRecordHistoryPayload) => Promise<GetCollectionRecordHistoryResult>,
   openRun: (automationId: string, claimId: string, name: string) => Promise<string | null> = noRun,
+  locateRun: (payload: LocateRecordHistoryRunPayload) => Promise<LocateRecordHistoryRunResult> = async () => ({ location: "unavailable" }),
 ) {
   const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [] });
   const history = vi.fn(read);
-  Object.assign(bridge, { getCollectionRecordHistory: history });
+  const locate = vi.fn(locateRun);
+  Object.assign(bridge, { getCollectionRecordHistory: history, locateRecordHistoryRun: locate });
   let shell!: { notices: ReturnType<typeof useShellError>; history: ReturnType<typeof useRecordHistory> };
   function Shell(props: { workspaceId: string; recordOpen: boolean }) {
     const notices = useShellError(props.workspaceId);
@@ -221,6 +224,7 @@ function shellWith(
             key={session.key} workspaceId={props.workspaceId} collectionPath={session.target.collectionPath} recordId={session.target.recordId}
             recordName={session.target.recordName} until={session.until} onClose={recordHistory.close} onOpenRun={recordHistory.openRun}
             onFailed={recordHistory.failed} onRead={recordHistory.read}
+            onRunsUnchecked={recordHistory.runsUnchecked} onRunsChecked={recordHistory.runsChecked}
           />
         ) : null}
       </>
@@ -229,8 +233,10 @@ function shellWith(
   const view = render(<Shell workspaceId="ws-1" recordOpen />);
   return {
     history,
+    locate,
     shell: () => shell,
     rows: () => shell.notices.shellErrors.filter((error) => error.kind === "record-history"),
+    runRows: () => shell.notices.shellErrors.filter((error) => error.kind === "record-history-run"),
     rerender: (props: { workspaceId: string; recordOpen: boolean }) => view.rerender(<Shell {...props} />),
   };
 }
@@ -254,6 +260,94 @@ describe("RecordButtonsRow History in the shell", () => {
     fireEvent.click(await screen.findByRole("button", { name: "History" }));
     fireEvent.click(await screen.findByRole("button", { name: "View run" }));
     await waitFor(() => expect(f.shell().notices.shellErrors.map((error) => [error.message, error.retry])).toEqual([[note, null]]));
+  });
+
+  it("reports a run dohc could not check with Try again, and clears it once the server shows the run", async () => {
+    const unplaced: RecordHistoryEntry = {
+      ...paidByRun, author: { kind: "automation", automationId: "collection:invoices-id#paid", name: "Mark paid", run: { claimId: "atc_1", location: "unchecked" } },
+    };
+    const f = shellWith(async () => ({ entries: [unplaced], nextBeforeHistoryId: null }), noRun, async () => { throw new Error("offline"); });
+    fireEvent.click(await screen.findByRole("button", { name: "History" }));
+    await waitFor(() => expect(f.runRows().map((row) => [row.message.startsWith(RUN_NOT_CHECKED), row.seen, row.retry !== null])).toEqual([[true, false, true]]));
+    expect(screen.queryByRole("button", { name: "View run" })).toBeNull();
+    fireEvent.keyDown(document, { key: "Escape" });
+    f.locate.mockResolvedValue({ location: "available" });
+    act(() => f.shell().notices.retryShellError(f.runRows()[0]!.id));
+    const dialog = await screen.findByRole("dialog", { name: "History of Invoice 12" });
+    expect(await within(dialog).findByRole("button", { name: "View run" })).toBeTruthy();
+    await waitFor(() => expect(f.runRows()).toEqual([]));
+  });
+
+  it("keeps a run's row until a History of that record checks that run, and reads back to its page", async () => {
+    const olderRun: RecordHistoryEntry = {
+      ...paidByRun, historyId: 1, author: { kind: "automation", automationId: "collection:invoices-id#paid", name: "Mark paid", run: { claimId: "atc_old", location: "unchecked" } },
+    };
+    const f = shellWith(async (payload) => payload.beforeHistoryId === undefined
+      ? { entries: [paidByRun], nextBeforeHistoryId: 3 }
+      : { entries: [olderRun], nextBeforeHistoryId: null }, noRun, async () => { throw new Error("offline"); });
+    fireEvent.click(await screen.findByRole("button", { name: "History" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Older changes" }));
+    await waitFor(() => expect(f.runRows()).toHaveLength(1));
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    // Opened again, the first page's runs all settle, but the older run is still unchecked.
+    f.locate.mockResolvedValue({ location: "unavailable" });
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    const dialog = await screen.findByRole("dialog", { name: "History of Invoice 12" });
+    expect(await within(dialog).findByRole("button", { name: "View run" })).toBeTruthy();
+    await act(async () => undefined);
+    expect(f.runRows()).toHaveLength(1);
+
+    f.history.mockClear();
+    act(() => f.shell().notices.retryShellError(f.runRows()[0]!.id));
+    await within(await screen.findByRole("dialog", { name: "History of Invoice 12" })).findByTestId("record-history-run-not-here");
+    expect(f.history.mock.calls.map(([payload]) => payload.beforeHistoryId)).toEqual([undefined, 3]);
+    await waitFor(() => expect(f.runRows()).toEqual([]));
+  });
+
+  it("keeps reading back to the oldest page a run could not be checked on", async () => {
+    const run = (historyId: number, claimId: string): RecordHistoryEntry => ({
+      ...paidByRun, historyId, author: { kind: "automation", automationId: "collection:invoices-id#paid", name: "Mark paid", run: { claimId, location: "unchecked" } },
+    });
+    let newerFails = false;
+    const f = shellWith(async (payload) => payload.beforeHistoryId === undefined
+      ? { entries: [run(3, "atc_new")], nextBeforeHistoryId: 3 }
+      : { entries: [run(1, "atc_old")], nextBeforeHistoryId: null }, noRun, async ({ claimId }) => {
+      if (claimId === "atc_old" || newerFails) throw new Error("offline");
+      return { location: "unavailable" };
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "History" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Older changes" }));
+    await waitFor(() => expect(f.runRows()).toHaveLength(1));
+    fireEvent.keyDown(document, { key: "Escape" });
+    // Opened again, a first-page run fails too; Try again must still reach the older page.
+    newerFails = true;
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    await waitFor(() => expect(f.locate.mock.calls.filter(([payload]) => payload.claimId === "atc_new")).toHaveLength(2));
+    await act(async () => undefined);
+    f.history.mockClear();
+    act(() => f.shell().notices.retryShellError(f.runRows()[0]!.id));
+    await screen.findByRole("dialog", { name: "History of Invoice 12" });
+    await waitFor(() => expect(f.history.mock.calls.map(([payload]) => payload.beforeHistoryId)).toEqual([undefined, 3]));
+  });
+
+  it("clears a recovered read's row and keeps saying a run could not be checked", async () => {
+    const unplaced: RecordHistoryEntry = {
+      ...paidByRun, author: { kind: "automation", automationId: "collection:invoices-id#paid", name: "Mark paid", run: { claimId: "atc_1", location: "unchecked" } },
+    };
+    const f = shellWith(async (payload) => {
+      if (payload.beforeHistoryId === undefined) return { entries: [unplaced], nextBeforeHistoryId: 3 };
+      throw new Error("The workspace engine is not running.");
+    }, noRun, async () => { throw new Error("offline"); });
+    fireEvent.click(await screen.findByRole("button", { name: "History" }));
+    await waitFor(() => expect(f.runRows()).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Older changes" }));
+    await waitFor(() => expect(f.rows()).toHaveLength(1));
+    f.history.mockResolvedValue({ entries: [{ ...paidByRun, historyId: 1, field: "Owner", author: null }], nextBeforeHistoryId: null });
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Try again" }));
+    await screen.findByText(/Owner:/);
+    await waitFor(() => expect(f.rows()).toEqual([]));
+    expect(f.runRows().map((row) => row.message.startsWith(RUN_NOT_CHECKED))).toEqual([true]);
   });
 
   it("gives focus back to History when its dialog closes", async () => {

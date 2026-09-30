@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import type { CollectionAutomationRun, CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import { createServerRuns, type ServerAnswer, type ServerRequest } from "../automations/serverRuns";
+
+type ServerReply = Omit<NonNullable<ServerAnswer>, "asker"> | null;
 import { CHANNELS } from "./channels";
 import { registerCollectionAutomationsIpc } from "./collectionAutomationsIpc";
 
@@ -24,7 +26,7 @@ function fixture(options: {
   file?: string;
   sharedView?: boolean;
   /** The relay's answers to the owner's server routes; null: this computer cannot ask as the owner. */
-  server?: (request: ServerRequest) => ServerAnswer | Promise<ServerAnswer>;
+  server?: (request: ServerRequest) => ServerReply | Promise<ServerReply>;
 } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const createFile = vi.fn(async () => ({ path: "Tasks/automations.yaml" }));
@@ -56,7 +58,8 @@ function fixture(options: {
   const asked: Array<[string, ServerRequest]> = [];
   const serverRuns = createServerRuns(async (workspaceId, request) => {
     asked.push([workspaceId, request]);
-    return options.server ? await options.server(request) : null;
+    const reply = options.server ? await options.server(request) : null;
+    return reply && { ...reply, asker: { account: "owner", current: () => true } };
   });
   const executor = {
     runs, listedRun, retry, undo, confirmReach, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false, unprovenPaths: [] }), dismissStops, shareImpact } as unknown as CollectionAutomations;
