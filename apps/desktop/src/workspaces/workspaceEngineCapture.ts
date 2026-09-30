@@ -3609,20 +3609,18 @@ export function createWorkspaceEngineCapture(
         const settleSaveStateTokens = new Map<string, number>();
         const settleId = (token: number, generation: number): string =>
           `${generation}:${token}`;
+        const takeSaveToken = (token: number, generation: number): number => {
+          const key = settleId(token, generation);
+          const saveToken = settleSaveStateTokens.get(key) ?? 0;
+          settleSaveStateTokens.delete(key);
+          return saveToken;
+        };
         const reportSaveState = (
           state: EngineYDocSaveState,
           token: number,
-          generation?: number,
         ): void => {
-          const key = generation === undefined ? undefined : settleId(token, generation);
-          const saveToken = key === undefined
-            ? token
-            : settleSaveStateTokens.get(key) ?? 0;
-          if (key !== undefined && state !== "settling") {
-            settleSaveStateTokens.delete(key);
-          }
           try {
-            input.onSaveState?.(state, saveToken);
+            input.onSaveState?.(state, token);
           } catch {
             // Observer boundary: a renderer-facing status hook must never
             // re-enter the session or wedge the settle chain.
@@ -3715,7 +3713,7 @@ export function createWorkspaceEngineCapture(
                 "the engine committed the settle but could not write the file (blocked target); the write is pending a retry",
               ),
             );
-            reportSaveState("error", token, generation);
+            reportSaveState("error", takeSaveToken(token, generation));
             return;
           }
           // The engine just wrote this path's settled content to disk — the
@@ -3804,7 +3802,7 @@ export function createWorkspaceEngineCapture(
                 `the engine settled the document but dohc could not check the file: ${digest.reason}`,
               ),
             );
-            reportSaveState("error", token, generation);
+            reportSaveState("error", takeSaveToken(token, generation));
             return;
           }
           if (digest.kind === "changed" || digest.sha256 !== result.sha256) {
@@ -3813,10 +3811,10 @@ export function createWorkspaceEngineCapture(
             // changed — it is an intent, and recreating the file would be the
             // same overwrite in reverse. The text stays in the CRDT and in
             // History either way.
-            reportSaveState("changed-on-disk", token, generation);
+            reportSaveState("changed-on-disk", takeSaveToken(token, generation));
             return;
           }
-          reportSaveState("saved", token, generation);
+          reportSaveState("saved", takeSaveToken(token, generation));
         };
         // Claim exactly what this settle can carry. The daemon serves one
         // session's commands in order, so an update already sent is in the
@@ -3825,8 +3823,9 @@ export function createWorkspaceEngineCapture(
           settleStarts += 1;
           settleClaims.set(settleId(token, generation), updatesSeen);
           settleStartedAtMs.set(settleId(token, generation), now());
-          settleSaveStateTokens.set(settleId(token, generation), ++saveStateTokens);
-          reportSaveState("settling", token, generation);
+          const saveToken = ++saveStateTokens;
+          settleSaveStateTokens.set(settleId(token, generation), saveToken);
+          reportSaveState("settling", saveToken);
         };
         // The one place a background settle failure is observable. Log it with
         // the path and the wire error, and tell the editor the file on disk is
@@ -3857,16 +3856,14 @@ export function createWorkspaceEngineCapture(
           // unredeemed — and only its claim, whichever settle finishes first.
           settleClaims.delete(settleId(token, generation));
           settleStartedAtMs.delete(settleId(token, generation));
+          const saveToken = takeSaveToken(token, generation);
           if (typeof error === "object" && error !== null) {
-            settleFailureTokens.set(
-              error,
-              settleSaveStateTokens.get(settleId(token, generation)) ?? 0,
-            );
+            settleFailureTokens.set(error, saveToken);
           }
           if (!(error instanceof YdocOwnerDraftPendingError)) {
             onError(`ydoc settle of ${input.path}`, error);
           }
-          reportSaveState(settleFailureSaveState(error), token, generation);
+          reportSaveState(settleFailureSaveState(error), saveToken);
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
