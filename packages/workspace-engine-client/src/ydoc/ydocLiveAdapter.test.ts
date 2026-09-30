@@ -5316,6 +5316,94 @@ it("notifies durable owner observers only after commit and preserves lost-respon
 
 
 describe("immutable original-record recovery", () => {
+  it.each(["CANCELLED", "INTERNAL"] as const)("keeps a committed %s record pending until its keyed retry dedupes", async code => {
+    const engine = seedPlaintextEngine("abc");
+    const resyncEntered = Promise.withResolvers<void>();
+    const releaseResync = Promise.withResolvers<void>();
+    const attempts: Request[] = [];
+    const refused = vi.fn();
+    let fail = false;
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.resync) {
+          resyncEntered.resolve();
+          await releaseResync.promise;
+        }
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          attempts.push(structuredClone(request));
+          const response = await engine.sendRequest(request);
+          if (fail) {
+            fail = false;
+            throw new DaemonRefusalError({ code, retry: "no", message: "answer lost after commit" }, undefined);
+          }
+          return response;
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    session.onLocalUpdateRefused(refused);
+    const before = engine.recordedUpdates.length;
+    attempts.length = 0;
+    fail = true;
+    try {
+      const editing = session.applyLocalTextEdit({ root: "plainText", index: 3, insert: "d" },
+        { idempotencyKey: "uncertain-original" });
+      await resyncEntered.promise;
+      expect(session.missingLocalState).toBe(true);
+      expect(session.doc.getText("plainText").toString()).toBe("abcd");
+      expect(refused).not.toHaveBeenCalled();
+      releaseResync.resolve();
+      await editing;
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]?.idempotencyKey).toBe(attempts[0]?.idempotencyKey);
+      expect(attempts[1]?.params).toEqual(attempts[0]?.params);
+      expect(engine.recordedUpdates.length - before).toBe(1);
+      expect(session.missingLocalState).toBe(false);
+      expect(refused).not.toHaveBeenCalled();
+      await expect(session.settle()).resolves.toMatchObject({ content: "abcd" });
+    } finally { releaseResync.resolve(); await session.evict(); adapter.dispose(); }
+  });
+
+  it("retires a refused client's causal tail and records an independent keyed client", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const refusal = new DaemonRefusalError({ code: "INVALID_PARAMS", message: "future-refusal", retry: "no" }, undefined);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const refused = vi.fn();
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.idempotencyKey === "refused") {
+          entered.resolve(); await release.promise; throw refusal;
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    session.onLocalUpdateRefused(refused);
+    const client = new Y.Doc();
+    Y.applyUpdate(client, session.initialUpdate);
+    const firstVector = Y.encodeStateVector(client);
+    client.getText("plainText").insert(3, " refused");
+    const first = session.applyLocalUpdate(Y.encodeStateAsUpdate(client, firstVector), { idempotencyKey: "refused" });
+    await entered.promise;
+    const secondVector = Y.encodeStateVector(client);
+    client.getText("plainText").insert(client.getText("plainText").length, " dependent");
+    const dependent = session.applyLocalUpdate(Y.encodeStateAsUpdate(client, secondVector), { idempotencyKey: "dependent" });
+    const independent = session.applyLocalUpdate(plaintextUpdate(session.initialUpdate, text => text.insert(3, " independent")),
+      { idempotencyKey: "independent", actorOriginId: "other-agent" });
+    release.resolve();
+    await expect(first).rejects.toBe(refusal);
+    await expect(dependent).rejects.toBe(refusal);
+    await independent;
+    expect(refused.mock.calls.map(([id]) => id)).toEqual(["refused", "dependent"]);
+    expect(session.missingLocalState).toBe(false);
+    await expect(session.settle()).resolves.toMatchObject({ content: "abc independent" });
+    client.destroy(); await session.evict(); adapter.dispose();
+  });
+
   it("reestablishes a neutral base and replays originals without arming settlement or scanning the full document", async () => {
     const engine = seedPlaintextEngine("abc");
     const scheduler = settleScheduler();

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import {
   DaemonRefusalError,
+  YDOC_PENDING_MAX_RECORDS,
   openEngineYdocProviderSession,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
@@ -2148,7 +2149,7 @@ async function daemonDeathCapture(
     durableUpdates: Uint8Array[];
     recoveryBases: Uint8Array[];
     journalKeys: Array<string | null>;
-    applyFaults: Array<"drop" | "commit-then-drop" | "commit-then-die">;
+    applyFaults: Array<"drop" | "commit-then-drop" | "commit-then-die" | "commit-then-cancel" | "commit-then-internal">;
     applyRefusals: unknown[];
     diskMarkdown: string;
     settled: string[];
@@ -2177,7 +2178,7 @@ async function daemonDeathCapture(
     // daemon died before recording, and is already back for the rebind.
     // "commit-then-drop": it recorded, then the response was lost the same
     // way. "commit-then-die": it recorded, then died and stays down.
-    applyFaults: [] as Array<"drop" | "commit-then-drop" | "commit-then-die">,
+    applyFaults: [] as Array<"drop" | "commit-then-drop" | "commit-then-die" | "commit-then-cancel" | "commit-then-internal">,
     applyRefusals: [] as unknown[],
     diskMarkdown: "",
     settled: [] as string[],
@@ -2333,6 +2334,10 @@ async function daemonDeathCapture(
         Y.applyUpdate(doc, update);
         state.durableUpdates.push(update);
         state.journalKeys.push(key ?? null);
+        if (fault === "commit-then-cancel" || fault === "commit-then-internal") {
+          throw new DaemonRefusalError({ code: fault === "commit-then-cancel" ? "CANCELLED" : "INTERNAL",
+            message: "answer lost after commit", retry: "no" }, undefined);
+        }
         if (fault === "commit-then-die") state.daemonAlive = false;
         if (fault !== undefined) throw transportDeath();
       },
@@ -2499,10 +2504,100 @@ function keyedUpdate(rendererDoc: Y.Doc, text: string): Uint8Array {
   return Y.encodeStateAsUpdate(scratch, before);
 }
 
+it.each(["commit-then-cancel", "commit-then-internal"] as const)("dedupes %s without a refusal notice", async fault => {
+  for (const confirmed of [false, true]) {
+    const fixture = await daemonDeathCapture("dohc-ydoc-uncertain-answer-", "ydoc-uncertain-answer");
+    const notices = vi.fn();
+    const errors = vi.fn();
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "ydoc-uncertain-answer", rootPath: fixture.rootPath,
+      rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider, onError: errors,
+    });
+    const session = await capture.openYDocSession({
+      path: "note.md", onRemoteUpdate: () => undefined, onEditRefused: notices,
+    });
+    fixture.state.applyFaults.push(fault);
+    const original = keyedUpdate(session.doc, "Saved once");
+    if (confirmed) await session.applyDecidedLocalUpdate(() => original, undefined, { idempotencyKey: "uncertain" });
+    else session.applyLocalUpdate(original, undefined, { idempotencyKey: "uncertain" });
+    expect((await session.settleNow()).content).toBe("Saved once");
+    expect(fixture.state.journalKeys).toEqual(["uncertain"]);
+    expect(fixture.state.durableUpdates).toHaveLength(1);
+    expect(notices).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+    await session.close({ settle: false }); await capture.stop();
+  }
+});
+
+it("reports one replay refusal batch and preserves an independent client", async () => {
+  const fixture = await daemonDeathCapture("dohc-ydoc-causal-refusal-", "ydoc-causal-refusal");
+  const notices: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-causal-refusal", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const mirror = new Y.Doc();
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: () => undefined,
+    onEditRefused: (_id, message) => notices.push(message),
+    onLineageReplaced: update => {
+      const fresh = new Y.Doc();
+      Y.applyUpdate(fresh, update);
+      expect(fresh.getText("plainText").toString()).toBe("Saved independent");
+      fresh.destroy();
+    },
+  });
+  Y.applyUpdate(mirror, session.initialUpdate);
+  typeInto(mirror, session, "Saved ");
+  await session.settleNow();
+  const independent = keyedUpdate(mirror, "independent");
+  fixture.state.daemonAlive = false;
+  for (const text of ["refused", " dependent", " tail"]) typeInto(mirror, session, text);
+  session.applyLocalUpdate(independent, undefined, { idempotencyKey: "other-client", actorOriginId: "other-agent" });
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  fixture.state.daemonAlive = true;
+  fixture.state.applyRefusals.push(new DaemonRefusalError({
+    code: "INVALID_PARAMS", message: "future-refusal", retry: "no",
+  }, undefined));
+  expect((await session.settleNow()).content).toBe("Saved independent");
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toContain('could not save edits to "note.md"');
+  expect(notices[0]).toContain("Open Notices and use Copy beside this file.");
+  expect(fixture.state.journalKeys).toContain("other-client");
+  mirror.destroy(); await session.close({ settle: false }); await capture.stop();
+});
+
+it("names the pending queue limit and releases its byte budget after draining", async () => {
+  const fixture = await daemonDeathCapture("dohc-ydoc-queue-limit-", "ydoc-queue-limit");
+  const notices: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-queue-limit", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: () => undefined,
+    onEditRefused: (_id, message) => notices.push(message),
+  });
+  const empty = new Uint8Array([0, 0]);
+  for (let count = 0; count <= YDOC_PENDING_MAX_RECORDS; count += 1) session.applyLocalUpdate(empty);
+  await session.settleNow();
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toContain("Too many edits are waiting to save.");
+  expect(notices[0]).not.toContain("too large");
+  expect(notices[0]).toContain("Open Notices and use Copy beside this file.");
+  await session.applyDecidedLocalUpdate(doc => keyedUpdate(doc, "later"), undefined, { idempotencyKey: "after-drain" });
+  expect((await session.settleNow()).content).toBe("later");
+  expect(notices).toHaveLength(1);
+  await session.close({ settle: false }); await capture.stop();
+});
+
 it.each([
   ["update-too-large", "LIMIT_EXCEEDED"],
   ["content-kind-mismatch", "INVALID_PARAMS"],
   ["future-update-refusal", "INVALID_PARAMS"],
+  ["future-limit-refusal", "LIMIT_EXCEEDED"],
 ] as const)("keeps typing live after a %s refusal, including replay", async (reason, code) => {
   for (const confirmed of [false, true]) {
     for (const replay of [false, true]) {

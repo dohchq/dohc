@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "./ydocPendingLimits";
+import { ydocUpdateDependsOn } from "./ydocUpdateDependencies";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import {
@@ -818,7 +819,7 @@ export class YdocAdapterSession {
     if (this.pendingRecords.size >= YDOC_PENDING_MAX_RECORDS ||
       retainedBytes > YDOC_PENDING_MAX_BYTES - this.pendingRecordBytes) {
       const error = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", retry: "no",
-        message: "The document has too many unsaved edits. Save them before editing again." }, undefined);
+        message: "pending-edits-limit" }, undefined);
       for (const listener of this.localUpdateRefusedListeners) {
         try { listener(record.idempotencyKey, error); }
         catch (cause) { this.surfaceSessionError(cause); }
@@ -960,12 +961,16 @@ export class YdocAdapterSession {
       ));
     } catch (error) {
       if (isYdocUpdateAdmissionRefusal(error) && this.pendingRecords.has(record)) {
-        // Later originals can depend on the refused structs. Reject that tail
-        // before replacing the document so observers can retain a recovery copy.
+        // Retire causal dependents before replacement so observers can retain
+        // a recovery copy. Independent clients keep their queued writes.
+        const refusedUpdates = [base64ToBytes(record.updateBase64)];
         let tail = false;
         for (const pending of this.pendingRecords) {
           if (pending === record) tail = true;
           if (!tail) continue;
+          const update = base64ToBytes(pending.updateBase64);
+          if (pending !== record && !refusedUpdates.some(refused => ydocUpdateDependsOn(update, refused))) continue;
+          if (pending !== record) refusedUpdates.push(update);
           pending.refusal = error;
           this.removePendingRecord(pending);
           for (const listener of this.localUpdateRefusedListeners) {

@@ -44,6 +44,7 @@ import {
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
   isYdocUpdateAdmissionRefusal,
+  ydocUpdateDependsOn,
   isTransientEngineRefusal,
   isYdocAuthorCapacityRefusal,
   isYdocRemoteUpdatesPendingRefusal,
@@ -2090,6 +2091,14 @@ export function createWorkspaceEngineCapture(
       refusal: { error: unknown } | null;
     };
     const pendingRecords = new Set<PendingRecord>();
+    let pendingUpdateBytes = 0;
+    const removePendingRecord = (record: PendingRecord): void => {
+      if (pendingRecords.delete(record)) pendingUpdateBytes -= record.update.byteLength;
+    };
+    const clearPendingRecords = (): void => {
+      pendingRecords.clear();
+      pendingUpdateBytes = 0;
+    };
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;
     let localGeneration = 0;
@@ -2097,26 +2106,36 @@ export function createWorkspaceEngineCapture(
       localGeneration += 1;
       input.onLineageReplaced(update, recoveredPaths);
     };
-    const pendingUpdateBytes = (): number => [...pendingRecords].reduce(
-      (sum, record) => sum + record.update.byteLength, 0,
-    );
     // Across IPC, renderer and main need separate ownership. Main retains at
     // most 32 MiB and 4096 originals, including queued IPC calls.
-    // The adapter caps its wire strings at 32 MiB. Recovery validates
-    // originals once, then replays them without scanning the whole document.
+    // Main owns originals across provider generations; the adapter needs wire
+    // strings for its standalone retry ladder. Sharing ownership would couple
+    // these lifetimes. Both queues are bounded independently.
     const refuseRecord = (record: PendingRecord, error: unknown): void => {
       if (record.refusal !== null) return;
       record.refusal = { error };
-      pendingRecords.delete(record);
+      const refusedUpdates = [record.update];
+      let later = false;
+      for (const pending of pendingRecords) {
+        if (pending === record) { later = true; continue; }
+        if (!later || !refusedUpdates.some(update => ydocUpdateDependsOn(pending.update, update))) continue;
+        pending.refusal = { error };
+        refusedUpdates.push(pending.update);
+        removePendingRecord(pending);
+      }
+      removePendingRecord(record);
       const reason = error instanceof Error ? error.message : "";
-      const explanation = reason.includes("update-too-large")
+      const explanation = reason.includes("pending-edits-limit")
+        ? "Too many edits are waiting to save."
+        : reason.includes("update-too-large")
         ? "The edit is too large."
         : reason.includes("content-kind-mismatch")
           ? "The edit does not match this file's format."
           : reason.includes("share-read-only")
             ? "This file is read-only."
             : "dohc refused this edit.";
-      const message = `dohc could not save an edit to "${input.path}". ${explanation} Copy it from recovery.`;
+      const what = refusedUpdates.length > 1 ? "edits" : "an edit";
+      const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices and use Copy beside this file.`;
       onError(`Y.Doc local update of ${input.path}`, new Error(message, { cause: error }));
       input.onEditRefused?.(record.options.idempotencyKey ?? "", message);
     };
@@ -2281,7 +2300,7 @@ export function createWorkspaceEngineCapture(
               const retired = canonicalDoc;
               canonicalDoc = replacement;
               if ((opened?.lineageClaimId ?? null) !== canonicalLineageClaimId) {
-                pendingRecords.clear();
+                clearPendingRecords();
                 recordedDoc.destroy();
                 recordedDoc = new Y.Doc();
                 Y.applyUpdate(recordedDoc, Y.encodeStateAsUpdate(replacement));
@@ -2301,7 +2320,7 @@ export function createWorkspaceEngineCapture(
                   record.acknowledged = true;
                   Y.applyUpdate(recordedDoc, record.update);
                   recordedStateVector = Y.encodeStateVector(recordedDoc);
-                  pendingRecords.delete(record);
+                  removePendingRecord(record);
                 }
               }
             },
@@ -2394,7 +2413,7 @@ export function createWorkspaceEngineCapture(
               "dohc could not restore all saved edits. Keep this editor open and restart dohc.");
           }
           openingRemoteUpdates.delete(replacement);
-          pendingRecords.clear();
+          clearPendingRecords();
           canonicalDoc = replacement.doc;
           canonicalLineageClaimId = replacementClaimId;
           recordedStateVector = Y.encodeStateVector(replacement.doc);
@@ -2451,11 +2470,9 @@ export function createWorkspaceEngineCapture(
           } catch (error) {
             if (!hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) throw error;
             refuseRecord(record, error);
-            // Every remaining original may depend on refused CRDT items.
-            // Keep the losing renderer in recovery and start from admitted work.
-            for (const dependent of pendingRecords) refuseRecord(dependent, error);
             const restored = new Y.Doc();
             Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
+            for (const pending of pendingRecords) Y.applyUpdate(restored, pending.update);
             canonicalDoc = restored;
             announceReplacement(Y.encodeStateAsUpdate(restored), []);
             doc.destroy();
@@ -2479,7 +2496,7 @@ export function createWorkspaceEngineCapture(
             return;
           }
           record.acknowledged = true;
-          pendingRecords.delete(record);
+          removePendingRecord(record);
           Y.applyUpdate(doc, record.update);
           Y.applyUpdate(recordedDoc, record.update);
           replacementClaimId = replacement.lineageClaimId ?? replacementClaimId;
@@ -2634,7 +2651,7 @@ export function createWorkspaceEngineCapture(
         } catch (error) {
           if (record.acknowledged) return;
           if (record.refusal !== null) throw record.refusal.error;
-          if (!sent && !record.sent) pendingRecords.delete(record);
+          if (!sent && !record.sent) removePendingRecord(record);
           throw unanswered(error);
         }
         if (record.acknowledged) return;
@@ -2654,7 +2671,7 @@ export function createWorkspaceEngineCapture(
           const journaled = generation.applyLocalUpdate(update, applyOptions);
           armed();
           await journaled;
-          pendingRecords.delete(record);
+          removePendingRecord(record);
           Y.applyUpdate(doc, update);
           Y.applyUpdate(recordedDoc, update);
           recordedStateVector = Y.encodeStateVector(recordedDoc);
@@ -2832,8 +2849,8 @@ export function createWorkspaceEngineCapture(
           acknowledged: false, sent: false, refusal: null,
         };
         if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
-            pendingUpdateBytes() + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
-          refuseRecord(record, new Error("update-too-large: pending edits reached the recovery limit"));
+            pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
+          refuseRecord(record, new Error("pending-edits-limit"));
           announceReplacement(Y.encodeStateAsUpdate(doc), []);
           if (keyed) throw record.refusal?.error;
           return false;
@@ -2844,9 +2861,10 @@ export function createWorkspaceEngineCapture(
         // does not.
         updatesCounted += 1;
         pendingRecords.add(record);
+        pendingUpdateBytes += update.byteLength;
         if (keyed) {
           await applyKeyedUpdate(update, capturedOptions, armed, record);
-          pendingRecords.delete(record);
+          removePendingRecord(record);
           return true;
         }
         // The renderer has already accepted this update, so the canonical doc
@@ -2871,7 +2889,7 @@ export function createWorkspaceEngineCapture(
           armed();
           await journaled;
           record.acknowledged = true;
-          pendingRecords.delete(record);
+          removePendingRecord(record);
           Y.applyUpdate(doc, update);
           Y.applyUpdate(recordedDoc, update);
           recordedStateVector = Y.encodeStateVector(recordedDoc);
@@ -2987,13 +3005,13 @@ export function createWorkspaceEngineCapture(
       },
       applyLocalUpdate(update, onArmed, applyOptions) {
         if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
-            pendingUpdateBytes() + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
+            pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
           const record: PendingRecord = {
             update, options: { ...structuredClone(applyOptions ?? {}),
               idempotencyKey: applyOptions?.idempotencyKey ?? createId() },
             acknowledged: false, sent: false, refusal: null,
           };
-          refuseRecord(record, new Error("update-too-large: pending edits reached the recovery limit"));
+          refuseRecord(record, new Error("pending-edits-limit"));
           // Wait for already admitted calls so the replacement contains them.
           void append(async () => {
             if (!closed && canonicalDoc) announceReplacement(Y.encodeStateAsUpdate(canonicalDoc), []);

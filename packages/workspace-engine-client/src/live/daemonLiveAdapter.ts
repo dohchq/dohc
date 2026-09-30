@@ -233,14 +233,16 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error);
 }
 
-// A terminal daemon answer definitively refused this write. Keep only session
-// loss and lineage races on the recovery path; new refusal reasons must not
-// become immortal pending records merely because the client does not name them.
+// Retryability does not prove non-admission: cancellation or an internal
+// failure can answer after the spawned record task commits. Only input and
+// permission refusals prove that this original did not land.
 export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
   const wire = error instanceof DaemonRefusalError
-    ? { retry: error.retry }
+    ? { code: error.wireCode, retry: error.retry }
     : wireErrorFrom(error);
   return wire?.retry === "no" &&
+    ["INVALID_PARAMS", "LIMIT_EXCEEDED", "FORBIDDEN", "SHARE_READ_ONLY",
+      "PAYLOAD_TOO_LARGE", "AUTHORSHIP_MISMATCH"].includes(wire.code) &&
     !isTransientEngineRefusal(error) &&
     !isDaemonReconnectError(error) &&
     !isYdocSessionNotFoundRefusal(error) &&
