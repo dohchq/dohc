@@ -191,7 +191,7 @@ describe("the automation replicas", () => {
     const replica = running.replica(WORKSPACE)!;
     expect(replica).toMatchObject({ workspaceId: WORKSPACE, ownerUserId: "owner", incarnation: 1, startedAtMs: 5, workspace: "handle-1" });
     const open = engine.sent.find((request) => request.method === "workspace.open")!;
-    expect(open.params).toMatchObject({ workspaceId: WORKSPACE, captureMode: "none", rootDir: replica.root,
+    expect(open.params).toMatchObject({ workspaceId: WORKSPACE, captureMode: "none", reconcileCollections: true, rootDir: replica.root,
       relay: { baseUrl: "https://relay.example", bearerToken: deriveAutomationReplicaBearer(storage.currentAutomationWorkspace(WORKSPACE)!, { key, namespace }) } });
     expect(replica.metadataDir.startsWith(replica.root)).toBe(false);
     expect(engine.methods()).toEqual(["workspace.open", "versions.ensureMain", "sync.adoptJoinIdentity", "sync.push", "sync.pull", "sync.materializePendingCursor", "sync.commitCursor"]);

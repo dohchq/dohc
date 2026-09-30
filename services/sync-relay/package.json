@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@dohc/app-backend-runtime": "workspace:*",
+    "@dohc/automation-executor": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",
@@ -42,6 +43,7 @@
     "@types/ws": "8.18.1",
     "tsx": "^4.23.11",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "yjs": "13.6.30"
   }
 }

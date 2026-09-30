@@ -142,8 +142,9 @@ export async function startAutomationReplicas(options: {
     }
     const {engine: engineClient, exited} = await engine();
     const bearerToken = deriveAutomationReplicaBearer(row, {key: options.key, namespace: options.namespace});
+    // Nothing watches the replica's folder, so the engine keeps its Collections current itself.
     const opened = await request(engineClient, "workspace.open", {rootDir: root, workspaceId: row.workspaceId, captureMode: "none",
-      recoverRunningDispatches: false, relay: {baseUrl: relay.origin, bearerToken}}) as {workspace?: unknown} | null;
+      reconcileCollections: true, recoverRunningDispatches: false, relay: {baseUrl: relay.origin, bearerToken}}) as {workspace?: unknown} | null;
     if (typeof opened?.workspace !== "string" || !opened.workspace) throw new Error("The engine did not open the automation replica.");
     const handle = opened.workspace;
     const closed = new AbortController();

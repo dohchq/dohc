@@ -15,7 +15,8 @@ import type { CliServerOptions, CliServerHandle } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import { createChatWrites } from "../workspaces/chatWrites";
-import type { CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
+import type { CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
+import { desktopRecordEditContext } from "../workspaces/desktopRecordEdits";
 import type { WorkspaceEngineMomentSummary, WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
@@ -345,8 +346,9 @@ describe("desktop CLI workspace context", () => {
     const opened = vi.fn(async () => session);
     f.dependencies.collectionEditContextFor = async (operation, signal) => {
       operation.assertCurrent(); admitted.push(operation.workspace.attachmentId);
-      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
-        onCaptureSettled: () => () => undefined, signal };
+      return desktopRecordEditContext({ workspaceRoot: operation.workspace.rootPath,
+        capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
+        onCaptureSettled: () => () => undefined, signal });
     };
     const context = await f.create().openCliWorkspace(f.workspace);
     try {
@@ -478,8 +480,9 @@ describe("desktop CLI workspace context", () => {
     const opened = vi.fn();
     f.dependencies.collectionEditContextFor = async (operation, signal): Promise<CollectionRecordEditContext> => {
       entered.release(); await held.promise; operation.assertCurrent();
-      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
-        onCaptureSettled: () => () => undefined, signal };
+      return desktopRecordEditContext({ workspaceRoot: operation.workspace.rootPath,
+        capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
+        onCaptureSettled: () => () => undefined, signal });
     };
     const context = await f.create().openCliWorkspace(f.workspace);
     const result = context.collections!.writes.setFields({ recordPath: "tasks/one.md", fields: { status: "done" },

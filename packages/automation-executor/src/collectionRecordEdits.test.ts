@@ -3,8 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { derivedRecordId } from "@dohc/automation-executor/record-ids";
-
+import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import {
   actorOriginIdFor,
   attributionFor,
@@ -13,13 +12,12 @@ import {
   collectionRecordWrites,
   setCollectionRecordFields,
   type CollectionRecordEditContext,
+  type RecordEditSession,
 } from "./collectionRecordEdits";
-import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { derivedRecordId } from "./recordIds";
+import { createTestScratch } from "./testScratch";
 
-import type { WorkspaceEngineYDocProviderSession } from "./workspaceEngineCapture";
-
-import { createTestScratch } from "./testTemp";
 const AGENT = {
   kind: "agent",
   agentId: "notes-agent",
@@ -52,7 +50,7 @@ function fakeSession(options: {
   /** Runs just before each update's turn on the session chain, as a remote update would land. */
   beforeTurn?: (doc: Y.Doc) => void;
 } = {}): {
-  session: WorkspaceEngineYDocProviderSession;
+  session: RecordEditSession;
   log: FakeSessionLog;
 } {
   const doc = new Y.Doc();
@@ -119,35 +117,35 @@ function fakeSession(options: {
       log.order.push("close");
     },
   };
-  return { session: session as unknown as WorkspaceEngineYDocProviderSession, log };
+  return { session, log };
 }
 
+/** A host over files in `root`: it records each session opened and each file created, with its author. */
 function contextFor(
   root: string,
-  session: WorkspaceEngineYDocProviderSession,
+  session: RecordEditSession,
   overrides: Partial<CollectionRecordEditContext> = {},
-): CollectionRecordEditContext & { openedPaths: string[]; authoredWrites: Array<{ path: string; author: unknown }> } {
+): CollectionRecordEditContext & { openedPaths: string[]; createdFiles: Array<{ path: string; author: unknown }> } {
   const openedPaths: string[] = [];
-  const authoredWrites: Array<{ path: string; author: unknown }> = [];
+  const createdFiles: Array<{ path: string; author: unknown }> = [];
   return {
     openedPaths,
-    authoredWrites,
-    capture: {
-      async openYDocSession(input) {
-        openedPaths.push(input.path);
-        return session;
-      },
-      // The engine writes the file with its author on the moment.
-      async writeAuthoredTextFile(absolutePath, text, author, options) {
-        authoredWrites.push({ path: absolutePath, author });
-        await mkdir(join(absolutePath, ".."), { recursive: true });
-        await writeFile(absolutePath, text, { flag: options?.createOnly ? "wx" : "w" });
-        return { resolvedAbsolutePath: absolutePath };
-      },
+    createdFiles,
+    async openRecord(path) {
+      openedPaths.push(path);
+      return session;
     },
-    workspaceRoot: root,
+    async createFile(path, text, author) {
+      createdFiles.push({ path, author });
+      await mkdir(join(root, path, ".."), { recursive: true });
+      await writeFile(join(root, path), text, { flag: "wx" });
+      return path;
+    },
+    async readText(path) {
+      return { text: await readFile(join(root, path), "utf8"), truncated: false };
+    },
     withAdapter: async () => null,
-    onCaptureSettled: () => () => undefined,
+    onRecordsChanged: () => () => undefined,
     signal: new AbortController().signal,
     ...overrides,
   };
@@ -155,7 +153,7 @@ function contextFor(
 
 /**
  * The engine side of a create: records it has adopted, keyed by id, and its
- * capture announcements. A lookup of an id it has not adopted answers the
+ * news of adopted records. A lookup of an id it has not adopted answers the
  * way collections.getRecord does.
  */
 function fakeEngine() {
@@ -186,7 +184,7 @@ function fakeEngine() {
           };
         },
       }),
-    onCaptureSettled: (listener) => {
+    onRecordsChanged: (listener) => {
       listeners.add(listener);
       for (const resolve of waitingForListener.splice(0)) resolve();
       return () => listeners.delete(listener);
@@ -450,13 +448,10 @@ describe("setCollectionRecordFields", () => {
     const controller = new AbortController();
     const context = contextFor(root, session, {
       signal: controller.signal,
-      capture: {
-        async openYDocSession() {
-          // An automation run's deadline passes while the engine opens it.
-          controller.abort();
-          return session;
-        },
-        writeAuthoredTextFile: vi.fn(),
+      async openRecord() {
+        // An automation run's deadline passes while the engine opens it.
+        controller.abort();
+        return session;
       },
     });
 
@@ -656,9 +651,9 @@ describe("createCollectionRecord", () => {
     const context = contextFor(root, session, engine.overrides);
     const recordId = derivedRecordId("failed-create");
     const failure = new Error("engine write failed");
-    context.capture.writeAuthoredTextFile = async (path, text) => {
-      await mkdir(join(path, ".."), { recursive: true });
-      await writeFile(path, text);
+    context.createFile = async (path, text) => {
+      await mkdir(join(root, path, ".."), { recursive: true });
+      await writeFile(join(root, path), text);
       throw failure;
     };
     await expect(createCollectionRecord(context, {
@@ -758,7 +753,7 @@ describe("createCollectionRecord", () => {
     ]);
     // The automation's file carries it as the moment's author, so the added
     // record's claim knows the automation and its depth.
-    expect(context.authoredWrites).toEqual([{ path: join(root, "tasks", "two.md"), author: AUTOMATION }]);
+    expect(context.createdFiles).toEqual([{ path: "tasks/two.md", author: AUTOMATION }]);
     await expect(readFile(join(root, "tasks", "two.md"), "utf8")).resolves.toBe(
       `---\nid: ${recordId}\n---\n`,
     );
@@ -1077,7 +1072,7 @@ describe("partial record retry", () => {
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
     const input = { collectionPath: "tasks", name: "retry", fields: { status: "open", priority: "high" }, author: AGENT };
-    vi.spyOn(context.capture, "openYDocSession").mockRejectedValueOnce(new Error("bind refused"));
+    vi.spyOn(context, "openRecord").mockRejectedValueOnce(new Error("bind refused"));
     const first = createCollectionRecord(context, input);
     await engine.listening();
     const recordId = await engine.adopt(root, "tasks/retry.md");
@@ -1095,13 +1090,13 @@ describe("partial record retry", () => {
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
     const adopted = derivedRecordId("reassigned");
-    const originalWrite = context.capture.writeAuthoredTextFile;
-    vi.spyOn(context.capture, "writeAuthoredTextFile").mockImplementationOnce(async (...args) => {
+    const originalWrite = context.createFile;
+    vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
       const written = await originalWrite(...args);
       await engine.adoptUnderNewId(root, "tasks/retry.md", adopted);
       return written;
     });
-    vi.spyOn(context, "onCaptureSettled").mockImplementationOnce(() => { throw Error("capture offline"); });
+    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => { throw Error("capture offline"); });
     // The engine reassigned the identity before capture could be confirmed.
     const remember = vi.fn(async () => {});
     await expect(collectionRecordWrites(context).create({
@@ -1132,7 +1127,7 @@ describe("partial record retry", () => {
     const { session } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    vi.spyOn(context, "onCaptureSettled").mockImplementationOnce(() => { throw Error("capture offline"); });
+    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => { throw Error("capture offline"); });
     const partial = await runCollectionRecordCreation(async work => {
       await work(context);
       throw Error("stale workspace");
@@ -1165,8 +1160,8 @@ describe("partial record retry", () => {
     const { session } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    const write = context.capture.writeAuthoredTextFile;
-    vi.spyOn(context.capture, "writeAuthoredTextFile").mockImplementationOnce(async (...args) => {
+    const write = context.createFile;
+    vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
       await write(...args);
       throw Error("response lost");
     });
@@ -1188,7 +1183,7 @@ describe("partial record retry", () => {
     const { session } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    vi.spyOn(context, "onCaptureSettled").mockImplementationOnce(() => { throw Error("capture offline"); });
+    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => { throw Error("capture offline"); });
     const input = { collectionPath: "tasks", name: "retry", author: AGENT };
     const partial = await createCollectionRecord(context, input);
     expect(partial).toMatchObject({ kind: "partial", failedStage: "capture" });
@@ -1209,7 +1204,7 @@ describe("partial record retry", () => {
     const context = contextFor(root, session, engine.overrides);
     const input = { collectionPath: "tasks", name: "retry", fields: { status: "open" }, author: AGENT };
     const fail = () => { throw new Error("injected " + stage); };
-    if (stage === "bind") vi.spyOn(context.capture, "openYDocSession").mockImplementationOnce(fail);
+    if (stage === "bind") vi.spyOn(context, "openRecord").mockImplementationOnce(fail);
     if (stage === "fields") vi.spyOn(session, "applyDecidedLocalUpdate").mockImplementationOnce(fail);
     if (stage === "settle") vi.spyOn(session, "settleNow").mockImplementationOnce(fail);
     if (stage === "close") vi.spyOn(session, "close").mockImplementationOnce(fail);

@@ -136,7 +136,8 @@ import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
-import { runCollectionRecordCreation, collectionRecordWrites, type CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
+import { runCollectionRecordCreation, collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
+import { desktopRecordEditContext, type DesktopRecordEditHost } from "./workspaces/desktopRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
@@ -3256,12 +3257,12 @@ async function collectionEditContextFor(
 
 function collectionEditContextWith(
   operation: DesktopWorkspaceOperation,
-  capture: CollectionRecordEditContext["capture"],
+  capture: DesktopRecordEditHost["capture"],
   signal: AbortSignal,
 ): CollectionRecordEditContext {
   const workspace = operation.workspace;
   assertWritableWorkspace(workspace);
-  return {
+  return desktopRecordEditContext({
     capture,
     workspaceRoot: workspace.rootPath,
     withAdapter: (work) => withEngineAdapter(workspace, work),
@@ -3271,7 +3272,7 @@ function collectionEditContextWith(
       return onWorkspaceCaptureSettled(daemon, workspace.workspaceId, listener);
     },
     signal,
-  };
+  });
 }
 
 // A workspace text file, or null when there is none.
