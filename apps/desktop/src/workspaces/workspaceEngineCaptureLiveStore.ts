@@ -143,7 +143,8 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
-  checkMove(input: { workspaceId: string; versionId: string; path: string }): Promise<void>;
+  // Preflight the author of the following rename or delete.
+  checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }): Promise<void>;
   listPendingCollectionAdoptions?(input?: {
     limit?: number;
     cursor?: CollectionPendingAdoptionCursor;
@@ -880,8 +881,8 @@ export function createCaptureLiveStores(
       return value === null ? null : snapshotFromWire(value);
     },
 
-    checkMove: (input: { workspaceId: string; versionId: string; path: string }) =>
-      runRead(async (adapter) => await adapter.checkMove(input)),
+    checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }) =>
+      runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
 
     async listTextFileMetadata(input: {
       workspaceId: string;

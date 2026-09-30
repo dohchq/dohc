@@ -469,7 +469,8 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.textRead]: VersionedTextReadParams;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobParams;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameParams;
-  [VERSIONED_METHOD.textCheckMove]: JsonObject & { versionId: string; path: string };
+  // Preflight the author of the following rename or delete.
+  [VERSIONED_METHOD.textCheckMove]: JsonObject & { versionId: string; path: string; author?: WriteAuthor };
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteParams;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackParams;
   [VERSIONED_METHOD.textList]: VersionedTextListParams;

@@ -5152,16 +5152,17 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("authored path change", async () => {
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);
-        const ensureAllowed = async () => {
-          for (const path of paths) {
+        const ensureAllowed = async (author?: MomentWriteAuthor) => {
+          for (const [index, path] of paths.entries()) {
             try {
-              await engine.checkMove({ workspaceId, versionId, path });
+              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}) });
             } catch (error) {
               throw liveDocumentMutationRefusal(error, path, authored.operation) ?? error;
             }
           }
         };
-        await ensureAllowed();
+        // Validate the author once before settlement or disk changes.
+        await ensureAllowed(authored.author);
         await settleAndCloseLiveYDocSessions(match, "Saved latest edits before moving or deleting the file");
         const source = paths[0];
         if (authored.operation === "move" && source !== undefined) {

@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:f
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { DaemonRefusalError, VERSIONED_METHOD, type Request } from "@dohc/workspace-engine-client";
 import { EngineDaemonUnavailableError, EngineWorkspaceSessionsClosedError, EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
@@ -19,11 +20,15 @@ const faults = vi.hoisted(() => ({} as {
   // Runs just before a hard link is made.
   link?: (from: string, to: string) => Promise<void>;
   readPolicy?: () => void;
+  // Sees every call that would change the disk.
+  mutate?: (syscall: string, path: string) => void;
 }));
 vi.mock("node:fs/promises", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   const refused = (syscall: string, path: string) =>
     Object.assign(new Error(`EPERM: operation not permitted, ${syscall} '${path}'`), { code: "EPERM", syscall, path });
+  const seen = <Args extends unknown[], Result>(syscall: string, call: (...args: Args) => Result) =>
+    (...args: Args): Result => { faults.mutate?.(syscall, String(args[0])); return call(...args); };
   return {
     ...actual,
     readFile: ((...args: Parameters<typeof actual.readFile>) => {
@@ -31,13 +36,19 @@ vi.mock("node:fs/promises", async importOriginal => {
       return actual.readFile(...args);
     }) as typeof actual.readFile,
     unlink: (async (path: Parameters<typeof actual.unlink>[0]) => {
+      faults.mutate?.("unlink", String(path));
       if (await faults.unlink?.(String(path))) throw refused("unlink", String(path));
       return await actual.unlink(path);
     }) as typeof actual.unlink,
     link: (async (from: Parameters<typeof actual.link>[0], to: Parameters<typeof actual.link>[1]) => {
+      faults.mutate?.("link", String(from));
       await faults.link?.(String(from), String(to));
       return await actual.link(from, to);
     }) as typeof actual.link,
+    rename: seen("rename", actual.rename) as typeof actual.rename,
+    mkdir: seen("mkdir", actual.mkdir) as typeof actual.mkdir,
+    rmdir: seen("rmdir", actual.rmdir) as typeof actual.rmdir,
+    copyFile: seen("copyFile", actual.copyFile) as typeof actual.copyFile,
     readdir: ((...args: Parameters<typeof actual.readdir>) => faults.readdir?.(String(args[0]))
       ? Promise.reject(refused("scandir", String(args[0])))
       : actual.readdir(...args)) as typeof actual.readdir,
@@ -103,9 +114,9 @@ async function fixture(options: {
     return join(systemTrash, entry);
   };
   return { rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
-    move: (fromPath: string, toPath: string, by = named as typeof named | typeof unnamed, overwrite?: boolean) =>
+    move: (fromPath: string, toPath: string, by: MomentWriteAuthor = named, overwrite?: boolean) =>
       prepareMoveWorkspacePathAs(operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, by, pathOptions()).then(finish => finish()),
-    remove: (path: string, by = named as typeof named | typeof unnamed) => prepareDeleteWorkspacePathAs(operation, path, by, pathOptions()).then(finish => finish()) };
+    remove: (path: string, by: MomentWriteAuthor = named) => prepareDeleteWorkspacePathAs(operation, path, by, pathOptions()).then(finish => finish()) };
 }
 
 describe("agent moves and deletes", () => {
@@ -236,6 +247,44 @@ describe("agent moves and deletes", () => {
     await f.settle();
     expect(await readFile(join(f.rootPath, "dir/a.txt"), "utf8")).toBe("a");
     expect((await f.added(seen)).filter(row => row.agentId !== undefined)).toEqual([]);
+    await f.engine().stop();
+  });
+
+  it.each([
+    ["a control character", { ...named, agentId: "Client\u0085name" }],
+    ["an oversized field", { ...named, agentId: "x".repeat(513) }],
+  ])("refuses an author with %s before anything on disk changes", async (_case, author) => {
+    const methods: string[] = [];
+    const f = await fixture({ beforeRequest: request => { methods.push(request.method); } });
+    await write(f.rootPath, "a.txt", "a");
+    await write(f.rootPath, "dir/b.txt", "b");
+    await write(f.rootPath, "dest/c.txt", "c");
+    const seen = await f.start();
+    methods.length = 0;
+    // Every disk change dohc attempts, so a rollback cannot hide one.
+    const attempted: string[] = [];
+    faults.mutate = (syscall, path) => { attempted.push(`${syscall} ${path}`); };
+    try {
+      expect(await f.move("a.txt", "moved.txt", author)).toEqual({ ok: false, path: "a.txt", reason: "invalid-metadata" });
+      expect(await f.move("dir", "dest", author, true)).toEqual({ ok: false, path: "dir", reason: "invalid-metadata" });
+      expect(await f.remove("dir", author)).toEqual({ ok: false, deleted: [], path: "dir", reason: "invalid-metadata" });
+    } finally { delete faults.mutate; }
+    expect(attempted).toEqual([]);
+    // The preflight refuses; from there no document settles, capture never flushes or holds, and nothing is recorded.
+    expect(methods.filter(method => method === VERSIONED_METHOD.textCheckMove)).toHaveLength(3);
+    const preflight = methods.slice(methods.indexOf(VERSIONED_METHOD.textCheckMove));
+    expect(preflight.filter(method => method.startsWith("ydoc.") || method.startsWith("capture."))).toEqual([]);
+    for (const method of [VERSIONED_METHOD.textRename, VERSIONED_METHOD.textDelete, VERSIONED_METHOD.textRollback]) {
+      expect(methods).not.toContain(method);
+    }
+    expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("a");
+    expect(await readFile(join(f.rootPath, "dir/b.txt"), "utf8")).toBe("b");
+    expect(await readFile(join(f.rootPath, "dest/c.txt"), "utf8")).toBe("c");
+    expect(existsSync(join(f.rootPath, "moved.txt"))).toBe(false);
+    expect(await f.workspaceTrash()).toEqual([]);
+    expect(f.trashItem).not.toHaveBeenCalled();
+    await f.settle();
+    expect(await f.added(seen)).toEqual([]);
     await f.engine().stop();
   });
 

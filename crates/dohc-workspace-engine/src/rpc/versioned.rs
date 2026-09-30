@@ -199,11 +199,14 @@ struct VersionedTextRenameParams {
     capture_hold_id: Option<String>,
 }
 
+/// Preflight the author before settling documents or changing the disk.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedTextCheckMoveParams {
     version_id: String,
     path: String,
+    #[serde(default)]
+    author: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -732,6 +735,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionedTextCheckMoveParams = parse(params)?;
+        validated_author(params.author.as_ref())?;
         let open = self.open(request.workspace.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         Self::read_under_ctx(
