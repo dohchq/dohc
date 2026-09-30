@@ -98,7 +98,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       let seq = 0;
       return bindEngineYDoc({
       open: () => ipc!.open(sender,{workspaceId: "workspace",sessionId,path: "docs/a.md"}),stageLocalUpdate: () => ++seq,
-      async applyLocalUpdate(update,seq,lineageGeneration) {const result = ipc!.applyUpdate(sender,{sessionId,update,seq,lineageGeneration}); if (!result.accepted) throw new Error(result.reason);},
+      async applyLocalUpdate(update,seq,lineageGeneration,requestId) {const result = ipc!.applyUpdate(sender,{sessionId,update,seq,lineageGeneration,requestId}); if (!result.accepted) throw new Error(result.reason);},
       onRemoteUpdate(listener) {listeners.set(CHANNELS.engineYDocRemoteUpdate,event => listener(event.update,event.lineageGeneration)); return () => listeners.delete(CHANNELS.engineYDocRemoteUpdate);},
       onLineageReplacement(listener) {listeners.set(CHANNELS.engineYDocLineageReplacement,listener); return () => listeners.delete(CHANNELS.engineYDocLineageReplacement);},
       async acknowledgeLineageReplacement(lineageGeneration) {const result=ipc!.acknowledgeLineageReplacement(sender,{sessionId,lineageGeneration}); if (!result.accepted) throw new Error(result.reason); return result.updates;},

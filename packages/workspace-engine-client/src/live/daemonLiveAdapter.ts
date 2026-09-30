@@ -233,19 +233,21 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error);
 }
 
-// Only named input refusals prove non-admission. INVALID_PARAMS also describes
-// session and lineage state that must go through recovery.
+// A terminal daemon answer definitively refused this write. Keep only session
+// loss and lineage races on the recovery path; new refusal reasons must not
+// become immortal pending records merely because the client does not name them.
 export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
-  const message = refusalMessageOf(error);
-  return isIdempotencyKeyReuseRefusal(error) || (
-    message !== null && (
-      message.startsWith("attribution ") ||
-      message === "only an automation's attribution names a run" ||
-      message === "Y.Doc replay parity violation" ||
-      message === "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
-    )
-  ) || refusalMessageOf(error, "LIMIT_EXCEEDED") ===
-    "This edit's author details exceed the supported size. Shorten the author details and try again.";
+  const wire = error instanceof DaemonRefusalError
+    ? { retry: error.retry }
+    : wireErrorFrom(error);
+  return wire?.retry === "no" &&
+    !isTransientEngineRefusal(error) &&
+    !isDaemonReconnectError(error) &&
+    !isYdocSessionNotFoundRefusal(error) &&
+    !isConflictStaleTargetRefusal(error) &&
+    !["ydoc-lineage-stale", "lineage-changed", "lineage-write-stale", "lineage-epoch-changed", "lineage-predecessor-mismatch",
+      "lineage-state-vector-mismatch"].includes(refusalMessageOf(error) ?? "") &&
+    !isYdocRemoteUpdatesPendingRefusal(error);
 }
 
 // The store refusals the desktop names and recovers from. Each is the

@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
-import type { OwnerLiveDocumentsResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, SyncStatusResult } from "../ipc/bridgeContract";
+import type { OwnerLiveDocumentsResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
@@ -19,6 +19,35 @@ import { WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_UPDATE_STATE, storedStat
 // generic error. The notice explains what was found; the rebuild is explicit
 // (a confirmed click), states the destination before anything moves, and the
 // success copy names the reverse path.
+it("reports an edit refusal once through Notices, without an ineffective retry", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
+  bridge.onEngineYDocSaveState = vi.fn(listener => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+  });
+  renderShell(bridge);
+  await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+  const message = 'dohc could not save an edit to "a.md". The edit is too large. Copy it from recovery.';
+  const event: EngineYDocSaveStateEvent = {
+    sessionId: "session-1", seq: 1, state: "error",
+    editRefusal: { workspaceId: WORKSPACE.workspaceId, path: "a.md", requestId: "request-1", message },
+  };
+  act(() => { for (const listener of listeners) listener(event); });
+  const user = userEvent.setup();
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const notices = await screen.findByTestId("notice-center");
+  expect(within(notices).getAllByText(message)).toHaveLength(1);
+  expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
+  expect(within(notices).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+  act(() => {
+    for (const listener of listeners) listener({ ...event,
+      editRefusal: { ...event.editRefusal!, workspaceId: OTHER_WORKSPACE.workspaceId,
+        message: "Another workspace refused an edit." } });
+  });
+  expect(screen.queryByText("Another workspace refused an edit.")).toBeNull();
+});
+
 describe("engine store recovery", () => {
   const refusedStatus = {
     ...SYNC_STATUS,

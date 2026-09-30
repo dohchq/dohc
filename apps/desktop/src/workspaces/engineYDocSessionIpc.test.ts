@@ -185,6 +185,19 @@ const openPayload = {
 };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("sends a definitive edit refusal through the scoped save event", async () => {
+    const h = harness(providerSession());
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+    const message = 'dohc could not save an edit to "notes/a.md". Copy it from recovery.';
+    h.capturedOpen()?.onEditRefused?.("request-1", message);
+    expect(sender.sent).toContainEqual({
+      channel: CHANNELS.engineYDocSaveState,
+      payload: { sessionId: openPayload.sessionId, state: "error", seq: 0,
+        editRefusal: { workspaceId: "workspace-1", path: "notes/a.md", requestId: "request-1", message } },
+    });
+    await h.ipc.shutdown();
+  });
   it("keeps the person attribution used by renderer record automations", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);

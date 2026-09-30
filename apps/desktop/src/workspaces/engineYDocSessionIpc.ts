@@ -120,6 +120,7 @@ interface EngineYDocSessionIpcOptions {
 
 interface SessionEvent {
   authorCapacity?: boolean;
+  editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
   state: EngineYDocSaveStateName;
   seq: number;
 }
@@ -563,6 +564,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           provider = await capture.openYDocSession({
             path: canonicalPath,
             contentKind: documentKind,
+            onEditRefused: (requestId, message) => {
+              publish(() => signals.emit({
+                state: "error", seq: saveSeq.dirtySeq,
+                editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
+              }));
+            },
             onSaveState: (state, token, event, authorCapacity) => {
               const seq =
                 event === "start"

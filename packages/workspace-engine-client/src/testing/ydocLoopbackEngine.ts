@@ -455,6 +455,16 @@ export class YdocLoopbackEngine implements EngineTransport {
     return project(this.requireSession(sessionId));
   }
 
+  // Inject loss of a generation's native state while the adapter still owns
+  // acknowledged history. Recovery must establish that base before originals.
+  discardSessionState(sessionId: string): void {
+    const session = this.requireSession(sessionId);
+    session.doc.destroy();
+    session.doc = declaredDoc(session.contentKind);
+    this.lineages.delete(this.lineageKeyFor(session));
+    session.firstUpdatePending = true;
+  }
+
   applyRemoteUpdate(
     sessionId: string,
     update: Uint8Array,

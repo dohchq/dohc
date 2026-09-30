@@ -6053,6 +6053,12 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 // never carried.
 export const EngineYDocSaveStateEvent = z.object({
   authorCapacity: z.boolean().optional(),
+  editRefusal: z.object({
+    workspaceId: WORKSPACE_ID,
+    path: z.string(),
+    requestId: z.string(),
+    message: z.string(),
+  }).optional(),
   sessionId: ENGINE_YDOC_SESSION_ID,
   state: z.enum(ENGINE_YDOC_SAVE_STATES),
   seq: z.number().int().nonnegative(),

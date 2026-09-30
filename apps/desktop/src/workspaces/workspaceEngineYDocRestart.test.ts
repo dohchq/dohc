@@ -363,12 +363,14 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   const seededDoc = new Y.Doc();
   seededDoc.getText("plainText").insert(0, "seed");
   const seedUpdate = Y.encodeStateAsUpdate(seededDoc);
+  const durableDoc = new Y.Doc();
+  Y.applyUpdate(durableDoc, seedUpdate);
 
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
   ): Promise<EngineYdocProviderSession> => {
     const doc = new Y.Doc();
-    Y.applyUpdate(doc, seedUpdate);
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(durableDoc));
     openedDocs.push(doc);
     const generation =
       options.transport === firstClient
@@ -387,15 +389,16 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
       evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
+        Y.applyUpdate(durableDoc, update);
         if (generation === 2 && secondGenerationApplyCount++ === 0) {
           const beforeRemote = Y.encodeStateVector(doc);
           doc.getText("plainText").insert(
             doc.getText("plainText").length,
             " remote",
           );
-          options.onRemoteUpdate(
-            Y.encodeStateAsUpdate(doc, beforeRemote),
-          );
+          const remote = Y.encodeStateAsUpdate(doc, beforeRemote);
+          Y.applyUpdate(durableDoc, remote);
+          options.onRemoteUpdate(remote);
           return;
         }
         if (generation === 1 || generation === 2) {
@@ -1492,7 +1495,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
       head: "present" as const,
       lineage: "existing" as const,
       unsettled: false,
-      evict: async () => undefined,
+      evict: async () => { lifecycle.push(`close-${openedGeneration}`); },
       async applyLocalUpdate(update) {
         if (openedGeneration === 1) throw refusal;
         Y.applyUpdate(doc, update);
@@ -1544,7 +1547,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
   await capture.stop();
 });
 
-it("releases a close-latched failed generation with settle true before the next edit", async () => {
+it("evicts a failed generation before accepting the next edit", async () => {
   const rootPath = await createTestScratch("dohc-ydoc-close-retry-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
@@ -1592,7 +1595,11 @@ it("releases a close-latched failed generation with settle true before the next 
       head: "present" as const,
       lineage: "existing" as const,
       unsettled: false,
-      evict: async () => undefined,
+      evict: async () => {
+        providerClosed = true;
+        closeAttempts.push({ generation: openedGeneration, settle: false });
+        leaseActive = false;
+      },
       async applyLocalUpdate(update) {
         // Models the round-1 provider latch: once close starts, another apply
         // resolves without journaling. Capture must never leave this provider
@@ -1661,9 +1668,8 @@ it("releases a close-latched failed generation with settle true before the next 
     content: "seed first second",
   });
 
-  expect(closeAttempts.slice(0, 2)).toEqual([
+  expect(closeAttempts).toEqual([
     { generation: 1, settle: false },
-    { generation: 1, settle: true },
   ]);
   expect(journaledGenerations).toEqual([2, 2]);
   expect(generation).toBe(2);
@@ -1721,7 +1727,7 @@ it("defers a version switch behind a dead generation until release converges", a
       head: "present" as const,
       lineage: "existing" as const,
       unsettled: false,
-      evict: async () => undefined,
+      evict: async () => { throw settlingCloseFailure; },
       async applyLocalUpdate() {
         applyCount += 1;
         throw refusal;
@@ -1731,7 +1737,7 @@ it("defers a version switch behind a dead generation until release converges", a
       },
       async close(closeOptions) {
         closeAttempts.push(closeOptions?.settle);
-        if (closeAttempts.length < 5) {
+        if (closeAttempts.length < 3) {
           if (closeOptions?.settle === true) throw settlingCloseFailure;
           throw new Error("plain close refused");
         }
@@ -1765,7 +1771,7 @@ it("defers a version switch behind a dead generation until release converges", a
 
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
-  expect(closeAttempts).toEqual([false, true]);
+  expect(closeAttempts).toEqual([]);
   expect(outcomes).toEqual([false]);
   expect(historyCaptureFailed).toBe(true);
   expect(onError).toHaveBeenCalledWith(
@@ -1784,7 +1790,7 @@ it("defers a version switch behind a dead generation until release converges", a
   await expect(capture.switchVersion("main")).rejects.toBe(
     settlingCloseFailure,
   );
-  expect(closeAttempts).toEqual([false, true, false, true]);
+  expect(closeAttempts).toEqual([false, true]);
   expect(leaseActive).toBe(true);
   expect(historyCaptureFailed).toBe(true);
   await expect(
@@ -1798,7 +1804,7 @@ it("defers a version switch behind a dead generation until release converges", a
   await expect(capture.switchVersion("main")).resolves.toMatchObject({
     activeVersionId: "main",
   });
-  expect(closeAttempts).toEqual([false, true, false, true, false]);
+  expect(closeAttempts).toEqual([false, true, false]);
   expect(leaseActive).toBe(false);
   expect(outcomes).toEqual([false, true]);
   expect(historyCaptureFailed).toBe(false);
@@ -2059,7 +2065,10 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
       head: "present" as const,
       lineage: "existing" as const,
       unsettled: false,
-      evict: async () => undefined,
+      evict: async () => {
+        closedGenerations.push(openedGeneration);
+        leaseActive = false;
+      },
       async applyLocalUpdate() {
         throw refusal;
       },
@@ -2137,8 +2146,10 @@ async function daemonDeathCapture(
     generation: number;
     lineage: "present" | "absent";
     durableUpdates: Uint8Array[];
+    recoveryBases: Uint8Array[];
     journalKeys: Array<string | null>;
     applyFaults: Array<"drop" | "commit-then-drop" | "commit-then-die">;
+    applyRefusals: unknown[];
     diskMarkdown: string;
     settled: string[];
     seedRequests: boolean[];
@@ -2159,6 +2170,7 @@ async function daemonDeathCapture(
     generation: 0,
     lineage: "present" as "present" | "absent",
     durableUpdates: [] as Uint8Array[],
+    recoveryBases: [] as Uint8Array[],
     // The idempotency key each journal write carried, null for none.
     journalKeys: [] as Array<string | null>,
     // What the next journal writes meet, one fault per write. "drop": the
@@ -2166,6 +2178,7 @@ async function daemonDeathCapture(
     // "commit-then-drop": it recorded, then the response was lost the same
     // way. "commit-then-die": it recorded, then died and stays down.
     applyFaults: [] as Array<"drop" | "commit-then-drop" | "commit-then-die">,
+    applyRefusals: [] as unknown[],
     diskMarkdown: "",
     settled: [] as string[],
     seedRequests: [] as boolean[],
@@ -2282,9 +2295,23 @@ async function daemonDeathCapture(
       // is asserted on directly instead; see `state.reportedLineage`.
       lineage: reportLineage(),
       unsettled: false,
-      evict: async () => undefined,
+      evict: async () => {
+        if (!state.daemonAlive) throw transportDeath();
+        if (state.failRelease) throw new Error("release-refused");
+        state.releasedGenerations.push(openedGeneration);
+      },
+      async reestablishAcknowledgedState(update) {
+        if (!state.daemonAlive) throw transportDeath();
+        expect(state.reportedLineage.at(-1)).toBe("absent");
+        expect(state.durableUpdates).toHaveLength(0);
+        state.recoveryBases.push(update);
+        state.durableUpdates.push(update);
+        state.lineage = "present";
+        Y.applyUpdate(doc, update);
+      },
       async applyLocalUpdate(update, applyOptions) {
         if (!state.daemonAlive) throw transportDeath();
+        if (state.applyRefusals.length > 0) throw state.applyRefusals.shift();
         const fault = state.applyFaults.shift();
         if (fault === "drop") throw transportDeath();
         if (state.refuseApply) throw new Error("record-update-refused");
@@ -2454,10 +2481,10 @@ it("journals a keyed write on a dead session under its own key once the daemon i
     { idempotencyKey: "claim/1/0" },
   );
 
-  // The revive replays the outage text without a key; the keyed write
+  // The revive replays the outage text under its own ID; the keyed write
   // follows as its own journal write, under its own key.
   expect(state.generation).toBe(2);
-  expect(state.journalKeys).toEqual([null, "claim/1/0"]);
+  expect(state.journalKeys).toEqual([expect.stringMatching(/^[0-9a-f-]{36}$/), "claim/1/0"]);
   expect((await session.settleNow()).content).toBe("PRE_KILL KEYED");
   await session.close({ settle: false });
   await capture.stop();
@@ -2471,6 +2498,68 @@ function keyedUpdate(rendererDoc: Y.Doc, text: string): Uint8Array {
   body.insert(body.length, text);
   return Y.encodeStateAsUpdate(scratch, before);
 }
+
+it.each([
+  ["update-too-large", "LIMIT_EXCEEDED"],
+  ["content-kind-mismatch", "INVALID_PARAMS"],
+  ["future-update-refusal", "INVALID_PARAMS"],
+] as const)("keeps typing live after a %s refusal, including replay", async (reason, code) => {
+  for (const confirmed of [false, true]) {
+    for (const replay of [false, true]) {
+      const fixture = await daemonDeathCapture("dohc-ydoc-refusal-", "ydoc-refusal");
+      const notices: string[] = [];
+      const setAside: string[] = [];
+      let mirror = new Y.Doc();
+      const capture = createWorkspaceEngineCapture({
+        workspaceId: "ydoc-refusal", rootPath: fixture.rootPath,
+        rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+        onError: () => undefined,
+      });
+      const session = await capture.openYDocSession({
+        path: "note.md", onRemoteUpdate: () => undefined,
+        onEditRefused: (_id, message) => notices.push(message),
+        onLineageReplaced: update => {
+          setAside.push(mirror.getText("plainText").toString());
+          mirror.destroy();
+          mirror = new Y.Doc();
+          Y.applyUpdate(mirror, update);
+        },
+      });
+      Y.applyUpdate(mirror, session.initialUpdate);
+      typeInto(mirror, session, "Saved ");
+      await session.settleNow();
+      const refusal = new DaemonRefusalError({ code, message: reason, retry: "no" }, undefined);
+      if (replay) fixture.state.daemonAlive = false;
+      else fixture.state.applyRefusals.push(refusal);
+      const failedBytes = keyedUpdate(mirror, "refused");
+      Y.applyUpdate(mirror, failedBytes);
+      if (confirmed) {
+        await expect(session.applyDecidedLocalUpdate(() => failedBytes, undefined,
+          { idempotencyKey: "refused-record" })).rejects.toThrow();
+      } else {
+        session.applyLocalUpdate(failedBytes);
+        if (!replay) typeInto(mirror, session, "dependent");
+      }
+      if (replay) {
+        await expect(session.settleNow()).rejects.toThrow(/closed/i);
+        fixture.state.daemonAlive = true;
+        fixture.state.applyRefusals.push(refusal);
+      }
+      await session.settleNow();
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain('dohc could not save an edit to "note.md"');
+      expect(notices[0]).not.toContain(reason);
+      expect(setAside.some(text => text.includes("refused"))).toBe(true);
+      typeInto(mirror, session, "later");
+      expect((await session.settleNow()).content).toBe("Saved later");
+      expect(session.doc.getText("plainText").toString()).toBe("Saved later");
+      expect(notices).toHaveLength(1);
+      mirror.destroy();
+      await session.close({ settle: false });
+      await capture.stop();
+    }
+  }
+});
 
 it("sends a keyed write again under its key after its daemon died, so the key still refuses changed content", async () => {
   const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
@@ -2575,15 +2664,16 @@ it("says a keyed write may have been recorded after two sends went unanswered", 
   // Neither send is answered. A rebuilt session that lacks the write does
   // not prove the engine never recorded it, so the caller is not told so.
   state.applyFaults.push("drop", "drop");
+  const original = keyedUpdate(session.doc, "KEYED");
   await expect(
-    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+    session.applyDecidedLocalUpdate(() => original, undefined, {
       idempotencyKey: "claim/1/0",
     }),
   ).rejects.toThrow("may have been recorded");
   expect(session.doc.getText("plainText").toString()).toBe("");
 
   // The caller's retry under the key lands the write once.
-  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+  await session.applyDecidedLocalUpdate(() => original, undefined, {
     idempotencyKey: "claim/1/0",
   });
   expect(state.journalKeys).toEqual(["claim/1/0"]);
@@ -2646,7 +2736,7 @@ it("rejects a keyed write on a dead session while the daemon is still down, and 
 
   state.daemonAlive = true;
   expect((await session.settleNow()).content).toBe("TYPED ");
-  expect(state.journalKeys).toEqual([null]);
+  expect(state.journalKeys).toEqual([expect.stringMatching(/^[0-9a-f-]{36}$/)]);
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -2839,6 +2929,97 @@ it("does not duplicate the document when the reopen finds no durable lineage", a
   // fixture that hardcoded "existing" here would keep passing every assertion
   // above while certifying the one condition it exists to stage.
   expect(state.reportedLineage).toEqual(["absent", "absent"]);
+  expect(state.recoveryBases).toHaveLength(1);
+  const base = new Y.Doc();
+  Y.applyUpdate(base, state.recoveryBases[0]!);
+  expect(base.getText("plainText").toString()).toBe("Anchor paragraph. ");
+  base.destroy();
+  await capture.stop();
+});
+
+it("restores an acknowledged base before pending originals on explicit settle", async () => {
+  const fixture = await daemonDeathCapture("dohc-ydoc-absent-settle-", "ydoc-absent-settle");
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-absent-settle", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, session.initialUpdate);
+  typeInto(mirror, session, "Saved ");
+  await session.settleNow();
+  fixture.state.daemonAlive = false;
+  typeInto(mirror, session, "pending");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  fixture.loseDurableLineage();
+  fixture.state.daemonAlive = true;
+  expect((await session.settleNow()).content).toBe("Saved pending");
+  expect(fixture.state.recoveryBases).toHaveLength(1);
+  const base = new Y.Doc();
+  Y.applyUpdate(base, fixture.state.recoveryBases[0]!);
+  expect(base.getText("plainText").toString()).toBe("Saved ");
+  base.destroy();
+  mirror.destroy();
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("does not adopt an absent lineage as the winner of an acknowledged claim", async () => {
+  const fixture = await daemonDeathCapture("dohc-ydoc-lost-claim-", "ydoc-lost-claim");
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-lost-claim", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions,
+    openRustYDocProviderSession: async options => ({
+      ...await fixture.openProvider(options),
+      lineageClaimId: fixture.state.generation === 1 ? "saved-claim" : null,
+    }),
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, session.initialUpdate);
+  typeInto(mirror, session, "Saved ");
+  await session.settleNow();
+  fixture.state.daemonAlive = false;
+  typeInto(mirror, session, "pending");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  fixture.loseDurableLineage();
+  fixture.state.daemonAlive = true;
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect(fixture.state.diskMarkdown).toBe("Saved ");
+  expect(session.doc.getText("plainText").toString()).toBe("Saved pending");
+  expect(fixture.state.recoveryBases).toHaveLength(0);
+  mirror.destroy();
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("does not settle an existing lineage missing acknowledged work", async () => {
+  const fixture = await daemonDeathCapture("dohc-ydoc-incomplete-", "ydoc-incomplete");
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-incomplete", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, session.initialUpdate);
+  typeInto(mirror, session, "Saved ");
+  await session.settleNow();
+  fixture.state.daemonAlive = false;
+  typeInto(mirror, session, "pending");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  const foreign = new Y.Doc();
+  foreign.getText("plainText").insert(0, "Incomplete");
+  fixture.state.durableUpdates = [Y.encodeStateAsUpdate(foreign)];
+  fixture.state.daemonAlive = true;
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect(fixture.state.diskMarkdown).toBe("Saved ");
+  expect(fixture.state.recoveryBases).toHaveLength(0);
+  foreign.destroy();
+  mirror.destroy();
+  await session.close({ settle: false });
   await capture.stop();
 });
 

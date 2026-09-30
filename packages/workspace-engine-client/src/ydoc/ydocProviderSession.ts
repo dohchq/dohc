@@ -2,6 +2,7 @@ import type * as Y from "yjs";
 import {
   isEngineStoreBusyRefusal,
   isTransientEngineRefusal,
+  isYdocUpdateAdmissionRefusal,
 } from "../live/daemonLiveAdapter";
 import {
   RemoteYdocApplyError,
@@ -84,6 +85,7 @@ export interface EngineYdocProviderSessionOptions {
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
   onLocalUpdateAcknowledged?: (idempotencyKey: string) => void;
+  onLocalUpdateRefused?: (idempotencyKey: string, error: unknown) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
   onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
   onSessionError?: (error: unknown) => void;
@@ -145,6 +147,11 @@ export interface EngineYdocProviderSession {
     update: Uint8Array,
     options?: ApplyLocalUpdateOptions & { armSettle?: boolean },
   ): Promise<void>;
+  replayLocalUpdate?(
+    update: Uint8Array,
+    options?: ApplyLocalUpdateOptions & { armSettle?: boolean },
+  ): Promise<void>;
+  reestablishAcknowledgedState?(update: Uint8Array): Promise<void>;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
   // `settle: false` alone does not promise the file will be left alone: a
   // release the daemon refuses as unsettled escalates to a settling close, so
@@ -192,6 +199,7 @@ export async function openEngineYdocProviderSession(
   const settleDebounceMs =
     options.settleDebounceMs ?? DEFAULT_SETTLE_DEBOUNCE_MS;
   session.onLocalUpdateAcknowledged((id) => options.onLocalUpdateAcknowledged?.(id));
+  session.onLocalUpdateRefused((id, error) => options.onLocalUpdateRefused?.(id, error));
   const scheduleSettle =
     options.scheduleSettle ??
     ((fn: () => void, ms: number) => {
@@ -233,7 +241,7 @@ export async function openEngineYdocProviderSession(
   }
 
   function rememberLocalEditError(error: unknown): void {
-    if (localEditError === null) localEditError = error;
+    if (localEditError === null && !isYdocUpdateAdmissionRefusal(error)) localEditError = error;
     notifyError(options.onLocalEditError, error);
   }
 
@@ -306,6 +314,19 @@ export async function openEngineYdocProviderSession(
         scheduleTransientSettleRetry(error);
       });
     }, settleDebounceMs);
+  }
+
+  function trackLocalOperation(operation: Promise<unknown>, armSettle: boolean): Promise<void> {
+    // The caller receives its refusal while the chain keeps later writes usable.
+    const journaled = journalChain.then(() => operation).then(() => undefined);
+    journalChain = journaled.catch((error: unknown) => {
+      if (isTransientEngineRefusal(error)) return;
+      rememberLocalEditError(error);
+      if (!isYdocUpdateAdmissionRefusal(error)) throw error;
+    });
+    void journalChain.catch(() => undefined);
+    if (armSettle) requestSettle();
+    return journaled;
   }
 
   const unsubscribeRemote = session.onRemoteUpdate((update) => {
@@ -410,25 +431,18 @@ export async function openEngineYdocProviderSession(
         rememberLocalEditError(error);
         throw error;
       }
-      // The caller hears the truth about its update; the chain carries the
-      // ordering. They are separate promises because a transient refusal must
-      // reject one and not the other: a chain left rejected answers every
-      // later settle with the same stale failure, and nothing would ever send
-      // the engine the text it is complaining about.
-      const journaled = journalChain
-        .then(() => operation)
-        .then(() => undefined);
-      journalChain = journaled.catch((error: unknown) => {
-        // The SESSION records the debt — it is what the engine refused, and
-        // its `resendMissingState` is a no-op when none is owed — so nothing
-        // here has to keep a copy that could go stale.
-        if (isTransientEngineRefusal(error)) return;
-        rememberLocalEditError(error);
-        throw error;
-      });
-      void journalChain.catch(() => undefined);
-      if (armSettle) requestSettle();
-      return journaled;
+      return trackLocalOperation(operation, armSettle);
+    },
+
+    async replayLocalUpdate(update, applyOptions) {
+      if (closed) throw new Error(`Y.Doc provider session for ${options.path} is closing.`);
+      const { armSettle = false, ...recordOptions } = applyOptions ?? {};
+      return trackLocalOperation(session.replayLocalUpdate(update, recordOptions), armSettle);
+    },
+
+    async reestablishAcknowledgedState(update) {
+      await journalChain;
+      await session.reestablishAcknowledgedState(update);
     },
 
     async settleNow(settleOptions) {

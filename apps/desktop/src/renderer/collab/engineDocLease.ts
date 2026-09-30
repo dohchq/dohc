@@ -973,7 +973,7 @@ function createEngineDocSession(
       return;
     }
     if (event.state === "error" || event.state === "changed-on-disk") {
-      reportSaveState(event.state, event.authorCapacity ? authorCapacityMessage(input.path) : null, event.authorCapacity);
+      reportSaveState(event.state, event.editRefusal?.message ?? (event.authorCapacity ? authorCapacityMessage(input.path) : null), event.authorCapacity);
       return;
     }
     if (event.state === "settling") {

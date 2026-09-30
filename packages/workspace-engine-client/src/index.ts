@@ -34,6 +34,7 @@ export {
   YdocOpenTimedOutError,
   type EngineTransport,
 } from "./ydoc/ydocLiveAdapter";
+export { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "./ydoc/ydocPendingLimits";
 export {
   YdocReleasedWithSettleFailureError,
   openEngineYdocProviderSession,
