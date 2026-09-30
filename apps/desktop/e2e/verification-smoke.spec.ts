@@ -22,12 +22,15 @@ test("@verification-smoke an editor change reaches disk and survives restart", a
     await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
     await expect.poll(() => readFile(join(workspace.rootPath, "proof.md"), "utf8")).toContain("Durable verification edit.");
     await desktop.close();
+    desktop = null;
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
     await waitForWorkspaceFile(desktop.page, opened.workspaceId, "proof.md");
     await explorerRow(desktop.page, "proof.md").click();
     await expect(desktop.page.getByTestId("markdown-editor")).toContainText("Durable verification edit.");
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    await desktop.close();
+    desktop = null;
   } finally { await cleanupDesktopWorkspace(desktop, workspace); }
 });
 

@@ -14,6 +14,8 @@
 // named. Only that explicit decision proceeds over silence, and only for the
 // windows the dialog covered.
 
+import { QUIT_ASK_TIMEOUT_MS } from "./shutdownBudgets";
+
 export type ExitKind = "quit" | "update";
 export type ExitRoundDecision = "clear" | "hold" | "cancel";
 export type ExitRoundOutcome = "proceed" | "cancelled" | "forced";
@@ -21,10 +23,6 @@ export type ExitRoundMessage =
   | { kind: "request"; roundId: number; exit: ExitKind }
   | { kind: "proceed"; roundId: number }
   | { kind: "cancelled"; roundId: number };
-
-// Bounds a silent renderer's ACK, never the user's decision — an answering
-// renderer resumes or holds within milliseconds.
-const QUIT_ASK_TIMEOUT_MS = 3_000;
 
 // Which renderers answer for the quit. Not every window runs the workspace:
 // the PDF export creates a hidden, preload-less one, and asking IT about

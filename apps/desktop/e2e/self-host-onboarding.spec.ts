@@ -27,6 +27,7 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
   let right: LaunchedDesktopApp | undefined;
   let ownerBrowser: BrowserContext | undefined;
   let otherBrowser: BrowserContext | undefined;
+  let bodyFailure: { error: unknown } | undefined;
   const account = { email: `desktop-${randomUUID()}@example.test`, password: `Desktop-proof-${randomUUID()}` };
   try {
     stack = await startSelfHostOnboardingStack(first.baseDir);
@@ -98,6 +99,13 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     const status = await right.page.evaluate(() => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.cloudStatus({}));
     expect(status).toMatchObject({ connected: true, email: account.email, serverUrl: stack.account.origin, relayUrl: stack.relayUrl });
     expect(left.logs.concat(joinedLogs, right.logs).filter(entry => entry.level === "pageerror")).toEqual([]);
+    await right.close();
+    right = undefined;
+    await left.close();
+    left = undefined;
+  } catch (error) {
+    bodyFailure = { error };
+    throw error;
   } finally {
     const cleanup = await Promise.allSettled([
       otherBrowser?.close(), ownerBrowser?.close(),
@@ -106,6 +114,13 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     cleanup.push(...await Promise.allSettled([stack?.close()]));
     cleanup.push(...await Promise.allSettled([first.cleanup()]));
     const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Self-host onboarding cleanup failed.");
+    if (failures.length) {
+      const errors = [...new Set([
+        ...(bodyFailure ? [bodyFailure.error] : []),
+        ...failures.map(result => result.reason),
+      ])];
+      if (bodyFailure && errors.length === 1) throw bodyFailure.error;
+      throw new AggregateError(errors, "Self-host onboarding cleanup failed.");
+    }
   }
 });

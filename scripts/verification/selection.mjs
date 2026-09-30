@@ -70,7 +70,9 @@ function owner(path, packages) {
 function sharedInput(path) {
   // Examples feed desktop staging, relay compiler tests, and runtime tests.
   // Native fixtures and goldens are also imported directly by JavaScript tests.
+  // The shutdown budgets also feed plain Node debug and verification proofs.
   return /^(?:crates|vendor|scripts|tools|examples|patches|\.cargo|\.config|\.github)\//u.test(path)
+    || path === "apps/desktop/src/shutdownBudgets.ts"
     || /(?:^|\/)package\.json$/u.test(path)
     || /(?:^|\/)(?:tsconfig[^/]*\.json|[^/]+\.config\.[^/]+|\.env(?:\.[^/]*)?)$/u.test(path)
     || /^apps\/desktop\/scripts\//u.test(path);

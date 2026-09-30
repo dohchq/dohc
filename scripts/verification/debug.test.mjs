@@ -26,6 +26,9 @@ if (process.argv[2] === "fixture") {
   });
   registerHooks({
     resolve(specifier, context, next) {
+      if (specifier === "../../apps/desktop/src/shutdownBudgets.ts") {
+        return { url: new URL(specifier, import.meta.url).href, shortCircuit: true };
+      }
       if (specifier === "node:fs/promises" && context.parentURL?.endsWith("/debug.mjs")) {
         return { url: pathToFileURL(join(root, "fs-adapter.mjs")).href, shortCircuit: true };
       }
@@ -103,7 +106,7 @@ if (process.argv[2] === "fixture") {
   async function fixture(t, { signal = "SIGINT", phase = "none", probe = "none" }) {
     const root = mkdtempSync(join(tmpdir(), "dohc-debug-test-"));
     // Run the actual launcher and close helper. Only build, Git and Electron/debugger I/O are adapters.
-    for (const file of ["debug.mjs", "close-electron.mjs"]) copyFileSync(join(import.meta.dirname, file), join(root, file));
+    for (const file of ["debug.mjs", "close-electron.mjs", "desktop-close-policy.mjs"]) copyFileSync(join(import.meta.dirname, file), join(root, file));
     writeFileSync(join(root, "build.mjs"), `export async function prepare() {}\nexport function assertPrepared() { return { desktop: { commit: 'earlier-build-head' } }; }`);
     writeFileSync(join(root, "process.mjs"), `import assert from 'node:assert/strict'; export const repoRoot = import.meta.dirname; export function git(args) { assert.deepEqual(args, ['rev-parse', 'HEAD']); return 'current-checkout-head'; }`);
     writeFileSync(join(root, "fs-adapter.mjs"), `export { mkdir, readFile } from 'node:fs/promises'; import { writeFile as write } from 'node:fs/promises'; export async function writeFile(path, ...args) { if (String(path).endsWith('desktop.jsonl')) await globalThis.debugFixtureHold('evidence'); return write(path, ...args); }`);

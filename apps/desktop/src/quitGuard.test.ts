@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { QUIT_ASK_TIMEOUT_MS } from "./shutdownBudgets";
 import {
   createExitRounds,
   createQuitGuard,
@@ -45,6 +46,23 @@ afterEach(() => {
 // one is clear. The interesting cases are what happens when the windows
 // disagree, answer late, come and go, or never answer.
 describe("exit rounds", () => {
+  it("uses the product acknowledgement window before asking about a silent renderer", async () => {
+    vi.useFakeTimers();
+    const confirmProceed = vi.fn(async () => true);
+    const exits = createExitRounds({
+      participants: () => [window(1)],
+      participantId: (participant) => participant.id,
+      send: vi.fn(),
+      confirmProceed,
+    });
+    const round = exits.begin("quit");
+    await vi.advanceTimersByTimeAsync(QUIT_ASK_TIMEOUT_MS - 1);
+    expect(confirmProceed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(confirmProceed).toHaveBeenCalledExactlyOnceWith("quit");
+    await expect(round.outcome).resolves.toBe("forced");
+  });
+
   it("asks every window and proceeds only when the last one clears", async () => {
     const r = rounds();
     const round = r.exits.begin("quit");

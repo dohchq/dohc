@@ -206,6 +206,21 @@ test("shared, native, fixture, config, and unknown inputs select all packages", 
   }
 });
 
+test("desktop shutdown budgets retain the plain Node debug and verification runtime checks", () => {
+  const input = "apps/desktop/src/shutdownBudgets.ts";
+  const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  for (const path of [input, input.replaceAll("/", "\\")]) {
+    const plan = select([path]);
+    assert.equal(plan.full, true);
+    assert.equal(plan.repository, "full");
+    assert.equal(plan.reason, `Shared verification input changed: ${input}`);
+    const command = manifest.scripts[plan.repository === "full" ? "test:repo" : "test:repo:source"];
+    for (const consumer of ["scripts/verification/debug.test.mjs", "scripts/verification/verification.test.mjs"]) {
+      assert.ok(command.split(/\s+/u).includes(consumer), `Missing shutdown budget runtime check: ${consumer}`);
+    }
+  }
+});
+
 test("full mode overrides an empty diff and ordinary empty selection stays empty", () => {
   const empty = select([]);
   assert.deepEqual(empty.packages, []);
