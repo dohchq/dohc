@@ -915,6 +915,42 @@ fn drain_deferred_ydoc(
             },
         ));
     }
+    let unresolved: bool = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 \
+             AND object_id=?3 AND settle_prior_update_seq IS NOT NULL)",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)
+    })?;
+    let materialization_pending = if unresolved {
+        let reconciled = store.write_with(faults, |tx| {
+            dohc_engine_collab::author_coverage::reconcile_in(tx, key, pending[0].3)
+                .map_err(map_collab_hard_error)
+        })?;
+        match reconciled {
+            TxnOutcome::Committed(resolved) => !resolved,
+            TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+        }
+    } else {
+        false
+    };
+    if materialization_pending {
+        // Return to the caller so settlement can replay the pending job.
+        // Keep every queued coordinate until its projection can commit.
+        return Ok((
+            YdocDrainResult {
+                refusals: inactive_refusals,
+                ..YdocDrainResult::default()
+            },
+            YdocDrainCleanup {
+                workspace_id: key.workspace_id.clone(),
+                coordinates: Vec::new(),
+                projection_refusal: None,
+            },
+        ));
+    }
     let search_policy = search_policy_for_store(store);
     let mut applied = 0usize;
     let mut refusals = inactive_refusals;
@@ -1101,6 +1137,9 @@ fn drain_deferred_ydoc(
                         )?);
                         continue;
                     }
+                    SyncError::RetryableState {
+                        reason: "ydoc-author-capacity",
+                    } => break,
                     hard => return Err(hard),
                 }
             }

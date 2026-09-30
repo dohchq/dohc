@@ -6252,3 +6252,147 @@ fn incomplete_preserved_local_side_credits_authors_before_choice_or_noop_complet
         }
     }
 }
+
+#[test]
+fn deferred_author_capacity_projects_a_prefix_and_resumes_after_materialization() {
+    use dohc_engine_collab::{
+        ContentKind, DocKey, WriterDocCache, Ydoc, author_coverage::MAX_INTERVAL_AUTHORS,
+    };
+    let (_scratch, db, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    let path = "notes/author-capacity.md";
+    let key = DocKey::new("ws", "main", "author-capacity").unwrap();
+    seed_text_head(&mut engine, &key.object_id, path, "seed");
+    let source = Ydoc::wire();
+    source.plaintext_insert(0, "seed");
+    let base = source.encode_full_state();
+    let claim = dohc_engine_storage::hex_sha256(&base);
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        ContentKind::Plaintext,
+        &base,
+        &dohc_engine_collab::BaseRelayCoordinate::new("source", 0, 0).unwrap(),
+        &NoFaults,
+        1_100,
+    )
+    .unwrap();
+    let total = MAX_INTERVAL_AUTHORS + 2;
+    for index in 0..total {
+        let update = source.plaintext_insert(0, "x");
+        let sha = engine.put_binary_blob(&update).unwrap();
+        let mut op = envelope(
+            &format!("peer-{index}"),
+            0,
+            "ydoc.update",
+            json!({
+                "versionId":"main", "objectId":key.object_id, "path":path,
+                "contentKind":"plaintext", "updateBlobSha256":sha,
+                "lineageClaimId":claim, "isBaseState":false,
+                "actorOriginId":format!("author-{index}"),
+                "attribution":{"actorKind":"agent","depth":0},
+            }),
+        );
+        op.relay_seq = Some(index as i64 + 1);
+        let parked = apply_ydoc_envelope(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .unwrap();
+        assert!(matches!(parked.primary, ApplyDisposition::Applied(result) if result.deferred));
+    }
+    let first = drain_deferred_ydoc_for_live_session(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        Some(&claim),
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(first.drained, MAX_INTERVAL_AUTHORS);
+    let pending_count = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE object_id=?1",
+                    [&key.object_id],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(pending_count(&engine), 2);
+    let prefix = VersionedTextStore::new(&mut engine)
+        .read_text("ws", "main", path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        prefix.text,
+        format!("{}seed", "x".repeat(MAX_INTERVAL_AUTHORS))
+    );
+    let prefix_authors: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments WHERE moment_id=?1",
+                [&prefix.latest_moment_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<serde_json::Value>>(&prefix_authors)
+            .unwrap()
+            .len(),
+        MAX_INTERVAL_AUTHORS
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&db, 3_000).unwrap();
+    let waiting =
+        drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
+            .unwrap();
+    assert_eq!(
+        waiting.drained, 0,
+        "open can continue while the prefix's disk write is pending"
+    );
+    assert_eq!(pending_count(&engine), 2);
+    let job = format!("ydoc-mat_{}", prefix.latest_moment_id);
+    assert_eq!(
+        engine
+            .load_materialization_job(&job)
+            .unwrap()
+            .unwrap()
+            .status,
+        dohc_engine_storage::JobStatus::Pending
+    );
+    engine.mark_materialization_complete(&job, 3_100).unwrap();
+    let resumed =
+        drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
+            .unwrap();
+    assert_eq!(resumed.drained, 2);
+    assert_eq!(pending_count(&engine), 0);
+    let final_head = VersionedTextStore::new(&mut engine)
+        .read_text("ws", "main", path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_head.text, format!("{}seed", "x".repeat(total)));
+    let suffix_authors: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments WHERE moment_id=?1",
+                [&final_head.latest_moment_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<serde_json::Value>>(&suffix_authors)
+            .unwrap()
+            .len(),
+        2
+    );
+}
