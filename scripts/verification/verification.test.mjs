@@ -417,10 +417,11 @@ test("verification selects packages and proofs and prepares before parallel jobs
     const siteOnly = changed === "apps/site/src/index.ts" && !full;
     const selected = changed === "packages/fixture/src/index.ts" ? ["@dohc/fixture"]
       : changed === "packages/mcp/src/index.ts" ? ["@dohc/mcp", "@dohc/share-web"]
-      : changed === "services/workspace-api/src/index.ts" ? ["@dohc/desktop", "@dohc/workspace-api"]
+      : changed === "services/workspace-api/src/index.ts" ? ["@dohc/workspace-api"]
       : siteOnly ? ["@dohc/desktop", "@dohc/site"]
       : ["@dohc/desktop", "@dohc/fixture", "@dohc/mcp", "@dohc/share-web", "@dohc/site", "@dohc/unrelated", "@dohc/workspace-api"];
-    const desktop = mode !== "pr" || js && selected.includes("@dohc/desktop") && !siteOnly;
+    const desktopScripts = js && selected.includes("@dohc/desktop") && !siteOnly;
+    const desktop = mode !== "pr" || desktopScripts || js && changed === "services/workspace-api/src/index.ts";
     const nativeProof = js && selected.includes("@dohc/share-web");
     const accounts = js && selected.includes("@dohc/workspace-api");
     const prepare = desktop || nativeProof;
@@ -576,7 +577,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
             ])};
           }
           if(command==='pnpm' && args[2]==='run' && ['test:scripts:isolated','test:scripts:runtime'].includes(args[3])) {
-            assert.ok(${desktop}, 'Unselected desktop scripts');
+            assert.ok(${desktopScripts}, 'Unselected desktop scripts');
             assert.ok(repositoryFinished, 'Desktop scripts started before repository checks finished');
             if(args[3]==='test:scripts:isolated') {
               assert.ok(!isolatedScriptsFinished, 'Isolated scripts ran twice');
@@ -752,16 +753,16 @@ test("verification selects packages and proofs and prepares before parallel jobs
         if (js) {
           assert.deepEqual(report.javascript.packages,selected);
           assert.deepEqual(report.javascript.proofs,{accounts,selfHostNative:nativeProof,desktop});
-          assert.equal(report.javascript.desktopScripts, desktop);
+          assert.equal(report.javascript.desktopScripts, desktopScripts);
           assert.deepEqual(report.javascript.testFiles, siteOnly ? {"@dohc/desktop": siteFiles} : {});
           const tests=JSON.parse(readFileSync(report.jsTests,"utf8"));
-          assert.equal(tests.desktopScripts, desktop);
+          assert.equal(tests.desktopScripts, desktopScripts);
           assert.deepEqual(tests.selectedPackages,selected);
           assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),selected);
           const calls=readFileSync(join(root,".dohc-dev/all-calls.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
           assert.deepEqual(calls.filter(({args})=>args[2]==="run" && ["test","test:unit"].includes(args[3])).map(({args})=>args[1]).sort(),tests.packages.map(pkg=>pkg.name).sort());
           for (const script of ["test:scripts:isolated", "test:scripts:runtime"]) {
-            assert.equal(calls.filter(({args}) => args[3] === script).length, desktop ? 1 : 0);
+            assert.equal(calls.filter(({args}) => args[3] === script).length, desktopScripts ? 1 : 0);
           }
           assert.equal(calls.some(({args}) => args[3] === "test:scripts"), false);
           if (siteOnly) assert.deepEqual(tests.packages.find(pkg => pkg.name === "@dohc/desktop").files, siteFiles);

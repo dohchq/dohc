@@ -73,7 +73,10 @@ Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
 The plan also lists selected JavaScript packages, test files, integration proofs, and required services.
 JavaScript selection follows workspace dependencies and declared external test inputs.
 Site-only changes run the site's tests and two desktop renderer compatibility files, without desktop packaging or native proofs.
-Additional desktop or integration inputs retain their complete suites and required proofs.
+Account API and Postgres inputs retain desktop preparation and account and desktop browser proofs, without unrelated desktop unit or packaging tests.
+Share-web inputs retain desktop preparation, desktop browser proofs, and the native delivery proof.
+Combined site changes retain both renderer compatibility files and those proofs.
+Desktop production changes and shared inputs retain the complete desktop suite, packaging tests, and proofs.
 Desktop-only changes run the Y.Doc compatibility files that import desktop code.
 Changes to Y.Doc projection or its other inputs run the complete Y.Doc suite, including the checkpoint boundary test.
 Shared configuration and unclassified code inputs select the full JavaScript suite.
