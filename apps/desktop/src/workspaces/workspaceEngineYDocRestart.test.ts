@@ -2022,7 +2022,7 @@ it("a settle whose materialization was blocked reports an error, never Saved", a
   await capture.stop();
 });
 
-it("surfaces an unrecoverable local refusal and releases every opened lease", async () => {
+it("retires a persistent local failure and releases every failed lease", async () => {
   const rootPath = await createTestScratch("dohc-ydoc-loud-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
@@ -2074,7 +2074,13 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
         throw refusal;
       },
       async settleNow() {
-        throw new Error("settle must not run after failed recovery");
+        return {
+          momentId: "recovered", path: options.path, content: "seed",
+          sha256: createHash("sha256").update("seed").digest("hex"), materialized: true,
+          projection: {
+            contentKind: "plaintext", sourceStateVectorSha256: "b".repeat(64), destructive: false,
+          },
+        };
       },
       async close() {
         closedGenerations.push(openedGeneration);
@@ -2100,22 +2106,22 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
   rendererDoc.getText("plainText").insert(4, " refused");
 
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
-  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect((await session.settleNow()).content).toBe("seed");
   expect(onError).toHaveBeenCalledWith(
     "Y.Doc local update of note.md",
     refusal,
   );
-  // Generations 1 and 2 die to the refusal; the settle then makes one more
-  // recovery attempt (a settle must try to persist what the canonical doc
-  // holds), which refuses too. The bar is that every opened lease is released.
+  // The third uncertain answer retires the edit. A clean generation can
+  // settle admitted content, and each failed generation releases its lease.
   expect(closedGenerations).toEqual([1, 2, 3]);
-  expect(leaseActive).toBe(false);
+  expect(leaseActive).toBe(true);
   await expect(session.close({ settle: false })).resolves.toBeUndefined();
+  expect(leaseActive).toBe(false);
   const reopened = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
   });
-  expect(generation).toBe(4);
+  expect(generation).toBe(5);
   await reopened.close({ settle: false });
   await capture.stop();
 });
@@ -2529,7 +2535,69 @@ it.each(["commit-then-cancel", "commit-then-internal"] as const)("dedupes %s wit
   }
 });
 
-it("reports one replay refusal batch and preserves an independent client", async () => {
+it.each([false, true])("keeps a write after one Internal answer when confirmed is %s", async confirmed => {
+  const fixture = await daemonDeathCapture("dohc-ydoc-internal-once-", "ydoc-internal-once");
+  const notices = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-internal-once", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: () => undefined, onEditRefused: notices,
+  });
+  fixture.state.applyRefusals.push(new DaemonRefusalError({
+    code: "INTERNAL", message: "uncertain answer", retry: "no",
+  }, undefined));
+  const update = keyedUpdate(session.doc, "Saved after retry");
+  if (confirmed) await session.applyDecidedLocalUpdate(() => update, undefined, { idempotencyKey: "retry" });
+  else session.applyLocalUpdate(update, undefined, { idempotencyKey: "retry" });
+  expect((await session.settleNow()).content).toBe("Saved after retry");
+  expect(fixture.state.journalKeys).toEqual(["retry"]);
+  expect(notices).not.toHaveBeenCalled();
+  await session.close({ settle: false }); await capture.stop();
+});
+
+it.each([false, true])("retires three Internal answers and saves a later independent write when confirmed is %s", async confirmed => {
+  const fixture = await daemonDeathCapture("dohc-ydoc-internal-limit-", "ydoc-internal-limit");
+  const notices = vi.fn();
+  const replacements = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-internal-limit", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: () => undefined,
+    onEditRefused: notices, onLineageReplaced: replacements,
+  });
+  const refused = keyedUpdate(session.doc, "Refused");
+  const independent = keyedUpdate(session.doc, "Saved independent");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    fixture.state.applyRefusals.push(new DaemonRefusalError({
+      code: "INTERNAL", message: "persistent uncertain answer", retry: "no",
+    }, undefined));
+  }
+  if (confirmed) {
+    await expect(session.applyDecidedLocalUpdate(() => refused, undefined, { idempotencyKey: "refused" }))
+      .rejects.toThrow("may have been recorded");
+    await session.applyDecidedLocalUpdate(() => independent, undefined, { idempotencyKey: "independent" });
+  } else {
+    session.applyLocalUpdate(refused, undefined, { idempotencyKey: "refused" });
+    session.applyLocalUpdate(independent, undefined, { idempotencyKey: "independent" });
+  }
+  expect((await session.settleNow()).content).toBe("Saved independent");
+  expect(fixture.state.applyRefusals).toHaveLength(0);
+  expect(fixture.state.journalKeys).toEqual(["independent"]);
+  expect(notices).toHaveBeenCalledTimes(1);
+  expect(notices.mock.calls[0]?.[0]).toBe("refused");
+  expect(replacements).toHaveBeenCalled();
+  await session.settleNow();
+  expect(notices).toHaveBeenCalledTimes(1);
+  await session.close({ settle: false }); await capture.stop();
+});
+
+it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s replay refusal batch and preserves an independent client", async kind => {
   const fixture = await daemonDeathCapture("dohc-ydoc-causal-refusal-", "ydoc-causal-refusal");
   const notices: string[] = [];
   const capture = createWorkspaceEngineCapture({
@@ -2557,13 +2625,22 @@ it("reports one replay refusal batch and preserves an independent client", async
   session.applyLocalUpdate(independent, undefined, { idempotencyKey: "other-client", actorOriginId: "other-agent" });
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   fixture.state.daemonAlive = true;
-  fixture.state.applyRefusals.push(new DaemonRefusalError({
-    code: "INVALID_PARAMS", message: "future-refusal", retry: "no",
-  }, undefined));
+  const attempts = kind === "uncertain-after-busy" ? 5 : kind === "uncertain" ? 3 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const busy = kind === "uncertain-after-busy" && attempt === 1;
+    fixture.state.applyRefusals.push(new DaemonRefusalError({
+      code: busy ? "OVERLOADED" : kind === "definitive" ? "INVALID_PARAMS" : "INTERNAL",
+      message: busy ? "engine-store-busy" : "future-refusal", retry: busy ? "afterBackoff" : "no",
+    }, undefined));
+  }
+  for (let attempt = 0; attempt < attempts - 1; attempt += 1) {
+    await expect(session.settleNow()).rejects.toThrow(/closed/i);
+    expect(notices).toHaveLength(0);
+  }
   expect((await session.settleNow()).content).toBe("Saved independent");
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain('could not save edits to "note.md"');
-  expect(notices[0]).toContain("Open Notices and use Copy beside this file.");
+  expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
   expect(fixture.state.journalKeys).toContain("other-client");
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
 });
@@ -2586,7 +2663,7 @@ it("names the pending queue limit and releases its byte budget after draining", 
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain("Too many edits are waiting to save.");
   expect(notices[0]).not.toContain("too large");
-  expect(notices[0]).toContain("Open Notices and use Copy beside this file.");
+  expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
   await session.applyDecidedLocalUpdate(doc => keyedUpdate(doc, "later"), undefined, { idempotencyKey: "after-drain" });
   expect((await session.settleNow()).content).toBe("later");
   expect(notices).toHaveLength(1);

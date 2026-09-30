@@ -2088,6 +2088,7 @@ export function createWorkspaceEngineCapture(
       readonly options: NonNullable<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]>;
       acknowledged: boolean;
       sent: boolean;
+      uncertainFailures: number;
       refusal: { error: unknown } | null;
     };
     const pendingRecords = new Set<PendingRecord>();
@@ -2135,9 +2136,22 @@ export function createWorkspaceEngineCapture(
             ? "This file is read-only."
             : "dohc refused this edit.";
       const what = refusedUpdates.length > 1 ? "edits" : "an edit";
-      const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices and use Copy beside this file.`;
+      const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices. Use Save copy on this file's recovery row.`;
       onError(`Y.Doc local update of ${input.path}`, new Error(message, { cause: error }));
       input.onEditRefused?.(record.options.idempotencyKey ?? "", message);
+    };
+    const recordUpdateFailure = (record: PendingRecord, error: unknown): boolean => {
+      if (hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) return true;
+      if (isTransientEngineCause(error)) {
+        record.uncertainFailures = 0;
+        return false;
+      }
+      if (isLineageChangedCause(error) ||
+          hasRefusalInCauseChain(error, isEngineSessionReconnectError)) return false;
+      // Keep the count with the original, so replacing its provider cannot
+      // let one unanswered write block all later independent work forever.
+      record.uncertainFailures += 1;
+      return record.uncertainFailures >= 3;
     };
     // Set when a reopen found another object at this path. Terminal: the
     // session stops reopening, since every reopen would meet the same
@@ -2468,7 +2482,7 @@ export function createWorkspaceEngineCapture(
             onReplayArmed?.();
             await journaled;
           } catch (error) {
-            if (!hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) throw error;
+            if (!recordUpdateFailure(record, error)) throw error;
             refuseRecord(record, error);
             const restored = new Y.Doc();
             Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
@@ -2691,7 +2705,7 @@ export function createWorkspaceEngineCapture(
           // The failed generation still holds this doc, and keeps it until
           // something replaces the generation.
           if (isLineageChangedCause(error)) throw error;
-          const refused = hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal);
+          const refused = recordUpdateFailure(record, error);
           if (refused) {
             refuseRecord(record, error);
             if (canonicalDoc !== doc && generation.doc === canonicalDoc) throw error;
@@ -2846,7 +2860,7 @@ export function createWorkspaceEngineCapture(
         const update = confirmRecording ? new Uint8Array(decidedUpdate) : decidedUpdate;
         const record: PendingRecord = {
           update, options: capturedOptions,
-          acknowledged: false, sent: false, refusal: null,
+          acknowledged: false, sent: false, uncertainFailures: 0, refusal: null,
         };
         if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
             pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
@@ -2902,7 +2916,7 @@ export function createWorkspaceEngineCapture(
             canonicalLineageClaimId = generation.lineageClaimId;
           }
         } catch (error) {
-          if (hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) {
+          if (recordUpdateFailure(record, error)) {
             refuseRecord(record, error);
             // Production providers already restore admitted state and announce
             // its replacement. Injected providers may need a clean reopen.
@@ -3009,7 +3023,7 @@ export function createWorkspaceEngineCapture(
           const record: PendingRecord = {
             update, options: { ...structuredClone(applyOptions ?? {}),
               idempotencyKey: applyOptions?.idempotencyKey ?? createId() },
-            acknowledged: false, sent: false, refusal: null,
+            acknowledged: false, sent: false, uncertainFailures: 0, refusal: null,
           };
           refuseRecord(record, new Error("pending-edits-limit"));
           // Wait for already admitted calls so the replacement contains them.
