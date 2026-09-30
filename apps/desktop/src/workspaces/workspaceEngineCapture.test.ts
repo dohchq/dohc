@@ -1542,10 +1542,20 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it("reports the open-time settle's own failure once", async () => {
+  it.each([
+    { label: "ordinary", authorCapacity: false, failure: new Error("the settle started and failed") },
+    {
+      label: "author-capacity",
+      authorCapacity: true,
+      failure: new DaemonRefusalError(
+        { code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" },
+        null,
+      ),
+    },
+  ])("reports an $label failure once with its logical save token", async ({ failure, authorCapacity }) => {
     const root = await createTestScratch("dohc-engine-capture-");
     await write(root, "note.md", EDITOR_TEXT);
-    const states: string[] = [];
+    const states: Array<{ state: string; token: number; authorCapacity?: boolean }> = [];
     const engine = capture(root, {
       openRustYDocProviderSession: async (options: EngineYdocProviderSessionOptions) =>
         ({
@@ -1559,9 +1569,8 @@ describe("workspaceEngineCapture batch capture", () => {
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
-            const failure = new Error("the settle started and failed");
-            options.onSettleStart?.(1);
-            options.onSettleError?.(failure, 1);
+            options.onSettleStart?.(47);
+            options.onSettleError?.(failure, 47);
             throw failure;
           },
           close: async () => undefined,
@@ -1570,12 +1579,16 @@ describe("workspaceEngineCapture batch capture", () => {
     const session = await engine.openYDocSession({
       path: "note.md",
       onRemoteUpdate: () => undefined,
-      onSaveState: (state) => states.push(state),
+      onSaveState: (state, token, authorCapacity) => states.push({ state, token, authorCapacity }),
     });
-    await vi.waitFor(() => expect(states).toContain("error"));
+    await vi.waitFor(() => expect(states.some(({ state }) => state === "error")).toBe(true));
     await session.close({ settle: false });
     await engine.stop();
-    expect(states).toEqual(["settling", "settling", "error"]);
+    expect(states).toEqual([
+      { state: "settling", token: 0, authorCapacity: undefined },
+      { state: "settling", token: 1, authorCapacity: undefined },
+      { state: "error", token: 1, authorCapacity },
+    ]);
   });
 
   it("keeps an edit made outside dohc when the open document's session closes", async () => {
