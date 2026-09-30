@@ -145,7 +145,7 @@ export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u
 export const MAX_FILE_WRITE_BYTES = 10 * 1024 * 1024;
 export const MAX_FILE_WRITE_FILES = 256;
 export const MAX_CLI_REQUEST_BYTES = 14 * 1024 * 1024;
-export const fileWriteFileSchema = z.object({
+const fileWriteFileSchema = z.object({
   path: documentPathArg,
   contentBase64: z.string(),
   expectedSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
