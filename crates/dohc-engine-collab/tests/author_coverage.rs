@@ -280,15 +280,43 @@ fn repeated_compaction_keeps_metadata_constant_and_crash_atomic() {
 }
 
 #[test]
-fn oversized_summary_entry_is_refused_without_truncation() {
-    let mut authors = author_coverage::Authors::default();
-    let json =
-        serde_json::json!([{"kind":"agent","agentId":"a","name":"n".repeat(author_coverage::MAX_AUTHOR_ENTRY_BYTES)}]).to_string();
+fn stored_author_fields_are_read_without_new_admission_rules() {
+    let mut ts = fresh_store("legacy-author-summary");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &NoFaults,
+        1,
+    )
+    .expect("marker");
+    let json = serde_json::json!([{"kind":"agent","agentId":"old\u{0085}","name":"n".repeat(author_coverage::MAX_AUTHOR_ENTRY_BYTES)}]).to_string();
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET pending_authors_json=?1", [&json])
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("pre-upgrade coverage");
+    let authors = ts
+        .store
+        .read_with(|conn| author_coverage::reserved_in(conn, &key))
+        .expect("stored authors remain readable");
+    assert_eq!(authors.len(), 1);
+    assert_eq!(authors.json(), json);
     assert!(matches!(
-        authors.union_json(&json),
+        ts.store
+            .read_with(|conn| author_coverage::check_admission_in(
+                conn,
+                &key,
+                Some(&"x".repeat(author_coverage::MAX_AUTHOR_ENTRY_BYTES)),
+                Some(&author("person")),
+            )),
         Err(CollabError::AuthorEntryTooLarge)
     ));
-    assert!(authors.is_empty());
 }
 
 #[test]
@@ -444,7 +472,7 @@ fn already_admitted_remote_authors_never_wedge_coverage_readers() {
                 author_coverage::reserved_in(conn, &key)?.len(),
                 remote_count
             );
-            assert!(!author_coverage::check_admission_in(
+            assert!(author_coverage::check_admission_in(
                 conn,
                 &key,
                 Some("remote-0"),
@@ -801,4 +829,51 @@ fn control_character_author_fields_are_refused_before_admission() {
     assert!(dohc_engine_collab::read_marker(&ts.store, &key)
         .expect("marker query")
         .is_none());
+}
+
+#[test]
+fn tiny_identities_queue_settlement_before_the_count_bound() {
+    let mut ts = fresh_store("tiny-author-threshold");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    let attribution = ChangeAttribution {
+        on_behalf_of: None,
+        ..author("person")
+    };
+    for index in 0..author_coverage::SETTLE_AUTHOR_COUNT_THRESHOLD {
+        let id = index.to_string();
+        let TxnOutcome::Committed(outcome) = record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &doc.plaintext_insert(index as u32, "x"),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some("authors.txt"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                actor_origin_id: Some(&id),
+                attribution: Some(&attribution),
+                ..LocalAppend::default()
+            },
+            &NoFaults,
+            1,
+            |_, _, _| Ok(()),
+        )
+        .expect("tiny author admitted") else {
+            panic!("admission did not commit");
+        };
+        assert_eq!(
+            outcome.settlement_requested,
+            index + 1 >= author_coverage::SETTLE_AUTHOR_COUNT_THRESHOLD
+        );
+    }
+    let covered = ts
+        .store
+        .read_with(|conn| author_coverage::reserved_in(conn, &key))
+        .expect("coverage");
+    assert!(covered.len() < author_coverage::MAX_INTERVAL_AUTHORS);
+    assert!(covered.journal_bytes() < author_coverage::SETTLE_AUTHOR_BYTE_THRESHOLD);
 }

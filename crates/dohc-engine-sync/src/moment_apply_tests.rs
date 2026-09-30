@@ -243,6 +243,32 @@ fn a_peer_keeps_the_depth_an_agent_moment_names() {
     );
 }
 
+#[test]
+fn a_peer_applies_pre_upgrade_control_character_authors() {
+    let authors = json!([
+        {"kind":"agent", "agentId":"old\nagent", "onBehalfOf":"old\u{0085}person"},
+        {"kind":"human", "humanId":"old\u{0085}human", "name":"old\nname"}
+    ]);
+    let (_scratch, mut peer) = test_store();
+    let mut payload = absent_text_payload("legacy-authors", "object", "doc.md", "content");
+    payload["authors"] = authors.clone();
+    hydrate_texts(&mut peer, &["content"]);
+    assert_eq!(
+        apply_moment_envelope(&mut peer, &envelope("source", 0, "ws", payload), &NoFaults)
+            .expect("peer applies legacy authors"),
+        ApplyOutcome::new(ApplyDisposition::Applied(0)),
+    );
+    let history = VersionedTextStore::new(&mut peer)
+        .get_moment("ws", "legacy-authors")
+        .expect("peer history")
+        .expect("moment");
+    assert_eq!(
+        serde_json::from_str::<Value>(history.author_json.as_deref().expect("authors"))
+            .expect("author JSON"),
+        authors
+    );
+}
+
 /// An older computer stored an agent author with any depth it was given, 0
 /// included. A newer peer applies the moment, reads such a depth as none in
 /// its history, and keeps the replicated payload exactly as it arrived.

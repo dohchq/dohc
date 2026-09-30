@@ -1403,16 +1403,6 @@ pub(crate) fn validate_moment_metadata(
         });
     }
     for author in &authors {
-        if author.as_object().is_some_and(|fields| {
-            fields
-                .values()
-                .filter_map(serde_json::Value::as_str)
-                .any(|value| value.chars().any(char::is_control))
-        }) {
-            return Err(DomainError::InvalidInput {
-                reason: "author ids and names must contain no control characters",
-            });
-        }
         let Some(author) = author.as_object() else {
             return Err(DomainError::InvalidInput {
                 reason: "moment authors must be a nonempty list",

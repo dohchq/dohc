@@ -13,6 +13,7 @@ pub use dohc_engine_domain::MAX_AUTHOR_ENTRY_BYTES;
 pub const MAX_INTERVAL_AUTHORS: usize = dohc_engine_domain::MAX_MOMENT_AUTHORS;
 pub const MAX_INTERVAL_AUTHOR_BYTES: usize = dohc_engine_domain::MAX_AUTHOR_JSON_BYTES;
 pub const SETTLE_AUTHOR_BYTE_THRESHOLD: usize = 96 * 1024;
+pub const SETTLE_AUTHOR_COUNT_THRESHOLD: usize = 960;
 
 fn sql(error: rusqlite::Error) -> CollabError {
     StorageError::persist_public(error).into()
@@ -51,16 +52,6 @@ impl Authors {
             .get(field)
             .and_then(Value::as_str)
             .ok_or_else(|| corrupt("author has no identity"))?;
-        if author.as_object().is_some_and(|fields| {
-            fields
-                .values()
-                .filter_map(Value::as_str)
-                .any(|value| value.chars().any(char::is_control))
-        }) {
-            return Err(CollabError::InvalidIdentifier {
-                reason: "author ids and names must contain no control characters".into(),
-            });
-        }
         let scope = author.get("onBehalfOf").and_then(Value::as_str);
         let identity = serde_json::json!([kind, scope, id]).to_string();
         let prior_depth = self
@@ -71,9 +62,6 @@ impl Authors {
             .unwrap_or(0);
         if prior_depth > author.get("depth").and_then(Value::as_u64).unwrap_or(0) {
             author["depth"] = Value::from(prior_depth);
-        }
-        if author.to_string().len() > MAX_AUTHOR_ENTRY_BYTES {
-            return Err(CollabError::AuthorEntryTooLarge);
         }
         self.0.insert(identity, author);
         Ok(())
@@ -238,6 +226,13 @@ pub fn check_admission_in(
     };
     let mut incoming = Authors::default();
     incoming.union_json(&json)?;
+    if incoming
+        .0
+        .values()
+        .any(|author| author.to_string().len() > MAX_AUTHOR_ENTRY_BYTES)
+    {
+        return Err(CollabError::AuthorEntryTooLarge);
+    }
     let identity = incoming
         .0
         .keys()
@@ -250,7 +245,10 @@ pub fn check_admission_in(
     if !known && (covered.len() > MAX_INTERVAL_AUTHORS || bytes > MAX_INTERVAL_AUTHOR_BYTES) {
         return Err(CollabError::AuthorCapacity);
     }
-    Ok(bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD && !unresolved_in(conn, key)?)
+    Ok(
+        (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
+            && !unresolved_in(conn, key)?,
+    )
 }
 
 fn unresolved_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabError> {

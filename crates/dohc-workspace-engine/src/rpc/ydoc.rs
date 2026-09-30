@@ -35,6 +35,34 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const AUTHOR_SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct AuthorSettlementQueue {
+    queued: bool,
+    retry_after: Option<Instant>,
+}
+
+impl AuthorSettlementQueue {
+    fn try_queue(&mut self, now: Instant) -> bool {
+        if self.queued
+            || self
+                .retry_after
+                .is_some_and(|retry_after| now < retry_after)
+        {
+            return false;
+        }
+        self.queued = true;
+        true
+    }
+
+    fn finish(&mut self, failed: bool, now: Instant) {
+        self.queued = false;
+        self.retry_after = failed.then(|| now + AUTHOR_SETTLEMENT_RETRY_DELAY);
+    }
+}
 
 type EditorDraftRead = (Option<OwnerDraftSnapshot>, Option<Arc<dyn Send + Sync>>);
 
@@ -49,7 +77,7 @@ pub(crate) struct YdocSession {
     pub(super) restore_generation: Option<i64>,
     pub(super) lineage_absent: bool,
     pub(super) first_update_pending: bool,
-    author_settlement_queued: bool,
+    author_settlement: AuthorSettlementQueue,
     pub(super) last_settled_sha: Option<String>,
     /// The head sha observed at open — the settle preimage expectation
     /// until the session's first settle replaces it.
@@ -76,7 +104,7 @@ impl YdocSession {
             restore_generation: captured.restore_generation,
             lineage_absent: false,
             first_update_pending: false,
-            author_settlement_queued: false,
+            author_settlement: AuthorSettlementQueue::default(),
             last_settled_sha: None,
             open_head_sha: Some(captured.source.source_digest.clone()),
             owner_seed_source: None,
@@ -999,7 +1027,7 @@ impl EngineService {
                 restore_generation: state.restore_generation,
                 lineage_absent: !state.lineage_existing,
                 first_update_pending: !state.lineage_existing,
-                author_settlement_queued: false,
+                author_settlement: AuthorSettlementQueue::default(),
                 last_settled_sha: None,
                 open_head_sha: state.head_blob_sha256,
                 owner_seed_source: state.owner_seed_source,
@@ -1168,13 +1196,9 @@ impl EngineService {
                 let queue_settlement = outcome
                     .as_ref()
                     .is_ok_and(|append| append.settlement_requested)
-                    && lock(&sessions).get_mut(&session_id).is_some_and(|session| {
-                        if session.author_settlement_queued {
-                            return false;
-                        }
-                        session.author_settlement_queued = true;
-                        true
-                    });
+                    && lock(&sessions)
+                        .get_mut(&session_id)
+                        .is_some_and(|session| session.author_settlement.try_queue(Instant::now()));
                 if queue_settlement {
                     tokio::spawn(async move {
                         let _serial = settle_open.session_ops.lock().await;
@@ -1198,12 +1222,12 @@ impl EngineService {
                                     "engine: queued author coverage settlement clock failed: {error}"
                                 );
                                 if let Some(session) = lock(&sessions).get_mut(&session_id) {
-                                    session.author_settlement_queued = false;
+                                    session.author_settlement.finish(true, Instant::now());
                                 }
                                 return;
                             }
                         };
-                        match settle_open
+                        let failed = match settle_open
                             .actor
                             .ydoc_settle_queued(
                                 settle_open.root.clone(),
@@ -1228,6 +1252,7 @@ impl EngineService {
                                 if let Some(session) = lock(&sessions).get_mut(&session_id) {
                                     session.last_settled_sha = Some(settled.sha256.clone());
                                 }
+                                false
                             }
                             Ok(dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending {
                                 record_facts,
@@ -1239,13 +1264,17 @@ impl EngineService {
                                         facts,
                                     );
                                 }
+                                true
                             }
-                            Err(error) => eprintln!(
-                                "engine: queued author coverage settlement failed: {error}"
-                            ),
-                        }
+                            Err(error) => {
+                                eprintln!(
+                                    "engine: queued author coverage settlement failed: {error}"
+                                );
+                                true
+                            }
+                        };
                         if let Some(session) = lock(&sessions).get_mut(&session_id) {
-                            session.author_settlement_queued = false;
+                            session.author_settlement.finish(failed, Instant::now());
                         }
                     });
                 }
@@ -1758,6 +1787,34 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn failed_author_settlement_waits_before_retrying() {
+        let mut queue = AuthorSettlementQueue::default();
+        let now = Instant::now();
+        assert!(queue.try_queue(now));
+        assert!(
+            !queue.try_queue(now),
+            "overlapping attempts stay suppressed"
+        );
+        queue.finish(true, now);
+        for offset in [
+            Duration::ZERO,
+            Duration::from_millis(1),
+            Duration::from_secs(4),
+        ] {
+            assert!(
+                !queue.try_queue(now + offset),
+                "later appends respect backoff"
+            );
+        }
+        assert!(queue.try_queue(now + AUTHOR_SETTLEMENT_RETRY_DELAY));
+        queue.finish(false, now + AUTHOR_SETTLEMENT_RETRY_DELAY);
+        assert!(
+            queue.try_queue(now + AUTHOR_SETTLEMENT_RETRY_DELAY),
+            "success clears backoff"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_close_retains_serialization_until_refused_session_is_reinserted() {
