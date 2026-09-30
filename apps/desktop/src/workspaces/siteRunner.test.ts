@@ -27,15 +27,17 @@ import {
 let root: string;
 const workspaceAuthority = { kind: "workspace" } as const;
 
-beforeEach(async () => {
-  root = await createTestScratch("dohc-sites-");
-});
+function registerSiteScratch(): void {
+  beforeEach(async () => {
+    root = await createTestScratch("dohc-sites-");
+  });
 
-afterEach(async () => {
-  // Windows can hold a killed descendant's working directory for a moment
-  // after it exits; rm retries EBUSY for up to about 5 s.
-  await rm(root, { recursive: true, force: true, maxRetries: 10 });
-});
+  afterEach(async () => {
+    // Windows can hold a killed descendant's working directory for a moment
+    // after it exits; rm retries EBUSY for up to about 5 s.
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
+  });
+}
 
 // stopChild sends SIGKILL and returns without waiting for the kernel to
 // reap the process — signal delivery and reaping are asynchronous, so
@@ -61,6 +63,8 @@ async function waitForProcessDeath(pid: number, deadlineMs = 10_000): Promise<bo
 }
 
 describe("startStaticSitePreview", () => {
+  registerSiteScratch();
+
   it("serves only the mounted site's own shared-with-me subtree", async () => {
     const mountRoot = "shared-with-me/alex";
     const siteRoot = `${mountRoot}/portal`;
@@ -835,6 +839,8 @@ describe("package manager helpers", () => {
 // A loaded gate can take seconds to start a child. Ready and build timeouts
 // the test does not expect to fire are 20 s, inside the 30 s test timeout.
 describe("startSiteDevServer", () => {
+  registerSiteScratch();
+
   it.runIf(process.platform !== "win32")(
     "stops descendants after the shell wrapper exits",
     async () => {
@@ -1224,6 +1230,8 @@ const BUILD_TIMEOUT_MS = 45_000;
 const BUILD_TEST_TIMEOUT_MS = 60_000;
 
 describe("buildSite", () => {
+  registerSiteScratch();
+
   it("runs a build command and detects the output directory", async () => {
     await mkdir(join(root, "site"), { recursive: true });
     const result = await buildSite({
