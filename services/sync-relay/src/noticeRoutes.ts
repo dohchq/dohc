@@ -107,7 +107,8 @@ export function createNoticeRoutes(
 type PostedNotice = Omit<PostNoticeInput, "senderUserId" | "senderLabel" | "nowMs" | "recipientUserId"> &
   ({ recipientUserId: string; toWorkspaceOwner: false } | { recipientUserId?: undefined; toWorkspaceOwner: true });
 
-function parsePostNotice(body: Record<string, unknown>): PostedNotice {
+/** A posted notice as the route accepts it; the server's own automations post through this too. */
+export function parsePostNotice(body: Record<string, unknown>): PostedNotice {
   if (
     typeof body.kind !== "string" || !Object.hasOwn(NOTICE_KINDS, body.kind) ||
     NOTICE_KINDS[body.kind as NoticeKind].recipients === "relay"

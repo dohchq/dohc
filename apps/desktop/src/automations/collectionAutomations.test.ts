@@ -3728,6 +3728,21 @@ describe("Collection automations that wake your agent", () => {
     expect(run!.writes).toEqual([{ kind: "message", messageId: w.messages[0]!.messageId, name: "your agent" }]);
   });
 
+  it("does not run an automation that wakes an agent where the host cannot wake one, and says so before it runs", async () => {
+    const cannot = "This server cannot wake your agent.";
+    const w = await world({ automations: { Tasks: `${ask}
+  - id: stamp
+    name: Stamp
+    when: {field-changed: Status}
+    do: [{set: {Stamped: true}}]` } });
+    const executor = w.makeExecutor({ wakeUnavailable: cannot });
+    await executor.open();
+    const { automations } = await executor.automationsIn("Tasks") as { automations: Array<{ automation: { id: string }; cannotRun: string | null }> };
+    expect(automations.map(({ automation, cannotRun }) => [automation.id, cannotRun])).toEqual([["ask", cannot], ["stamp", null]]);
+    expect(w.subscriptions.has("collection:Tasks#ask")).toBe(false);
+    expect(w.subscriptions.has("collection:Tasks#stamp")).toBe(true);
+  });
+
   it("wakes the agent for a change an agent or another automation made, one level deeper", async () => {
     // The woken agent changes a task; Stamp stamps it; Ask, seeing Stamp's
     // change, wakes the agent again. Each hop carries the chain one deeper,
