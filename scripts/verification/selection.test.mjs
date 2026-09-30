@@ -256,8 +256,10 @@ test("canonical repository checks include every script contract except the Docke
   const listed = new Set([...manifest.scripts["test:repo"].matchAll(/[^\s]+\.test\.mjs/gu),
     ...manifest.scripts["test:repo:source"].matchAll(/[^\s]+\.test\.mjs/gu)].map(([path]) => path));
   const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs"]);
-  const tracked = execFileSync("git", ["ls-files", "-z", "--", "scripts/**/*.test.mjs", "tools/**/*.test.mjs"],
+  const tracked = execFileSync("git", ["ls-files", "-z", "--", ":(glob)scripts/**/*.test.mjs", ":(glob)tools/**/*.test.mjs"],
     { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).split("\0").filter(Boolean);
+  assert.ok(tracked.includes("scripts/build-slot.test.mjs"));
+  assert.ok(tracked.includes("scripts/verification/selection.test.mjs"));
   for (const path of tracked) {
     assert.ok(listed.has(path) || optIn.has(path), `Missing canonical repository contract: ${path}`);
   }
