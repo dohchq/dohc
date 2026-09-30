@@ -397,6 +397,30 @@ pub fn reconcile_in(conn: &Connection, key: &DocKey, now_ms: i64) -> Result<bool
     }
 }
 
+/// A newer local head supersedes the unresolved attempt. Its moment already
+/// names the reserved authors, so cancel its write instead of crediting them again.
+pub fn supersede_in(conn: &Connection, key: &DocKey, now_ms: i64) -> Result<(), CollabError> {
+    if reconcile_in(conn, key, now_ms)? {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE materialization_jobs SET status='cancelled', completed_at_ms=?4 \
+         WHERE status='pending' AND job_id=(SELECT 'ydoc-mat_'||m.moment_id \
+         FROM ydoc_docs d JOIN moments m ON m.workspace_id=d.workspace_id \
+         AND m.version_id=d.version_id AND m.object_id=d.object_id AND m.moment_order=d.settle_seq \
+         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3)",
+        params![key.workspace_id, key.version_id, key.object_id, now_ms],
+    )
+    .map_err(sql)?;
+    conn.execute(
+        "UPDATE ydoc_docs SET settle_prior_update_seq=NULL \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(sql)?;
+    Ok(())
+}
+
 pub fn reconcile_workspace_in(
     conn: &Connection,
     workspace_id: &str,

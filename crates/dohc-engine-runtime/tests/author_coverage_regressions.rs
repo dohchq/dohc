@@ -1,11 +1,13 @@
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, author_coverage};
 use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, RollbackTextFileMutation};
-use dohc_engine_runtime::{ActorHandle, CancellationToken, WorkspaceSupervisor, YdocOpenState};
+use dohc_engine_runtime::{
+    ActorHandle, CancellationToken, CaptureIngest, WorkspaceSupervisor, YdocOpenState,
+};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, NoFaults, StorageError, TxnOutcome,
 };
 use dohc_engine_sync::{SyncError, project_and_write_in_tx};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path, try_make_file_symlink};
 use std::{path::Path, sync::Arc};
 
 const WS: &str = "coverage-regression";
@@ -715,6 +717,152 @@ async fn file_rewrite_discards_pending_authors_of_replaced_content() {
             authors.is_empty(),
             "{origin} cannot credit old edits in a later settlement"
         );
+    }
+}
+
+fn settlement_job_and_history(store: &EngineStore, key: &DocKey) -> (String, Vec<String>) {
+    store
+        .read_with(|conn| {
+            let status = conn
+                .query_row(
+                    "SELECT j.status FROM ydoc_docs d JOIN moments m ON m.workspace_id=d.workspace_id \
+                     AND m.version_id=d.version_id AND m.object_id=d.object_id AND m.moment_order=d.settle_seq \
+                     JOIN materialization_jobs j ON j.job_id='ydoc-mat_'||m.moment_id \
+                     WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::persist_public)?;
+            let authors = conn
+                .prepare(
+                    "SELECT author_json FROM moments WHERE workspace_id=?1 AND object_id=?2 \
+                     AND author_json IS NOT NULL ORDER BY moment_order",
+                )
+                .and_then(|mut statement| {
+                    statement
+                        .query_map(rusqlite::params![WS, key.object_id], |row| row.get(0))?
+                        .collect::<rusqlite::Result<Vec<String>>>()
+                })
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>((status, authors))
+        })
+        .expect("settlement job and history")
+}
+
+fn credits(history: &[String], author: &str) -> usize {
+    history
+        .iter()
+        .filter(|authors| authors.contains(&format!("\"{author}\"")))
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symlink_blocked_settlement_yields_to_a_captured_outside_edit() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let elsewhere = ScratchDir::new().expect("outside the workspace");
+    let db = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("actor").actor;
+    let state = open(&actor).await;
+    let doc = Ydoc::wire();
+    append(&actor, &state.key, doc.plaintext_insert(0, "a"), "alice").await;
+    settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
+        .await
+        .expect("first settlement");
+    append(&actor, &state.key, doc.plaintext_insert(1, "b"), "bob").await;
+    assert!(
+        settle(
+            &actor,
+            scratch.path(),
+            &state,
+            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+        )
+        .await
+        .is_err()
+    );
+    let file = scratch.path().join(FILE);
+    let target = elsewhere.path().join("target.txt");
+    std::fs::write(&target, "a").expect("symlink target");
+    std::fs::remove_file(&file).expect("remove settled file");
+    if !try_make_file_symlink(&target, &file).expect("symlink") {
+        eprintln!("skipping: this host cannot create file symlinks");
+        return;
+    }
+    actor
+        .materialize_replay_pending(scratch.path().into(), WS.into(), 4)
+        .await
+        .expect("replay reaches the symlink");
+    let store = EngineStore::open(&db, 5).expect("inspect blocked attempt");
+    let (status, _) = settlement_job_and_history(&store, &state.key);
+    assert_eq!(status, "pending", "the symlink blocks the settlement write");
+    assert!(coverage(&store, &state.key).3.is_some());
+    drop(store);
+
+    // The person replaces the symlink with their own file.
+    std::fs::remove_file(&file).expect("remove symlink");
+    std::fs::write(&file, "outside").expect("outside edit");
+    actor
+        .capture_ingest(
+            CaptureIngest {
+                workspace_id: WS.into(),
+                version_id: "main".into(),
+                path: FILE.into(),
+                text: "outside".into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 6,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("outside edit captured");
+    let store = EngineStore::open(&db, 7).expect("inspect captured edit");
+    let captured = coverage(&store, &state.key);
+    assert_eq!(captured.3, None, "the captured head resolves the attempt");
+    assert_eq!(captured.2, "[]");
+    let (status, history) = settlement_job_and_history(&store, &state.key);
+    assert_eq!(status, "cancelled", "the superseded write cannot replay");
+    assert_eq!(credits(&history, "alice"), 1);
+    assert_eq!(
+        credits(&history, "bob"),
+        1,
+        "the blocked settlement moment keeps its credit"
+    );
+    assert!(
+        store
+            .read_with(|conn| author_coverage::interval_in(conn, &state.key, i64::MAX))
+            .expect("interval")
+            .is_empty(),
+        "no later settlement can credit bob again"
+    );
+    drop(store);
+
+    let reopened = open(&actor).await;
+    let doc = Ydoc::wire();
+    doc.apply(&reopened.initial_update)
+        .expect("captured lineage");
+    assert_eq!(doc.plaintext_string(), "outside");
+    append(&actor, &state.key, doc.plaintext_insert(7, "c"), "carol").await;
+    settle(&actor, scratch.path(), &reopened, Arc::new(NoFaults))
+        .await
+        .expect("settlement after the capture");
+    actor
+        .materialize_replay_pending(scratch.path().into(), WS.into(), 8)
+        .await
+        .expect("cancelled write stays cancelled");
+    supervisor.close(&db).expect("stop");
+    drop(actor);
+    assert_eq!(std::fs::read_to_string(&file).expect("disk"), "outsidec");
+    let store = EngineStore::open(&db, 9).expect("inspect later settlement");
+    let (_, history) = settlement_job_and_history(&store, &state.key);
+    for author in ["alice", "bob", "carol"] {
+        assert_eq!(credits(&history, author), 1, "{author} is credited once");
     }
 }
 

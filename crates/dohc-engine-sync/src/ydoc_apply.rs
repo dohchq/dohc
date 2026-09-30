@@ -1893,32 +1893,37 @@ pub fn reconcile_local_resulting_head_in_tx(
         })?;
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
     match resulting {
-        ResultingHead::Text { path, text } => match fold_complete_ydoc_lineage_in_tx(
-            tx,
-            &complete,
-            path,
-            text,
-            LineageFoldAuthor {
-                actor_origin_id,
-                attribution,
-            },
-            now_ms,
-            true,
-        )? {
-            LineageFold::Folded(facts) => Ok(facts.map(|facts| *facts)),
-            LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
+        ResultingHead::Text { path, text } => {
+            // A blocked settlement write must not refuse this head forever.
+            dohc_engine_collab::author_coverage::supersede_in(tx, &key, now_ms)
+                .map_err(map_collab_hard_error)?;
+            match fold_complete_ydoc_lineage_in_tx(
                 tx,
-                workspace_id,
-                version_id,
-                object_id,
+                &complete,
                 path,
                 text,
-                actor_origin_id,
-                attribution,
+                LineageFoldAuthor {
+                    actor_origin_id,
+                    attribution,
+                },
                 now_ms,
-            )
-            .map_err(map_domain_hard_error),
-        },
+                true,
+            )? {
+                LineageFold::Folded(facts) => Ok(facts.map(|facts| *facts)),
+                LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
+                    tx,
+                    workspace_id,
+                    version_id,
+                    object_id,
+                    path,
+                    text,
+                    actor_origin_id,
+                    attribution,
+                    now_ms,
+                )
+                .map_err(map_domain_hard_error),
+            }
+        }
         ResultingHead::BinaryOrAbsent => {
             retire_complete_ydoc_lineage_in_tx(tx, &complete).map(|()| None)
         }
