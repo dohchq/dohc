@@ -842,6 +842,25 @@ async fn directory_blocked_settlement_yields_to_a_captured_outside_edit() {
             store
                 .write_with(&NoFaults, |tx| {
                     if operation == "conflict-resolution" {
+                        // Resolution writes its chosen file head in this same transaction.
+                        dohc_engine_domain::write_text_in_tx(
+                            tx,
+                            &dohc_engine_domain::WriteText {
+                                workspace_id: WS.into(),
+                                version_id: "main".into(),
+                                object_id: state.key.object_id.clone(),
+                                path: FILE.into(),
+                                text: resulting_text.into(),
+                                moment_id: "resolution-head".into(),
+                                metadata_origin: "conflict-resolution".into(),
+                                metadata_summary: None,
+                                metadata_correlation_id: None,
+                                author_json: None,
+                                now_ms: 6,
+                                request_id: None,
+                            },
+                        )
+                        .expect("resolution file head");
                         dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
                             tx,
                             WS,
