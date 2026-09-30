@@ -37,6 +37,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import {
   AUTOMATION_CLAIMED_EVENT,
+  DaemonRefusalError,
   decodeAutomationGroupHandover,
   type Event,
   type JsonValue,
@@ -535,9 +536,14 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       writeText: async (path, text, expectedContentHash) => {
         const read = await readText(ws, path);
         if (read === null || read.truncated || read.contentHash !== expectedContentHash) return { status: "conflict" };
-        await adapter.writeTextFile({
-          workspaceId, versionId: read.versionId, path, text, publish: true, expectedSha256: expectedContentHash, metadata: { origin: "api", summary: `Updated ${posix.basename(path)}` },
-        });
+        try {
+          await adapter.writeTextFile({
+            workspaceId, versionId: read.versionId, path, text, publish: true, expectedSha256: expectedContentHash, metadata: { origin: "api", summary: `Updated ${posix.basename(path)}` },
+          });
+        } catch (error) {
+          if (error instanceof DaemonRefusalError && error.message === "write-precondition-failed") return { status: "conflict" };
+          throw error;
+        }
         syncSoon(ws);
         return { status: "written" };
       },
