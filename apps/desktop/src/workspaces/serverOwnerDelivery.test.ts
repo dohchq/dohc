@@ -164,21 +164,29 @@ it("stop cancels the initial wait and ignores later retries", async () => {
 
 it("retains an abort-ignoring pass after its deadline until both stop calls finish", async () => {
   const entered = deferred<AbortSignal>(), settled = deferred<{documentCount: number; acknowledged: boolean}>();
-  const runPass = vi.fn((_id, _index, signal: AbortSignal) => {entered.resolve(signal); return settled.promise;});
+  let passSettled = false;
+  const runPass = vi.fn(async (_id, _index, signal: AbortSignal) => {
+    entered.resolve(signal);
+    const result = await settled.promise;
+    passSettled = true;
+    return result;
+  });
   const owner = startServerOwnerDelivery({workspaceIds: () => ["workspace"], attemptTimeoutMs: 10, retryDelayMs: 1000, runPass, onError() {}});
   const signal = await entered.promise;
   await new Promise<void>(resolve => {
     if (signal.aborted) resolve(); else signal.addEventListener("abort", () => resolve(), {once: true});
   });
   owner.retry("workspace");
-  const stopped = vi.fn();
-  const stops = [owner.stop().then(stopped), owner.stop().then(stopped)];
+  const stopped = vi.fn(() => {expect(passSettled).toBe(true);});
+  const stops = Promise.all([owner.stop().then(stopped), owner.stop().then(stopped)]);
+  void stops.catch(() => undefined);
   try {
-    await Promise.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(passSettled).toBe(false);
     expect(stopped).not.toHaveBeenCalled();
     expect(runPass).toHaveBeenCalledTimes(1);
   } finally {settled.resolve({documentCount: 1, acknowledged: true});}
-  await Promise.all(stops);
+  await stops;
   expect(stopped).toHaveBeenCalledTimes(2);
   expect(runPass).toHaveBeenCalledTimes(1);
 });

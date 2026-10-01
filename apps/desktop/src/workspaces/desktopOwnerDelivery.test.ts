@@ -70,21 +70,29 @@ it("continues acknowledged work at zero delay and retries even when logging thro
 
 it("a deadline aborts the pass but keeps its slot and every stop until actual settlement", async () => {
   const entered = deferred<AbortSignal>(), settled = deferred<OwnerYDocDrainResult>();
-  const runPass = vi.fn((_document, signal: AbortSignal) => {entered.resolve(signal); return settled.promise;});
+  let passSettled = false;
+  const runPass = vi.fn(async (_document, signal: AbortSignal) => {
+    entered.resolve(signal);
+    const result = await settled.promise;
+    passSettled = true;
+    return result;
+  });
   const owner = startDesktopOwnerDelivery({config: {...parseDesktopOwnerDeliveryConfig(config), attemptTimeoutMs: 10}, runPass, onError() {}});
   const signal = await entered.promise;
   await new Promise<void>(resolve => {
     if (signal.aborted) resolve(); else signal.addEventListener("abort", () => resolve(), {once: true});
   });
-  const stopped = vi.fn();
-  const stops = [owner.stop().then(stopped), owner.stop().then(stopped)];
+  const stopped = vi.fn(() => {expect(passSettled).toBe(true);});
+  const stops = Promise.all([owner.stop().then(stopped), owner.stop().then(stopped)]);
+  void stops.catch(() => undefined);
   try {
-    await Promise.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
     expect(signal.aborted).toBe(true);
+    expect(passSettled).toBe(false);
     expect(stopped).not.toHaveBeenCalled();
     expect(runPass).toHaveBeenCalledTimes(1);
   } finally {settled.resolve("acknowledged");}
-  await Promise.all(stops);
+  await stops;
   expect(stopped).toHaveBeenCalledTimes(2);
   expect(runPass).toHaveBeenCalledTimes(1);
 });
