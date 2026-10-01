@@ -261,7 +261,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(dialog.getByRole("listitem").filter({ hasText: recipientLabel })).toHaveCount(1);
       // The recipient can still edit, so read-only afterwards proves the stop.
       await expect(saveState(recipient!.page)).toHaveAttribute("data-state", "saved");
-      await expect(editor(recipient!.page).locator('[contenteditable="true"]')).toHaveCount(1);
+      await expect(editor(recipient!.page)).toHaveAttribute("contenteditable", "true");
       await dialog.getByRole("button", { name: "Stop access" }).click();
       const current = dialog.getByLabel("Current file before restore");
       await expect(current).toBeVisible({ timeout: 60_000 });
@@ -299,7 +299,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1], [R1]), { timeout: 60_000 }).toBe(true);
       const page = recipient!.page;
       await expect(saveState(page)).toHaveAttribute("data-state", "read-only", { timeout: 60_000 });
-      await expect(editor(page).locator('[contenteditable="true"]')).toHaveCount(0);
+      await expect(editor(page)).toHaveAttribute("contenteditable", "false");
       await editor(page).getByText(H1).click();
       await page.keyboard.type(" Typed after access stopped.");
       await expect(editor(page)).not.toContainText("Typed after access stopped.");
