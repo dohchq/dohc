@@ -35,7 +35,7 @@ interface Metadata {
 interface AgentAuthor {
   kind: "agent";
   agentId: string;
-  onBehalfOf: string;
+  onBehalfOf: string | null;
   agentRunId: string | null;
 }
 
@@ -259,7 +259,7 @@ function author(value: unknown): AgentAuthor | null {
   return {
     kind: "agent",
     agentId: authorField(record.agentId, "effectContext.author.agentId"),
-    onBehalfOf: authorField(
+    onBehalfOf: record.onBehalfOf === null ? null : authorField(
       record.onBehalfOf,
       "effectContext.author.onBehalfOf",
     ),
@@ -492,7 +492,7 @@ function canonicalAuthors(value: AgentAuthor | null): Record<string, unknown>[] 
   return [{
     kind: "agent",
     agentId: value.agentId,
-    onBehalfOf: value.onBehalfOf,
+    ...(value.onBehalfOf === null ? {} : { onBehalfOf: value.onBehalfOf }),
     ...(value.agentRunId === null ? {} : { agentRunId: value.agentRunId }),
   }];
 }
