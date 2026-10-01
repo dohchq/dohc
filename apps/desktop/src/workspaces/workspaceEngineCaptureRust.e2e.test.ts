@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -797,30 +797,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       // settle on a doubling delay, so releasing the lock is followed by the
       // write landing BY ITSELF — no further edit. The retry replays the
       // durably pending materialization job through the idempotent settle.
-      const deadline = Date.now() + 20_000;
-      while (Date.now() < deadline) {
-        const contents = await readFile(absolute, "utf8").catch(async (error) => {
-          const diagnostic = {
-            path: absolute,
-            states: [...states],
-            errors: [...errors],
-            directory: await readdir(root).catch(
-              (listingError: NodeJS.ErrnoException) => listingError.code,
-            ),
-          };
-          if (error instanceof Error) {
-            error.message += `\nLocked-save recovery: ${JSON.stringify(diagnostic)}`;
-          }
-          throw error;
-        });
-        if (
-          contents !== "base\n" &&
-          states.includes("saved")
-        ) {
-          break;
-        }
-        await delay(200);
-      }
+      await expect.poll(() => states.includes("saved"), {timeout: 20_000}).toBe(true);
       expect(await readFile(absolute, "utf8")).toBe("locked edit\nbase\n");
       expect(states).toContain("saved");
 
