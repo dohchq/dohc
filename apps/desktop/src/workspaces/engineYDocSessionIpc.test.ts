@@ -144,6 +144,7 @@ function harness(
   const onError = vi.fn();
   const ipc = createEngineYDocSessionIpc({
     localPersonId: () => "person-local",
+    localAuthorContext: () => ({ authorContext: "host-person-context", authorContextGeneration: 0 }),
     sessionFor: () =>
       retired
         ? undefined
@@ -198,13 +199,14 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     await h.ipc.shutdown();
   });
-  it("keeps the person attribution used by renderer record automations", async () => {
+  it("keeps the host context captured by the renderer original", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
-    await h.ipc.open(sender, openPayload);
+    const opened = await h.ipc.open(sender, openPayload);
+    expect(opened).toMatchObject({ authorContext: "host-person-context", authorContextGeneration: 0 });
     const update = new Uint8Array([0, 0]);
-    expect(h.ipc.applyUpdate(sender, {sessionId: openPayload.sessionId, update, seq: 1, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111"})).toEqual({accepted: true});
-    expect(h.session.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), {idempotencyKey: "11111111-1111-4111-8111-111111111111", attribution: {actorKind: "human", onBehalfOf: "person-local"}});
+    expect(h.ipc.applyUpdate(sender, {sessionId: openPayload.sessionId, update, seq: 1, lineageGeneration: 1, authorContext: "host-person-context", requestId: "11111111-1111-4111-8111-111111111111"})).toEqual({accepted: true});
+    expect(h.session.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), {idempotencyKey: "11111111-1111-4111-8111-111111111111", authorContext: "host-person-context"});
     await h.ipc.shutdown();
   });
 

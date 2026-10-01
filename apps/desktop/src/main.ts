@@ -141,6 +141,7 @@ import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
 import { runCollectionRecordCreation, collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
 import { desktopRecordEditContext, type DesktopRecordEditHost } from "./workspaces/desktopRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
+import { prepareDeleteWorkspacePathAs } from "./workspaces/workspaceFileMoves";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
 
@@ -303,7 +304,7 @@ import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices
 import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
-import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
+import { captureLocalAuthorContext, readOrCreateLocalInstallationIdentity, type LocalInstallationIdentity } from "./workspaces/localInstallationIdentity";
 import {
   createCloudLogin,
   type CloudLogin,
@@ -804,6 +805,20 @@ function notifyCloudSessionChangedWithKey(
   }
 }
 
+function notifyLocalAuthorContextChanged(): void {
+  for (const workspace of listWorkspaces()) {
+    if (workspace.shareView) continue;
+    const event = {
+      workspaceId: workspace.workspaceId,
+      authorContext: captureLocalAuthorContext(localInstallationIdentity(), workspace.workspaceId, localUserId()),
+      authorContextGeneration: localAuthorContextGeneration,
+    };
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(CHANNELS.engineYDocAuthorContextChanged, event);
+    }
+  }
+}
+
 function workspaceSummaries(): WorkspaceSummary[] {
   return workspaceSummariesFrom(listWorkspaces());
 }
@@ -849,6 +864,7 @@ let cachedCredentials: CloudSessionCredentials | null = null;
 const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
 const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
+let localAuthorContextGeneration = 0;
 let ownerDeliveryCredentialLifetime = new AbortController();
 // Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
 // across physical workspaces in the same session, and clear it whenever that
@@ -860,6 +876,8 @@ const credentialSessionCache =
     ownerDeliveryCredentialLifetime = new AbortController();
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
+    localAuthorContextGeneration += 1;
+    notifyLocalAuthorContextChanged();
     void ownerDatasetCopies.credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
       .catch(error => console.error("Collection copy cleanup failed", error));
     // A credential load publishes a temporary null first. Keep saved pages until the account is known.
@@ -938,7 +956,7 @@ function noticeStore(): NoticeStore {
   cachedNoticeStore ??= createNoticeStore({
     directory: join(stateDir(), "notices"),
     session: noticeSession,
-    installId: localReactorFallbackId,
+    installId: localInstallationId,
     onChanged: notifyNoticesChanged,
     ...createWorkspaceRefusalNotices({
       sessions: () => desktopEngine.sessions,
@@ -1324,7 +1342,7 @@ const shareRosters = createShareRosters({
   localPersonId: async (workspace) => {
     const proved = await provedNeverShared(workspace, () =>
       withEngineAdapter(workspace, (adapter) => adapter.remoteChangesApplied()).catch(() => null));
-    return proved ? localReactorFallbackId() : null;
+    return proved ? localInstallationId() : null;
   },
   syncHistory: (workspace) => readSyncHistory(workspace.rootPath),
   logError: (workspaceId, error) =>
@@ -2035,7 +2053,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       },
       hooks,
       requireEngineSessions(),
-      testCaptureSeams(),
+      { ...testCaptureSeams(), localPersonId: localUserId },
     ),
   onWatcherBatch,
 });
@@ -2571,12 +2589,12 @@ function localUserDisplayName(): string {
 // stable uuid persisted in stateDir — never the email — so a signed-out
 // reaction cell is stable across restarts without leaking PII into the CRDT.
 // Memoized after the first read; the sync fs touch happens at most once.
-let cachedLocalReactorId: string | null = null;
-function localReactorFallbackId(): string {
-  if (cachedLocalReactorId) return cachedLocalReactorId;
-  const id = readOrCreateLocalReactorId(join(stateDir(), "dohc-local-id.json"));
-  cachedLocalReactorId = id;
-  return id;
+let cachedLocalInstallationIdentity: LocalInstallationIdentity | null = null;
+function localInstallationIdentity(): LocalInstallationIdentity {
+  return cachedLocalInstallationIdentity ??= readOrCreateLocalInstallationIdentity(join(stateDir(), "dohc-local-id.json"));
+}
+function localInstallationId(): string {
+  return localInstallationIdentity().id;
 }
 
 // The local user's stable, OPAQUE reactor identity (WS-MU-C2). This value
@@ -2588,7 +2606,7 @@ function localReactorFallbackId(): string {
 // per-install uuid. The email→display-name mapping stays LOCAL in
 // localUserDisplayName().
 function localUserId(): string {
-  return cachedCredentials?.userId ?? localReactorFallbackId();
+  return cachedCredentials?.userId ?? localInstallationId();
 }
 
 // The verified relay identity for a signed-in chat message (WS-MU-C0). A
@@ -3276,6 +3294,8 @@ function collectionEditContextWith(
   return desktopRecordEditContext({
     capture,
     workspaceRoot: workspace.rootPath,
+    personAuthor: () => ({ kind: "human", humanId: localUserId(),
+      authorContext: captureLocalAuthorContext(localInstallationIdentity(), workspace.workspaceId, localUserId()) }),
     withAdapter: (work) => withEngineAdapter(workspace, work),
     onCaptureSettled: (listener) => {
       const daemon = desktopEngine.daemon;
@@ -3637,7 +3657,7 @@ const AUTOMATION_HOST_REQUEST_TIMEOUT_MS = 15_000;
 // Which of the owner's computers runs each open synced workspace's
 // schedules, as the relay records it.
 const automationHosts = createAutomationHosts({
-  installId: localReactorFallbackId,
+  installId: localInstallationId,
   label: () => computerLabel(hostname()),
   synced: (workspaceId) => findWorkspace(workspaceId)?.remote !== undefined,
   send: async (workspaceId, request) => {
@@ -3786,7 +3806,7 @@ async function scheduleHostState(
     throw new Error("dohc could not read which computer runs this workspace's schedules.");
   }
   const host = automationHosts.learned(workspaceId, answered);
-  const installId = localReactorFallbackId();
+  const installId = localInstallationId();
   return {
     kind: "relay",
     generation: host?.generation ?? 0,
@@ -3903,7 +3923,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
       return relayPressTransport(
         { baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch },
         workspaceId,
-        localReactorFallbackId(),
+        localInstallationId(),
       );
     },
     heldClaim: async (press) => {
@@ -3969,14 +3989,14 @@ function createCollectionAutomationsFor(
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
     reportFailure: (report) => sendFailureNotices({
       notices: noticeStore(),
-      computer: { installId: localReactorFallbackId(), label: computerLabel(hostname()) },
+      computer: { installId: localInstallationId(), label: computerLabel(hostname()) },
       throughShare: findWorkspace(workspaceId)?.shareView !== undefined,
       primaryUserId: localUserId(),
       lastChangedBy: (automationId) => automationLastChangedBy(workspaceId, automationId),
       onError: (context, error) => console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     }, workspaceId, report),
     withdrawFailure: (failure) =>
-      noticeStore().withdraw(automationFailedNoticeId({ workspaceId, installId: localReactorFallbackId(), failure })),
+      noticeStore().withdraw(automationFailedNoticeId({ workspaceId, installId: localInstallationId(), failure })),
     onSwitchedOff: (switched) => void sendSwitchedOffNotice(workspaceId, switched).catch((error: unknown) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: tell who changed "${switched.name}" last that it was switched off:`, error)),
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
@@ -4012,7 +4032,7 @@ function createCollectionAutomationsFor(
     // after a sign-in: the reach check allowed it as this computer's person.
     postNotice: ({ recipientUserId, ...notice }, signal) => noticeStore().postNotice({
       workspaceId, ...notice, signal,
-      ...(recipientUserId === localReactorFallbackId() ? { onlyHere: true } : { recipientUserId }),
+      ...(recipientUserId === localInstallationId() ? { onlyHere: true } : { recipientUserId }),
     }),
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
@@ -4153,7 +4173,7 @@ const chatWrites = createChatWrites({
   localUserDisplayName,
   agentDisplayName: async () =>
     (await readCachedUserSettingsFile(stateDir())).settings.profile.agentName ?? "Agent",
-  localReactorFallbackId,
+  localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
   syncSharedChannelsForChatTarget,
@@ -4191,7 +4211,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
       run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
       retry: (input) => retryAutomationRun({
         notices: noticeStore(),
-        installId: localReactorFallbackId(),
+        installId: localInstallationId(),
         holds: async (run) => (await (await opened()).run(run.automationId, run.claimId)) !== null,
         recovery: async (automationId) => (await opened()).switchedOffTarget(automationId),
         retry: async (run) => (await opened()).retry(run),
@@ -4252,6 +4272,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
+  localAuthorContext: workspaceId => ({ authorContext: captureLocalAuthorContext(localInstallationIdentity(), workspaceId, localUserId()),
+    authorContextGeneration: localAuthorContextGeneration }),
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
   acquireWorkspace: (workspaceId) => {
@@ -4384,6 +4406,7 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunnin
 });
 
 const desktopEngine = createDesktopEngine({
+  authorContextSecret: () => localInstallationIdentity().authorContextSecret,
   onWorkspaceOpened: workspaceId => {
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
@@ -4697,11 +4720,24 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
           workspace,
           capture: activity.engineCaptureFor(workspaceId, workspace.rootPath),
           yDocSessions: engineYDocSessionIpc.fileMutationPort(),
+          assertCurrent: () => operation.assertCurrent(),
         });
       },
     ),
   shareViewFiles,
-  trashItem: (path) => shell.trashItem(path),
+  deleteLocalPath: async ({ workspace, authorityId, capture, yDocSessions, assertCurrent }, path) => {
+    if (!capture) throw new Error("dohc could not record this delete in History. Restart dohc to try again.");
+    const author = { kind: "human" as const, humanId: localUserId(),
+      authorContext: captureLocalAuthorContext(localInstallationIdentity(), workspace.workspaceId, localUserId()) };
+    const complete = await prepareDeleteWorkspacePathAs(
+      { workspace: { ...workspace, attachmentId: authorityId }, assertCurrent }, path, author,
+      { capture, requestId: randomUUID(), trashItem: target => shell.trashItem(target),
+        markDeleted: target => yDocSessions.markDeletedUnderPath(authorityId, target) },
+    );
+    const result = await complete();
+    if (!result.ok) throw new Error(result.reason);
+    return { trashed: result.trashed };
+  },
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
   shareViewEdited: (workspaceId) => shareDirectWrites?.shareViewEdited(workspaceId),
   logError: (message, error) => console.error(message, error),
@@ -5921,7 +5957,7 @@ function registerIpcHandlers(): void {
     registerHandler: handleIpc,
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId,
-    localReactorFallbackId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
+    localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
     activity, desktopChatBookmarks, notifyRenderer,

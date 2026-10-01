@@ -70,6 +70,7 @@ export interface EngineYDocTransport {
   // provider can delay transport without letting an older settle report the
   // pending edit as saved. null refuses the write before it enters a batch.
   stageLocalUpdate(): number | null;
+  captureAuthorContext?(): string | undefined;
   // Ship a local editor batch to main, where it is journaled via recordUpdate.
   // sequence is the newest staged edit covered by the merged update.
   // Resolution acknowledges that main accepted the batch. A refusal main
@@ -81,6 +82,7 @@ export interface EngineYDocTransport {
     sequence: number,
     lineageGeneration: number,
     requestId: string,
+    authorContext?: string,
   ): void | Promise<void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
   // through the engine). Returns an unsubscribe function.
@@ -324,6 +326,7 @@ export async function bindEngineYDoc(
   let pendingLocalUpdates: Array<{
     update: Uint8Array;
     sequence: number;
+    authorContext?: string;
   }> = [];
   let sendChain = Promise.resolve();
   let unacknowledgedBatches = 0;
@@ -392,6 +395,7 @@ export async function bindEngineYDoc(
     update: Uint8Array;
     sequence: number;
     requestId: string;
+    authorContext?: string;
   }, batchGeneration: number): Promise<void> => {
     try {
       await deliverBatchUntilAcknowledged(batch, batchGeneration);
@@ -407,6 +411,7 @@ export async function bindEngineYDoc(
     update: Uint8Array;
     sequence: number;
     requestId: string;
+    authorContext?: string;
   }, batchGeneration: number): Promise<void> => {
     if (localUpdatesRefused) return;
     if (batch.update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) {
@@ -424,6 +429,7 @@ export async function bindEngineYDoc(
           batch.sequence,
           batchGeneration,
           batch.requestId,
+          batch.authorContext,
         );
         return;
       } catch (error) {
@@ -470,28 +476,34 @@ export async function bindEngineYDoc(
     }
     const updates = pendingLocalUpdates;
     pendingLocalUpdates = [];
-    // These edits belong to the same renderer owner. Assign an immutable
-    // delivery identity only after merging; retries retain its bytes and id.
-    const batch = {
-      update: updates.length === 1
-        ? updates[0]!.update
-        : Y.mergeUpdates(updates.map(({ update }) => update)),
-      sequence: updates.at(-1)!.sequence,
-      requestId: crypto.randomUUID(),
-    };
-    retainedBytes += batch.update.byteLength - updates.reduce(
-      (total, { update }) => total + update.byteLength, 0,
-    );
-    retainedRecords += 1 - updates.length;
-    const batchGeneration = lineageGeneration;
-    // Preserve batch order even when the transport is asynchronous. A failed
-    // head stays ahead of every later batch until main acknowledges it. The
-    // chain remains pending during retries, so teardown cannot settle and
-    // close a session that still has renderer-only edits.
-    unacknowledgedBatches += 1;
-    sendChain = sendChain.then(() =>
-      applyLocalUpdateUntilAcknowledged(batch, batchGeneration),
-    );
+    const groups: typeof updates[] = [];
+    for (const update of updates) {
+      const previous = groups.at(-1);
+      if (previous && previous[0]!.authorContext === update.authorContext) {
+        previous.push(update);
+      } else {
+        groups.push([update]);
+      }
+    }
+    for (const group of groups) {
+      const batch = {
+        update: group.length === 1
+          ? group[0]!.update
+          : Y.mergeUpdates(group.map(({ update }) => update)),
+        sequence: group.at(-1)!.sequence,
+        requestId: crypto.randomUUID(),
+        authorContext: group[0]!.authorContext,
+      };
+      retainedBytes += batch.update.byteLength - group.reduce(
+        (total, { update }) => total + update.byteLength, 0,
+      );
+      retainedRecords += 1 - group.length;
+      const batchGeneration = lineageGeneration;
+      unacknowledgedBatches += 1;
+      sendChain = sendChain.then(() =>
+        applyLocalUpdateUntilAcknowledged(batch, batchGeneration),
+      );
+    }
     return sendChain;
   };
 
@@ -523,7 +535,11 @@ export async function bindEngineYDoc(
     setDeliveryPending(true);
     retainedBytes = nextBytes;
     retainedRecords = nextRecords;
-    pendingLocalUpdates.push({ update: new Uint8Array(update), sequence });
+    pendingLocalUpdates.push({
+      update: new Uint8Array(update),
+      sequence,
+      authorContext: transport.captureAuthorContext?.(),
+    });
     scheduleLocalUpdateFlush();
   };
   doc.on("update", onUpdate);

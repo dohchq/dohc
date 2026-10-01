@@ -428,7 +428,7 @@ describe("CLI socket server", () => {
         currentCredentialGeneration: () => 0,
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
-        localReactorFallbackId: () => "install-local-user-id",
+        localInstallationId: () => "install-local-user-id",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
         async syncSharedChannelsForChatTarget(_workspaceId, target) {

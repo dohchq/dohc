@@ -576,10 +576,15 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
 // A file write's author. A public or named author arrives only through
 // relay replication, never from this computer.
 function adapterAuthor(author: MomentWriteAuthor): WriteAuthor {
+  if (author.kind === "human") {
+    return { kind: "human", humanId: author.humanId,
+      ...(author.authorContext !== undefined ? { authorContext: author.authorContext } : {}) };
+  }
   if (author.kind === "automation") {
     return {
       kind: "automation",
       automationId: author.automationId,
+      ...(author.authorContext !== undefined ? { authorContext: author.authorContext } : {}),
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
       depth: author.depth,
     };
@@ -594,6 +599,7 @@ function captureAuthor(author: MomentWriteAuthor): AgentAuthor {
   return {
     kind: "agent",
     agentId: author.agentId,
+    ...(author.authorContext !== undefined ? { authorContext: author.authorContext } : {}),
     onBehalfOf: author.onBehalfOf,
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }

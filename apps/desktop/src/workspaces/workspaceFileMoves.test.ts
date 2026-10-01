@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readlink, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -84,10 +84,12 @@ async function fixture(options: {
   const operation = { workspace: { rootPath, attachmentId: Symbol(), readOnly: false, shareView: undefined as unknown },
     state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };
   const workspaceId = "file-moves-test";
+  const loopback = new VersionedLoopbackEngine();
+  loopback.admitAuthorContextForTest("host-person-context", "local:installation");
   let capture: WorkspaceEngineCapture | undefined;
   const engine = () => {
     capture ??= createWorkspaceEngineCapture({ workspaceId, rootPath, attachmentId: Symbol("attachment"),
-      rustEngineSessions: mockDaemonSessions({ rootPath, workspaceId, loopback: new VersionedLoopbackEngine(), nativeMove: options.nativeMove ?? true,
+      rustEngineSessions: mockDaemonSessions({ rootPath, workspaceId, loopback, nativeMove: options.nativeMove ?? true,
         ...(options.beforeRequest ? { beforeRequest: options.beforeRequest } : {}),
         ...(options.afterRequest ? { afterRequest: options.afterRequest } : {}) }) });
     return capture;
@@ -891,4 +893,86 @@ describe("agent move and delete admission", () => {
     expect(await pending).toMatchObject({ ok: false, reason: expect.stringContaining("History cannot record") });
     expect(f.recorded.recordDisk).not.toHaveBeenCalled();
   });
+});
+
+it("records a hand delete under the installation person and leaves outside edits unattributed", async () => {
+  const f = await fixture();
+  await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
+  const seen = await f.start();
+  try {
+    await write(f.rootPath, "tasks/hand.md", "# Outside edit\n");
+    await f.settle();
+    const outside = (await f.rows()).filter(row => !seen.has(row.id));
+    expect(outside.length).toBeGreaterThan(0);
+    expect(outside.every(row => row.authors === undefined)).toBe(true);
+    for (const row of outside) seen.add(row.id);
+    expect(await f.remove("tasks/hand.md", {
+      kind: "human", humanId: "forged-person", authorContext: "host-person-context",
+    })).toMatchObject({ ok: true });
+    const deleted = (await f.rows()).filter(row => !seen.has(row.id));
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0]).toMatchObject({
+      operation: "delete", path: "tasks/hand.md",
+      authors: [{ kind: "human", humanId: "local:installation" }],
+    });
+    expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
+    expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
+  } finally {
+    await f.engine().stop();
+  }
+});
+
+it("a person's mixed folder delete preserves neutral excluded files and link targets", async () => {
+  const f = await fixture();
+  const external = await createTestScratch("dohc-delete-outside-");
+  await write(external, "kept.txt", "outside");
+  await write(f.rootPath, "tasks/hand.md", "record");
+  await write(f.rootPath, "tasks/.env", "SECRET=kept private");
+  await write(f.rootPath, "tasks/node_modules/pkg.js", "excluded");
+  await symlink(external, join(f.rootPath, "tasks/link"), process.platform === "win32" ? "junction" : "dir");
+  const seen = await f.start();
+  try {
+    expect(await f.remove("tasks", { kind: "human", humanId: "local:installation", authorContext: "host-person-context" }))
+      .toMatchObject({ ok: true });
+    const deleted = (await f.rows()).filter(row => !seen.has(row.id));
+    expect(deleted.filter(row => row.operation === "delete")).toMatchObject([{
+      path: "tasks/hand.md", authors: [{ kind: "human", humanId: "local:installation" }],
+    }]);
+    expect(existsSync(join(f.rootPath, "tasks"))).toBe(false);
+    expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
+  } finally { await f.engine().stop(); }
+});
+
+it("a refused person delete restores its link entry without copying the target", async () => {
+  const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textDelete, "tasks/z.md") });
+  const external = await createTestScratch("dohc-delete-link-restore-");
+  await write(external, "kept.txt", "outside");
+  await write(f.rootPath, "tasks/a.md", "first");
+  await symlink(external, join(f.rootPath, "tasks/zzlink"), process.platform === "win32" ? "junction" : "dir");
+  await write(f.rootPath, "tasks/z.md", "last");
+  await f.start();
+  try {
+    expect(await f.remove("tasks", { kind: "human", humanId: "local:installation", authorContext: "host-person-context" }))
+      .toMatchObject({ ok: false });
+    expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
+    expect(await readFile(join(f.rootPath, "tasks/z.md"), "utf8")).toBe("last");
+    expect((await lstat(join(f.rootPath, "tasks/zzlink"))).isSymbolicLink()).toBe(true);
+    expect(await readlink(join(f.rootPath, "tasks/zzlink"))).toContain(external);
+  } finally { await f.engine().stop(); }
+});
+
+it("restores admitted excluded subtrees when the first person tombstone is refused", async () => {
+  const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textDelete, "tasks/a.md") });
+  await write(f.rootPath, "tasks/a.md", "record");
+  await write(f.rootPath, "tasks/zzz/node_modules/pkg.js", "excluded");
+  await write(f.rootPath, "tasks/zzz/.env", "SECRET=private");
+  await f.start();
+  try {
+    expect(await f.remove("tasks", { kind: "human", humanId: "local:installation", authorContext: "host-person-context" }))
+      .toMatchObject({ ok: false, deleted: [] });
+    expect(await readFile(join(f.rootPath, "tasks/a.md"), "utf8")).toBe("record");
+    expect(await readFile(join(f.rootPath, "tasks/zzz/node_modules/pkg.js"), "utf8")).toBe("excluded");
+    expect(await readFile(join(f.rootPath, "tasks/zzz/.env"), "utf8")).toBe("SECRET=private");
+    expect(await f.workspaceTrash()).toEqual([]);
+  } finally { await f.engine().stop(); }
 });

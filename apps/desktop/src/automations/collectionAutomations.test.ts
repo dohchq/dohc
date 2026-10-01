@@ -543,6 +543,7 @@ async function world(options: {
   const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = async (signal, work) => {
     await options.withRecordWrites?.(signal, events);
     return await work(collectionRecordWrites(desktopRecordEditContext({
+      personAuthor: () => ({ kind: "human", humanId: "local:test" }),
       capture, workspaceRoot: root, signal,
       withAdapter: async (read) => await read(engine),
       onCaptureSettled: (listener) => { if (failures.capture > 0) { failures.capture--; throw Error("capture offline"); } settleListeners.add(listener); return () => settleListeners.delete(listener); },

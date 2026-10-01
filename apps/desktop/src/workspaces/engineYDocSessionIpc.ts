@@ -116,6 +116,7 @@ interface EngineYDocSessionIpcOptions {
   onError: (message: string, error?: unknown) => void;
   /** The person typing on this computer: the account, or this installation's id when signed out. */
   localPersonId: () => string;
+  localAuthorContext?: (workspaceId: string) => { authorContext: string; authorContextGeneration: number };
 }
 
 interface SessionEvent {
@@ -327,6 +328,7 @@ class DocumentMutationReservations {
 }
 
 class EngineYDocSessionIpc implements LiveDocumentSessions {
+  readonly #localAuthorContext: EngineYDocSessionIpcOptions["localAuthorContext"];
   readonly #sessionFor: EngineYDocSessionIpcOptions["sessionFor"];
   readonly #acquireWorkspace: EngineYDocSessionIpcOptions["acquireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
@@ -356,6 +358,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
     this.#localPersonId = options.localPersonId;
+    this.#localAuthorContext = options.localAuthorContext;
     this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
       onOutbound: (outbound) => this.#send(outbound),
@@ -662,6 +665,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       }
       return OpenEngineYDocSessionResult.parse({
         available: true,
+        ...(!this.#isSharedView(owned.workspace) ? this.#localAuthorContext?.(owned.workspace.workspaceId) : {}),
         initialUpdate: Y.encodeStateAsUpdate(owned.provider.doc),
         ...(owned.provider.objectId ? { objectId: owned.provider.objectId } : {}),
         ...(owned.provider.versionId
@@ -749,11 +753,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         owned.provider.applyLocalUpdate(
           input.update,
           () => noteLocalEdit(owned.saveSeq, input.seq),
-          // A renderer editor update is this computer's person typing:
-          // agent and automation writes take the collection write seam,
-          // never this IPC. The declared kind and person ride beside the
-          // device attribution.
-          { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: this.#localPersonId() } },
+          // Local edits retain main's opaque context from the original edit.
+          // Shared-view admission keeps its current contract until A2.
+          this.#isSharedView(owned.workspace)
+            ? { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: this.#localPersonId() } }
+            : { idempotencyKey: input.requestId, ...(input.authorContext ? { authorContext: input.authorContext } : {}) },
         );
         return { accepted: true };
       },

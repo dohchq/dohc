@@ -103,7 +103,7 @@ function fixture() {
     currentCredentialGeneration: () => generation,
     localUserDisplayName: () => "Sam",
     agentDisplayName: async () => "Nova",
-    localReactorFallbackId: () => "local-id",
+    localInstallationId: () => "local-id",
     ...effects,
   });
   const place = { workspaceId: "workspace", store };

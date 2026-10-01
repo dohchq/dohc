@@ -39,7 +39,6 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import {
   createFile,
   createFolder,
-  deletePath,
   movePath,
   normalizeWorkspaceMovePaths,
   prepareWorkspaceDelete,
@@ -95,11 +94,12 @@ export interface WorkspaceFileMutationAuthority<
   readonly workspace: Readonly<Workspace>;
   readonly capture: MutationCapture | null;
   readonly yDocSessions: WorkspaceFileMutationYDocPort;
+  assertCurrent(): void;
 }
 
 type MutationCapture = Pick<
   WorkspaceEngineCapture,
-  "beginFileRename" | "settleAndCloseLiveSessionsForPath"
+  "beginFileRename" | "settleAndCloseLiveSessionsForPath" | "changePathsAs"
 >;
 
 function assertWritableWorkspace(
@@ -127,7 +127,10 @@ export function createWorkspaceFileMutationOwner<
     ) => Promise<Result>,
   ): Promise<Result>;
   shareViewFiles: Pick<ShareViewFiles, "change">;
-  trashItem(path: string): Promise<void>;
+  deleteLocalPath(
+    authority: WorkspaceFileMutationAuthority<Workspace>,
+    path: string,
+  ): Promise<{ trashed: boolean }>;
   notifyRenderer(workspaceId: string): void;
   // A file in a share view was created or saved, and its change is in the
   // share view's journal. The shell answers with a direct push.
@@ -198,6 +201,7 @@ export function createWorkspaceFileMutationOwner<
       authorityId: symbol;
       capture: MutationCapture | null;
       yDocSessions: WorkspaceFileMutationYDocPort;
+      assertCurrent(): void;
     }) => Promise<Result>,
   ): Promise<Result> => {
     dependencies.assertTrustedSender(event);
@@ -213,6 +217,7 @@ export function createWorkspaceFileMutationOwner<
           authorityId: authority.authorityId,
           capture: authority.capture,
           yDocSessions: authority.yDocSessions,
+          assertCurrent: () => authority.assertCurrent(),
         }),
     );
   };
@@ -370,82 +375,26 @@ export function createWorkspaceFileMutationOwner<
       );
     },
 
-    deletePath: async (event, payload) => {
-      return await runMutation(
-        event,
-        payload,
-        DeleteWorkspacePathPayload.parse,
-        async ({
-          input,
-          workspace,
-          receivedShare,
-          authorityId,
-          capture,
-          yDocSessions,
-        }) => {
-          if (!receivedShare) assertWritableWorkspace(workspace);
-      return withExclusiveWorkspaceOperation(
-        workspace.rootPath,
-        async (markWorkspaceChanged, lease) => {
-          const localPath = receivedShare
-            ? null
-            : await prepareWorkspaceDelete(
-                workspace.rootPath,
-                input.relativePath,
-              );
-          // The Y.Doc is canonical while its session is live. Settle and
-          // release it before moving the artifact out from under the engine.
-          const finishDebts = localPath === null
-            ? undefined
-            : await capture?.settleAndCloseLiveSessionsForPath(localPath);
-          try {
-            // Local deletion stays recoverable: deletePath tries the OS trash,
-            // then moves the entry into .dohc/trash when the OS refuses it.
-            let result: ShareViewFileChangeValue;
-            if (receivedShare) {
-              const outcome = await dependencies.shareViewFiles.change(
-                lease,
-                shareTarget(workspace),
-                { kind: "delete", path: input.relativePath },
-              );
-              result = structuralShareViewChangeValue(
-                workspace.workspaceId,
-                outcome,
-                markWorkspaceChanged,
-              );
-            } else {
-              result = await deletePath(
-                workspace.rootPath,
-                localPath!,
-                dependencies.trashItem,
-              );
-            }
-            if (
-              typeof result !== "object" ||
-              result === null ||
-              !("trashed" in result)
-            ) {
+    deletePath: async (event, payload) =>
+      await runMutation(event, payload, DeleteWorkspacePathPayload.parse,
+        async ({ input, workspace, receivedShare, authorityId, capture, yDocSessions, assertCurrent }) => {
+          if (!receivedShare) {
+            assertWritableWorkspace(workspace);
+            const path = await prepareWorkspaceDelete(workspace.rootPath, input.relativePath);
+            return DeleteWorkspacePathResult.parse(await dependencies.deleteLocalPath(
+              { authorityId, workspace, capture, yDocSessions, assertCurrent }, path,
+            ));
+          }
+          return await withExclusiveWorkspaceOperation(workspace.rootPath, async (markWorkspaceChanged, lease) => {
+            const result = structuralShareViewChangeValue(workspace.workspaceId,
+              await dependencies.shareViewFiles.change(lease, shareTarget(workspace),
+                { kind: "delete", path: input.relativePath }), markWorkspaceChanged);
+            if (typeof result !== "object" || result === null || !("trashed" in result)) {
               throw new Error("Shared file delete returned an invalid result.");
             }
-            if (!receivedShare) markWorkspaceChanged();
-            if (localPath !== null) {
-                  yDocSessions.markDeletedUnderPath(authorityId,
-                localPath,
-              );
-            }
-            // The finisher cancels write debts only after removal succeeds.
-            // On failure it restores the debts against the file still on disk.
-            finishDebts?.(true);
             return DeleteWorkspacePathResult.parse(result);
-          } catch (error) {
-            finishDebts?.(false);
-            throw error;
-          }
-        },
-      );
-    },
-      );
-    },
+          });
+        }),
 
     writeText: async (event, payload) => {
       return await runMutation(

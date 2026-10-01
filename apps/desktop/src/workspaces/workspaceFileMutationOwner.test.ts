@@ -27,6 +27,7 @@ import {
   type WorkspaceFileMutationYDocPort,
 } from "./workspaceFileMutationOwner";
 import { deferred } from "../testing/deferred";
+import { deletePath } from "./workspaceFiles";
 
 interface TestEvent {
   trusted: boolean;
@@ -42,7 +43,7 @@ interface TestWorkspace {
 
 type MutationCapture = Pick<
   WorkspaceEngineCapture,
-  "beginFileRename" | "settleAndCloseLiveSessionsForPath"
+  "beginFileRename" | "settleAndCloseLiveSessionsForPath" | "changePathsAs"
 >;
 
 const roots: string[] = [];
@@ -183,6 +184,7 @@ async function harness(options: {
       workspace: Readonly<TestWorkspace>;
       capture: MutationCapture | null;
       yDocSessions: WorkspaceFileMutationYDocPort;
+      assertCurrent(): void;
     }) => Promise<Result>,
   ): Promise<Result> => {
     rendererOperationCalls(event, workspaceId);
@@ -196,13 +198,22 @@ async function harness(options: {
       workspace: requireWorkspace(workspaceId),
       capture,
       yDocSessions,
+      assertCurrent: () => { if (event.authorityId !== undefined && event.authorityId !== authorityId) throw new Error("File change stopped because this window changed workspaces."); },
     });
   };
   const owner = createWorkspaceFileMutationOwner({
     assertTrustedSender,
     withRendererWorkspaceOperation,
     shareViewFiles: { change },
-    trashItem,
+    deleteLocalPath: async ({ capture, authorityId, yDocSessions }, path) => {
+      const finish = await capture?.settleAndCloseLiveSessionsForPath(path);
+      try {
+        const result = await deletePath(rootPath, path, trashItem);
+        yDocSessions.markDeletedUnderPath(authorityId, path);
+        finish?.(true);
+        return result;
+      } catch (error) { finish?.(false); throw error; }
+    },
     notifyRenderer,
     shareViewEdited,
     logError,
@@ -239,8 +250,8 @@ async function harness(options: {
     setAuthorityId(next: symbol) {
       authorityId = next;
     },
-    setCapture(next: MutationCapture | null) {
-      capture = next;
+    setCapture(next: Omit<MutationCapture, "changePathsAs"> | null) {
+      capture = next === null ? null : { ...next, changePathsAs: async () => { throw new Error("Not used in mutation-owner tests."); } };
     },
   };
 }

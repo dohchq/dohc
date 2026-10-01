@@ -103,12 +103,13 @@ export function createRealShareMountHarness(input: {
     withRendererWorkspaceOperation: async (_event, workspaceId, work) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Wrong host workspace");
       return work({
+        assertCurrent: () => undefined,
         authorityId: workspace.attachmentId, workspace, capture: null,
         yDocSessions: { withDocumentUnowned: unexpected, markDeletedUnderPath: unexpected },
       });
     },
     shareViewFiles: files,
-    trashItem: unexpected,
+    deleteLocalPath: unexpected,
     notifyRenderer: () => undefined,
     shareViewEdited: () => undefined,
     logError,

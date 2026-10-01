@@ -135,7 +135,7 @@ function fixture(kind: ScopeKind = "local") {
     warmCredentials: async () => undefined, currentCredentials: () => chatCredentials,
     currentCredentialGeneration: () => 0,
     localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova",
-    localReactorFallbackId: () => "local-owner", projectChatBookmarks,
+    localInstallationId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
     notifyRenderer: () => undefined,
   });
@@ -148,7 +148,7 @@ function fixture(kind: ScopeKind = "local") {
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
     warmCredentialCache, localUserId: () => "owner",
-    localReactorFallbackId: () => "local-owner", currentCredentials: () => null,
+    localInstallationId: () => "local-owner", currentCredentials: () => null,
     chatRelayIdentityFor,
     syncWorkspaceSharedChannels: async () => 0, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels: async () => 0,

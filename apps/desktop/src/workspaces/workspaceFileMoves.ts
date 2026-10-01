@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { copyFile, link, lstat, mkdir, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
+import { copyFile, link, lstat, mkdir, readdir, readlink, realpath, rename, rmdir, stat, symlink, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
 import type { CliResultByVerb } from "@dohc/cli/protocol";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
@@ -9,7 +9,8 @@ import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
-import { moveIntoWorkspaceTrash } from "./workspaceFiles";
+import { moveIntoWorkspaceTrash, prepareWorkspaceDelete } from "./workspaceFiles";
+import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 type PathChangeWorkspace = { rootPath: string; readOnly?: boolean; shareView?: unknown };
@@ -25,7 +26,7 @@ export interface PathChangeOptions {
 // A path as spelled and where it resolves, and for a tree the files in it,
 // relative to it. A lone file is the one file "".
 interface AdmittedPath { path: string; relative: string; physical: string }
-interface AdmittedTree extends AdmittedPath { files: string[] }
+interface AdmittedTree extends AdmittedPath { files: string[]; trackedFiles?: string[] }
 
 type MoveFailure = Extract<CliResultByVerb["fileMove"], { ok: false }>;
 type DeleteFailure = Extract<CliResultByVerb["fileDelete"], { ok: false }>;
@@ -56,7 +57,7 @@ function reason(error: unknown, failed: string): string {
   return `${failed} (${code}). ${next}`;
 }
 
-function assertWritable(operation: WorkspaceAuthorityOperation<PathChangeWorkspace, unknown>) {
+function assertWritable(operation: Pick<WorkspaceAuthorityOperation<PathChangeWorkspace, unknown>, "workspace" | "assertCurrent">) {
   operation.assertCurrent();
   if (operation.workspace.readOnly || operation.workspace.shareView !== undefined) {
     throw new Error("This workspace is read-only. Change files in the owning workspace.");
@@ -126,10 +127,47 @@ async function admitTree(rootPath: string, spelled: string, allowed: (path: stri
   return { ...target, files };
 }
 
+// A person's folder delete keeps the original entry-delete boundary. History
+// records eligible regular files; links and excluded subtrees move untouched.
+async function humanDeleteTree(rootPath: string, path: string, allowed: (path: string) => boolean):
+  Promise<AdmittedTree & { trackedFiles: string[] }> {
+  const physical = await prepareWorkspaceDelete(rootPath, path);
+  const files: string[] = [];
+  const trackedFiles: string[] = [];
+  const walk = async (sub: string): Promise<void> => {
+    const entry = under(physical, sub);
+    const info = await lstat(join(rootPath, entry));
+    const recordable = validateUserMaterializePath(entry, { platform: process.platform });
+    if (!info.isDirectory() || !recordable.ok) {
+      files.push(sub);
+      if (info.isFile() && recordable.ok && allowed(entry)) trackedFiles.push(sub);
+      return;
+    }
+    for (const name of (await readdir(join(rootPath, entry))).sort()) {
+      await walk(sub ? sub + "/" + name : name);
+    }
+  };
+  await walk("");
+  return { path, relative: physical, physical, files, trackedFiles };
+}
+
 // The policy the capture seam read for this change, once it left the queue.
 function historyAdmission(policy: WorkspaceEnginePolicySnapshot): (path: string) => boolean {
   if (policy.errors.length) throw new Error(`dohc could not read the workspace file policy: ${policy.errors.join("; ")}. Fix the reported policy errors.`);
   return historyPathAdmission(policy);
+}
+
+async function assertRestoreTarget(rootPath: string, to: string, admittedTreeRoot?: string): Promise<void> {
+  const spelled = relative(rootPath, to).split(sep).join("/");
+  if (admittedTreeRoot === undefined) {
+    await assertResolvedWorkspacePath({ rootPath, absolutePath: to, spelled, label: "Path", access: "entry" });
+    return;
+  }
+  const admitted = relative(rootPath, admittedTreeRoot).split(sep).join("/");
+  const target = await realRelativeInRoot(rootPath, to, true);
+  if (!target.ok || target.relative !== spelled || (spelled !== admitted && !spelled.startsWith(admitted + "/"))) {
+    throw new Error("The restore path changed. The entry stays in the workspace trash.");
+  }
 }
 
 // Places `from`, a file this change staged in the workspace trash, at `to`
@@ -139,9 +177,8 @@ function historyAdmission(policy: WorkspaceEnginePolicySnapshot): (path: string)
 // can be lost. When that name cannot be removed, a spare copy stays in the
 // trash; the file is placed all the same. Throws, with nothing at `to`, when
 // `to` is taken or leads outside the workspace or into a reserved area.
-async function placeFile(rootPath: string, from: string, to: string): Promise<void> {
-  await assertResolvedWorkspacePath({ rootPath, absolutePath: to, spelled: relative(rootPath, to).split(sep).join("/"),
-    label: "Path", access: "entry" });
+async function placeFile(rootPath: string, from: string, to: string, admittedTreeRoot?: string): Promise<void> {
+  await assertRestoreTarget(rootPath, to, admittedTreeRoot);
   await mkdir(dirname(to), { recursive: true });
   await link(from, to).catch(async (error: unknown) => {
     if (errnoOf(error) === "EEXIST") throw error;
@@ -155,23 +192,35 @@ async function placeFile(rootPath: string, from: string, to: string): Promise<vo
 // and each entry moves into it the same way. Answers the files, relative to
 // `from`, that stayed in the trash; a folder dohc could not read stays whole
 // under its own name. Never throws.
-async function placeBack(rootPath: string, from: string, to: string, sub = ""): Promise<string[]> {
+async function placeBack(rootPath: string, from: string, to: string, sub = "", admittedTreeRoot?: string): Promise<string[]> {
   let entries: string[];
   try {
-    if (!(await lstat(from)).isDirectory()) {
-      await placeFile(rootPath, from, to);
+    const info = await lstat(from);
+    if (info.isSymbolicLink()) {
+      await assertRestoreTarget(rootPath, to, admittedTreeRoot);
+      await mkdir(dirname(to), { recursive: true });
+      const target = await readlink(from);
+      // Windows junctions can target directories outside this workspace.
+      const type = process.platform === "win32"
+        ? ((await stat(from)).isDirectory() ? "junction" : "file")
+        : undefined;
+      await symlink(target, to, type);
+      await unlink(from);
+      return [];
+    }
+    if (!info.isDirectory()) {
+      await placeFile(rootPath, from, to, admittedTreeRoot);
       return [];
     }
     entries = await readdir(from);
-    await assertResolvedWorkspacePath({ rootPath, absolutePath: to, spelled: relative(rootPath, to).split(sep).join("/"),
-      label: "Path", access: "entry" });
+    await assertRestoreTarget(rootPath, to, admittedTreeRoot);
     await mkdir(dirname(to), { recursive: true });
     await mkdir(to);
   } catch {
     return [sub];
   }
   const left: string[] = [];
-  for (const name of entries) left.push(...await placeBack(rootPath, join(from, name), join(to, name), sub ? `${sub}/${name}` : name));
+  for (const name of entries) left.push(...await placeBack(rootPath, join(from, name), join(to, name), sub ? `${sub}/${name}` : name, admittedTreeRoot));
   // Whichever folder is empty now goes: the staged one, or the fresh one when nothing reached it.
   await rmdir(left.length ? to : from).catch(() => undefined);
   return left;
@@ -436,7 +485,7 @@ async function undoMove(rootPath: string, engine: AuthoredPathChanges, change: M
 }
 
 export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
-  operation: WorkspaceAuthorityOperation<Workspace, State>,
+  operation: Pick<WorkspaceAuthorityOperation<Workspace, State>, "workspace" | "assertCurrent">,
   path: string,
   author: MomentWriteAuthor,
   options: PathChangeOptions,
@@ -448,18 +497,24 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
     const changed = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       let gone: string[] = [];
       // The capture settles, closes and checks this endpoint before the hold.
-      const endpoint = (await admitPath(rootPath, path)).physical;
+      const endpoint = author.kind === "human"
+        ? await prepareWorkspaceDelete(rootPath, path)
+        : (await admitPath(rootPath, path)).physical;
       return await options.capture.changePathsAs<Changed<{ path: string; withoutHistory: string[] }, DeleteFailure>>([endpoint],
         { operation: "delete", author, correlationId: `fileDelete:${options.requestId}` },
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
-          const target = await admitTree(rootPath, path, historyAdmission(engine.policy));
+          const allowed = historyAdmission(engine.policy);
+          const target = author.kind === "human"
+            ? await humanDeleteTree(rootPath, path, allowed)
+            : await admitTree(rootPath, path, allowed);
           if (target.relative !== endpoint) throw new Error(`${path} now leads somewhere else. Check the path, then try again.`);
           const files = target.files.map(sub => under(target.relative, sub));
           const shown = (file: string) => target.path + file.slice(target.relative.length);
           // Oversized files and text with invalid UTF-8 go without a History row.
-          const recorded = new Set(await engine.recordDisk(target.relative, files));
+          const historyFiles = target.trackedFiles?.map(sub => under(target.relative, sub)) ?? files;
+          const recorded = new Set(await engine.recordDisk(target.relative, historyFiles));
           const withoutHistory = files.filter(file => !recorded.has(file)).map(shown);
           const original = join(rootPath, target.relative);
           // The workspace trash first, a move dohc can put back while History
@@ -481,7 +536,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
             const left = files.slice(0, at);
             gone = left;
             for (const file of left) options.markDeleted(file);
-            const kept = await restoreUnrecorded(rootPath, staged, original, target.files.slice(at), at === 0);
+            const kept = await restoreUnrecorded(rootPath, staged, original, target.files.slice(at), at === 0, author.kind === "human" ? original : undefined);
             const failedPath = shown(files[at] ?? target.relative);
             const trash = workspaceTrashPath(staged);
             const notes = [reason(error, `History could not record the delete of ${failedPath}.`)];
@@ -519,14 +574,14 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
 // replacing anything that appeared at its place since. `whole` puts back the
 // whole staged entry. Answers the files that stay in the trash.
 async function restoreUnrecorded(rootPath: string, staged: string, original: string,
-  unrecorded: readonly string[], whole: boolean): Promise<string[]> {
+  unrecorded: readonly string[], whole: boolean, admittedTreeRoot?: string): Promise<string[]> {
   if (whole) {
-    const left = await placeBack(rootPath, staged, original);
+    const left = await placeBack(rootPath, staged, original, "", admittedTreeRoot);
     return unrecorded.filter(sub => stayed(left, sub));
   }
   const kept: string[] = [];
   for (const sub of unrecorded) {
-    if ((await placeBack(rootPath, join(staged, sub), join(original, sub))).length) kept.push(sub);
+    if ((await placeBack(rootPath, join(staged, sub), join(original, sub), "", admittedTreeRoot)).length) kept.push(sub);
   }
   return kept;
 }

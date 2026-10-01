@@ -85,6 +85,7 @@ const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 interface CaptureOptions {
+  localPersonId?: () => string;
   store?: CaptureVersionedTextStore;
   now?: () => number;
   createId?: () => string;
@@ -4130,6 +4131,68 @@ it.each(["agent", "typing"])("reopens after a daemon crash by replaying original
   const replayCount = replayed.length;
   await session.settleNow();
   expect(replayed).toHaveLength(replayCount);
+  await session.close({ settle: false });
+  await engine.stop();
+  seed.destroy(); source.destroy();
+});
+
+it("pins main's person before edits wait in the document queue", async () => {
+  const root = await createTestScratch("dohc-person-queue-");
+  const loopback = new VersionedLoopbackEngine();
+  const path = "notes/people.txt";
+  loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, text: "seed" });
+  const seed = new Y.Doc();
+  seed.getText("plainText").insert(0, "seed");
+  const initial = Y.encodeStateAsUpdate(seed);
+  const source = new Y.Doc();
+  Y.applyUpdate(source, initial);
+  const originals: Uint8Array[] = [];
+  source.on("update", update => originals.push(new Uint8Array(update)));
+  for (const text of ["offline", "alice", "bob", "offline again"]) {
+    source.getText("plainText").insert(source.getText("plainText").length, text);
+  }
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const recorded: Array<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]> = [];
+  const sessions = mockLiveSessions(loopback);
+  vi.spyOn(sessions, "admitAuthorContext").mockImplementation(async (_workspace, personId) =>
+    Object.freeze({ authorContext: "context:" + personId }));
+  let personId = "local:installation";
+  const engine = capture(root, {
+    rustEngineSessions: sessions,
+    localPersonId: () => personId,
+    openRustYDocProviderSession: async options => {
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, initial);
+      return {
+        doc, initialUpdate: initial, contentKind: "plaintext", path: options.path,
+        head: "present", lineage: "existing", unsettled: false,
+        async applyLocalUpdate(update, originalOptions) {
+          recorded.push(structuredClone(originalOptions));
+          if (recorded.length === 1) { entered.resolve(); await release.promise; }
+          Y.applyUpdate(doc, update);
+        },
+        settleNow: async () => ({ momentId: "person-moment", path: options.path, sha256: "a".repeat(64),
+          content: doc.getText("plainText").toString(), materialized: true,
+          projection: { contentKind: "plaintext", sourceStateVectorSha256: "b".repeat(64), destructive: false } }),
+        close: async () => undefined, evict: async () => undefined,
+      } satisfies EngineYdocProviderSession;
+    },
+  });
+  const session = await engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
+  const pending = [session.applyDecidedLocalUpdate(() => originals[0]!)];
+  await entered.promise;
+  personId = "alice";
+  pending.push(session.applyDecidedLocalUpdate(() => originals[1]!));
+  personId = "bob";
+  pending.push(session.applyDecidedLocalUpdate(() => originals[2]!));
+  personId = "local:installation";
+  pending.push(session.applyDecidedLocalUpdate(() => originals[3]!));
+  release.resolve();
+  await Promise.all(pending);
+  expect(recorded.map(original => original?.authorContext)).toEqual([
+    "context:local:installation", "context:alice", "context:bob", "context:local:installation",
+  ]);
   await session.close({ settle: false });
   await engine.stop();
   seed.destroy(); source.destroy();

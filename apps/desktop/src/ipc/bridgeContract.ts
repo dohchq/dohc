@@ -5900,6 +5900,8 @@ export type OpenEngineYDocSessionPayload = z.infer<typeof OpenEngineYDocSessionP
 
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
+  authorContext: z.string().min(1).max(4096).optional(),
+  authorContextGeneration: z.number().int().nonnegative().optional(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
   objectId: z.string().min(1).optional(),
   versionId: z.string().min(1).optional(),
@@ -5964,6 +5966,7 @@ export type ReadEngineYDocArtifactAssetResult = z.infer<
 >;
 
 export const ApplyEngineYDocUpdatePayload = z.object({
+  authorContext: z.string().min(1).max(4096).optional(),
   sessionId: ENGINE_YDOC_SESSION_ID,
   requestId: z.string().uuid(),
   update: ENGINE_YDOC_UPDATE,
@@ -6046,6 +6049,13 @@ export const EngineYDocLineageReplacementEvent = z.object({
 export type EngineYDocLineageReplacementEvent = z.infer<
   typeof EngineYDocLineageReplacementEvent
 >;
+
+export const EngineYDocAuthorContextEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  authorContext: z.string().min(1).max(4096),
+  authorContextGeneration: z.number().int().nonnegative(),
+});
+export type EngineYDocAuthorContextEvent = z.infer<typeof EngineYDocAuthorContextEvent>;
 
 // seq is the highest applyLocalUpdate seq main had journaled when this settle
 // STARTED. The renderer clears to "saved" only once this covers its latest
@@ -6644,6 +6654,7 @@ export interface DohcDesktopBridge
   onEngineYDocLineageReplacement(
     listener: (event: EngineYDocLineageReplacementEvent) => void,
   ): () => void;
+  onEngineYDocAuthorContextChanged(listener: (event: EngineYDocAuthorContextEvent) => void): () => void;
   // The document's real save state, pushed on every settle outcome. The editor
   // must never claim "Saved" from anything else: a settle can fail (and used to
   // fail silently) while the renderer's own timer said the doc was safe.

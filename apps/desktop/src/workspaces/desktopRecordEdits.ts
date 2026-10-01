@@ -3,17 +3,16 @@ import type {
   CollectionRecordEditAdapter,
   CollectionRecordEditContext,
 } from "@dohc/automation-executor/collection-record-edits";
-import {
-  readWorkspaceText,
-  withStaleSensitiveWorkspaceOperation,
-} from "./workspaceAssets";
+import { readWorkspaceText } from "./workspaceAssets";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { requirePublishedWrite, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
-import { createFile, CreatedFileWriteError } from "./workspaceFiles";
+import { CreatedFileWriteError } from "./workspaceFiles";
 
 /** What this desktop's record writes in one workspace run over. Main supplies it. */
 export interface DesktopRecordEditHost {
   capture: Pick<WorkspaceEngineCapture, "openYDocSession" | "writeAuthoredFile">;
   workspaceRoot: string;
+  personAuthor(): Extract<MomentWriteAuthor, { kind: "human" }>;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withAdapter<T>(
     work: (adapter: CollectionRecordEditAdapter) => Promise<T>,
@@ -29,11 +28,8 @@ export interface DesktopRecordEditHost {
 
 /**
  * The record edit context over this desktop's capture. A record opens as the
- * capture's live document session. An automation's file is written through
- * the engine with the automation as the moment's author. Anyone else's is
- * created on disk, as the createWorkspaceFile IPC does, and capture takes it
- * from there. Each settled capture pass is the news that records may have
- * been adopted.
+ * capture's live document session. Creation goes through the engine with the
+ * author main admitted. Each settled capture pass announces record adoption.
  */
 export function desktopRecordEditContext(host: DesktopRecordEditHost): CollectionRecordEditContext {
   const { capture, workspaceRoot, signal } = host;
@@ -48,17 +44,13 @@ export function desktopRecordEditContext(host: DesktopRecordEditHost): Collectio
         onRemoteUpdate: () => undefined,
       }),
     async createFile(path, text, author) {
-      if (author.kind === "automation") {
-        requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, author, {
-          createOnly: true,
-          signal,
-        }));
-        return path;
-      }
-      return await withStaleSensitiveWorkspaceOperation(
-        workspaceRoot,
-        async () => await createFile(workspaceRoot, path, text, { exclusive: true }),
-      );
+      const admittedAuthor = author.kind === "automation" || author.kind === "agent"
+        ? author : host.personAuthor();
+      requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, admittedAuthor, {
+        createOnly: true,
+        signal,
+      }));
+      return path;
     },
     isIncompleteFileWrite: (error) => error instanceof CreatedFileWriteError,
     readText: (path) => readWorkspaceText(workspaceRoot, path),

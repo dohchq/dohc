@@ -95,7 +95,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     currentCredentials: () => null,
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
-    localReactorFallbackId: () => "local:device",
+    localInstallationId: () => "local:device",
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
     syncSharedChannelsForChatTarget: async () => undefined,
@@ -360,7 +360,8 @@ describe("desktop CLI workspace context", () => {
     const opened = vi.fn(async () => session);
     f.dependencies.collectionEditContextFor = async (operation, signal) => {
       operation.assertCurrent(); admitted.push(operation.workspace.attachmentId);
-      return desktopRecordEditContext({ workspaceRoot: operation.workspace.rootPath,
+      return desktopRecordEditContext({
+      personAuthor: () => ({ kind: "human", humanId: "local:test" }), workspaceRoot: operation.workspace.rootPath,
         capture: { openYDocSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal });
     };
@@ -493,7 +494,8 @@ describe("desktop CLI workspace context", () => {
     const opened = vi.fn();
     f.dependencies.collectionEditContextFor = async (operation, signal): Promise<CollectionRecordEditContext> => {
       entered.release(); await held.promise; operation.assertCurrent();
-      return desktopRecordEditContext({ workspaceRoot: operation.workspace.rootPath,
+      return desktopRecordEditContext({
+      personAuthor: () => ({ kind: "human", humanId: "local:test" }), workspaceRoot: operation.workspace.rootPath,
         capture: { openYDocSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal });
     };

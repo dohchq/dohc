@@ -84,6 +84,7 @@ import {
   type ActiveAgentRun,
 } from "./workspaceWatcher";
 import {
+  historyPathAdmission,
   readWorkspaceEnginePolicy,
   type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
@@ -435,6 +436,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
     onArmed?: () => void,
     options?: {
       actorOriginId?: string;
+      authorContext?: string;
       attribution?: ChangeAttributionWire;
       idempotencyKey?: string;
     },
@@ -455,6 +457,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
     onArmed?: () => void,
     options?: {
       actorOriginId?: string;
+      authorContext?: string;
       attribution?: ChangeAttributionWire;
       idempotencyKey?: string;
     },
@@ -732,6 +735,8 @@ export interface WorkspaceEngineCaptureOptions {
   workspaceId: string;
   rootPath: string;
   attachmentId: symbol;
+  /** Main captures the person when an edit arrives, before queued work runs. */
+  localPersonId?: () => string;
   // Injectable for tests; production uses the required Rust workspace sessions.
   store?: CaptureVersionedTextStore;
   // Injectable for tests; production uses the daemon's encrypted secret store.
@@ -1609,6 +1614,16 @@ export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
   const { workspaceId, rootPath, attachmentId } = options;
+  const authorWorkspace = { workspaceId, rootPath, attachmentId };
+  function pinAuthor(author: MomentWriteAuthor): Promise<MomentWriteAuthor> {
+    const captured = structuredClone(author);
+    if (!options.localPersonId || captured.authorContext !== undefined) return Promise.resolve(captured);
+    const personId = options.localPersonId();
+    const pending = options.rustEngineSessions.admitAuthorContext(authorWorkspace, personId)
+      .then(context => ({ ...captured, authorContext: context.authorContext }));
+    void pending.catch(() => undefined);
+    return pending;
+  }
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
   const teardownRetry = options.teardownRetryMs ?? {
@@ -2922,13 +2937,21 @@ export function createWorkspaceEngineCapture(
       // another settle). #514, and its two review rounds.
       const armed = announceOnce(onArmed);
       const keyed = confirmRecording && applyOptions?.idempotencyKey !== undefined;
-      const capturedOptions = {
+      const personId = options.localPersonId?.();
+      const capturedOptions: NonNullable<Parameters<WorkspaceEngineYDocProviderSession["applyLocalUpdate"]>[2]> = {
         ...structuredClone(applyOptions ?? {}),
         idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
       };
       let decided = false;
       return append(async () => {
         if (canonicalDoc === null || closed) throw closedError();
+        if (personId !== undefined && capturedOptions.authorContext === undefined) {
+          capturedOptions.authorContext = (await sessions.admitAuthorContext(workspace, personId)).authorContext;
+        }
+        if (capturedOptions.authorContext && capturedOptions.attribution?.actorKind === "human") {
+          delete capturedOptions.attribution;
+          delete capturedOptions.actorOriginId;
+        }
         const doc = canonicalDoc;
         const decidedUpdate = decide(doc);
         decided = true;
@@ -3867,26 +3890,22 @@ export function createWorkspaceEngineCapture(
     },
 
     setActiveAgentRun(run) {
+      const pinnedAuthor = run === null ? Promise.resolve(null) : pinAuthor({ kind: "agent",
+        agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId,
+        ...(run.depth > 0 ? { depth: run.depth } : {}) });
       return enqueueResult("daemon capture authorship", async () => {
         const engine = await engineStore();
         if (run === null) await engine.flushCapture?.();
-        await engine.setCaptureAuthor?.(
-          run === null
-            ? null
-            : {
-                kind: "agent",
-                agentId: run.agentId,
-                onBehalfOf: run.onBehalfOf,
-                agentRunId: run.agentRunId,
-                ...(run.depth > 0 ? { depth: run.depth } : {}),
-              },
-        );
+        const author = await pinnedAuthor;
+        if (author !== null && author.kind !== "agent") throw new Error("Invalid captured agent author.");
+        await engine.setCaptureAuthor?.(author);
       });
     },
 
     registerExpectedEngineEvents,
 
     writeAuthoredFile(absolutePath, content, author, writeOptions = {}) {
+      const pinnedAuthor = pinAuthor(author);
       return enqueueResult("write authored file", async () => {
         if (writeOptions.signal?.aborted) {
           throw new Error("The write was cancelled.");
@@ -3936,7 +3955,7 @@ export function createWorkspaceEngineCapture(
             ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
-            author,
+            author: await pinnedAuthor,
           };
           const result = typeof decoded === "string"
             ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
@@ -5451,8 +5470,11 @@ export function createWorkspaceEngineCapture(
     },
 
     changePathsAs(paths, authored, work, removed) {
+      const pinnedAuthor = pinAuthor(authored.author);
+      const captured = { ...authored };
       const match = (candidate: string) => paths.some(path => pathIsAtOrUnder(candidate, path));
       return enqueueResult("authored path change", async () => {
+        authored = { ...captured, author: await pinnedAuthor };
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);
         const ensureAllowed = async (author?: MomentWriteAuthor) => {
@@ -5520,7 +5542,7 @@ export function createWorkspaceEngineCapture(
                 const onDisk = new Set(files);
                 const kept = new Set(held);
                 for (const head of await listTextFileMetadata(engine, versionId)) {
-                  if (!pathIsAtOrUnder(head.path, path) || kept.has(head.path)) continue;
+                  if (!pathIsAtOrUnder(head.path, path) || kept.has(head.path) || !historyPathAdmission(policy)(head.path)) continue;
                   await deleteIfTracked(engine, versionId, head.path,
                     { origin: "local-file", summary: `Deleted ${pathBasename(head.path)}` }, undefined, !onDisk.has(head.path));
                 }

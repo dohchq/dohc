@@ -19,6 +19,7 @@ type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 
 function sharedBridge() {
   const saveStateListeners = new Set<SaveStateListener>();
+  const authorListeners = new Set<(event: import("../../ipc/bridgeContract").EngineYDocAuthorContextEvent) => void>();
   const remoteUpdateListeners = new Set<
     (event: {
       sessionId: string;
@@ -49,10 +50,12 @@ function sharedBridge() {
           available: true,
           initialUpdate: Y.encodeStateAsUpdate(source),
           lineageGeneration: 1,
+          authorContext: "installation-context",
+          authorContextGeneration: 0,
         };
       },
     ),
-    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+    applyEngineYDocUpdate: vi.fn(async (_payload: { authorContext?: string }) => ({ accepted: true as const })),
     onEngineYDocRemoteUpdate: (
       listener: (event: {
         sessionId: string;
@@ -73,6 +76,10 @@ function sharedBridge() {
     onEngineYDocSaveState: (listener: SaveStateListener) => {
       saveStateListeners.add(listener);
       return () => saveStateListeners.delete(listener);
+    },
+    onEngineYDocAuthorContextChanged: (listener: Parameters<import("../../ipc/bridgeContract").DohcDesktopBridge["onEngineYDocAuthorContextChanged"]>[0]) => {
+      authorListeners.add(listener);
+      return () => authorListeners.delete(listener);
     },
     onEngineYDocOwnerHandoff: () => () => undefined,
     prepareEngineYDocOwnerHandoff: async () => undefined,
@@ -102,6 +109,12 @@ function sharedBridge() {
   return {
     api,
     emit,
+    emitAuthorContext(workspaceId: string, context: string, generation: number) {
+      for (const listener of authorListeners) listener({
+        workspaceId, authorContext: context, authorContextGeneration: generation,
+      });
+    },
+    authorListenerCount: () => authorListeners.size,
     openedSessionIds,
     failNextOpen(error = new Error("engine unavailable")) {
       openError = error;
@@ -640,4 +653,35 @@ it("opens one fresh shared lease for each version or retry key", async () => {
   await waitFor(() =>
     expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(3),
   );
+});
+
+it("pins context across account events and ignores stale or other-workspace events", async () => {
+  const view = render(<Consumer id="person" reopenKey={0} retryKey={0} />);
+  await waitFor(() => expect(screen.getByTestId("available-person").textContent).toBe("true"));
+  act(() => {
+    fireEvent.click(screen.getByTestId("type-person"));
+    harness.emitAuthorContext("ws-1", "alice-context", 1);
+    fireEvent.click(screen.getByTestId("type-person"));
+    harness.emitAuthorContext("ws-2", "elsewhere-context", 2);
+    harness.emitAuthorContext("ws-1", "old-context", 0);
+    fireEvent.click(screen.getByTestId("type-person"));
+  });
+  view.unmount();
+  await disposeEngineDocLeasesForTests();
+  expect(harness.api.applyEngineYDocUpdate.mock.calls.map(call => (call[0] as { authorContext: string }).authorContext))
+    .toEqual(["installation-context", "alice-context"]);
+  expect(harness.authorListenerCount()).toBe(0);
+});
+
+it("does not overwrite a newer identity event with an earlier open response", async () => {
+  const release = harness.holdNextOpen();
+  const view = render(<Consumer id="person" reopenKey={0} retryKey={0} />);
+  await waitFor(() => expect(harness.api.openEngineYDocSession).toHaveBeenCalled());
+  harness.emitAuthorContext("ws-1", "bob-context", 2);
+  release();
+  await waitFor(() => expect(screen.getByTestId("available-person").textContent).toBe("true"));
+  fireEvent.click(screen.getByTestId("type-person"));
+  view.unmount();
+  await disposeEngineDocLeasesForTests();
+  expect(harness.api.applyEngineYDocUpdate.mock.calls[0]?.[0]).toMatchObject({ authorContext: "bob-context" });
 });

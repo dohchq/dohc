@@ -53,6 +53,7 @@ interface CollectionAutomationsLifecycle {
 }
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
+  authorContextSecret?: () => string;
   onWorkspaceOpened?(workspaceId: string): void;
   onRefusalsChanged?: () => void;
   serverOwnerDelivery?: ServerOwnerDelivery;
@@ -391,7 +392,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       if (hostIngress && peerIngress && (hostIngress.configPath !== peerIngress.configPath ||
         hostIngress.client.aggregateBytes !== peerIngress.client.aggregateBytes || hostIngress.client.maxUploads !== peerIngress.client.maxUploads)) throw new Error("Private owner modes require the same native ingress configuration and client budget.");
       const ingress = hostIngress ?? peerIngress ?? (serverOwnerConfig && {configPath: serverOwnerConfig.nativeConfigPath, client: serverOwnerConfig.nativeClient});
+      const authorContextSecret = dependencies.authorContextSecret?.();
       rustEngineDaemon = createRustEngineDaemon({
+        ...(authorContextSecret ? { authorContextSecret } : {}),
         ...(ingress ? {privateOwnerHost: ingress} : {}),
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
@@ -485,6 +488,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // 101.8 s for 15,000 files on the launch fixture; 120 s bounds that path
       // with headroom. The renderer names the wait.
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
+        ...(authorContextSecret ? { authorContextSecret } : {}),
         workspaceOpenDeadlineMs: 120_000,
         onOpened: workspace => dependencies.onWorkspaceOpened?.(workspace.workspaceId),
       });

@@ -200,14 +200,35 @@ function makeTransport(
   kind: LiveDocumentKind,
 ): EngineYDocTransport {
   let lineageGeneration = 1;
+  let authorContext: string | undefined;
+  let authorContextGeneration = -1;
+  let unsubscribeAuthorContext: (() => void) | undefined;
   return {
+    captureAuthorContext: () => authorContext,
     ...(kind === "scene" ? { initializeDoc: declareSceneRoots } : {}),
     async open() {
+      unsubscribeAuthorContext = bridge().onEngineYDocAuthorContextChanged((event) => {
+        const generation = event.authorContextGeneration;
+        const context = event.workspaceId === workspaceId ? event.authorContext : undefined;
+        if (generation !== undefined && generation >= authorContextGeneration && context) {
+          authorContextGeneration = generation;
+          authorContext = context;
+        }
+      });
       const result = await bridge().openEngineYDocSession({
         workspaceId,
         path,
         sessionId,
+      }).catch((error: unknown) => {
+        unsubscribeAuthorContext?.();
+        unsubscribeAuthorContext = undefined;
+        throw error;
       });
+      if (result.authorContext && result.authorContextGeneration !== undefined &&
+          result.authorContextGeneration >= authorContextGeneration) {
+        authorContext = result.authorContext;
+        authorContextGeneration = result.authorContextGeneration;
+      }
       if (result.available && result.lineageGeneration !== undefined) {
         lineageGeneration = result.lineageGeneration;
       }
@@ -248,7 +269,7 @@ function makeTransport(
       localSeq.current += 1;
       return localSeq.current;
     },
-    async applyLocalUpdate(update, seq, updateGeneration, requestId) {
+    async applyLocalUpdate(update, seq, updateGeneration, requestId, capturedAuthorContext) {
       if (writesRefused.current) return;
       // The provider owns ordered retry. Rejecting here keeps this batch at
       // the head of that queue; resolving is the acknowledgement that main
@@ -262,6 +283,7 @@ function makeTransport(
         seq,
         lineageGeneration: updateGeneration,
         requestId,
+        authorContext: capturedAuthorContext,
       });
       if (!result.accepted) {
         throw new EngineYDocDeliveryRefusedError(result.reason);
@@ -297,6 +319,8 @@ function makeTransport(
       return result.updates;
     },
     async close() {
+      unsubscribeAuthorContext?.();
+      unsubscribeAuthorContext = undefined;
       await bridge().closeEngineYDocSession({ sessionId }).catch(() => undefined);
     },
   };
