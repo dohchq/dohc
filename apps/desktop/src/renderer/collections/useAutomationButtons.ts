@@ -26,6 +26,11 @@ export interface ButtonReporter {
 export interface ButtonView {
   /** Null until main has said what the button does. */
   state: AutomationButtonState | null;
+  /**
+   * True while this window waits on main's listing, for a button with no
+   * state or an unchecked one. A button with any other state keeps it.
+   */
+  checking: boolean;
   /** True from the press until its run settles. */
   running: boolean;
   /** Why the run waits, or what the last press found, for the button's description. */
@@ -92,6 +97,10 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
   const listeners = new Map<string, Set<() => void>>();
   const views = new Map<string, ButtonView>();
   let requests = 0;
+  // True from the newest read until main answers it, and before the first.
+  let checking = true;
+  // Main said what the buttons do changed while nothing showed them.
+  let stale = false;
 
   const notify = (key: string) => {
     for (const listener of [...(listeners.get(key) ?? [])]) listener();
@@ -103,6 +112,15 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
   const everyChanged = () => {
     views.clear();
     for (const key of [...listeners.keys()]) notify(key);
+  };
+  // Only a button with no state, or an unchecked one, shows that a read is in flight.
+  const setChecking = (value: boolean) => {
+    if (checking === value) return;
+    checking = value;
+    for (const key of [...views.keys()]) {
+      const state = states?.get((JSON.parse(key) as [string, string])[0]);
+      if (state === undefined || state.kind === "unchecked") changed(key);
+    }
   };
   const report = (): ButtonReporter => (closed ? silent : reporters.get(workspaceId) ?? silent);
   // Every Try again goes through the window's live store for this
@@ -127,6 +145,33 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     // this person with Try again, and main takes it back once the run succeeds.
   }
 
+  /**
+   * Reads what each button shows. `check` asks a shared view's host again,
+   * past main's last answer. An older answer never replaces a newer one.
+   */
+  async function read(check: boolean): Promise<void> {
+    if (closed) return;
+    const request = ++requests;
+    setChecking(true);
+    try {
+      const { buttons } = await bridge().listAutomationButtons("collectionPath" in of
+        ? { workspaceId, collectionPath: of.collectionPath, ...(check ? { check: true as const } : {}) }
+        : { workspaceId, datasetId: of.datasetId });
+      if (closed || request !== requests) return;
+      notes.clear();
+      // A dataset lists every table's buttons; this store shows one table's.
+      const shown = "table" in of ? buttons.filter((button) => button.table === of.table) : buttons;
+      states = new Map(shown.map(({ field, state }) => [field, state]));
+      checking = false;
+      everyChanged();
+    } catch (error) {
+      if (closed || request !== requests) return;
+      setChecking(false);
+      report().onError("dohc could not read this Collection's buttons.", error, () => void live()?.refresh());
+    }
+  }
+  const refresh = () => read(false);
+
   const find = (claimId: string) => [...runs].find(([, run]) => run.claimId === claimId);
   const stopSettled = bridge().onAutomationRunSettled((event) => {
     if (closed || event.workspaceId !== workspaceId) return;
@@ -144,6 +189,13 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     found[1].waiting = PRESS_WAITING[event.reason];
     changed(found[0]);
   });
+  // A shared view's host answered, or the automations main read changed. A
+  // shown store reads again now, and an idle one when it next shows.
+  const stopChanged = bridge().onCollectionAutomationsChanged((event) => {
+    if (closed || event.workspaceId !== workspaceId) return;
+    if (listeners.size > 0) void refresh();
+    else stale = true;
+  });
 
   return {
     workspaceId,
@@ -153,6 +205,10 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       const set = listeners.get(key) ?? new Set<() => void>();
       set.add(listener);
       listeners.set(key, set);
+      if (stale) {
+        stale = false;
+        void refresh();
+      }
       return () => {
         set.delete(listener);
         if (set.size === 0) listeners.delete(key);
@@ -164,32 +220,11 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     /** Whether nothing shows or runs these buttons, so the window may drop the store. */
     idle: () => listeners.size === 0 && runs.size === 0,
 
-    /** Shows states another answer carried, such as the record view's. */
-    show(buttons: readonly { field: string; state: AutomationButtonState }[]): void {
-      requests += 1;
-      notes.clear();
-      states = new Map(buttons.map(({ field, state }) => [field, state]));
-      everyChanged();
-    },
+    /** Reads what each button shows. */
+    refresh,
 
-    /** Reads what each button shows. An older answer never replaces a newer one. */
-    async refresh(): Promise<void> {
-      const request = ++requests;
-      try {
-        const { buttons } = await bridge().listAutomationButtons("collectionPath" in of
-          ? { workspaceId, collectionPath: of.collectionPath }
-          : { workspaceId, datasetId: of.datasetId });
-        if (closed || request !== requests) return;
-        notes.clear();
-        // A dataset lists every table's buttons; this store shows one table's.
-        const shown = "table" in of ? buttons.filter((button) => button.table === of.table) : buttons;
-        states = new Map(shown.map(({ field, state }) => [field, state]));
-        everyChanged();
-      } catch (error) {
-        if (closed || request !== requests) return;
-        report().onError("dohc could not read this Collection's buttons.", error, () => void live()?.refresh());
-      }
-    },
+    /** Check again: asks a shared view's host now, not main's last answer. */
+    checkAgain: () => read(true),
 
     /**
      * Presses a button on one record. The press id stays with this press, so
@@ -212,9 +247,9 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
         }
         if ("relayed" in result) {
           // The owner's computer runs it. Its changes arrive as synced
-          // edits, and a failure as a notice, so the button is free again.
+          // edits, and a failure as that host's one notice, so this window
+          // reports nothing and the button is free again.
           finish(key);
-          report().onNotice(`Sent ${field} for ${record.label}`);
           return;
         }
         run.claimId = result.claimId;
@@ -237,7 +272,11 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       let view = views.get(key);
       if (!view) {
         const run = runs.get(key);
-        view = { state: states?.get(field) ?? null, running: run !== undefined, note: run?.waiting ?? notes.get(key) ?? null };
+        const state = states?.get(field) ?? null;
+        view = {
+          state, running: run !== undefined, note: run?.waiting ?? notes.get(key) ?? null,
+          checking: checking && (state === null || state.kind === "unchecked"),
+        };
         views.set(key, view);
       }
       return view;
@@ -250,6 +289,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       closed = true;
       stopSettled();
       stopWaiting();
+      stopChanged();
       runs.clear();
       notes.clear();
       earlySettles.clear();

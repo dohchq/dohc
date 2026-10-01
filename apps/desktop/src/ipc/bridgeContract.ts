@@ -4999,8 +4999,10 @@ export type WriteCollectionAutomationsResult =
 // person a press acts for is main's own signed-in person, never a value a
 // window sends. A document Collection is named by its folder, and a dataset
 // Collection by its id.
+// `check` asks a shared view's host again, past any answer main holds; the
+// buttons it asks about list as checking until the host answers.
 export const ListAutomationButtonsPayload = z.union([
-  z.strictObject({ workspaceId: WORKSPACE_ID, collectionPath: PATH_STRING }),
+  z.strictObject({ workspaceId: WORKSPACE_ID, collectionPath: PATH_STRING, check: z.literal(true).optional() }),
   z.strictObject({ workspaceId: WORKSPACE_ID, datasetId: z.uuid() }),
 ]);
 export type ListAutomationButtonsPayload = z.infer<typeof ListAutomationButtonsPayload>;
@@ -5008,8 +5010,9 @@ export type ListAutomationButtonsPayload = z.infer<typeof ListAutomationButtonsP
 export type ListedAutomationButton = CollectionAutomationButton & { table: string | null };
 export type ListAutomationButtonsResult = { buttons: ListedAutomationButton[] };
 
-// The record an open file is, and its Collection's buttons. Null when the
-// file is not a record in a Collection.
+// The record an open file is, and its Collection's Button fields. Null when
+// the file is not a record in a Collection. What each button does comes only
+// from listAutomationButtons.
 export const ListRecordButtonsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
@@ -5017,7 +5020,7 @@ export const ListRecordButtonsPayload = z.object({
 export type ListRecordButtonsPayload = z.infer<typeof ListRecordButtonsPayload>;
 export type ListRecordButtonsResult =
   | { record: null }
-  | { record: CollectionRecord; collectionPath: string; buttons: CollectionAutomationButton[] };
+  | { record: CollectionRecord; collectionPath: string; fields: string[] };
 
 const PressedButton = {
   workspaceId: WORKSPACE_ID,
@@ -6570,7 +6573,8 @@ export interface DohcDesktopBridge
   onAutomationHoldsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
-  // The automations main read from the workspace changed: re-read field marks.
+  // The automations main read from the workspace changed, or a shared view's
+  // host answered a Button check: re-read field marks and Button states.
   onCollectionAutomationsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;

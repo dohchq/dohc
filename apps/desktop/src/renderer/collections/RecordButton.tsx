@@ -1,8 +1,8 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { LoaderCircle } from "lucide-react";
-import { PrimaryButton, SecondaryButton } from "../ui/controls";
-import type { IrreversibleAction } from "@dohc/automation-executor/automation-buttons";
+import { LoaderCircle, RefreshCw } from "lucide-react";
+import { IconButton, PrimaryButton, SecondaryButton } from "../ui/controls";
+import { BUTTON_CHECKING, type IrreversibleAction } from "@dohc/automation-executor/automation-buttons";
 import { useButtonView, type AutomationButtons } from "./useAutomationButtons";
 
 // One Button field on one record: a native button named for the field and
@@ -14,6 +14,12 @@ import { useButtonView, type AutomationButtons } from "./useAutomationButtons";
 // A button whose run changes what dohc cannot undo, such as a dataset action,
 // asks first in the same place: Run runs it, and Cancel or Escape returns to
 // the button (AGENTS.md: warn before an irreversible action runs).
+//
+// While main reads what a button does, or a shared view's host has not
+// answered, the button cannot run and says dohc is checking. When the host
+// could not answer, Check again beside the button asks it again.
+
+const BUTTON_NOT_CHECKED = "dohc could not check this button.";
 
 const EDGE = 8;
 const GAP = 4;
@@ -26,7 +32,7 @@ export function RecordButton(props: {
   /** The record's name, as in "Mark paid for Invoice 12". */
   recordLabel: string;
 }) {
-  const { state, running, note } = useButtonView(props.buttons, props.field, props.recordId);
+  const { state, running, note, checking } = useButtonView(props.buttons, props.field, props.recordId);
   const id = useId();
   const button = useRef<HTMLButtonElement>(null);
   const words = useRef<HTMLSpanElement>(null);
@@ -35,8 +41,22 @@ export function RecordButton(props: {
   const [place, setPlace] = useState<CSSProperties>({ position: "fixed", left: 0, top: 0, visibility: "hidden" });
   // Focus that a click gives shows nothing, as for any control.
   const pointer = useRef(false);
-  const description = note ?? (state !== null && state.kind !== "ready" ? state.reason : null);
+  const description = note ?? (checking ? BUTTON_CHECKING
+    : state === null ? BUTTON_NOT_CHECKED
+    : state.kind === "ready" ? null : state.reason);
   const blocked = running || state === null || state.kind !== "ready";
+  // Offered once dohc could not check, and kept, unpressable, while main answers.
+  const recheck = !running && (state?.kind === "unchecked" || (state === null && !checking));
+  // Check again goes once the button has an answer. Focus on it then moves to
+  // the button, which says what the answer was. React detaches the ref before
+  // it removes the control, so focus is still there to see.
+  const handBack = useRef(false);
+  const recheckRef = useCallback((node: HTMLButtonElement | null) => {
+    if (node === null) return;
+    return () => {
+      if (document.activeElement === node) handBack.current = true;
+    };
+  }, []);
   const irreversible = state?.kind === "ready" ? state.irreversible ?? [] : [];
   const [asking, setAsking] = useState<readonly IrreversibleAction[] | null>(null);
   const confirmId = useId();
@@ -60,6 +80,11 @@ export function RecordButton(props: {
   useEffect(() => {
     if (asking !== null) run.current?.focus();
   }, [asking !== null]);
+  useLayoutEffect(() => {
+    if (recheck || !handBack.current) return;
+    handBack.current = false;
+    button.current?.focus();
+  }, [recheck]);
 
   useLayoutEffect(() => {
     if (!open || !button.current || !words.current) return;
@@ -133,11 +158,43 @@ export function RecordButton(props: {
         {/* An invisible copy of the label, with room for the spinner, sits under the label, so the button keeps its width while it runs. */}
         <span data-label={props.field} className="grid min-w-0 grid-cols-1 before:invisible before:col-start-1 before:row-start-1 before:min-w-0 before:truncate before:pl-4 before:content-[attr(data-label)]">
           <span className="col-start-1 row-start-1 flex min-w-0 items-center justify-center gap-1">
-            {running ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" /> : null}
+            {/* Turns only where motion is allowed; with reduced motion it stays as a still mark beside the words. */}
+            {running || state?.kind === "checking" ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 motion-safe:animate-spin" /> : null}
             <span className="truncate">{props.field}</span>
           </span>
         </span>
       </SecondaryButton>
+      {recheck ? (
+        <IconButton
+          ref={recheckRef}
+          aria-label={`Check ${props.field} for ${props.recordLabel} again`}
+          title="Check again"
+          aria-disabled={checking || undefined}
+          aria-describedby={description === null ? undefined : id}
+          className="ml-1 shrink-0 aria-disabled:cursor-default aria-disabled:hover:bg-transparent aria-disabled:hover:text-subtle"
+          onPointerDown={() => {
+            pointer.current = true;
+          }}
+          onFocus={() => {
+            if (!pointer.current) setFocused(true);
+            pointer.current = false;
+          }}
+          onBlur={() => setFocused(false)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && open && asking === null) {
+              // Escape closes the words, not the surface around the button.
+              event.stopPropagation();
+              setFocused(false);
+              setHovered(false);
+            }
+          }}
+          onClick={() => {
+            if (!checking) void props.buttons.checkAgain();
+          }}
+        >
+          <RefreshCw aria-hidden size={12} strokeWidth={1.9} />
+        </IconButton>
+      ) : null}
       {asking !== null ? createPortal(
         <span
           ref={words}
