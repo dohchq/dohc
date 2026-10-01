@@ -2191,10 +2191,12 @@ describe("set-aside draft recovery", () => {
     // this mock needs it even though this test never emits through it.
     const onEngineYDocSaveState = vi.fn(() => () => undefined);
     const onEngineYDocLineageReplacement = vi.fn(() => () => undefined);
+    const onEngineYDocAuthorContextChanged = vi.fn(() => () => undefined);
     Object.assign(bridge, {
       openEngineYDocSession,
       onEngineYDocSaveState,
       onEngineYDocLineageReplacement,
+      onEngineYDocAuthorContextChanged,
     });
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
@@ -2282,10 +2284,12 @@ describe("set-aside draft recovery", () => {
     // this mock needs it even though this test never emits through it.
     const onEngineYDocSaveState = vi.fn(() => () => undefined);
     const onEngineYDocLineageReplacement = vi.fn(() => () => undefined);
+    const onEngineYDocAuthorContextChanged = vi.fn(() => () => undefined);
     Object.assign(bridge, {
       openEngineYDocSession,
       onEngineYDocSaveState,
       onEngineYDocLineageReplacement,
+      onEngineYDocAuthorContextChanged,
     });
     try {
       renderShell(bridge);

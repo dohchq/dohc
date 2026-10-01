@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -8,7 +8,9 @@ import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions } from "..
 import { bridgeAutomationClaimsToExecutors } from "../workspaces/automationClaimsBridge";
 import { onWorkspaceCaptureSettled } from "../workspaces/captureActivityBridge";
 import { collectionRecordWrites, setCollectionRecordFields, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
-import { desktopRecordEditContext } from "../workspaces/desktopRecordEdits";
+import { createRecordByHand, desktopRecordEditContext, type LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
+import { prepareDeleteWorkspacePathAs } from "../workspaces/workspaceFileMoves";
+import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { createTestScratch } from "../workspaces/testTemp";
 import { captureLocalAuthorContext } from "../workspaces/localInstallationIdentity";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
@@ -35,6 +37,12 @@ async function harness(automations: string, run: (context: {
   personSets: (fields: Record<string, unknown>) => Promise<unknown>;
   /** The engine id of an automation in Tasks, by its id in the file. */
   automationId: (id: string) => Promise<string>;
+  /** This signed-out computer's person, with main's signed evidence. */
+  person: LocalPersonAuthor;
+  /** The desktop's record edit context for a person. */
+  recordContext: (person: LocalPersonAuthor, signal: AbortSignal) => CollectionRecordEditContext;
+  capture: ReturnType<typeof createWorkspaceEngineCapture>;
+  workspace: { workspaceId: string; rootPath: string; attachmentId: symbol };
 }) => Promise<void>) {
   const root = await createTestScratch("dohc-collection-automation-e2e-");
   await mkdir(join(root, "Tasks"), { recursive: true });
@@ -67,12 +75,14 @@ async function harness(automations: string, run: (context: {
       };
       return await work(adapter);
     });
-  const editContext = (signal: AbortSignal): CollectionRecordEditContext => desktopRecordEditContext({
-    person: { kind: "human", humanId: identity.id, authorContext },
+  const person: LocalPersonAuthor = { kind: "human", humanId: identity.id, authorContext };
+  const recordContext = (by: LocalPersonAuthor, signal: AbortSignal): CollectionRecordEditContext => desktopRecordEditContext({
+    person: by,
     capture, workspaceRoot: root, signal,
     withAdapter: withEngine,
     onCaptureSettled: (listener) => onWorkspaceCaptureSettled(lifecycle, workspace.workspaceId, listener),
   });
+  const editContext = (signal: AbortSignal) => recordContext(person, signal);
   const errors: string[] = [];
   const executor = new CollectionAutomations({
     withEngine,
@@ -138,6 +148,7 @@ async function harness(automations: string, run: (context: {
         const { collections } = await withEngine((adapter) => adapter.listCollections());
         return collectionAutomationId(collections.find((collection) => collection.path === "Tasks")!.objectId, id);
       },
+      person, recordContext, capture, workspace,
     });
     expect(errors).toEqual([]);
   } finally {
@@ -241,6 +252,56 @@ it.skipIf(engine.missing)(
         expect.objectContaining({ Status: "Found 1" }),
       ]));
       expect(records).toHaveLength(2);
+    });
+  },
+  120_000,
+);
+
+// A person creates a record by hand and deletes it, signed out. The engine
+// stamps the installation from main's signed context on both History moments;
+// the renderer's author is a display label and names no one.
+it.skipIf(engine.missing)(
+  "credits a record created and deleted by hand to the signed-out installation in History",
+  async () => {
+    await harness([
+      // Nothing a hand create or delete does matches this, so nothing runs.
+      "  - id: idle",
+      "    name: Idle",
+      "    when: {field-changed: Status, to: Never}",
+      "    do: [{set: {Finished on: never}}]",
+      "",
+    ].join("\n"), async ({ root, withEngine, person, recordContext, capture, workspace }) => {
+      const signal = new AbortController().signal;
+      const created = await createRecordByHand({ workspaceId: workspace.workspaceId, collectionPath: "Tasks", name: "hand" }, {
+        author: createLocalChangeAuthor("Someone else"),
+        localPerson: async () => person,
+        withWorkspaceOperation: async (work) => await work(workspace),
+        editContext: async (_operation, by) => recordContext(by, signal),
+      });
+      if ("kind" in created) throw new Error(`The record was only partly created: ${created.reason}`);
+      expect(created).toMatchObject({ path: "Tasks/hand.md", recordId: expect.stringMatching(/^rec_/u) });
+      const { records } = await withEngine((adapter) => adapter.queryCollectionRecords({ collectionPath: "Tasks" }));
+      expect(records.map((record) => record.path).sort()).toEqual(["Tasks/hand.md", "Tasks/one.md"]);
+
+      const systemTrash = await createTestScratch("dohc-collection-hand-trash-");
+      const deleting = await prepareDeleteWorkspacePathAs({ workspace, assertCurrent: () => undefined }, "Tasks/hand.md", person, {
+        capture, requestId: "hand-delete", markDeleted: () => undefined,
+        trashItem: async (target) => { await rename(target, join(systemTrash, basename(target))); },
+      });
+      await expect(deleting()).resolves.toEqual({ ok: true, path: "Tasks/hand.md", trashed: true });
+      expect(await readFile(join(systemTrash, "hand.md"), "utf8")).toContain(created.recordId);
+      await expect(stat(join(root, "Tasks", "hand.md"))).rejects.toThrow();
+
+      const installation = [{ kind: "human", humanId: "local:test" }];
+      const moments = (await capture.listMoments({ limit: 100 })).moments.filter((moment) => moment.path === "Tasks/hand.md");
+      // Newest first: the delete, then whatever adoption recorded, then the creation.
+      expect(moments[0]).toMatchObject({ operation: "delete", authors: installation });
+      expect(moments.at(-1)).toMatchObject({ authors: installation });
+      expect(moments.at(-1)?.operation).not.toBe("delete");
+      // No moment for the record names anyone else.
+      for (const moment of moments) {
+        expect(moment.authors === undefined || JSON.stringify(moment.authors) === JSON.stringify(installation)).toBe(true);
+      }
     });
   },
   120_000,
