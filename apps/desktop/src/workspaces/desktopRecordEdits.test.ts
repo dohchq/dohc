@@ -19,7 +19,7 @@ async function contextFor(materializeOutcome: string) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-record-edits-"));
   roots.push(workspaceRoot);
   const capture: DesktopRecordEditHost["capture"] = {
-    openYDocSession: () => Promise.reject(new Error("not used")),
+    openRecordSession: () => Promise.reject(new Error("not used")),
     writeAuthoredFile: async (absolutePath) => ({ resolvedAbsolutePath: absolutePath, materializeOutcome }),
   };
   return desktopRecordEditContext({

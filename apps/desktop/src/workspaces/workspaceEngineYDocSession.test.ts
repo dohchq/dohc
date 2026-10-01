@@ -43,6 +43,8 @@ import {
   type FakeDaemonCapture,
 } from "../testing/fakeDaemonCapture";
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
+import { desktopRecordEditContext } from "./desktopRecordEdits";
+import { setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
 const ATTACHMENT_ID = Symbol("test-workspace-attachment");
@@ -66,6 +68,9 @@ let settleRefusal: unknown = null;
 // `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and reinserts
 // the session entry, so the doc stays reserved.
 let closeRefusal: unknown = null;
+let beforeRecordUpdate: (() => Promise<void>) | null = null;
+let beforeClose: (() => Promise<void>) | null = null;
+let enforceRecordOwner = false;
 // Refuses the next journal write once, the way the daemon refuses it on the
 // wire, then lets later writes (the adapter's recovery included) through.
 let nextRecordRefusal: unknown = null;
@@ -103,7 +108,23 @@ function daemonSessions(): EngineWorkspaceSessions {
     },
     async sendRequest(request: Request): Promise<Response> {
       requests.push(request);
+      if (request.method === YDOC_METHOD.recordUpdate && beforeRecordUpdate) {
+        const hook = beforeRecordUpdate;
+        beforeRecordUpdate = null;
+        await hook();
+      }
+      if (request.method === YDOC_METHOD.close && beforeClose) {
+        const hook = beforeClose;
+        beforeClose = null;
+        await hook();
+      }
       const params = request.params as Record<string, JsonValue | undefined>;
+      // The packaged daemon refuses a second owner. The generic loopback
+      // also supports replica tests, so enforce that rule for record writes.
+      if (enforceRecordOwner && request.method === YDOC_METHOD.open &&
+          [...daemon.leases.values()].includes(String(params.path))) {
+        throw wireRefusal("ydoc-session-busy");
+      }
       if (request.method === "workspace.open") {
         return {
           id: request.id,
@@ -228,6 +249,9 @@ beforeEach(async () => {
   requests = [];
   settleRefusal = null;
   closeRefusal = null;
+  beforeRecordUpdate = null;
+  beforeClose = null;
+  enforceRecordOwner = false;
   nextRecordRefusal = null;
   nextOpenRefusal = null;
   busyRecordAttempts = 0;
@@ -247,6 +271,7 @@ beforeEach(async () => {
   // else. A loopback that reports `materialized: true` while writing
   // nothing would leave every file below unchanged, so it materializes too.
   ydoc = new YdocLoopbackEngine({
+    projectRichdoc: doc => documentMarkdown(Y.encodeStateAsUpdate(doc)),
     materialize: ({ path, content }) =>
       writeFileSync(join(root, path), content, "utf8"),
   });
@@ -271,6 +296,232 @@ afterEach(async () => {
   await capture?.stop().catch(() => undefined);
   await sessions?.closeAll().catch(() => undefined);
   if (root) await rm(root, { recursive: true, force: true });
+});
+
+const recordAutomation = {
+  kind: "automation", automationId: "collection:tasks#finish", onBehalfOf: "person", depth: 1,
+  run: { claimId: "finish-run", automationName: "Finish" },
+} as const;
+
+function writeFinished(expectedBefore: Record<string, unknown> = { "Finished on": null }) {
+  enforceRecordOwner = true;
+  return setCollectionRecordFields(desktopRecordEditContext({
+    capture, workspaceRoot: root, signal: new AbortController().signal,
+    withAdapter: async () => null, onCaptureSettled: () => () => undefined,
+  }), {
+    recordPath: PATH, fields: { "Finished on": "2026-10-01" },
+    expectedBefore, author: recordAutomation, idempotencyKeyPrefix: "finish-run/set",
+  });
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function openRecordEditor(assertRecordWritable?: () => void) {
+  const editor = new Y.Doc();
+  const remoteOrigin = Symbol("record-remote");
+  const owner = await capture.openYDocSession({ path: PATH, contentKind: "richdoc",
+    assertRecordWritable,
+    onRemoteUpdate: update => Y.applyUpdate(editor, update, remoteOrigin),
+  });
+  Y.applyUpdate(editor, owner.initialUpdate, remoteOrigin);
+  editor.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin !== remoteOrigin) owner.applyLocalUpdate(update);
+  });
+  return { owner, editor };
+}
+
+it("writes automation fields through an open session and updates its editor once", async () => {
+  const { owner, editor } = await openRecordEditor();
+  const before = ydoc.recordedUpdates.length;
+  await expect(writeFinished()).resolves.toMatchObject({ replaced: { "Finished on": null } });
+  expect(owner.doc.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
+  expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
+  expect(methodCount(YDOC_METHOD.open)).toBe(1);
+  expect(methodCount(YDOC_METHOD.close)).toBe(0);
+  expect(ydoc.recordedUpdates).toHaveLength(before + 1);
+  const fieldRequest = requests.filter(request => request.method === YDOC_METHOD.recordUpdate).at(-1);
+  expect(fieldRequest?.params).toMatchObject({ actorOriginId: recordAutomation.automationId,
+    attribution: { actorKind: "automation", onBehalfOf: "person", depth: 1, run: recordAutomation.run },
+  });
+  expect(fieldRequest?.idempotencyKey).toBe("finish-run/set/Finished on");
+  await writeFinished();
+  expect(ydoc.recordedUpdates).toHaveLength(before + 1);
+  typeIntoBody(editor, "Still editable.");
+  await owner.settleNow();
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Still editable.");
+  await owner.close();
+  editor.destroy();
+});
+
+it.each(["update-too-large", "pending-edits-limit"])("refuses an unkeyed agent write without losing queued typing (%s)", async refusal => {
+  const { owner, editor } = await openRecordEditor();
+  const entered = deferred();
+  const release = deferred();
+  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
+  nextRecordRefusal = wireRefusal(refusal);
+  const write = setCollectionRecordFields(desktopRecordEditContext({
+    capture, workspaceRoot: root, signal: new AbortController().signal,
+    withAdapter: async () => null, onCaptureSettled: () => () => undefined,
+  }), { recordPath: PATH, fields: { "Finished on": "2026-10-01" },
+    author: { kind: "agent", agentId: "cli-agent", onBehalfOf: "person", depth: 1 } });
+  const refused = expect(write).rejects.toThrow(refusal);
+  await entered.promise;
+  typeIntoBody(editor, "Typing queued behind the refused agent write.");
+  release.resolve();
+  await refused;
+  await owner.settleNow();
+  expect(editor.getMap("frontmatter").get("Finished on")).toBeUndefined();
+  expect(documentMarkdown(Y.encodeStateAsUpdate(owner.doc))).toContain("Typing queued behind the refused agent write.");
+  expect(captureErrors).toEqual([]);
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Typing queued behind the refused agent write.");
+  await owner.close(); editor.destroy();
+});
+
+it("refuses a borrowed record write during an owner handoff and permits retry", async () => {
+  let held = false;
+  const { owner, editor } = await openRecordEditor(() => {
+    if (held) throw new Error("Owner handoff active. Try again.");
+  });
+  const borrow = await capture.openRecordSession(PATH);
+  held = true;
+  const decide = vi.fn(() => null);
+  await expect(borrow.applyDecidedLocalUpdate(decide, () => {}, {})).rejects.toThrow("Try again");
+  expect(decide).not.toHaveBeenCalled();
+  await borrow.close();
+  held = false;
+  await writeFinished();
+  expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
+  await owner.close(); editor.destroy();
+});
+
+it("keeps typing concurrent with an automation write and waits before owner teardown", async () => {
+  const { owner, editor } = await openRecordEditor();
+  const entered = deferred();
+  const release = deferred();
+  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
+  const write = writeFinished();
+  await entered.promise;
+  typeIntoBody(editor, "Typed during the field write.");
+  const close = owner.close();
+  release.resolve();
+  await write;
+  await close;
+  const markdown = await readFile(join(root, PATH), "utf8");
+  expect(markdown).toContain("Typed during the field write.");
+  expect(markdown).toContain("2026-10-01");
+  expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
+  expect(ydoc.recordedUpdates).toHaveLength(3);
+  const typing = requests.filter(request => request.method === YDOC_METHOD.recordUpdate).at(-1);
+  expect(typing?.params).not.toHaveProperty("actorOriginId");
+  expect(typing?.params).not.toHaveProperty("attribution");
+  editor.destroy();
+});
+
+it("finishes a borrowed record write before a capture-chain teardown sweep", async () => {
+  const { editor } = await openRecordEditor();
+  const entered = deferred();
+  const release = deferred();
+  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
+  const write = writeFinished();
+  await entered.promise;
+  typeIntoBody(editor, "Typed before the lifecycle sweep.");
+  const sweep = capture.settleAndCloseLiveSessionsForPath(PATH);
+  release.resolve();
+  await write;
+  const finishRemoval = await sweep;
+  finishRemoval(false);
+  const markdown = await readFile(join(root, PATH), "utf8");
+  expect(markdown).toContain("Typed before the lifecycle sweep.");
+  expect(markdown).toContain("2026-10-01");
+  expect(methodCount(YDOC_METHOD.close)).toBe(1);
+  expect(ydoc.recordedUpdates).toHaveLength(3);
+  editor.destroy();
+});
+
+it("keeps typing and attribution when a borrowed keyed write meets a busy store", async () => {
+  const { owner, editor } = await openRecordEditor();
+  const entered = deferred();
+  const release = deferred();
+  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
+  nextRecordRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
+  const write = writeFinished();
+  await entered.promise;
+  typeIntoBody(editor, "Typed while the keyed write recovered.");
+  release.resolve();
+  await write;
+  await owner.settleNow();
+  expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
+  expect(documentMarkdown(Y.encodeStateAsUpdate(owner.doc))).toContain("Typed while the keyed write recovered.");
+  const fieldWrites = requests.filter(request => request.idempotencyKey === "finish-run/set/Finished on");
+  expect(fieldWrites.length).toBeGreaterThan(1);
+  for (const request of fieldWrites) {
+    expect(request.params).toMatchObject({ actorOriginId: recordAutomation.automationId,
+      attribution: { actorKind: "automation", onBehalfOf: "person", depth: 1, run: recordAutomation.run },
+    });
+  }
+  expect(ydoc.recordedUpdates).toHaveLength(3);
+  await owner.close();
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Typed while the keyed write recovered.");
+  editor.destroy();
+});
+
+it("keeps the open editor's changes when a borrowed write's key is refused", async () => {
+  const { owner, editor } = await openRecordEditor();
+  await writeFinished();
+  editor.getMap("frontmatter").set("Finished on", "2026-09-30");
+  typeIntoBody(editor, "Kept after the key refusal.");
+  await expect(writeFinished({ "Finished on": "2026-09-30" })).rejects.toThrow("idempotency-key-reuse-mismatch");
+  expect(owner.doc.getMap("frontmatter").get("Finished on")).toBe("2026-09-30");
+  expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-09-30");
+  expect(ydoc.recordedUpdates).toHaveLength(4);
+  typeIntoBody(editor, "Still editable after recovery.");
+  await owner.settleNow();
+  const markdown = await readFile(join(root, PATH), "utf8");
+  expect(markdown).toContain("Kept after the key refusal.");
+  expect(markdown).toContain("Still editable after recovery.");
+  expect(markdown).toContain("2026-09-30");
+  await owner.close();
+  editor.destroy();
+});
+
+it("checks expected-before against the open session instead of the settled artifact", async () => {
+  const owner = await capture.openYDocSession({ path: PATH, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+  const editor = mirrorEditor(owner);
+  editor.getMap("frontmatter").set("Finished on", "2026-09-30");
+  const result = await writeFinished();
+  expect(result).toMatchObject({ replaced: {}, kept: { "Finished on": "2026-09-30" } });
+  expect(owner.doc.getMap("frontmatter").get("Finished on")).toBe("2026-09-30");
+  await owner.close();
+  editor.destroy();
+});
+
+it("refuses a record write truthfully while its owner is tearing down, then permits retry", async () => {
+  const owner = await capture.openYDocSession({ path: PATH, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+  const entered = deferred();
+  const release = deferred();
+  beforeClose = async () => { entered.resolve(); await release.promise; };
+  const close = owner.close();
+  await entered.promise;
+  try {
+    await expect(writeFinished()).rejects.toThrow("The record is closing. Try again after it closes.");
+    expect(methodCount(YDOC_METHOD.open)).toBe(1);
+  } finally {
+    release.resolve();
+    await close;
+  }
+  await expect(writeFinished()).resolves.toMatchObject({ replaced: { "Finished on": null } });
+});
+
+it("keeps the closed-record open, journal, settle and close path", async () => {
+  await expect(writeFinished()).resolves.toMatchObject({ replaced: { "Finished on": null } });
+  expect(methodCount(YDOC_METHOD.open)).toBe(1);
+  expect(methodCount(YDOC_METHOD.close)).toBe(1);
+  expect(ydoc.recordedUpdates).toHaveLength(2);
+  expect(await readFile(join(root, PATH), "utf8")).toContain("2026-10-01");
 });
 
 it("journals a live editor update through the Rust Y.Doc provider and suppresses its mirror write", async () => {
