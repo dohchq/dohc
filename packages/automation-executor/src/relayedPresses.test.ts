@@ -30,7 +30,7 @@ function channel<A>() {
   };
 }
 
-function hostWith(relay: PressTransport, overrides: Partial<RelayedPressHostOptions> = {}) {
+function hostWith(relay: Omit<PressTransport, "inspections" | "answerInspection"> & Partial<Pick<PressTransport, "inspections" | "answerInspection">>, overrides: Partial<RelayedPressHostOptions> = {}) {
   const host = createRelayedPressHost({
     workspaceId: "ws-1",
     host: {
@@ -39,8 +39,9 @@ function hostWith(relay: PressTransport, overrides: Partial<RelayedPressHostOpti
       generation: () => 7,
       hold: () => () => undefined,
     },
-    transport: async () => relay,
+    transport: async () => ({ inspections: () => [], answerInspection: async () => undefined, ...relay }),
     heldClaim: async () => null,
+    inspect: async () => ({ kind: "unchecked", reason: "not ready" }),
     press: async () => ({ pressed: { busy: true }, field: null }),
     notifyFailure: async () => undefined,
     onError: () => undefined,
@@ -53,7 +54,7 @@ function hostWith(relay: PressTransport, overrides: Partial<RelayedPressHostOpti
 const pendingPress: RelayAutomationPress = {
   hostPressId: "p1", definitionHash: "0123456789abcdef", state: "pending",
   automationId: "collection:Invoices#paid", collectionPath: "Invoices",
-  recordId: "rec-12", pressedBy: "ana", createdAtMs: 1,
+  recordId: "rec-12", pressedBy: "ana", createdAtMs: 1, confirmed: [],
 };
 
 describe("relay polling lifetime", () => {
@@ -230,5 +231,28 @@ describe("relay polling lifetime", () => {
     settling.resolve();
     await setImmediate();
     expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it("finishes a started inspection after stop without inspecting or pressing the next request", async () => {
+    const started = channel<void>();
+    const answered = channel<void>();
+    const inspection = Promise.withResolvers<{ kind: "unchecked"; reason: string }>();
+    const inspect = vi.fn(() => { started.send(); return inspection.promise; });
+    const answerInspection = vi.fn(async () => { answered.send(); });
+    const accept = vi.fn(async () => []);
+    const host = hostWith({
+      list: async () => [pendingPress], accept, settle: async () => undefined,
+      inspections: () => [{ ...pendingPress, inspectionId: "i1" }, { ...pendingPress, inspectionId: "i2" }],
+      answerInspection,
+    }, { inspect });
+    host.start();
+    await started.next();
+    host.stop();
+    inspection.resolve({ kind: "unchecked", reason: "not ready" });
+    await answered.next();
+    await setImmediate();
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(answerInspection).toHaveBeenCalledWith(7, "i1", { kind: "unchecked", reason: "not ready" });
+    expect(accept).not.toHaveBeenCalled();
   });
 });
