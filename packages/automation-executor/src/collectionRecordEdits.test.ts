@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { getEventListeners } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
@@ -678,7 +679,7 @@ describe("createCollectionRecord", () => {
   });
 
   it("writes the file with a new record id, finishes on the engine's announcement without polling, and seeds fields", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
     const engine = fakeEngine();
@@ -899,7 +900,7 @@ describe("createCollectionRecord", () => {
   });
 
   it("stops waiting at the adoption ceiling when the caller's signal allows longer", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const root = await createTestScratch("dohc-collection-edits-");
     const { session } = fakeSession();
     const engine = fakeEngine();
@@ -917,6 +918,230 @@ describe("createCollectionRecord", () => {
 
     expect(await outcome).toMatchObject({ kind: "partial", created: ["tasks/two.md"], failedStage: "index", retry: { mode: "resume" } });
     expect(engine.listeners.size).toBe(0);
+  });
+
+  it.each(["abort", "deadline"] as const)("stops a pending file read at %s without starting a late lookup", async end => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const root = await createTestScratch("dohc-record-read-wait-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const controller = new AbortController();
+    const context = contextFor(root, session, { ...engine.overrides, signal: controller.signal });
+    const started = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<{ text: string; truncated: boolean }>();
+    vi.spyOn(context, "readText").mockImplementationOnce(() => {
+      started.resolve();
+      return held.promise;
+    });
+    const created = createCollectionRecord(context, {
+      collectionPath: "tasks", name: "two", fields: { status: "open" }, author: AGENT,
+    });
+    await started.promise;
+    engine.announce(null);
+    if (end === "abort") controller.abort();
+    else await vi.advanceTimersByTimeAsync(15_000);
+    expect(await created).toMatchObject({
+      kind: "partial", failedStage: "index",
+      reason: "dohc created tasks/two.md, but the engine did not add it to the Collection in time.",
+    });
+    expect(engine.listeners.size).toBe(0);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await engine.adopt(root, "tasks/two.md");
+    held.resolve(await context.readText("tasks/two.md"));
+    await held.promise;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(engine.lookups).toHaveLength(0);
+    expect(context.openedPaths).toEqual([]);
+  });
+
+  it.each(["abort", "deadline"] as const)("stops a pending lookup at %s without seeding its late result", async end => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const root = await createTestScratch("dohc-record-lookup-wait-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const controller = new AbortController();
+    const context = contextFor(root, session, { ...engine.overrides, signal: controller.signal });
+    const createFile = context.createFile;
+    vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
+      const path = await createFile(...args);
+      await engine.adopt(root, path);
+      return path;
+    });
+    const started = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+    const withAdapter = context.withAdapter;
+    vi.spyOn(context, "withAdapter").mockImplementationOnce(async work => {
+      const result = await withAdapter(work);
+      started.resolve();
+      await held.promise;
+      return result;
+    });
+    const created = createCollectionRecord(context, {
+      collectionPath: "tasks", name: "two", fields: { status: "open" }, author: AGENT,
+    });
+    await started.promise;
+    engine.announce(null);
+    if (end === "abort") controller.abort();
+    else await vi.advanceTimersByTimeAsync(15_000);
+    expect(await created).toMatchObject({ kind: "partial", failedStage: "index" });
+    expect(engine.listeners.size).toBe(0);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+    held.resolve();
+    await held.promise;
+    // Cross the real scheduler's event-loop boundary, without waiting for time.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(engine.lookups).toHaveLength(1);
+    expect(context.openedPaths).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  it("coalesces a burst during a lookup into one follow-up check", async () => {
+    const root = await createTestScratch("dohc-record-burst-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const started = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+    const withAdapter = context.withAdapter;
+    vi.spyOn(context, "withAdapter").mockImplementationOnce(async work => {
+      const result = await withAdapter(work);
+      started.resolve();
+      await held.promise;
+      return result;
+    });
+    const created = createCollectionRecord(context, { collectionPath: "tasks", name: "two", author: AGENT });
+    await started.promise;
+    // Use resolved reads for the event-loop barrier below.
+    const read = await context.readText("tasks/two.md");
+    vi.spyOn(context, "readText").mockResolvedValue(read);
+    for (let index = 0; index < 1_000; index++) engine.announce(["tasks/two.md"]);
+    expect(engine.lookups).toHaveLength(1);
+    held.resolve();
+    await engine.lookupsReached(2);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(engine.lookups).toHaveLength(2);
+    const recordId = await engine.adopt(root, "tasks/two.md");
+    engine.announce(null);
+    expect(await created).toEqual({ path: "tasks/two.md", recordId });
+    expect(engine.lookups).toHaveLength(3);
+    expect(engine.listeners.size).toBe(0);
+  });
+
+  it("recovers from an engine refusal on the next notification", async () => {
+    const root = await createTestScratch("dohc-record-refusal-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    engine.refuseLookups(Error("collection reloading"));
+    const created = createCollectionRecord(contextFor(root, session, engine.overrides), {
+      collectionPath: "tasks", name: "two", author: AGENT,
+    });
+    await engine.lookupsReached(1);
+    engine.refuseLookups(null);
+    const recordId = await engine.adopt(root, "tasks/two.md");
+    engine.announce(null);
+    expect(await created).toEqual({ path: "tasks/two.md", recordId });
+    expect(engine.listeners.size).toBe(0);
+  });
+
+  it.each(["creation", "registration"] as const)("releases a subscription when the workspace ends during %s", async when => {
+    const root = await createTestScratch("dohc-record-subscribe-abort-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const controller = new AbortController();
+    const unsubscribe = vi.fn();
+    const context = contextFor(root, session, {
+      ...engine.overrides,
+      signal: controller.signal,
+      onRecordsChanged(listener) {
+        const remove = engine.overrides.onRecordsChanged!(listener);
+        if (when === "registration") controller.abort();
+        return () => { remove(); unsubscribe(); };
+      },
+    });
+    const createFile = context.createFile;
+    if (when === "creation") vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
+      const path = await createFile(...args);
+      controller.abort();
+      return path;
+    });
+    const read = vi.spyOn(context, "readText");
+    expect(await createCollectionRecord(context, { collectionPath: "tasks", name: "two", author: AGENT }))
+      .toMatchObject({ kind: "partial", failedStage: "index" });
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(engine.listeners.size).toBe(0);
+    expect(context.openedPaths).toEqual([]);
+    // Only the outer creation's diagnostic read runs after cancellation.
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(engine.lookups).toEqual([]);
+  });
+
+  it("handles notifications during registration when the file is already indexed", async () => {
+    const root = await createTestScratch("dohc-record-register-news-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, {
+      ...engine.overrides,
+      onRecordsChanged(listener) {
+        const remove = engine.overrides.onRecordsChanged!(listener);
+        listener(null);
+        listener(["tasks/two.md"]);
+        return remove;
+      },
+    });
+    const createFile = context.createFile;
+    let recordId = "";
+    vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
+      const path = await createFile(...args);
+      recordId = await engine.adopt(root, path);
+      return path;
+    });
+    expect(await createCollectionRecord(context, { collectionPath: "tasks", name: "two", author: AGENT }))
+      .toEqual({ path: "tasks/two.md", recordId });
+    expect(engine.lookups).toEqual([recordId]);
+    expect(engine.listeners.size).toBe(0);
+  });
+
+  it("keeps a late read from the old workspace out of the next workspace's creation", async () => {
+    const oldRoot = await createTestScratch("dohc-record-old-workspace-");
+    const { session: oldSession, log: oldLog } = fakeSession();
+    const oldEngine = fakeEngine();
+    const controller = new AbortController();
+    const oldContext = contextFor(oldRoot, oldSession, { ...oldEngine.overrides, signal: controller.signal });
+    const started = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<{ text: string; truncated: boolean }>();
+    vi.spyOn(oldContext, "readText").mockImplementationOnce(() => {
+      started.resolve();
+      return held.promise;
+    });
+    const oldCreation = createCollectionRecord(oldContext, {
+      collectionPath: "tasks", name: "two", fields: { status: "old" }, author: AGENT,
+    });
+    await started.promise;
+    controller.abort();
+    expect(await oldCreation).toMatchObject({ kind: "partial", failedStage: "index" });
+
+    const nextRoot = await createTestScratch("dohc-record-next-workspace-");
+    const { session: nextSession, log: nextLog } = fakeSession();
+    const nextEngine = fakeEngine();
+    const nextContext = contextFor(nextRoot, nextSession, nextEngine.overrides);
+    const nextCreation = createCollectionRecord(nextContext, {
+      collectionPath: "tasks", name: "two", fields: { status: "next" }, author: AGENT,
+    });
+    await nextEngine.listening();
+    const oldId = await oldEngine.adopt(oldRoot, "tasks/two.md");
+    held.resolve(await oldContext.readText("tasks/two.md"));
+    oldEngine.announce(null);
+    const nextId = await nextEngine.adopt(nextRoot, "tasks/two.md");
+    nextEngine.announce(null);
+    expect(await nextCreation).toEqual({ path: "tasks/two.md", recordId: nextId });
+    expect(nextId).not.toBe(oldId);
+    expect(oldContext.openedPaths).toEqual([]);
+    expect(oldLog.updates).toEqual([]);
+    expect(oldEngine.lookups).toEqual([]);
+    expect(nextLog.doc.getMap("frontmatter").get("status")).toBe("next");
   });
 
   it("names the created record when seeding its fields fails", async () => {
@@ -1193,7 +1418,7 @@ describe("partial record retry", () => {
   });
 
   it("retries capture subscription failure without leaving a deadline behind", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const root = await createTestScratch("dohc-record-capture-retry-");
     const { session } = fakeSession();
     const engine = fakeEngine();
@@ -1237,7 +1462,7 @@ describe("partial record retry", () => {
   });
 
   it("resumes an adoption timeout with the returned identity", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const root = await createTestScratch("dohc-record-retry-");
     const { session } = fakeSession();
     const engine = fakeEngine();
