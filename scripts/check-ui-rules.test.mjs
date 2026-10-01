@@ -232,6 +232,36 @@ test("hex colors within longer style values and CSS declarations count", () => {
   ]) assert.deepEqual(scanSource(path, source), [], source);
 });
 
+test("color property families count in CSS declarations and style objects", () => {
+  for (const [cssName, styleName] of [
+    ["caret-color", "caretColor"],
+    ["accent-color", "accentColor"],
+    ["stop-color", "stopColor"],
+    ["text-decoration-color", "textDecorationColor"],
+    ["flood-color", "floodColor"],
+    ["background-position", "backgroundPosition"],
+    ["border-image", "borderImage"],
+    ["outline-style", "outlineStyle"],
+    ["box-shadow", "boxShadow"],
+    ["text-shadow", "textShadow"],
+    ["fill", "fill"],
+    ["stroke", "stroke"],
+  ]) {
+    for (const source of [
+      `const css = \`.a { ${cssName}: #1234 }\`;`,
+      `const style = { ${styleName}: " #1234" };`,
+      `const style = { "${cssName}": " #1234" };`,
+    ]) assert.deepEqual(scanSource(path, source).map(finding => finding.value), ["#1234"], source);
+  }
+});
+
+test("gradient functions count outside a named style property", () => {
+  for (const name of ["linear-gradient", "radial-gradient", "conic-gradient", "repeating-linear-gradient", "repeating-radial-gradient", "repeating-conic-gradient"]) {
+    const source = `const gradient = "${name}(#1234,#5678)";`;
+    assert.deepEqual(scanSource(path, source).map(finding => finding.value), ["#1234", "#5678"], source);
+  }
+});
+
 test("typed color declarations retain the declared name", () => {
   for (const sourcePath of [path, path.replace(/tsx$/u, "ts")]) {
     for (const source of [
