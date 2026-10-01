@@ -540,9 +540,10 @@ if (deviceControl) {
 }
 const ownerAdmissionRun = ownerAdmission && deviceControl && deployment ? startOwnerAdmission({config: ownerAdmission,storage,history: deployment.history,control: deviceControl,
   onError: error => console.error("[sync-relay] private owner delivery:",error)}) : undefined;
-server.once("close",() => ownerAdmissionRun?.close());
-process.once("SIGINT",() => ownerAdmissionRun?.close());
-process.once("SIGTERM",() => ownerAdmissionRun?.close());
+const stopOwnerAdmission = () => {void ownerAdmissionRun?.close().catch(error => console.error("[sync-relay] private owner delivery shutdown:",error));};
+server.once("close",stopOwnerAdmission);
+process.once("SIGINT",stopOwnerAdmission);
+process.once("SIGTERM",stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
 if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
 const configuredServiceHost = serviceHostConfig && deployment
@@ -642,6 +643,7 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    await ownerAdmissionRun?.close();
     await automations?.close();
     await selfHost?.close();
     await configuredServiceHost?.close();
