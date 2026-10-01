@@ -63,9 +63,9 @@ export function DocumentMenu(props: {
   // The lasting half. A refusal owes the user a next step
   // (the dohc-interface skill), and a label that swaps for 1.2s has no room for one
   // and no time to be read. It is stated in the menu's status line, which
-  // every user reaches — a tooltip is not one, because focus stays on the
-  // menu container and never presents it. It stands until the user
-  // closes the menu or another action supersedes it, never on a timer.
+  // every user reaches — a tooltip is not one, because a title never
+  // presents to keyboard focus. It stands until the user closes the menu
+  // or another action supersedes it, never on a timer.
   const [instruction, setInstruction] = useState("");
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Every attempt gets a number, and only the newest one may speak. A
