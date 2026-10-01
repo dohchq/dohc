@@ -3962,7 +3962,7 @@ async function hostButtonAuthority(workspaceId: string, id: string, inspection =
     credentials.userId !== entry.remote.ownerUserId || !relayUrlsMatch(credentials.relayUrl, entry.remote.serverUrl) ||
     !automationHosts.stillRuns(workspaceId) || !entry.automationHost) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED, "roster");
   return automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch })
-    .authority(workspaceId, localReactorFallbackId(), entry.automationHost.generation, id, inspection);
+    .authority(workspaceId, localInstallationId(), entry.automationHost.generation, id, inspection);
 }
 
 // An open workspace's Collection automations. Runs write through the same
