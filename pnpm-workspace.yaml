@@ -14,6 +14,9 @@ allowBuilds:
   esbuild: true
   msgpackr-extract: false
 
+minimumReleaseAgeExclude:
+  - effect@4.0.0
+
 # TipTap packages share parser contracts but declare broad transitive ranges.
 # Keep every parser and editor package on the same release.
 overrides:
