@@ -1,6 +1,6 @@
 # Share grant state machine
 
-Reader: the relay implementer who stores grants, issues credentials, and checks mutations.
+Use this reference when changing grant storage, credentials, or authorization checks in the relay.
 
 A share owns one immutable selector. It can hold many grants at the same time, including many link grants. Each grant changes independently unless it depends on a parent link grant.
 

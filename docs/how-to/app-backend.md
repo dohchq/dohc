@@ -141,6 +141,10 @@ Dataset records and uploaded files do not require ordinary file-share selectors.
 Friends open the share link and launch the app. The browser broker supplies only granted operations and files.
 It does not supply owner credentials. The frontend can use ordinary networking, so review where it sends data.
 
+Apps using a `collection-create` capability save responses as shared Markdown files.
+Anyone with that share can read every response field, including fields outside `readFields`.
+Use a dataset with explicitly authorized reads for private responses.
+
 ## Manage the same records
 
 Choose **Table**, **Board**, or **Calendar** in the Collection's layout control.

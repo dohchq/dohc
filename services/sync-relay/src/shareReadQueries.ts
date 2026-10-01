@@ -368,7 +368,7 @@ export function createShareReadQueries(
   };
 
   // A share link reads an earlier revision only of a file still in the share
-  // (docs/adr/0014). The revision must be the after-content of a log row above
+  // (docs/engineering/security-boundaries.md). The revision must be the after-content of a log row above
   // the epoch floor that this link's filter admits, and that row's object must
   // be the current file at a selected path now. The hash alone grants nothing.
   // Storage returns only rows whose object is still in the share, so deleted

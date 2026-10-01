@@ -100,7 +100,7 @@ These commands run development services. Use the [self-hosting guide](docs/how-t
 apps/desktop          Electron desktop app
 apps/site             marketing site and interactive product demo
 crates                Rust workspace engine and supporting crates
-docs                  ADRs and implementation plans
+docs                  user guides and reference; engineering guidance in docs/engineering
 fixtures              workspace fixtures the engine crates read
 packages              shared TypeScript contracts, clients, tools, and UI code
 services              optional authentication, sync, and share viewer services
