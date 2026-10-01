@@ -88,7 +88,9 @@ cover the access rules.
 
 Edit on a Collection permits validated changes to its `collection.yaml` and
 `automations.yaml`. Named recipients and Edit link holders can also create a
-Collection with its first records inside a shared folder. Other file changes remain proposals.
+Collection with its first records inside a shared folder.
+Named recipients must choose to propose other file changes.
+Link holders cannot submit proposals, so unsupported changes are refused.
 A dependent named grant needs promotion before it receives this direct lane.
 Edit link holders can change the Collection's own files, with their grant and
 server-minted link principal recorded as authors.

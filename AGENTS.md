@@ -143,6 +143,8 @@ Name the reader before adding a document to main. If nobody will use it to make 
 
 Keep `docs/` for people using dohc, including app authors and agents. Put essential maintainer procedures and security boundaries in `docs/engineering/`. Keep new task plans, campaigns, review logs, and measurements in ignored `.agent-artifacts/`. Remove them when the task ends. Existing tracked plans may stay in `docs/engineering/plans/` while their coordinating sessions still need them.
 
+Release owners follow the [desktop release procedure](docs/engineering/desktop-release.md).
+
 Read [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md) before writing docs, specs, plans, PR bodies, commit messages, or skills. Use [`.agents/skills/dohc-interface/SKILL.md`](.agents/skills/dohc-interface/SKILL.md) for anything a person sees inside the app.
 
 Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term list; check terms against it and the surrounding code before defining them. If a paragraph-long code comment is needed to defend a workaround, fix the code instead.
