@@ -85,10 +85,22 @@ function isModified(value: unknown, defaultValue: unknown): boolean {
   return JSON.stringify(value) !== JSON.stringify(defaultValue);
 }
 
+// After a failed save the control shows the value on disk: every catch and
+// refusal path below restores it, or never left it. The document chip's
+// "your edits are still here" would be false here.
+export const SETTINGS_SAVE_ERROR_TITLE =
+  "dohc could not save this setting. It shows its saved value.";
+
 function StatusPill(props: { state: SettingsSaveState }) {
   if (props.state === "idle") return null;
   return (
-    <StateMark testId="settings-save-state" state={props.state} shown={props.state} className="ml-auto" />
+    <StateMark
+      testId="settings-save-state"
+      state={props.state}
+      shown={props.state}
+      title={props.state === "error" ? SETTINGS_SAVE_ERROR_TITLE : undefined}
+      className="ml-auto"
+    />
   );
 }
 

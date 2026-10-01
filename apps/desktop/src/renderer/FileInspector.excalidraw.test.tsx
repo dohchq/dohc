@@ -1075,6 +1075,11 @@ describe("FileInspector Excalidraw view", () => {
     expect(screen.getByTestId("mock-excalidraw-canvas").dataset.readOnly).toBe(
       "true",
     );
+    // The notice says why; the chip must not claim a read-only share.
+    const chip = screen.getByTestId("drawing-save-state");
+    expect(chip.dataset.state).toBe("read-only");
+    expect(chip.textContent).toBe("Read-only");
+    expect(chip.getAttribute("title")).toBeNull();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));

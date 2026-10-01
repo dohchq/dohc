@@ -31,14 +31,17 @@ export const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
 export const REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
   "Another file replaced this file while you had it open. Close this tab to open the file now at this path.";
 
-// The states a save chip can show. `recovery`, `read-only-transition` and
-// `too-large` are the shell's own, not the engine's: an unresolved set-aside
-// draft beside a settled document, a document that went read-only under an
-// edit, and a file the bounded read cut short so the editor is disabled.
+// The states a save chip can show. `recovery`, `read-only-transition`,
+// `read-only-unavailable` and `too-large` are the shell's own, not the
+// engine's: an unresolved set-aside draft beside a settled document, a
+// document that went read-only under an edit, a live session that cannot
+// take edits for a reason its own notice states, and a file the bounded read
+// cut short so the editor is disabled.
 export type SaveStateKey =
   | EngineDocSaveState
   | "recovery"
   | "read-only-transition"
+  | "read-only-unavailable"
   | "too-large";
 
 export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
@@ -76,6 +79,9 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
     mark: "attention",
     title: "This document became read-only. Your edit was set aside in the notice below.",
   },
+  // No title: the cause (still opening, deleted, the engine may hold it,
+  // invalid assets, a removal in progress) is stated by its own notice.
+  "read-only-unavailable": { label: "Read-only", mark: "held" },
   "too-large": {
     label: "Read-only",
     mark: "held",

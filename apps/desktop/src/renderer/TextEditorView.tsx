@@ -22,6 +22,7 @@ export function TextEditorView({
   workspaceId,
   path,
   truncated,
+  readOnly,
   reopenKey,
   switchReadPending,
   switchUnresyncedRef,
@@ -45,6 +46,7 @@ export function TextEditorView({
   workspaceId: string;
   path: string;
   truncated?: boolean;
+  readOnly?: boolean;
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   pendingUndo?: PendingTextUndo;
@@ -63,7 +65,7 @@ export function TextEditorView({
     refreshAfterConflict,
     workspaceId,
     path,
-    disabled: truncated,
+    disabled: truncated || readOnly,
     reopenKey,
     switchReadPending,
     switchUnresyncedRef,
@@ -83,7 +85,7 @@ export function TextEditorView({
         <StateMark
           testId={`${testId}-save-state`}
           state={editor.saveState}
-          shown={truncated ? "too-large" : editor.saveState}
+          shown={readOnly ? "read-only" : truncated ? "too-large" : editor.saveState}
           className="ml-auto"
         />
       </div>
@@ -100,7 +102,7 @@ export function TextEditorView({
           valueRevision={editor.valueRevision}
           language={language}
           path={path}
-          readOnly={truncated}
+          readOnly={truncated || readOnly}
           scrollLine={scrollLine}
           pendingUndo={pendingUndo}
           onPendingUndoConsumed={onPendingUndoConsumed}

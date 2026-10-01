@@ -274,13 +274,18 @@ export function DrawingView({
         : engineMode
           ? engine.saveState
           : editor.saveState;
-  // A read-only chip with neither a read-only share nor an engine cause behind
-  // it is the bounded read's: the file was too large, so the canvas is off.
+  // Three reasons a drawing is read-only, named in the order they are known:
+  // the share is read-only, the live session cannot take edits (its notice
+  // says why), or the bounded read cut the file short.
   const drawingShown = engine.readOnlyWhileEditing
     ? "read-only-transition"
-    : drawingChipState === "read-only" && !readOnly && !engineReadOnly
-      ? "too-large"
-      : drawingChipState;
+    : drawingChipState !== "read-only"
+      ? drawingChipState
+      : readOnly
+        ? "read-only"
+        : engineReadOnly
+          ? "read-only-unavailable"
+          : "too-large";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
