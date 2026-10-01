@@ -45,6 +45,8 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
         json!([{"kind":"human","humanId":"person"},{"kind":"agent","agentId":"agent","onBehalfOf":"owner"}]),
     ] {
         let (_scratch, path, mut engine) = open_store();
+        let mut expected = json!({"versionId":"main","objectId":"record","authors":authors});
+        crate::outbound::omit_human_authors(&mut expected);
         queue_legacy_moment(&mut engine, authors);
         let client = RelaySyncClient::new(FakeRelay::default());
         let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
@@ -56,13 +58,7 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
         );
         let first = client.transport().pushes.lock().unwrap()[0].ops.clone();
         let repaired = &first[1].payload;
-        assert!(repaired.get("authors").is_none_or(|authors| {
-            authors
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|author| author["kind"] == "agent")
-        }));
+        assert_eq!(repaired, &expected);
         drop(engine);
         let mut engine = EngineStore::open(&path, 2002).unwrap();
         let stored = list_replication_ops(&engine, "ws", "local", 0, 10).unwrap();
