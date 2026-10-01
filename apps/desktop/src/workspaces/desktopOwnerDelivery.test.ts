@@ -42,3 +42,49 @@ it("stop aborts the current pass and waits for its resources to settle", async (
   expect(activeSignal.aborted).toBe(true); expect(stopped).toBe(false);
   closed.resolve(); await stop; expect(stopped).toBe(true);
 });
+
+it("stops before the initial pass without starting native work", async () => {
+  vi.useFakeTimers();
+  const runPass = vi.fn().mockResolvedValue("retry");
+  const owner = startDesktopOwnerDelivery({config: parseDesktopOwnerDeliveryConfig(config), runPass, onError() {}});
+  await owner.stop();
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(runPass).not.toHaveBeenCalled();
+});
+
+it("continues acknowledged work at zero delay and retries even when logging throws", async () => {
+  vi.useFakeTimers();
+  const failure = new Error("Temporary transport failure.");
+  const onError = vi.fn(() => {throw new Error("Logger failed.");});
+  const runPass = vi.fn().mockResolvedValueOnce("acknowledged").mockRejectedValueOnce(failure).mockResolvedValue("empty");
+  const owner = startDesktopOwnerDelivery({config: parseDesktopOwnerDeliveryConfig(config), runPass, onError});
+  await vi.advanceTimersByTimeAsync(1);
+  expect(runPass).toHaveBeenCalledTimes(2);
+  expect(onError).toHaveBeenCalledWith(failure);
+  await vi.advanceTimersByTimeAsync(2499);
+  expect(runPass).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(runPass).toHaveBeenCalledTimes(3);
+  await owner.stop();
+});
+
+it("a deadline aborts the pass but keeps its slot and every stop until actual settlement", async () => {
+  const entered = deferred<AbortSignal>(), settled = deferred<OwnerYDocDrainResult>();
+  const runPass = vi.fn((_document, signal: AbortSignal) => {entered.resolve(signal); return settled.promise;});
+  const owner = startDesktopOwnerDelivery({config: {...parseDesktopOwnerDeliveryConfig(config), attemptTimeoutMs: 10}, runPass, onError() {}});
+  const signal = await entered.promise;
+  await new Promise<void>(resolve => {
+    if (signal.aborted) resolve(); else signal.addEventListener("abort", () => resolve(), {once: true});
+  });
+  const stopped = vi.fn();
+  const stops = [owner.stop().then(stopped), owner.stop().then(stopped)];
+  try {
+    await Promise.resolve();
+    expect(signal.aborted).toBe(true);
+    expect(stopped).not.toHaveBeenCalled();
+    expect(runPass).toHaveBeenCalledTimes(1);
+  } finally {settled.resolve("acknowledged");}
+  await Promise.all(stops);
+  expect(stopped).toHaveBeenCalledTimes(2);
+  expect(runPass).toHaveBeenCalledTimes(1);
+});

@@ -5,6 +5,9 @@ import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {canonicalRelayUrl} from "./syncCode";
 import type {OwnerYDocDrainResult} from "./ownerYDocOutbox";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import {ownerDeliveryWait} from "./ownerDeliveryWait";
 
 export interface DesktopOwnerDeliveryDocument {
   binding: LiveObjectBinding;
@@ -69,20 +72,28 @@ export function startDesktopOwnerDelivery(options: {
   onError(error: unknown): void;
 }) {
   const config = structuredClone(options.config), lifetime = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | undefined, next = 0;
-  function schedule(delayMs: number) {if (!lifetime.signal.aborted) {timer = setTimeout(run, delayMs); timer.unref();}}
-  function run() {
-    timer = undefined;
-    if (lifetime.signal.aborted || active) return;
-    const document = config.documents[next]!; next = (next + 1) % config.documents.length;
-    const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(config.attemptTimeoutMs)]);
-    let result: OwnerYDocDrainResult = "retry";
-    active = Promise.resolve().then(() => options.runPass(document, signal)).then(value => {result = value;})
-      .catch(error => {if (!lifetime.signal.aborted) {try {options.onError(error);} catch { /* Logging cannot abandon retry scheduling. */ }}})
-      .finally(() => {active = undefined; schedule(result === "acknowledged" ? 0 : config.retryDelayMs);});
-  }
-  schedule(0);
+  let next = 0;
+  const finished = Effect.runPromiseExit(Effect.gen(function* () {
+    yield* ownerDeliveryWait(0);
+    while (!lifetime.signal.aborted) {
+      const document = config.documents[next]!; next = (next + 1) % config.documents.length;
+      const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(config.attemptTimeoutMs)]);
+      // Abort the actual pass, then await its native/network resource release.
+      const result = yield* Effect.uninterruptible(Effect.tryPromise({
+        try: () => options.runPass(document, signal),
+        catch: error => error,
+      })).pipe(Effect.catch(error => {
+        if (!lifetime.signal.aborted) {try {options.onError(error);} catch { /* Logging cannot abandon retries. */ }}
+        return Effect.succeed<OwnerYDocDrainResult>("retry");
+      }));
+      yield* ownerDeliveryWait(result === "acknowledged" ? 0 : config.retryDelayMs);
+    }
+  }), {signal: lifetime.signal});
   return {
-    async stop(): Promise<void> {lifetime.abort(); clearTimeout(timer); await active;},
+    async stop(): Promise<void> {
+      lifetime.abort();
+      const exit = await finished;
+      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
+    },
   };
 }
