@@ -275,8 +275,9 @@ impl EngineService {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
             }
-            "authorContext.admit" => {
-                self.admit_author_context(request.workspace.as_ref(), request.params)?
+            #[cfg(feature = "harness")]
+            "harness.authorContext" => {
+                self.harness_author_context(request.workspace.as_ref(), request.params)?
             }
             "engine.ping" => engine_ping(),
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
@@ -501,6 +502,10 @@ impl EngineService {
             }
             "capture.moveFile" => {
                 self.capture_move_file(request.workspace, request.params)
+                    .await?
+            }
+            "capture.restoreTrashed" => {
+                self.capture_restore_trashed(request.workspace, request.params)
                     .await?
             }
             "versions.active" => {
@@ -1248,6 +1253,7 @@ mod tests {
             "capture.reconcile",
             "capture.release",
             "capture.renew",
+            "capture.restoreTrashed",
             "capture.setAuthor",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",

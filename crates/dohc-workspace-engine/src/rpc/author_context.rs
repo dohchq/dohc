@@ -1,7 +1,9 @@
 use crate::EngineService;
 use base64::Engine as _;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
-use dohc_engine_protocol::wire::{Request, WorkspaceHandle};
+use dohc_engine_protocol::wire::Request;
+#[cfg(feature = "harness")]
+use dohc_engine_protocol::wire::WorkspaceHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -14,10 +16,10 @@ struct AuthorContext {
     person_id: String,
 }
 
+#[cfg(feature = "harness")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AdmitParams {
-    host_credential: String,
+struct HarnessAdmitParams {
     person_id: String,
 }
 
@@ -55,16 +57,16 @@ impl EngineService {
             .map_err(|_| refused())
     }
 
-    pub(super) fn admit_author_context(
+    // Integration fixtures sign as the desktop host does. The host signs its
+    // own contexts; production builds have no method that mints one.
+    #[cfg(feature = "harness")]
+    pub(super) fn harness_author_context(
         &self,
         handle: Option<&WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: AdmitParams = super::request::parse(params)?;
+        let params: HarnessAdmitParams = super::request::parse(params)?;
         let secret = self.author_context_secret.get().ok_or_else(refused)?;
-        if !bool::from(secret.as_bytes().ct_eq(params.host_credential.as_bytes())) {
-            return Err(refused());
-        }
         if params.person_id.is_empty()
             || params.person_id.len() > dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES
             || params.person_id.chars().any(char::is_control)
@@ -113,10 +115,13 @@ impl EngineService {
     }
 
     pub(super) fn stamp_local_authorship(&self, request: &mut Request) -> Result<(), WireError> {
+        // Capture records outside disk edits under its author. Only a declared
+        // agent run may be that author; an outside edit is otherwise nobody's.
+        let capture_config =
+            request.method == "capture.setAuthor" || request.method == "workspace.open";
         let supports_author = request.method.starts_with("versionedText.")
             || request.method.starts_with("versionedBinary.")
-            || request.method == "capture.setAuthor"
-            || request.method == "workspace.open";
+            || capture_config;
         let live_update = request.method == "ydoc.recordUpdate";
         if !supports_author && !live_update {
             return Ok(());
@@ -192,6 +197,9 @@ impl EngineService {
                 let author = author.as_object_mut().ok_or_else(refused)?;
                 author.remove("authorContext");
                 let kind = author.get("kind").and_then(Value::as_str);
+                if capture_config && kind != Some("agent") {
+                    return Err(refused());
+                }
                 match person {
                     None if matches!(kind, Some("human" | "agent"))
                         || author.contains_key("onBehalfOf") =>
@@ -213,6 +221,11 @@ impl EngineService {
                     None => {}
                 }
             } else if let Some(person) = person {
+                // A person's context names who wrote a file, never who
+                // authors capture.
+                if capture_config {
+                    return Err(refused());
+                }
                 params.insert(author_key.into(), json!({"kind":"human", "humanId":person}));
             }
         }

@@ -44,6 +44,7 @@ import {
   type AutomationWatchGroupsResult,
   type CaptureFlushResult,
   type CaptureMoveFileResult,
+  type CaptureRestoreTrashedResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
   type CollectionGetRecordResult,
@@ -1621,6 +1622,12 @@ export class VersionedLiveAdapter {
   // One rename that refuses to replace, of a visible regular file, under a hold.
   async moveFileUnderHold(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult> {
     return await this.workspaceRequest(WORKSPACE_METHOD.captureMoveFile, input);
+  }
+
+  // One workspace trash entry back at its place, whole, in one rename that
+  // refuses to replace, under a hold.
+  async restoreTrashedUnderHold(input: { holdId: string; trashName: string; toPath: string }): Promise<CaptureRestoreTrashedResult> {
+    return await this.workspaceRequest(WORKSPACE_METHOD.captureRestoreTrashed, input);
   }
 
   async close(): Promise<void> {

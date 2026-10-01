@@ -53,6 +53,14 @@ struct CaptureMoveFileParams {
     to_path: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaptureRestoreTrashedParams {
+    hold_id: String,
+    trash_name: String,
+    to_path: String,
+}
+
 static NEXT_CAPTURE_HOLD: AtomicU64 = AtomicU64::new(1);
 
 /// Whether the hold is still running. An expired hold ends here, before its
@@ -184,6 +192,100 @@ fn move_visible_file(root: &Path, from: &str, to: &str) -> Result<Option<NotMove
         Err(err) => Err(WireError::new(
             ErrorCode::Internal,
             format!("capture.moveFile could not move the file: {err}"),
+        )),
+    }
+}
+
+/// Moves one entry a person's delete staged in the workspace trash,
+/// `<root>/.dohc/trash/<trash_name>`, back to `to`, its place in the
+/// workspace, in one rename that refuses to replace anything there, an empty
+/// folder included. The entry moves whole and unread: a folder with all it
+/// holds, or a link as the link. `.dohc` and its trash must be real folders
+/// inside the canonical root, and `to` an addressable workspace path whose
+/// parent resolves to itself, so neither end reaches outside the workspace.
+fn restore_trashed_entry(
+    root: &Path,
+    trash_name: &str,
+    to: &str,
+) -> Result<Option<NotMoved>, WireError> {
+    let invalid = |message: &'static str| WireError::new(ErrorCode::InvalidParams, message);
+    let leaf = Path::new(trash_name);
+    let single_leaf = !trash_name.is_empty()
+        && trash_name != "."
+        && trash_name != ".."
+        && !trash_name.contains(['/', '\\'])
+        && !trash_name.chars().any(char::is_control)
+        && leaf.file_name() == Some(leaf.as_os_str());
+    if !single_leaf {
+        return Err(invalid(
+            "capture.restoreTrashed needs one workspace trash entry",
+        ));
+    }
+    let to = match classify_engine_file_path_normalized(to) {
+        (PathClassification::Tracked | PathClassification::Secret, Some(normalized))
+            if normalized == to =>
+        {
+            normalized
+        }
+        _ => return Err(invalid("capture.restoreTrashed needs a workspace path")),
+    };
+    let metadata = root.join(".dohc");
+    let trash = metadata.join("trash");
+    for folder in [&metadata, &trash] {
+        match std::fs::symlink_metadata(folder) {
+            Ok(entry) if entry.is_dir() => {}
+            _ => {
+                return Err(invalid(
+                    "capture.restoreTrashed needs the workspace trash folder",
+                ));
+            }
+        }
+    }
+    let resolved_trash = std::fs::canonicalize(&trash)
+        .map_err(|_| invalid("capture.restoreTrashed needs the workspace trash folder"))?;
+    if resolved_trash != root.join(".dohc").join("trash") {
+        return Err(invalid(
+            "capture.restoreTrashed trash folder leads outside the workspace",
+        ));
+    }
+    // The canonical root is a verbatim path on Windows, where `/` is no
+    // separator, so the destination is built segment by segment.
+    let mut to_abs = root.to_path_buf();
+    to_abs.extend(to.split('/'));
+    let parent = to_abs
+        .parent()
+        .ok_or_else(|| invalid("capture.restoreTrashed needs a workspace path"))?;
+    let resolved_parent = std::fs::canonicalize(parent)
+        .map_err(|_| invalid("capture.restoreTrashed parent folder does not resolve"))?;
+    if resolved_parent != parent {
+        return Err(invalid(
+            "capture.restoreTrashed parent folder leads somewhere else",
+        ));
+    }
+    let from_abs = resolved_trash.join(leaf);
+    match std::fs::symlink_metadata(&from_abs) {
+        Ok(_) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Some(NotMoved::SourceMissing)),
+        Err(err) => {
+            return Err(WireError::new(
+                ErrorCode::Internal,
+                format!("capture.restoreTrashed could not read the entry: {err}"),
+            ));
+        }
+    }
+    match dohc_engine_files::move_file_no_replace(&from_abs, &to_abs) {
+        Ok(()) => Ok(None),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(Some(NotMoved::DestinationExists)),
+        Err(err) if err.kind() == ErrorKind::DirectoryNotEmpty => {
+            Ok(Some(NotMoved::DestinationExists))
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(Some(NotMoved::SourceMissing)),
+        Err(err) if err.kind() == ErrorKind::Unsupported => {
+            Ok(Some(NotMoved::NoReplaceUnsupported))
+        }
+        Err(err) => Err(WireError::new(
+            ErrorCode::Internal,
+            format!("capture.restoreTrashed could not move the entry: {err}"),
         )),
     }
 }
@@ -514,6 +616,175 @@ impl EngineService {
             None => json!({ "moved": true }),
             Some(reason) => json!({ "moved": false, "reason": reason.as_str() }),
         })
+    }
+
+    /// Put one entry a person's delete staged in the workspace trash back at
+    /// its place, whole and unread, in one rename that refuses to replace,
+    /// while the caller's hold keeps capture out. The caller then hands it to
+    /// the system trash from there, whose Restore returns it to that place.
+    /// `restored: false` names why it stayed staged.
+    pub(super) async fn capture_restore_trashed(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CaptureRestoreTrashedParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "capture.restoreTrashed needs the workspace's owning handle",
+            ));
+        }
+        require_capture_hold(&open, Some(&params.hold_id))?;
+        let root = open.root.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            restore_trashed_entry(&root, &params.trash_name, &params.to_path)
+        })
+        .await
+        .map_err(|_| {
+            WireError::new(ErrorCode::Internal, "capture.restoreTrashed worker failed")
+        })??;
+        Ok(match outcome {
+            None => json!({ "restored": true }),
+            Some(reason) => json!({ "restored": false, "reason": reason.as_str() }),
+        })
+    }
+}
+
+#[cfg(test)]
+mod restore_trashed_tests {
+    use super::{NotMoved, restore_trashed_entry};
+    use dohc_engine_testkit::ScratchDir;
+    use std::path::PathBuf;
+
+    fn workspace() -> (ScratchDir, PathBuf) {
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = std::fs::canonicalize(scratch.path()).expect("canonical root");
+        std::fs::create_dir_all(root.join(".dohc").join("trash")).expect("trash");
+        std::fs::create_dir_all(root.join("tasks")).expect("tasks");
+        (scratch, root)
+    }
+
+    fn staged(root: &std::path::Path, name: &str) -> PathBuf {
+        root.join(".dohc").join("trash").join(name)
+    }
+
+    #[test]
+    fn restores_a_whole_folder_in_one_rename() {
+        let (_scratch, root) = workspace();
+        let entry = staged(&root, "1-a-build");
+        std::fs::create_dir_all(entry.join("deep")).expect("staged folder");
+        std::fs::write(entry.join("deep").join("out.js"), "built").expect("staged file");
+        assert_eq!(
+            restore_trashed_entry(&root, "1-a-build", "tasks/build").unwrap(),
+            None
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("tasks").join("build").join("deep").join("out.js"))
+                .unwrap(),
+            "built"
+        );
+        assert!(!entry.exists());
+    }
+
+    #[test]
+    fn never_replaces_what_is_at_the_place_not_even_an_empty_folder() {
+        let (_scratch, root) = workspace();
+        std::fs::create_dir_all(staged(&root, "1-a-build")).expect("staged folder");
+        std::fs::write(staged(&root, "1-a-build").join("out.js"), "built").expect("staged file");
+        std::fs::create_dir_all(root.join("tasks").join("build")).expect("new empty folder");
+        std::fs::write(staged(&root, "2-b-hand.md"), "old").expect("staged file");
+        std::fs::write(root.join("tasks").join("hand.md"), "new").expect("new file");
+        assert_eq!(
+            restore_trashed_entry(&root, "1-a-build", "tasks/build").unwrap(),
+            Some(NotMoved::DestinationExists)
+        );
+        assert_eq!(
+            restore_trashed_entry(&root, "2-b-hand.md", "tasks/hand.md").unwrap(),
+            Some(NotMoved::DestinationExists)
+        );
+        assert!(staged(&root, "1-a-build").join("out.js").exists());
+        assert_eq!(
+            std::fs::read_dir(root.join("tasks").join("build"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("tasks").join("hand.md")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(staged(&root, "2-b-hand.md")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            restore_trashed_entry(&root, "3-gone.md", "tasks/gone.md").unwrap(),
+            Some(NotMoved::SourceMissing)
+        );
+    }
+
+    #[test]
+    fn moves_only_one_trash_entry_to_an_addressable_workspace_path() {
+        let (_scratch, root) = workspace();
+        std::fs::write(staged(&root, "1-a-hand.md"), "old").expect("staged file");
+        for name in [
+            "",
+            ".",
+            "..",
+            "x/1-a-hand.md",
+            "x\\1-a-hand.md",
+            "bell\u{7}",
+        ] {
+            assert!(
+                restore_trashed_entry(&root, name, "tasks/hand.md").is_err(),
+                "{name:?}"
+            );
+        }
+        for to in [
+            ".dohc/hand.md",
+            "tasks/node_modules/hand.md",
+            "../hand.md",
+            "/hand.md",
+            "tasks//hand.md",
+        ] {
+            assert!(
+                restore_trashed_entry(&root, "1-a-hand.md", to).is_err(),
+                "{to}"
+            );
+        }
+        assert!(restore_trashed_entry(&root, "1-a-hand.md", "missing/hand.md").is_err());
+        assert!(staged(&root, "1-a-hand.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_linked_trash_and_linked_parents_and_moves_a_link_as_a_link() {
+        let (_scratch, root) = workspace();
+        let outside = ScratchDir::new().expect("outside");
+        std::fs::write(outside.path().join("kept.txt"), "outside").expect("outside file");
+        std::os::unix::fs::symlink(outside.path(), staged(&root, "1-a-link")).expect("staged link");
+        assert_eq!(
+            restore_trashed_entry(&root, "1-a-link", "tasks/link").unwrap(),
+            None
+        );
+        let restored = std::fs::symlink_metadata(root.join("tasks").join("link")).unwrap();
+        assert!(restored.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("kept.txt")).unwrap(),
+            "outside"
+        );
+
+        std::fs::write(staged(&root, "2-b-hand.md"), "old").expect("staged file");
+        std::os::unix::fs::symlink(outside.path(), root.join("alias")).expect("parent link");
+        assert!(restore_trashed_entry(&root, "2-b-hand.md", "alias/hand.md").is_err());
+
+        std::fs::rename(root.join(".dohc").join("trash"), root.join("moved-trash")).unwrap();
+        std::os::unix::fs::symlink(root.join("moved-trash"), root.join(".dohc").join("trash"))
+            .expect("trash link");
+        assert!(restore_trashed_entry(&root, "2-b-hand.md", "tasks/hand.md").is_err());
+        assert!(!outside.path().join("hand.md").exists());
     }
 }
 

@@ -463,8 +463,8 @@ async fn open_capture_author_stamps_the_startup_baseline() {
         &transport,
         &bootstrap_handle,
         0,
-        "authorContext.admit",
-        json!({"hostCredential":AUTHOR_CONTEXT_SECRET,"personId":"local"}),
+        "harness.authorContext",
+        json!({"personId":"local"}),
     )
     .await;
     call(
@@ -526,6 +526,137 @@ async fn open_capture_author_stamps_the_startup_baseline() {
         json!([author]),
         "initializing CaptureDriver with None makes this actor-neutral."
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_authors_are_declared_agents_never_a_person() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    let context = call(
+        &transport,
+        &handle,
+        2,
+        "harness.authorContext",
+        json!({"personId":"local"}),
+    )
+    .await["authorContext"]
+        .clone();
+    let person = json!({"kind":"human", "humanId":"local"});
+    for (id, params) in [
+        (3, json!({"author": person, "authorContext": context})),
+        (4, json!({"author": person})),
+        (5, json!({"author": null, "authorContext": context})),
+        (6, json!({"authorContext": context})),
+    ] {
+        let refused = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.setAuthor", Some(handle.clone()), params),
+            )
+            .await
+            .expect_err("capture never takes a person as its author");
+        assert_eq!(refused.message, "author-context-required", "request {id}");
+    }
+    // Clearing the author without a context stays neutral.
+    call(
+        &transport,
+        &handle,
+        7,
+        "capture.setAuthor",
+        json!({"author": null}),
+    )
+    .await;
+    for (id, mut params) in [
+        (
+            8,
+            json!({"captureAuthor": person, "authorContext": context}),
+        ),
+        (9, json!({"authorContext": context})),
+    ] {
+        params["rootDir"] = json!(scratch.path().to_string_lossy());
+        params["workspaceId"] = json!(WORKSPACE_ID);
+        let refused = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "workspace.open", None, params),
+            )
+            .await
+            .expect_err("an open never makes a person its capture author");
+        assert_eq!(refused.message, "author-context-required", "request {id}");
+    }
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(10, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outside_edits_stay_unattributed_once_the_agent_capture_author_clears() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let agent = json!({
+        "kind": "agent",
+        "agentId": "agent",
+        "onBehalfOf": "local",
+        "agentRunId": "run",
+    });
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    call(
+        &transport,
+        &handle,
+        100,
+        "capture.setAuthor",
+        json!({"author": agent}),
+    )
+    .await;
+    write_file(scratch.path(), "by-agent.md", b"agent edit");
+    reconcile_until_settled(&transport, &handle, 200).await;
+    call(
+        &transport,
+        &handle,
+        300,
+        "capture.setAuthor",
+        json!({"author": null}),
+    )
+    .await;
+    write_file(scratch.path(), "outside.md", b"outside edit");
+    reconcile_until_settled(&transport, &handle, 400).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(500, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let store = EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 100)
+        .expect("reopen store");
+    let author_json = |path: &str| -> Option<String> {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_json FROM moments WHERE path = ?1",
+                    [path],
+                    |row| row.get(0),
+                )
+            })
+            .expect("captured moment")
+    };
+    let by_agent: Value = serde_json::from_str(
+        author_json("by-agent.md")
+            .as_deref()
+            .expect("the agent's edit keeps its author"),
+    )
+    .expect("valid author json");
+    assert_eq!(by_agent, json!([agent]));
+    assert_eq!(author_json("outside.md"), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -211,6 +211,17 @@ function idempotencyKeyReuseRefusal(): Error {
   });
 }
 
+// The literal from crates/dohc-workspace-engine/src/rpc/author_context.rs.
+function authorContextRequiredRefusal(): Error {
+  return Object.assign(new Error("author-context-required"), {
+    wireError: {
+      code: "FORBIDDEN",
+      message: "author-context-required",
+      retry: "no",
+    },
+  });
+}
+
 function optionalBoolean(object: JsonObject, key: string): boolean | undefined {
   const value = object[key];
   if (value === undefined) return undefined;
@@ -290,7 +301,10 @@ export class YdocLoopbackEngine implements EngineTransport {
   readonly responses: Response[] = [];
   readonly events: Event[] = [];
   readonly recordedUpdates: Uint8Array[] = [];
+  // The author the engine stamped on each recorded update, beside it.
+  readonly recordedAuthors: Array<{ actorOriginId: string | null; attribution: JsonValue | null }> = [];
   readonly helloAck = { capabilities: ["blobs"] } as const;
+  private readonly authorContexts = new Map<string, string>();
 
   private readonly files = new Map<string, LoopbackFile>();
   private readonly sessions = new Map<string, LoopbackSession>();
@@ -319,6 +333,48 @@ export class YdocLoopbackEngine implements EngineTransport {
   >();
 
   constructor(private readonly options: YdocLoopbackEngineOptions = {}) {}
+
+  // Test fixtures declare host admission explicitly. Native RPC tests prove its authority.
+  admitAuthorContextForTest(authorContext: string, personId: string): void {
+    this.authorContexts.set(authorContext, personId);
+  }
+
+  // Mirrors `stamp_local_authorship` for ydoc.recordUpdate: the person comes
+  // only from an admitted context. A declared agent or automation is scoped
+  // to that person, a bare update is the person's own, and a client claim of
+  // a person is refused.
+  private stampAuthor(params: JsonObject): JsonObject {
+    const { authorContext, ...stamped } = params;
+    let person: string | undefined;
+    if (authorContext !== undefined) {
+      person = typeof authorContext === "string" ? this.authorContexts.get(authorContext) : undefined;
+      if (person === undefined) throw authorContextRequiredRefusal();
+    }
+    if (stamped.seed === true) {
+      // The engine records a seed under no author (`ydoc_record_update`), so
+      // neither its key nor History carries one.
+      delete stamped.actorOriginId;
+      delete stamped.attribution;
+      return stamped;
+    }
+    const attribution = stamped.attribution;
+    const declared = attribution !== null && typeof attribution === "object" && !Array.isArray(attribution)
+      ? attribution : undefined;
+    const kind = declared?.actorKind;
+    if (person === undefined) {
+      if (kind === "human" || kind === "agent" || declared?.onBehalfOf !== undefined) {
+        throw authorContextRequiredRefusal();
+      }
+      return stamped;
+    }
+    if (kind === undefined) {
+      if (attribution !== undefined || stamped.actorOriginId !== undefined) throw authorContextRequiredRefusal();
+      return { ...stamped, actorOriginId: person,
+        attribution: { actorKind: "human", onBehalfOf: person, depth: 0 } };
+    }
+    if ((kind !== "agent" && kind !== "automation") || declared === undefined) throw authorContextRequiredRefusal();
+    return { ...stamped, attribution: { ...declared, onBehalfOf: person } };
+  }
 
   seedFile(input: SeedLoopbackFileInput): void {
     const key = fileKey(input.workspace, input.versionId, input.path);
@@ -644,7 +700,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     ) {
       throw new Error("ydoc.recordUpdate requires an idempotency key.");
     }
-    const params = asObject(request.params, "ydoc.recordUpdate params");
+    const params = this.stampAuthor(asObject(request.params, "ydoc.recordUpdate params"));
     const session = this.requireSession(
       requiredString(params, "sessionId", "ydoc.recordUpdate params"),
     );
@@ -655,8 +711,10 @@ export class YdocLoopbackEngine implements EngineTransport {
     const seed = optionalBoolean(params, "seed") ?? false;
     // A seed can only be the first update of a lineage-absent session —
     // mirrors the daemon refusal in crates/dohc-workspace-engine/src/lib.rs.
+    // The key covers the stamped author, so a retry keeps its original
+    // person and a person changed under the same key is refused.
     const payload = JSON.stringify([this.lineageKeyFor(session), sha256(update),
-      params.actorOriginId ?? null, params.attribution ?? null, params.authorContext ?? null, seed]);
+      params.actorOriginId ?? null, params.attribution ?? null, seed]);
     const recorded = this.recordRequests.get(request.idempotencyKey);
     if (recorded !== undefined) {
       if (recorded.payload !== payload) throw idempotencyKeyReuseRefusal();
@@ -676,6 +734,10 @@ export class YdocLoopbackEngine implements EngineTransport {
       entry.settledUpdates = entry.journaledUpdates;
     }
     this.recordedUpdates.push(update);
+    this.recordedAuthors.push({
+      actorOriginId: typeof params.actorOriginId === "string" ? params.actorOriginId : null,
+      attribution: params.attribution ?? null,
+    });
     session.updateSeq += 1;
     const result = { seq: session.updateSeq, lineageClaimId: null };
     this.recordRequests.set(request.idempotencyKey, { payload, result });

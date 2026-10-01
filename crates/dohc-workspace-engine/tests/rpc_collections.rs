@@ -542,27 +542,42 @@ async fn assert_capture_authored_record_edit(human: bool) {
     } else {
         "agent-collection-capture"
     };
-    let author = if human {
-        json!({"kind":"human", "humanId":agent_id, "onBehalfOf":"local"})
-    } else {
-        json!({"kind":"agent", "agentId":agent_id, "onBehalfOf":"local", "agentRunId":"run-collection-capture"})
-    };
-    call(
-        &transport,
-        &handle,
-        61,
-        "capture.setAuthor",
-        json!({
-            "author": author
-        }),
-    )
-    .await;
     let record_path = collection_dir.join("alpha.md");
     let edited = std::fs::read_to_string(&record_path)
         .expect("read adopted record")
         .replace("status: open", "status: done");
-    std::fs::write(&record_path, edited).expect("agent edits record file");
-    reconcile_capture(&transport, &handle, 70).await;
+    if human {
+        // A person's edit is their own write. Capture never takes a person
+        // as its author, and the engine replaces the declared one.
+        call(
+            &transport,
+            &handle,
+            61,
+            "versionedText.write",
+            json!({
+                "workspaceId": WORKSPACE_ID,
+                "versionId": "main",
+                "path": "tasks/alpha.md",
+                "text": edited,
+                "origin": "api",
+                "author": {"kind":"human", "humanId":"forged-person", "onBehalfOf":"local"},
+            }),
+        )
+        .await;
+    } else {
+        call(
+            &transport,
+            &handle,
+            61,
+            "capture.setAuthor",
+            json!({
+                "author": {"kind":"agent", "agentId":agent_id, "onBehalfOf":"local", "agentRunId":"run-collection-capture"}
+            }),
+        )
+        .await;
+        std::fs::write(&record_path, edited).expect("agent edits record file");
+        reconcile_capture(&transport, &handle, 70).await;
+    }
 
     let record = call(
         &transport,
@@ -4198,6 +4213,6 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn capture_human_record_edit_keeps_person_in_field_history() {
+async fn person_record_write_keeps_person_in_field_history() {
     assert_capture_authored_record_edit(true).await;
 }

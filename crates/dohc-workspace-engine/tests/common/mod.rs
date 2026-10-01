@@ -25,8 +25,9 @@ pub fn authored_service() -> EngineService {
     service
 }
 
-// Success-path fixtures declare their person through the private host seam.
-// Spoofing tests call the transport directly and do not use this helper.
+// Success-path fixtures sign their person as the desktop host does, through
+// the harness-only signer. Spoofing tests call the transport directly and do
+// not use this helper.
 pub async fn trusted_fixture_params(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -52,9 +53,9 @@ pub async fn trusted_fixture_params(
                 RequestContext::unbounded(),
                 request(
                     u64::MAX - 1,
-                    "authorContext.admit",
+                    "harness.authorContext",
                     Some(handle.clone()),
-                    json!({"hostCredential":AUTHOR_CONTEXT_SECRET,"personId":person}),
+                    json!({"personId":person}),
                 ),
             )
             .await

@@ -5435,6 +5435,7 @@ describe("immutable original-record recovery", () => {
 
   it.each(["recovery", "resend"] as const)("restores an acknowledged base as a neutral seed before originals during %s", async mode => {
     const engine = seedPlaintextEngine("abc");
+    engine.admitAuthorContextForTest("bob-context", "bob");
     let fail = false;
     const attempts: Request[] = [];
     const busy = new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined);
@@ -5457,7 +5458,7 @@ describe("immutable original-record recovery", () => {
     attempts.length = 0;
     fail = true;
     const edit = session.applyLocalTextEdit({ root: "plainText", index: 2, insert: "d" },
-      { idempotencyKey: "bob-original", actorOriginId: "bob-agent",
+      { idempotencyKey: "bob-original", authorContext: "bob-context", actorOriginId: "bob-agent",
         attribution: { actorKind: "agent", onBehalfOf: "bob", depth: 1 } });
     if (mode === "resend") {
       await expect(edit).rejects.toBe(busy);
@@ -5590,6 +5591,7 @@ describe("immutable original-record recovery", () => {
         return engine.sendRequest(request);
       },
     });
+    engine.admitAuthorContextForTest("original-alice-context", "alice");
     const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
     const before = engine.recordedUpdates.length;
     const attribution = { actorKind: "automation" as const, onBehalfOf: "alice", depth: 2,
@@ -5614,6 +5616,8 @@ describe("immutable original-record recovery", () => {
 
   it("replays mixed pending authors separately, including an original deletion-only record", async () => {
     const engine = seedPlaintextEngine("abc");
+    engine.admitAuthorContextForTest("alice-context", "alice");
+    engine.admitAuthorContextForTest("bob-context", "bob");
     let busy = false;
     const accepted: Request[] = [];
     const refused: Request[] = [];
@@ -5653,13 +5657,15 @@ describe("immutable original-record recovery", () => {
     adapter.dispose();
   });
 
-  it.each(["author", "bytes", "run name", "run claim"])("refuses changed %s reuse even when the local document already holds the update", async change => {
+  it.each(["author", "person", "bytes", "run name", "run claim"])("refuses changed %s reuse even when the local document already holds the update", async change => {
     const engine = seedPlaintextEngine();
+    engine.admitAuthorContextForTest("alice-context", "alice");
+    engine.admitAuthorContextForTest("bob-context", "bob");
     const adapter = new YdocLiveAdapter(engine);
     const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
     const source = new Y.Doc();
     const update = (() => { source.getText("plainText").insert(0, "a"); return Y.encodeStateAsUpdate(source); })();
-    const options = { idempotencyKey: "fixed-id", actorOriginId: "automation-a",
+    const options = { idempotencyKey: "fixed-id", authorContext: "alice-context", actorOriginId: "automation-a",
       attribution: { actorKind: "automation" as const, onBehalfOf: "alice", depth: 2,
         run: { claimId: "run-a", automationName: "Original name" } } };
     await session.applyLocalUpdate(update, options);
@@ -5668,6 +5674,7 @@ describe("immutable original-record recovery", () => {
     expect(engine.recordedUpdates).toHaveLength(before);
     const changed = structuredClone(options);
     if (change === "author") changed.actorOriginId = "automation-b";
+    if (change === "person") changed.authorContext = "bob-context";
     if (change === "run name") changed.attribution.run.automationName = "New name";
     if (change === "run claim") changed.attribution.run.claimId = "run-b";
     if (change === "bytes") source.getText("plainText").insert(1, "b");
@@ -5676,6 +5683,65 @@ describe("immutable original-record recovery", () => {
     expect(engine.recordedUpdates).toHaveLength(before);
     await session.evict();
     adapter.dispose();
+    source.destroy();
+  });
+
+  it("stamps the admitted person and refuses a client's person claim", async () => {
+    const engine = seedPlaintextEngine();
+    engine.admitAuthorContextForTest("alice-context", "alice");
+    engine.admitAuthorContextForTest("alice-again", "alice");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    const insert = (text: string) => {
+      const source = new Y.Doc();
+      source.getText("plainText").insert(0, text);
+      const update = Y.encodeStateAsUpdate(source);
+      source.destroy();
+      return update;
+    };
+    const typed = insert("a");
+    await session.applyLocalUpdate(typed, { idempotencyKey: "typed", authorContext: "alice-context" });
+    await session.applyLocalUpdate(insert("b"), { authorContext: "alice-context", actorOriginId: "agent-a",
+      attribution: { actorKind: "agent", onBehalfOf: "mallory", depth: 1 } });
+    expect(engine.recordedAuthors.slice(-2)).toEqual([
+      { actorOriginId: "alice", attribution: { actorKind: "human", onBehalfOf: "alice", depth: 0 } },
+      { actorOriginId: "agent-a", attribution: { actorKind: "agent", onBehalfOf: "alice", depth: 1 } },
+    ]);
+    const recorded = engine.recordedUpdates.length;
+    // Another context naming the same person is the same request.
+    await session.applyLocalUpdate(typed, { idempotencyKey: "typed", authorContext: "alice-again" });
+    expect(engine.recordedUpdates).toHaveLength(recorded);
+    for (const claim of [
+      { actorOriginId: "mallory", attribution: { actorKind: "human" as const, onBehalfOf: "mallory" } },
+      { actorOriginId: "agent-a", attribution: { actorKind: "agent" as const, onBehalfOf: "mallory", depth: 1 } },
+      { authorContext: "forged-context" },
+      { authorContext: "alice-context", attribution: { actorKind: "human" as const } },
+    ]) {
+      await expect(session.applyLocalUpdate(insert("x"), claim)).rejects.toThrow("author-context-required");
+    }
+    expect(engine.recordedUpdates).toHaveLength(recorded);
+    await session.evict();
+    adapter.dispose();
+  });
+
+  it("records a seed under no author, so a retry that changes its declared author is the same seed", async () => {
+    const engine = seedPlaintextEngine("abc");
+    engine.admitAuthorContextForTest("alice-context", "alice");
+    const opened = (await engine.sendRequest({ id: 1, method: YDOC_METHOD.open, workspace: WORKSPACE,
+      params: { versionId: VERSION, path: PATH } })).result as { sessionId: string };
+    const source = new Y.Doc();
+    source.getText("plainText").insert(0, "abc");
+    const updateBase64 = Buffer.from(Y.encodeStateAsUpdate(source)).toString("base64");
+    const seed = (id: number, claim: Record<string, JsonValue>) => engine.sendRequest({
+      id, method: YDOC_METHOD.recordUpdate, workspace: WORKSPACE, idempotencyKey: "seed-original",
+      params: { sessionId: opened.sessionId, updateBase64, seed: true, ...claim },
+    });
+    const first = await seed(2, { authorContext: "alice-context", actorOriginId: "agent-a",
+      attribution: { actorKind: "agent", onBehalfOf: "mallory", depth: 1 } });
+    const retried = await seed(3, { actorOriginId: "mallory", attribution: { actorKind: "human", onBehalfOf: "mallory" } });
+    expect(retried.result).toEqual(first.result);
+    expect(engine.recordedUpdates).toHaveLength(1);
+    expect(engine.recordedAuthors).toEqual([{ actorOriginId: null, attribution: null }]);
     source.destroy();
   });
 });

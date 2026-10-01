@@ -44,8 +44,8 @@ async fn context(
         transport,
         handle,
         3,
-        "authorContext.admit",
-        json!({"hostCredential":SECRET,"personId":person}),
+        "harness.authorContext",
+        json!({"personId":person}),
     )
     .await["authorContext"]
         .clone()
@@ -55,6 +55,7 @@ async fn context(
 async fn stamped_originals_keep_people_through_switch_and_restart() {
     let scratch = ScratchDir::new().unwrap();
     let (transport, handle) = open(&scratch).await;
+    // The host signs its own contexts; no engine method mints one for a client.
     assert!(
         transport
             .call(
@@ -63,7 +64,7 @@ async fn stamped_originals_keep_people_through_switch_and_restart() {
                     4,
                     "authorContext.admit",
                     Some(handle.clone()),
-                    json!({"hostCredential":"ordinary-rpc-token","personId":"forged"})
+                    json!({"hostCredential":SECRET,"personId":"forged"})
                 )
             )
             .await
