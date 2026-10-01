@@ -271,7 +271,16 @@ export async function verify(args) {
           if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
         }
         if (proofs.desktop) {
-          const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", mode === "pr" ? "@verification-smoke|@self-host-onboarding" : "@verification-smoke"];
+          // The states page compares its baselines on Windows, where they were
+          // taken. Elsewhere its pixel test skips itself, which the skip check
+          // below would count as a failure, so it is left out and the report
+          // says so. @states-page selects both of its tests; the pixel test
+          // alone carries @states-baselines, and that is the proof required.
+          const gallery = mode === "pr" && proofs.statesPage && process.platform === "win32";
+          if (mode === "pr" && proofs.statesPage && !gallery) { report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save(); }
+          const selected = mode === "pr" ? ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-page"] : [])] : ["@verification-smoke"];
+          const required = mode === "pr" ? ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-baselines"] : [])] : ["@verification-smoke"];
+          const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", selected.join("|")];
           const jsonReport = join(output, "playwright.json");
           await proofStep("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env }), { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
           const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
@@ -279,7 +288,7 @@ export async function verify(args) {
           report.desktopProofs = passedSpecTitles(desktopReport.suites);
           if (!report.desktop?.expected || report.desktop.unexpected || report.desktop.flaky) throw new Error("Desktop verification did not complete a passing test run.");
           if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
-          if (mode === "pr" && ["@verification-smoke", "@self-host-onboarding"].some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error("The desktop gate did not pass both persistence and self-host onboarding proofs.");
+          if (mode === "pr" && required.some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error(`The desktop gate did not pass every required proof: ${required.join(", ")}.`);
         }
       }
       if (mode === "pr" && gates.js) {

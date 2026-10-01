@@ -3,11 +3,16 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { DocumentMenu } from "../DocumentMenu";
 import { OverlayFrame } from "../Overlay";
-import { SegmentedControl, SwitchControl, TextControl } from "../settings/SettingRow";
+import { ColorControl, HueControl, SegmentedControl, SwitchControl, TextControl } from "../settings/SettingRow";
 import { CopyDetailsButton } from "../shell/copyDetails";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
 import { EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { MoreMenu } from "../ui/MoreMenu";
+import { FolderChip, Step } from "../ui/Step";
+import { AgentBadge } from "../workbench/AgentBadge";
+import { AutomationBadge } from "../workbench/AutomationBadge";
+import { ChatAvatar } from "../workbench/ChatAvatar";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { PanelLoading } from "../workbench/PanelLoading";
@@ -18,19 +23,30 @@ import { closeStatesPage } from "./statesRoute";
 // pixel baselines in e2e/states-page.spec.ts. Nothing here is product.
 //
 // The parts are the real ones, so a change to a part changes the capture.
+// Each section is one part, named by `data-part`, and the capture takes one
+// baseline per part per theme: a PR that changes one part updates that
+// part's pair of PNGs and no other.
+//
 // A state a part reaches through a prop (selected, active, disabled) is
 // passed as that prop. A state the browser owns (hover, focus-visible,
 // focus) is marked with `data-force-state`, and the capture forces it on
 // that element through the browser's own pseudo-class forcing, so the
 // part's own rules apply. `data-force-target` names a descendant when the
-// part does not take the attribute itself. On the page itself, hover the
-// parts.
+// part does not take the attribute itself. A state a part reaches by being
+// used (a menu open, a copy acknowledged) is reached that way: the capture
+// opens the menu or presses the button. On the page itself, hover and press
+// the parts.
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
-function Section(props: { title: string; children: ReactNode }) {
+// A floating part draws a shadow up to 38px below and 28px beside itself,
+// and its whole shadow must stay in its own capture. The toasts get this
+// padding; the menus get the same room from their taller boxes.
+const SHADOW_ROOM = "p-10";
+
+function Section(props: { part: string; title: string; children: ReactNode }) {
   return (
-    <section className="flex flex-col gap-3">
+    <section data-part={props.part} className="flex flex-col gap-3">
       <SectionLabel as="h3" className="m-0">
         {props.title}
       </SectionLabel>
@@ -110,6 +126,7 @@ function Row(props: {
 }
 
 const RELAY_ERROR = "dohc could not reach the sync relay. Check your connection.";
+const FOLDER = "C:\\Users\\ice\\Research";
 
 function toast(tone: "danger" | "success") {
   return {
@@ -172,15 +189,25 @@ const themeOptions = [
   { value: "system", label: "System" },
 ];
 
+const menuItems = [
+  { label: "Rename", onSelect: noop },
+  { label: "Duplicate", onSelect: noop },
+  { label: "Move to…", onSelect: noop },
+  { label: "Delete", onSelect: noop, disabled: true },
+];
+
+const avatarSizes = ["post", "comment", "strip"] as const;
+
 function Pane(props: { theme: "light" | "dark" }) {
+  const { theme } = props;
   return (
     <section
-      data-theme={props.theme}
-      data-testid={`states-${props.theme}`}
-      aria-label={`${props.theme} theme`}
+      data-theme={theme}
+      data-testid={`states-${theme}`}
+      aria-label={`${theme} theme`}
       className="flex min-w-0 flex-col gap-8 bg-bg p-6 text-ink"
     >
-      <Section title="Surfaces and states">
+      <Section part="surfaces" title="Surfaces and states">
         <Swatch label="bg" className="bg-bg" />
         <Swatch label="panel" className="bg-panel" />
         <Swatch label="panel-2" className="bg-panel-2" />
@@ -192,7 +219,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Swatch label="agent" className="bg-agent" />
       </Section>
 
-      <Section title="Buttons">
+      <Section part="buttons" title="Buttons">
         <Specimen label="primary: rest, hover, focus-visible, disabled">
           <PrimaryButton>Save</PrimaryButton>
           <PrimaryButton data-force-state="hover">Save</PrimaryButton>
@@ -228,21 +255,55 @@ function Pane(props: { theme: "light" | "dark" }) {
           <IconButton aria-label="More" data-force-state="focus-visible"><MoreHorizontal size={14} aria-hidden /></IconButton>
           <IconButton aria-label="More" disabled><MoreHorizontal size={14} aria-hidden /></IconButton>
         </Specimen>
-        <Specimen label="copy: rest, hover">
-          <CopyButton getText={() => ""} testId={`states-copy-${props.theme}`} />
+      </Section>
+
+      {/* The copied and refused ones are pressed by the capture; press them
+          yourself on the page. */}
+      <Section part="copy" title="Copy">
+        <Specimen label="copy: rest, hover, copied, refused">
+          <CopyButton getText={() => ""} testId={`states-copy-${theme}`} />
           <span data-force-state="hover" data-force-target="button">
-            <CopyButton getText={() => ""} testId={`states-copy-hover-${props.theme}`} />
+            <CopyButton getText={() => ""} testId={`states-copy-hover-${theme}`} />
           </span>
+          <CopyButton getText={() => "wss://relay.dohc.dev"} testId={`states-copy-copied-${theme}`} />
+          <CopyButton
+            getText={() => {
+              throw new Error("nothing to copy");
+            }}
+            testId={`states-copy-refused-${theme}`}
+          />
+        </Specimen>
+        <Specimen label="copy details: rest, icon, copied, icon copied">
           <CopyDetailsButton label="Copy details" details={() => ""} />
           <CopyDetailsButton iconOnly label="Copy details" details={() => ""} />
+          <CopyDetailsButton
+            label="Copy details"
+            details={() => RELAY_ERROR}
+            data-testid={`states-copy-details-copied-${theme}`}
+          />
+          <CopyDetailsButton
+            iconOnly
+            label="Copy details"
+            details={() => RELAY_ERROR}
+            data-testid={`states-copy-details-icon-copied-${theme}`}
+          />
         </Specimen>
-        <Specimen label="segmented: rest, hover on first">
+      </Section>
+
+      <Section part="segmented" title="Segmented control">
+        <Specimen label="rest, hover on first, focus-visible on checked">
           <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
           <span data-force-state="hover" data-force-target="[role=radio]">
             <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
           </span>
+          <span data-force-state="focus-visible" data-force-target="[aria-checked=true]">
+            <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
+          </span>
         </Specimen>
-        <Specimen label="switch: on, off, focus-visible, disabled">
+      </Section>
+
+      <Section part="switch" title="Switch">
+        <Specimen label="on, off, focus-visible, disabled">
           <SwitchControl label="Sync" checked onChange={noop} />
           <SwitchControl label="Sync" checked={false} onChange={noop} />
           <span data-force-state="focus-visible" data-force-target="[role=switch]">
@@ -252,7 +313,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      <Section title="Chips">
+      <Section part="chips" title="Chips">
         <Specimen label="pill: neutral, success, warning, danger, agent">
           <Pill>12</Pill>
           <Pill className="text-success">Synced</Pill>
@@ -270,7 +331,34 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      <Section title="Text inputs">
+      <Section part="avatars" title="Avatars">
+        <Specimen label="human: post, comment, strip">
+          {avatarSizes.map((size) => (
+            <ChatAvatar key={size} name="Ice de Vera" kind="human" size={size} />
+          ))}
+        </Specimen>
+        <Specimen label="agent: post, comment, strip">
+          {avatarSizes.map((size) => (
+            <ChatAvatar key={size} name="Agent" kind="agent" size={size} />
+          ))}
+        </Specimen>
+        <Specimen label="automation: post, comment, strip">
+          {avatarSizes.map((size) => (
+            <ChatAvatar key={size} name="Nightly digest" kind="automation" size={size} />
+          ))}
+        </Specimen>
+      </Section>
+
+      <Section part="badges" title="Badges">
+        <Specimen label="agent, automation">
+          <span className="text-[13px] font-medium text-ink">Agent</span>
+          <AgentBadge testIdPrefix={`states-${theme}`} author={{ authorDisplayName: "Agent", authorOwnerDisplayName: "You" }} />
+          <span className="ml-4 text-[13px] font-medium text-ink">Nightly digest</span>
+          <AutomationBadge testIdPrefix={`states-${theme}`} author={{ authorDisplayName: "Nightly digest" }} />
+        </Specimen>
+      </Section>
+
+      <Section part="text-inputs" title="Text inputs">
         <Specimen label="rest">
           <TextControl label="Relay" value="" placeholder="wss://relay.example" onChange={noop} />
         </Specimen>
@@ -284,7 +372,44 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      <Section title="List rows">
+      <Section part="steps" title="Steps">
+        <div className="w-80">
+          <Step number={1} title="Sign in on this machine" state="done" summary="ice@example.com" />
+          <Step number={2} title="Choose an empty folder on this machine" state="current">
+            <FolderChip folder={null} placeholder="Choose a folder" onClick={noop} />
+          </Step>
+          <Step number={3} title="Enter the code from your other machine" state="pending" last />
+        </div>
+      </Section>
+
+      <Section part="folder-chip" title="Folder chip">
+        <Specimen label="empty">
+          <div className="w-64"><FolderChip folder={null} placeholder="Choose a folder" onClick={noop} /></div>
+        </Specimen>
+        <Specimen label="chosen">
+          <div className="w-64"><FolderChip folder={FOLDER} placeholder="Choose a folder" onClick={noop} /></div>
+        </Specimen>
+        <Specimen label="hover">
+          <div className="w-64" data-force-state="hover" data-force-target="button">
+            <FolderChip folder={FOLDER} placeholder="Choose a folder" onClick={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="hue-control" title="Hue control">
+        <Specimen label="person, olive chosen">
+          <HueControl label="Your color" value="olive" shape="person" onChange={noop} />
+        </Specimen>
+        <Specimen label="agent, none chosen">
+          <HueControl label="Your agent's color" value={null} shape="agent" onChange={noop} />
+        </Specimen>
+      </Section>
+
+      <Section part="color-control" title="Color control">
+        <ColorControl label="Accent" value="#6b7230" onChange={noop} />
+      </Section>
+
+      <Section part="list-rows" title="List rows">
         <ul role="tree" aria-label="Rows" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
           <Row name="rest" folder />
           <Row name="hover" force="hover" />
@@ -293,33 +418,57 @@ function Pane(props: { theme: "light" | "dark" }) {
           <Row name="focused" focused />
           <Row name="drop target" folder drop />
         </ul>
-        <Specimen label="document menu">
-          <div className="flex h-48 w-56 items-start justify-end">
-            <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
+      </Section>
+
+      {/* Both menus are opened by the capture, and their boxes are tall
+          enough for the open menu and its shadow. The ••• menu's first row
+          takes keyboard focus when it opens; forcing focus there draws the
+          same row the same way whether or not focus has since moved on. */}
+      <Section part="menu" title="Menu">
+        <Specimen label="rows: keyboard-active, hover, rest, disabled">
+          <div
+            className="flex h-56 w-56 items-start justify-end"
+            data-force-state="focus"
+            data-force-target="[role=menuitem]:nth-child(1)"
+          >
+            <div data-force-state="hover" data-force-target="[role=menuitem]:nth-child(2)">
+              <MoreMenu label="More for Research" items={menuItems} testId={`states-menu-${theme}`} />
+            </div>
           </div>
         </Specimen>
       </Section>
 
-      <Section title="Empty and loading">
+      <Section part="document-menu" title="Document menu">
+        <div className="flex h-64 w-56 items-start justify-end">
+          <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
+        </div>
+      </Section>
+
+      <Section part="empty" title="Empty">
         <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
           <EmptyState title='No files match "budget".' hint="Try a shorter search.">
             <button type="button" className={KBD}>Clear search</button>
           </EmptyState>
         </div>
+      </Section>
+
+      <Section part="loading" title="Loading">
         <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
           <PanelLoading label="files" />
         </div>
       </Section>
 
-      <Section title="Toasts">
-        <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
-        <div data-force-state="hover" data-force-target="[data-testid='workspace-shell-error-retry']">
+      <Section part="toasts" title="Toasts">
+        <div className={`flex w-full flex-wrap items-start gap-x-6 gap-y-4 ${SHADOW_ROOM}`}>
           <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
+          <div data-force-state="hover" data-force-target="[data-testid='workspace-shell-error-retry']">
+            <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
+          </div>
+          <WorkspaceErrorToast error={toast("success")} onHide={noop} />
         </div>
-        <WorkspaceErrorToast error={toast("success")} onHide={noop} />
       </Section>
 
-      <Section title="Notices">
+      <Section part="notices" title="Notices">
         <div className="w-[420px] rounded-lg border border-line bg-panel text-xs text-ink">
           <SectionLabel as="h3" className="m-0 px-3 pb-1 pt-2">
             On this computer
@@ -332,8 +481,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </div>
       </Section>
 
-      <Section title="Dialog">
-        <DialogSpecimen theme={props.theme} />
+      <Section part="dialog" title="Dialog">
+        <DialogSpecimen theme={theme} />
       </Section>
     </section>
   );
