@@ -5,7 +5,6 @@ import { ArrowLeft, MessageSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatMessageRecord,
-  ChatReactionRecord,
   ChatThreadRecord,
   ListFileChatsResponse,
 } from "../../ipc/bridgeContract";
@@ -15,9 +14,8 @@ import {
   ChatMessageList,
   type ChatMessageListHandle,
   chatAuthorLabel,
-  runReactionToggle,
-  type PendingReactionCell,
 } from "./chatMessages";
+import { useReactions, type ReactionView } from "./reactionStore";
 
 // Linked Chats surface (PR 0M-5) — the Chats panel's "This file" tab. Per-file Chats
 // stored in the engine and linked to the file's stable object id, so a chat
@@ -42,6 +40,8 @@ function ReadOnlyNotice() {
     </p>
   );
 }
+
+const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
 
 type ThreadsState =
   | { status: "loading" }
@@ -103,15 +103,11 @@ export function LinkedChatsPanel(props: {
   const [activeThread, setActiveThread] = useState<ChatThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
-  const [reactions, setReactions] = useState<ChatReactionRecord[]>([]);
-  const [viewerAuthorId, setViewerAuthorId] = useState("");
   const [creating, setCreating] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
   const liveToken = useRef(0);
-  // The viewer's reaction writes in flight, one entry per (message, emoji)
-  // cell (see runReactionToggle).
-  const pendingReactions = useRef(new Map<string, PendingReactionCell>());
+  const reactions = useReactions();
   const listRef = useRef<ChatMessageListHandle | null>(null);
 
   const refreshThreads = useCallback(async () => {
@@ -179,17 +175,17 @@ export function LinkedChatsPanel(props: {
       const token = ++liveToken.current;
       setActiveThread(thread);
       setMessages([]);
-      setReactions([]);
       setMessagesLoading(true);
       try {
+        const ticket = reactions.ticket();
         const [result, reactionResult] = await Promise.all([
           bridge().listChatMessages({ workspaceId, threadId: thread.id }),
           bridge().listChatReactions({ workspaceId, threadId: thread.id }),
         ]);
+        // What the server holds is news for every surface, still open or not.
+        reactions.ingest([{ threadId: thread.id, ...reactionResult, ticket }]);
         if (token !== liveToken.current) return;
         setMessages(result.messages);
-        setReactions(reactionResult.reactions);
-        setViewerAuthorId(reactionResult.viewerAuthorId);
         // Everything on screen is read. Reporting waits for the write to
         // land: the navigator refetches on that signal, and refetching earlier
         // would read the same count back.
@@ -223,7 +219,7 @@ export function LinkedChatsPanel(props: {
         if (token === liveToken.current) setMessagesLoading(false);
       }
     },
-    [props.onError, props.onThreadRead, workspaceId],
+    [props.onError, props.onThreadRead, reactions, workspaceId],
   );
 
   // Consume each search-result click once. The shell creates a fresh record
@@ -299,28 +295,24 @@ export function LinkedChatsPanel(props: {
     }
   }, [activeThread, composer, props.onError, sending, workspaceId]);
 
-  // Reactions (WS-MU-C2): optimistic toggle of the viewer's own reaction with
-  // rollback-on-failure and per-cell ordering, then reconcile to the canonical
-  // server list. Shared with the Chats view so behavior can never drift.
+  // Reactions (WS-MU-C2) go through the workspace's reaction store, shared
+  // with every Chats surface: this thread's rows as the store knows them.
+  const threadReactions = activeThread ? reactions.view(activeThread.id) : NO_REACTIONS;
   const toggleReaction = useCallback(
     (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
       const thread = activeThread;
-      if (!thread) return;
-      runReactionToggle(
-        {
-          workspaceId,
-          threadId: thread.id,
-          viewerAuthorId,
-          liveToken,
-          pendingReactions,
-          setReactions,
-          setViewerAuthorId,
-          onError: props.onError,
+      if (!thread || !threadReactions.viewerAuthorId) return;
+      const token = liveToken.current;
+      reactions.toggle({
+        ...input,
+        threadId: thread.id,
+        viewerAuthorId: threadReactions.viewerAuthorId,
+        onError: (message, cause) => {
+          if (token === liveToken.current) props.onError(message, cause);
         },
-        input,
-      );
+      });
     },
-    [activeThread, props.onError, viewerAuthorId, workspaceId],
+    [activeThread, props.onError, reactions, threadReactions.viewerAuthorId],
   );
 
   // Stable for ChatMessageList's memo — an inline literal would defeat it on
@@ -330,8 +322,13 @@ export function LinkedChatsPanel(props: {
   // for exactly this; omitting the whole prop would have hidden other
   // people's reactions too.
   const reactionControls = useMemo(
-    () => ({ reactions, viewerAuthorId, onToggle: toggleReaction, readOnly }),
-    [reactions, viewerAuthorId, toggleReaction, readOnly],
+    () => ({
+      reactions: threadReactions.reactions,
+      viewerAuthorId: threadReactions.viewerAuthorId,
+      onToggle: toggleReaction,
+      readOnly,
+    }),
+    [threadReactions, toggleReaction, readOnly],
   );
 
   if (activeThread) {

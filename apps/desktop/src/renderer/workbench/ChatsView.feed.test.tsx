@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
+// Before ChatsView and LinkedChats load, so their message lists render rows.
+import "../../testing/legendListMock";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { type ChatsNav } from "./ChatsView";
+import { ChatsView as ProductionChatsView, type ChatsNav } from "./ChatsView";
+import { LinkedChatsPanel } from "./LinkedChats";
+import { ReactionStoreProvider } from "./reactionStore";
 import {
   ChatsView,
   NOW,
@@ -189,8 +193,8 @@ describe("ChatsView hybrid feed", () => {
     expect(feedPill().getAttribute("aria-pressed")).toBe("true");
     expect(onError).toHaveBeenCalledWith("Could not update that reaction.", expect.any(Error));
     expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
-    // Home shows no row identity; usePersonalChatFeed.test.ts pins that the
-    // exact prior rows, not a rebuilt one, come back.
+    // Home shows no row identity; reactionStore.test.tsx pins that the exact
+    // read rows, not a rebuilt one, come back.
   });
 
   it("keeps an acknowledged Like when Home cannot reload reactions", async () => {
@@ -203,7 +207,7 @@ describe("ChatsView hybrid feed", () => {
 
     await waitFor(() =>
       expect(onError).toHaveBeenCalledWith(
-        "Your reaction was saved, but Home could not reload reactions.",
+        "Your reaction was saved, but dohc could not reload reactions.",
         expect.any(Error),
       ),
     );
@@ -257,50 +261,39 @@ describe("ChatsView hybrid feed", () => {
     );
   });
 
-  it("frees a reopened Home's controls and lets no old completion free a newer write", async () => {
-    const oldWrite = deferred<unknown>();
-    const oldListing = deferred<unknown>();
-    const newWrite = deferred<unknown>();
+  it("shows a reopened Home the Like still in flight, and lets no second write overtake it", async () => {
+    const write = deferred<unknown>();
+    const listing = deferred<unknown>();
     const onError = vi.fn();
     bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [homeItem("A post", "message-1")] });
-    bridgeMock.setChatReaction
-      .mockImplementationOnce(() => oldWrite.promise)
-      .mockImplementationOnce(() => newWrite.promise);
-    bridgeMock.listChatReactions
-      .mockImplementationOnce(() => oldListing.promise)
-      .mockResolvedValue({ reactions: [like("message-1")], viewerAuthorId: "author-you" });
+    bridgeMock.setChatReaction.mockImplementationOnce(() => write.promise);
+    bridgeMock.listChatReactions.mockImplementationOnce(() => listing.promise);
     renderView(vi.fn(), onError);
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     await pickReaction(await screen.findByTestId("chats-feed-like"), "👍");
     await userEvent.click(screen.getByTestId("chats-feed-back"));
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
 
-    // A fresh Home: nothing rests, and the server has no like yet.
+    // The reopened page has no like yet, but the write is still on its way:
+    // Home shows it, and the message rests until it settles.
     const trigger = await screen.findByTestId("chats-feed-like");
-    expect(isPending(trigger)).toBe(false);
-    expect(screen.queryByTestId("chats-feed-reaction-pill")).toBeNull();
-    await pickReaction(trigger, "👍");
-    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
     expect(isPending(trigger)).toBe(true);
-
-    // The old write settles in full. It neither repaints nor frees the new claim.
-    await act(async () => {
-      oldWrite.resolve({ reaction: { ...like("message-1"), state: "added" }, viewerAuthorId: "author-you" });
-      await oldWrite.promise;
-      oldListing.resolve({ reactions: [like("message-1"), like("message-1", "author-peer")], viewerAuthorId: "author-you" });
-      await oldListing.promise;
-    });
     await userEvent.click(trigger);
     expect(screen.queryByTestId("chats-feed-reaction-picker")).toBeNull();
-    expect(isPending(trigger)).toBe(true);
-    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(2);
-    expect(feedPill().textContent).toContain("1");
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      newWrite.resolve({ reaction: { ...like("message-1"), state: "added" }, viewerAuthorId: "author-you" });
-      await newWrite.promise;
+      write.resolve({ reaction: { ...like("message-1"), state: "added" }, viewerAuthorId: "author-you" });
+      await write.promise;
+    });
+    expect(isPending(trigger)).toBe(true);
+    await act(async () => {
+      listing.resolve({ reactions: [like("message-1"), like("message-1", "author-peer")], viewerAuthorId: "author-you" });
+      await listing.promise;
     });
     await waitFor(() => expect(isPending(trigger)).toBe(false));
+    expect(feedPill().textContent).toContain("2");
     expect(feedPill().getAttribute("aria-pressed")).toBe("true");
     expect(onError).not.toHaveBeenCalled();
   });
@@ -464,10 +457,7 @@ describe("ChatsView hybrid feed", () => {
     const stale = deferred<unknown>();
     bridgeMock.listPersonalChatFeed
       .mockResolvedValueOnce({ items: [homeItem("A post", "message-1")] })
-      .mockImplementationOnce(() => stale.promise)
-      .mockResolvedValueOnce({
-        items: [{ ...homeItem("A post", "message-1"), reactions: [like("message-1")] }],
-      });
+      .mockImplementationOnce(() => stale.promise);
     bridgeMock.listChatReactions.mockResolvedValue({ reactions: [like("message-1")], viewerAuthorId: "author-you" });
     renderView();
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
@@ -478,17 +468,17 @@ describe("ChatsView hybrid feed", () => {
     expect(screen.getByText("Loading…")).toBeTruthy();
     await pickReaction(screen.getByTestId("chats-feed-like"), "👍");
     await waitFor(() => expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(1));
-    // The acknowledgement dropped the pre-write page and read it again.
-    expect(bridgeMock.listPersonalChatFeed).toHaveBeenCalledTimes(3);
-    await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
+    await waitFor(() => expect(isPending(screen.getByTestId("chats-feed-like"))).toBe(false));
     expect(feedPill().getAttribute("aria-pressed")).toBe("true");
 
+    // The page lands after the write settled, without the like it predates.
     await act(async () => {
       stale.resolve({ items: [homeItem("A post", "message-1")] });
       await stale.promise;
     });
     expect(feedPill().getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByText("Loading…")).toBeNull();
+    expect(bridgeMock.listPersonalChatFeed).toHaveBeenCalledTimes(2);
   });
 
   it("drops a delayed Home reaction failure after leaving Home", async () => {
@@ -1072,5 +1062,83 @@ describe("ChatsView hybrid feed", () => {
     // Saved is still the reverse path.
     await userEvent.click(saved);
     expect(bridgeMock.archiveChatBookmark).toHaveBeenCalled();
+  });
+});
+
+// Home and the file rail's chat under one workspace owner, as the shell
+// mounts them: one write chain, and one confirmed state from both reads.
+describe("Home and a file's chat share one reaction store", () => {
+  it("shows one surface's toggle on the other, and rolls back to the newest read either took", async () => {
+    const write = deferred<unknown>();
+    const refused = deferred<unknown>();
+    const onError = vi.fn();
+    bridgeMock.listPersonalChatFeed
+      .mockResolvedValueOnce({ items: [homeItem("A post", "message-1")] })
+      .mockResolvedValueOnce({
+        items: [{ ...homeItem("A post", "message-1"), reactions: [like("message-1"), like("message-1", "author-peer")] }],
+      });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ id: "message-1", body: "A post" })] });
+    bridgeMock.listChatReactions
+      .mockResolvedValueOnce({ reactions: [], viewerAuthorId: "author-you" })
+      .mockResolvedValue({ reactions: [like("message-1")], viewerAuthorId: "author-you" });
+    bridgeMock.setChatReaction
+      .mockImplementationOnce(() => write.promise)
+      .mockImplementationOnce(() => refused.promise);
+    render(
+      <ReactionStoreProvider workspaceId="workspace-a">
+        <ProductionChatsView
+          workspaceId="workspace-a"
+          workspaces={[{ workspaceId: "workspace-a", label: "Work" }]}
+          onOpenFileChat={vi.fn()}
+          onError={onError}
+        />
+        <div data-testid="file-chat">
+          <LinkedChatsPanel
+            workspaceId="workspace-a"
+            filePath="notes/topic.md"
+            initialThread={{ id: "thread-1", title: "Thread", createdAtMs: NOW, updatedAtMs: NOW }}
+            onError={onError}
+          />
+        </div>
+      </ReactionStoreProvider>,
+    );
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const homeLike = await screen.findByTestId("chats-feed-like");
+    const fileChat = within(screen.getByTestId("file-chat"));
+    const fileThumbs = () =>
+      fileChat.getAllByTestId("linked-chat-quick-reaction").find((button) => button.dataset.emoji === "👍")!;
+    const filePill = () => fileChat.getByTestId("linked-chat-reaction-pill");
+    await waitFor(() => expect(fileThumbs()).toBeTruthy());
+
+    // A like from the file's chat is on Home at once, and Home's controls
+    // for that message rest until it settles.
+    await userEvent.click(fileThumbs());
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    expect(isPending(homeLike)).toBe(true);
+    await act(async () => {
+      write.resolve({});
+      await write.promise;
+    });
+    await waitFor(() => expect(isPending(homeLike)).toBe(false));
+    expect(feedPill().textContent).toContain("1");
+
+    // Home's newer read finds a peer's like too; the file's chat shows it
+    // without reading again.
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(filePill().textContent).toContain("2"));
+    expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(2);
+
+    // A refused unlike from the file's chat returns both surfaces to that read.
+    await userEvent.click(fileThumbs());
+    expect(feedPill().textContent).toContain("1");
+    expect(filePill().textContent).toContain("1");
+    await act(async () => {
+      refused.reject(new Error("ECONNRESET"));
+      await refused.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(filePill().textContent).toContain("2"));
+    expect(feedPill().textContent).toContain("2");
+    expect(feedPill().getAttribute("aria-pressed")).toBe("true");
+    expect(onError).toHaveBeenCalledWith("Could not update that reaction.", expect.any(Error));
   });
 });

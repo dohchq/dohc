@@ -10,8 +10,8 @@ import {
 // Home Like over the real IPC path: the keyboard picker, add, remove, and
 // pointer re-add, then the like still there when Home reopens, in both
 // themes under reduced motion. The recorded times are settled round trips.
-// The unit suite for usePersonalChatFeed proves the paint before the write
-// answers; a local write settles too fast to observe that here.
+// The reaction store's unit suite proves the paint before the write answers;
+// a local write settles too fast to observe that here.
 test("Home Like works by keyboard and pointer and persists across reopen in both themes", async ({}, testInfo) => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
