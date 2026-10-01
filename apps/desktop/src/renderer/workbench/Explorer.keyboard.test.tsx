@@ -178,9 +178,9 @@ describe("Explorer tree tab stop", () => {
 });
 
 describe("the active row inside a multi-selection", () => {
-  // Every selected row shares one fill. The open file alone is medium
-  // weight, so it still reads once the tree loses focus and the ring (which
-  // follows the focused row, not the open file) is gone.
+  // Every selected row shares one fill. The ring marks the focused row, not
+  // the open file, so the open file alone is medium weight and still reads
+  // after focus leaves the tree.
   it("keeps its weight cue when the tree is not focused", async () => {
     const user = userEvent.setup();
     render(
