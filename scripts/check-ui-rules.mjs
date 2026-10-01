@@ -14,6 +14,9 @@ const colorUtility = new RegExp(`(?<![\\w-])(?:bg|text|border(?:-[xytrblse])?|di
 const iconLibrary = /(?:^|[/@-])(?:icons?|iconify|icon-park|heroicons|lucide|phosphor|feather|fontawesome|fortawesome|octicons|ionicons|remixicon|mdi|boxicons|iconoir|hugeicons)(?:$|[/@-])/iu;
 const hex = /#(?:[\da-f]{8}|[\da-f]{6}|[\da-f]{4}|[\da-f]{3})(?![\w-])/giu;
 const nonColorNames = /^(?:href|src|to|id|hash|querySelector|querySelectorAll|getElementById|closest|matches)$/u;
+const styleKey = "(?:color|background(?:-?color|-?image)?|fill|stroke|border(?:-?(?:top|right|bottom|left|block|inline)(?:-?(?:start|end))?)?(?:-?color)?|(?:box|text)-?shadow|outline(?:-?color)?)";
+const styleName = new RegExp(`^${styleKey}$`, "iu");
+const cssDeclaration = new RegExp(`(?:^|[\\s;{])(?:${styleKey}|--[\\w-]+)\\s*:[^;{}]*$`, "iu");
 
 export function isRendererSource(path) {
   return path.startsWith(renderer) && /\.tsx?$/u.test(path)
@@ -79,7 +82,7 @@ export function scanSource(path, source) {
       if (path !== `${renderer}tokens.ts`) {
         const context = literalContext(node, source);
         const colorContext = /(?:color|background|fill|stroke)/iu.test(context);
-        const styleContext = colorContext || /(?:border|shadow|outline)/iu.test(context);
+        const styleContext = styleName.test(context);
         for (const [start, end] of segments) {
           const value = source.slice(start, end);
           for (const match of value.matchAll(hex)) {
@@ -87,8 +90,8 @@ export function scanSource(path, source) {
             const after = value.slice(match.index + match[0].length);
             const entireColor = match[0] === value && !nonColorNames.test(context)
               && (colorContext || !/^#\d{3,4}$/u.test(value));
-            const cssValue = /:\s*$/u.test(before) || /\bvar\([^)]*,\s*$/u.test(before)
-              || (/[\s(,]$/u.test(before) && (value.includes(":") || styleContext));
+            const cssValue = (/\bvar\([^)]*,\s*$/u.test(before) && !/^#\d{3,4}$/u.test(match[0]))
+              || (/[\s(:,]$/u.test(before) && (cssDeclaration.test(before) || styleContext));
             const arbitraryColor = before.endsWith("[") && /^\s*(?:\/[^\]]+)?\]/u.test(after);
             if (entireColor || cssValue || arbitraryColor) add(start + match.index, "raw-hex", match[0]);
           }

@@ -213,11 +213,19 @@ test("hex colors within longer style values and CSS declarations count", () => {
     ['const css = `.a { background: linear-gradient(#abc,#def) }`;', ["#abc", "#def"]],
     ['node.style.border = "1px solid #ff0000";', ["#ff0000"]],
     ['node.style.setProperty("box-shadow", "0 0 0 1px #000");', ["#000"]],
+    ['const style = { borderTop: "1px solid #abc", "border-inline-start": "1px solid #def" };', ["#abc", "#def"]],
+    ['const css = `.a { color:#abc; outline: 1px solid #000 }`;', ["#abc", "#000"]],
+    ['const css = `:root { --ink: #abc; --line: #000; }`;', ["#abc", "#000"]],
   ]) {
     assert.deepEqual(scanSource(path, source).map(finding => finding.value), expected, source);
   }
   for (const source of [
     'const issue = "see #1579";',
+    'const text = "Fixed: see #1234";',
+    'const text = "Error: #add failed";',
+    'const borderId = "x #1234";',
+    'const borderId = "x #abc"; const shadowLabel = "x #add"; const outlineLabel = "x #def";',
+    'const fallback = "var(--reference, #1234)";',
     'const style = { background: "url(https://example.test/#abc)" };',
     'const css = `.a { background: url(https://example.test/#abc) }`;',
     'const style = { border: "solid#abc" };',
