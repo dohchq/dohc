@@ -2999,6 +2999,34 @@ describe("YdocLiveAdapter", () => {
     ]);
   });
 
+  it("keeps an already queued settle ahead of a flush requested after the first completes", async () => {
+    const engine = seedPlaintextEngine();
+    const completed: number[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport: engine,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettled: (_result, token) => { completed.push(token); },
+      scheduleSettle: () => () => undefined,
+    });
+    try {
+      await provider.applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (text) => text.insert(0, "typed")),
+      );
+      const first = provider.settleNow();
+      const second = provider.settleNow();
+      await first;
+      const third = provider.settleNow();
+      await Promise.all([second, third]);
+      expect(completed).toEqual([1, 2, 3]);
+    } finally {
+      await provider.close({ settle: false });
+    }
+  });
+
   it("announces a settle at the JOURNAL BARRIER, not when it finally runs", async () => {
     // Round 3 (D5). onSettleStart used to fire inside the settle chain, so a
     // settle queued behind an in-flight one announced itself only once the

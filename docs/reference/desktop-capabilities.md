@@ -1,8 +1,6 @@
 # Desktop capabilities
 
-Release owners use this reference to decide which capabilities they can claim
-for a tested build. A configured release target is not evidence that its
-installer has passed the [release rehearsal](../how-to/desktop-release.md).
+Use this reference to check which platform and services a feature needs.
 
 | Capability | Requirements |
 | --- | --- |
@@ -37,9 +35,7 @@ hosting can support browser links without a private network. Hosting does not
 grant workspace access; the server still enforces each share's permissions.
 
 Self-hosting and dohc Drive use the same collaboration model. Their distinction
-is who operates the services. Drive's planned free tier and managed setup do not
-justify restricting self-hosted capabilities.
+is who operates the services.
 
-These requirements describe the code's boundaries. Verify the installed server
-configuration before claiming that sync, browser sharing, live editing, or app
-publishing is available.
+Check your server's configuration before using sync, browser sharing, live
+editing, or app publishing.

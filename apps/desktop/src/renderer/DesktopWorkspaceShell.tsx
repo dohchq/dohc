@@ -117,11 +117,8 @@ import { CommandPalette, type Command } from "./CommandPalette";
 import { QuickOpenPalette } from "./QuickOpenPalette";
 import { FileInspector } from "./FileInspector";
 import { classifyForView } from "./fileViewKind";
-import {
-  preloadMarkdownEditor,
-  type HeadingTarget,
-  type ScrollTarget,
-} from "./MarkdownView";
+import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
+import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";

@@ -518,7 +518,9 @@ it("slices large checkpoint exports without loading whole blobs and rejects dama
   const record=f.journal.exportPage({scope,through:cursor,afterRevision:-1,authorize:f.authorize})[0];
   const parts:Uint8Array[]=[];for(let offset=0;offset<checkpoint.byteLength;offset+=1024*1024)parts.push(f.journal.exportBlob({scope,record,offset,authorize:f.authorize}));
   expect(parts.map(part=>part.byteLength)).toEqual([1024*1024,1024*1024,1024*1024,111]);
-  expect(Buffer.concat(parts)).toEqual(Buffer.from(checkpoint));
+  const exported=Buffer.concat(parts);
+  expect(exported.byteLength).toBe(checkpoint.byteLength);
+  expect(exported.equals(checkpoint)).toBe(true);
   expect(()=>f.journal.exportBlob({scope,record,offset:0,length:1024*1024+1,authorize:f.authorize})).toThrow();
   expect(()=>f.journal.exportPage({scope,through:{...cursor,digest:digest("wrong")},afterRevision:-1,authorize:f.authorize})).toThrow();
   f.db.prepare("UPDATE dohc_dataset_journals SET checkpoint_sha256=? WHERE dataset_id='large'").run(digest("wrong"));

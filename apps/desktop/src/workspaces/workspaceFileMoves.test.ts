@@ -584,7 +584,9 @@ describe("agent moves and deletes", () => {
     const base = change === "move" ? "moved" : "dir";
     expect(result).toMatchObject({ ok: true, withoutHistory: [base + "/people.csv"] });
     const kept = change === "move" ? join(f.rootPath, "moved") : await f.systemTrashed("dir");
-    expect(await readFile(join(kept, "people.csv"))).toEqual(csv);
+    const retained = await readFile(join(kept, "people.csv"));
+    expect(retained.byteLength).toBe(csv.byteLength);
+    expect(retained.equals(csv)).toBe(true);
     await f.settle();
     expect(await f.added(seen)).toEqual([
       { operation: change === "move" ? "rename" : "delete", path: base + "/a.txt", agentId: "Client name" },
@@ -604,7 +606,9 @@ describe("agent moves and deletes", () => {
       replaced: { path: "dest.png", trashed: accepts, withoutHistory: ["dest.png"] } });
     if (!result.ok || !result.replaced) throw new Error("Expected replacement");
     const kept = accepts ? await f.systemTrashed("dest.png") : join(f.rootPath, result.replaced.trashPath!);
-    expect(await readFile(kept)).toEqual(Buffer.from(oversized));
+    const retained = await readFile(kept);
+    expect(retained.byteLength).toBe(oversized.byteLength);
+    expect(retained.equals(oversized)).toBe(true);
     expect(result.replaced.trashPath).toEqual(accepts ? undefined : expect.stringMatching(/^\.dohc\/trash\//));
     await f.engine().stop();
   });

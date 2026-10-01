@@ -87,7 +87,7 @@ const linkLogSchema = z.object({
 type LinkLogOp = z.infer<typeof linkLogSchema>["ops"][number];
 
 // One change per logged moment, named like the engine's history: beforeBlobSha256 and afterBlobSha256.
-// A link reads an afterBlobSha256 only while its file is still in the share (docs/adr/0014).
+// A link reads an afterBlobSha256 only while its file is still in the share (docs/engineering/security-boundaries.md).
 function linkChange(op: LinkLogOp): Record<string, unknown> | null {
   if (op.opKind === "workspace.init") return null;
   if (op.opKind === "version.create") return {recordedAtMs: op.recordedAtMs, operation: "version", versionId: op.payload.versionId,

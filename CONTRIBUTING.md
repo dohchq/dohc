@@ -20,7 +20,7 @@ For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of openi
 
 ## Submit a pull request
 
-Read [AGENTS.md](AGENTS.md) for product boundaries and development rules. Follow the [setup and verification guide](docs/how-to/verify-agent-work.md).
+Read [AGENTS.md](AGENTS.md) for product boundaries and development rules. Follow the [setup and verification guide](docs/engineering/verify-agent-work.md).
 
 Cloud CI is disabled by default. A maintainer verifies fork PRs locally before merging.
 Enabling Blacksmith adds automatic checks for ready branches in this repository; it does not enable checks for forks.
