@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Typecheck owns syntax validity; this guard scans literals through parser recovery.
 import { globSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -35,7 +36,11 @@ function literalContext(node, source) {
   if (parent.name === "JSXAttribute" || parent.name === "Property") return text(parent.firstChild);
   if (parent.name === "JSXEscape" && parent.parent.name === "JSXAttribute") return text(parent.parent.firstChild);
   const previous = sibling(node, "prevSibling");
-  if (parent.name === "VariableDeclaration" && previous?.name === "Equals") return text(sibling(previous, "prevSibling"));
+  if (parent.name === "VariableDeclaration" && previous?.name === "Equals") {
+    let declaration = sibling(previous, "prevSibling");
+    if (declaration?.name === "TypeAnnotation") declaration = sibling(declaration, "prevSibling");
+    return text(declaration);
+  }
   if (parent.name === "AssignmentExpression" && parent.firstChild.name === "MemberExpression") return text(parent.firstChild.lastChild);
   if (parent.name === "ArgList" && parent.parent.name === "CallExpression") {
     const callee = parent.parent.firstChild;
@@ -74,6 +79,7 @@ export function scanSource(path, source) {
       if (path !== `${renderer}tokens.ts`) {
         const context = literalContext(node, source);
         const colorContext = /(?:color|background|fill|stroke)/iu.test(context);
+        const styleContext = colorContext || /(?:border|shadow|outline)/iu.test(context);
         for (const [start, end] of segments) {
           const value = source.slice(start, end);
           for (const match of value.matchAll(hex)) {
@@ -81,7 +87,8 @@ export function scanSource(path, source) {
             const after = value.slice(match.index + match[0].length);
             const entireColor = match[0] === value && !nonColorNames.test(context)
               && (colorContext || !/^#\d{3,4}$/u.test(value));
-            const cssValue = /:\s*$/u.test(before) || /\bvar\([^)]*,\s*$/u.test(before);
+            const cssValue = /:\s*$/u.test(before) || /\bvar\([^)]*,\s*$/u.test(before)
+              || (/[\s(,]$/u.test(before) && (value.includes(":") || styleContext));
             const arbitraryColor = before.endsWith("[") && /^\s*(?:\/[^\]]+)?\]/u.test(after);
             if (entireColor || cssValue || arbitraryColor) add(start + match.index, "raw-hex", match[0]);
           }
@@ -111,7 +118,7 @@ export function scanSource(path, source) {
   chunks.push(source.slice(end));
   const uncommented = chunks.join("");
   for (const match of uncommented.matchAll(colorUtility)) add(match.index, "palette", match[0]);
-  for (const match of uncommented.matchAll(/(?<![\w-])backdrop-blur(?:-[\w.]+|-\[[^\]]+\])?(?![\w-])|(?:-webkit-)?backdrop-filter(?=["']?\s*:|["'`]\s*,)|\b(?:backdropFilter|WebkitBackdropFilter)(?=["']?\s*[:,}=])/gu)) add(match.index, "backdrop", match[0]);
+  for (const match of uncommented.matchAll(/(?<![\w-])backdrop-blur(?:-[\w.]+|-\[[^\]]+\])?(?![\w-])|(?:-webkit-)?backdrop-filter(?=["']?\s*:|["'`]\s*,)|\b(?:backdropFilter|WebkitBackdropFilter)(?=["']?\s*(?:[:,}]|=(?![=>])))/gu)) add(match.index, "backdrop", match[0]);
   return findings;
 }
 

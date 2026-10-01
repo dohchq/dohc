@@ -193,3 +193,54 @@ test("source and full verification include the guard and its fixture tests", () 
     assert.equal(selectJavaScript([changed], packages).repository, "full", changed);
   }
 });
+
+test("parser recovery preserves violations before an unclosed brace", () => {
+  const source = 'import "react-icons/fa";\nconst color = "#abc";\nconst classes = "bg-blue-500 backdrop-blur";\nfunction broken() {';
+  assert.deepEqual(scanSource(path, source), [
+    { rule: "icon-library", value: "react-icons/fa", line: 1 },
+    { rule: "raw-hex", value: "#abc", line: 2 },
+    { rule: "palette", value: "bg-blue-500", line: 3 },
+    { rule: "backdrop", value: "backdrop-blur", line: 3 },
+  ]);
+});
+
+test("hex colors within longer style values and CSS declarations count", () => {
+  for (const [source, expected] of [
+    ['const style = { border: "1px solid #ff0000" };', ["#ff0000"]],
+    ['const css = `.a { border: 1px solid #f00 }`;', ["#f00"]],
+    ['const style = { boxShadow: "0 0 0 1px #000" };', ["#000"]],
+    ['const style = { background: "linear-gradient(#abc, #def)" };', ["#abc", "#def"]],
+    ['const css = `.a { background: linear-gradient(#abc,#def) }`;', ["#abc", "#def"]],
+    ['node.style.border = "1px solid #ff0000";', ["#ff0000"]],
+    ['node.style.setProperty("box-shadow", "0 0 0 1px #000");', ["#000"]],
+  ]) {
+    assert.deepEqual(scanSource(path, source).map(finding => finding.value), expected, source);
+  }
+  for (const source of [
+    'const issue = "see #1579";',
+    'const style = { background: "url(https://example.test/#abc)" };',
+    'const css = `.a { background: url(https://example.test/#abc) }`;',
+    'const style = { border: "solid#abc" };',
+  ]) assert.deepEqual(scanSource(path, source), [], source);
+});
+
+test("typed color declarations retain the declared name", () => {
+  for (const sourcePath of [path, path.replace(/tsx$/u, "ts")]) {
+    for (const source of [
+      'const color: string = "#1579";',
+      'const color: string = /* text-white */ "#1579";',
+      'const issue: string = "#1234", color: string = "#1579";',
+      'const color: string = "#1579", issue: string = "#1234";',
+    ]) assert.deepEqual(scanSource(sourcePath, source).map(finding => finding.value), ["#1579"], source);
+    assert.deepEqual(scanSource(sourcePath, 'const issue: string = "#1579";'), []);
+  }
+});
+
+test("backdrop comparisons do not count as assignments", () => {
+  for (const source of [
+    'backdropFilter === x;',
+    'backdropFilter == x;',
+    'node.style.WebkitBackdropFilter === x;',
+    'const compare = backdropFilter => backdropFilter === x;',
+  ]) assert.deepEqual(scanSource(path, source), [], source);
+});
