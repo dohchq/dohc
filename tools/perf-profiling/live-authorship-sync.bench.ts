@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
-import { createRequire } from 'node:module';
+import * as Y from 'yjs';
 import { markdownToYDoc } from '../../packages/ydoc-projection/src/import-export.js';
 import { createLiveMarkdownJournalValidator } from '../../packages/ydoc-projection/src/liveDocumentValidation.js';
 import { registered, cleanupLiveDeliveryFixtures, policy } from '../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js';
@@ -10,7 +10,6 @@ import type { StorageContext } from '../../services/sync-relay/src/storage/conte
 import type { LiveUpdateJournalCommitInput, LiveUpdateJournalCutResult, RelayLiveUpdateJournalResult } from '../../services/sync-relay/src/storage/types.js';
 import type { LiveDocumentKey } from '@dohc/live-session-contract/live-update-admission';
 
-const Y = createRequire(new URL('../../packages/ydoc-projection/package.json', import.meta.url))('yjs') as typeof import('yjs');
 export interface JournalAdapter {
   commit(storage: StorageContext, input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult;
   read(storage: StorageContext, input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;

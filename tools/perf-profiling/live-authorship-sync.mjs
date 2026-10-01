@@ -30,9 +30,12 @@ await mkdir(output, { recursive: false });
 const slash = path => path.replaceAll('\\', '/');
 const localImport = target => { const path = slash(relative(output, target)); return path.startsWith('.') ? path : './' + path; };
 const journalPath = resolve(root, 'services/sync-relay/src/storage/liveUpdateJournal.ts');
+const require = createRequire(resolve(root, 'services/sync-relay/package.json'));
 const baseline = await readFile(baselineSource, 'utf8');
 const rewritten = baseline.replace(/(from\s+["'])(\.\.?\/[^"']+)(["'])/g, (_match, start, target, end) =>
-  start + localImport(resolve(dirname(journalPath), target)) + end);
+  start + localImport(resolve(dirname(journalPath), target)) + end)
+  .replace(/(from\s+["'])(@dohc\/[^"']+)(["'])/g, (_match, start, target, end) =>
+    start + localImport(require.resolve(target)) + end);
 const sha = source => createHash('sha256').update(source).digest('hex');
 const sources = { baselineSha256: sha(baseline), baselineRuntimeSha256: sha(rewritten), currentSha256: sha(await readFile(journalPath)),
   harnessSha256: sha(await readFile(resolve(root, 'tools/perf-profiling/live-authorship-sync.bench.ts'))), baselineSource: slash(relative(root, baselineSource)) };
@@ -50,8 +53,8 @@ it('measures paired relay admission', async () => {
   });
 }, 7200000);
 `);
-await writeFile(configPath, `export default { root: ${JSON.stringify(root)}, test: { include: [${JSON.stringify(slash(relative(root, testPath)))}], fileParallelism: false, maxWorkers: 1 } };\n`);
-const require = createRequire(resolve(root, 'services/sync-relay/package.json'));
+const yjsModule = require.resolve('yjs').replace(/yjs\.cjs$/, 'yjs.mjs');
+await writeFile(configPath, `export default { root: ${JSON.stringify(root)}, resolve: { alias: { yjs: ${JSON.stringify(yjsModule)} } }, test: { include: [${JSON.stringify(slash(relative(root, testPath)))}], fileParallelism: false, maxWorkers: 1 } };\n`);
 const vitest = resolve(dirname(require.resolve('vitest/package.json')), 'vitest.mjs');
 const startedAt = new Date().toISOString();
 let lane;
