@@ -38,6 +38,7 @@ async fn call(
     method: &str,
     params: Value,
 ) -> Value {
+    let params = trusted_fixture_params(transport, handle, params).await;
     *id += 1;
     transport
         .call(
@@ -159,7 +160,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_claims(&scratch);
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let mut notices = service.events().subscribe();
     let transport = InProcessTransport::new(service);
     let opened = transport
@@ -938,7 +939,7 @@ async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
             })
             .expect("bind the record and claim its addition");
     }
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let mut notices = service.events().subscribe();
     let transport = InProcessTransport::new(service);
     let opened = transport
@@ -1180,7 +1181,7 @@ async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
             )
             .expect("seed the schema");
     }
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let mut id = 0;
     let open = async |id: &mut u64| -> WorkspaceHandle {
@@ -1307,7 +1308,7 @@ async fn group_messages_written_here_claim_through_rpc() {
     const TASK: &str = "collection:object-tasks#task";
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let mut notices = service.events().subscribe();
     let transport = InProcessTransport::new(service);
     let opened = transport
@@ -1591,7 +1592,7 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
     const REPORT: &str = "collection:Invoices#weekday-report";
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let mut notices = service.events().subscribe();
     let transport = InProcessTransport::new(service);
     let opened = transport

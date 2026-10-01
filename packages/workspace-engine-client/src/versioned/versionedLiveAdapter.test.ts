@@ -389,6 +389,27 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it("moves a registered test context to the wire and uses its person for human history", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    loopback.admitAuthorContextForTest("host-person-context", "local:installation");
+    const adapter = new VersionedLiveAdapter({
+      sendRequest: request => loopback.sendRequest(request), close: () => undefined,
+    }, WORKSPACE, {workspaceId: WORKSPACE});
+    await adapter.ensureMainVersion({workspaceId: WORKSPACE});
+    const input = {workspaceId: WORKSPACE, versionId: "main", path: "person.md", text: "person", publish: true,
+      metadata: {origin: "api" as const}, author: {kind: "human" as const, humanId: "forged", authorContext: "host-person-context"}};
+    const written = await adapter.writeTextFile(input);
+    expect(written.moment.authors).toEqual([{kind: "human", humanId: "local:installation"}]);
+    expect(loopback.requests.at(-1)?.params).toMatchObject({authorContext: "host-person-context", author: {kind: "human", humanId: "forged"}});
+    expect((loopback.requests.at(-1)?.params as {author: Record<string, unknown>}).author).not.toHaveProperty("authorContext");
+    const deleted = await adapter.deleteTextFile({...input, author: {...input.author, humanId: "also-forged"}});
+    expect(deleted.moment.authors).toEqual([{kind: "human", humanId: "local:installation"}]);
+    await expect(adapter.writeTextFile({...input, author: {...input.author, authorContext: "unknown-context"}}))
+      .rejects.toThrow("author-context-required");
+    await expect(adapter.writeTextFile({...input, author: {kind: "human", humanId: "forged"}}))
+      .rejects.toThrow("author-context-required");
+  });
+
   it.each(["api", "local-file"] as const)("records %s text without publishing unless explicitly requested", async (origin) => {
     const loopback = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter({ sendRequest: (request) => loopback.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });

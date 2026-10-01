@@ -180,7 +180,7 @@ export type MomentAuthor =
 
 // A local agent write names the person the agent works for. An automation
 // names its run's person, and none when its run has none.
-export type MomentWriteAuthor = (AgentMomentAuthor & { onBehalfOf: string }) | AutomationMomentAuthor;
+export type MomentWriteAuthor = ((AgentMomentAuthor & { onBehalfOf: string }) | HumanMomentAuthor | AutomationMomentAuthor) & { authorContext?: string };
 
 type VersionedFileContentKind = "text" | "binary";
 

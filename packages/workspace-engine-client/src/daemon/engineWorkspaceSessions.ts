@@ -107,7 +107,12 @@ export interface EngineWorkspaceRunOptions {
   retryInitialCapture?: boolean;
 }
 
+export interface LocalAuthorContext {
+  readonly authorContext: string;
+}
+
 export interface EngineWorkspaceSessionsOptions {
+  authorContextSecret?: string;
   onOpened?(workspace: EngineWorkspace): void;
   transportRebindAttempts?: number;
   sleep?: (delayMs: number) => Promise<void>;
@@ -318,6 +323,8 @@ async function defaultSleep(ms: number): Promise<void> {
 }
 
 export class EngineWorkspaceSessions {
+  private readonly authorContextSecret?: string;
+  private readonly authorContexts = new Map<string, Promise<LocalAuthorContext>>();
   private readonly entries = new Map<string | symbol, SessionEntry>();
   private readonly workspaceEntries = new Map<string, SessionEntry>();
   private readonly preparations = new Map<string, Promise<void>>();
@@ -401,6 +408,7 @@ export class EngineWorkspaceSessions {
     private readonly source: EngineDaemonClientSource,
     options: EngineWorkspaceSessionsOptions = {},
   ) {
+    this.authorContextSecret = options.authorContextSecret;
     this.onOpened = options.onOpened;
     this.transportRebindAttempts =
       options.transportRebindAttempts ?? TRANSPORT_REBIND_ATTEMPTS;
@@ -895,6 +903,28 @@ export class EngineWorkspaceSessions {
     }
   }
 
+  admitAuthorContext(workspace: EngineWorkspace, personId: string): Promise<LocalAuthorContext> {
+    const key = JSON.stringify([workspace.workspaceId, personId]);
+    const existing = this.authorContexts.get(key);
+    if (existing) return existing;
+    const secret = this.authorContextSecret;
+    if (!secret) return Promise.reject(new Error("Author context host credential is unavailable."));
+    const context = this.run(workspace, async ({ client, workspace: handle }) => {
+      const requester = new WorkspaceDaemonRequester(client);
+      const result = await requester.request("authorContext.admit", {
+        hostCredential: secret, personId,
+      }, { workspace: handle });
+      if (typeof result !== "object" || result === null || Array.isArray(result) ||
+        typeof result.authorContext !== "string" || result.authorContext.length === 0) {
+        throw new Error("Rust engine returned an invalid author context.");
+      }
+      return Object.freeze({ authorContext: result.authorContext });
+    }, { retryTransportErrors: true });
+    this.authorContexts.set(key, context);
+    void context.catch(() => { if (this.authorContexts.get(key) === context) this.authorContexts.delete(key); });
+    return context;
+  }
+
   rememberCaptureAuthor(
     workspace: AttachedEngineWorkspace,
     author: AgentAuthor | null,
@@ -1219,6 +1249,7 @@ export class EngineWorkspaceSessions {
           ? {
               captureAuthor:
                 this.captureAuthors.get(sessionKey) ?? null,
+              ...(this.captureAuthors.get(sessionKey)?.authorContext ? { authorContext: this.captureAuthors.get(sessionKey)?.authorContext } : {}),
             }
           : {}),
       },

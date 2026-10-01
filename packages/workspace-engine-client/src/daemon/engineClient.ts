@@ -656,6 +656,7 @@ class BlobStreamError extends Error {
 export type CompletedBlob = BlobStart & { readonly bytes: Buffer };
 
 export interface EngineClientSpawnOptions {
+  authorContextSecret?: string;
   command: string;
   args?: string[];
   cwd?: string;
@@ -2410,6 +2411,7 @@ export async function createEngineClient(
       ...options.env,
       DOHC_ENGINE_LIVE_HOST_CONFIG: options.env?.DOHC_ENGINE_LIVE_HOST_CONFIG,
       [ENGINE_AUTH_TOKEN_ENV]: options.authToken,
+      DOHC_ENGINE_AUTHOR_CONTEXT_SECRET: options.authorContextSecret,
     },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,

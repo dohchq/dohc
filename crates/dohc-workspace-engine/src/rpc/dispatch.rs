@@ -151,9 +151,10 @@ impl EngineService {
     pub(crate) async fn dispatch(
         &self,
         ctx: RequestContext,
-        request: Request,
+        mut request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
+        self.stamp_local_authorship(&mut request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
@@ -273,6 +274,9 @@ impl EngineService {
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
+            }
+            "authorContext.admit" => {
+                self.admit_author_context(request.workspace.as_ref(), request.params)?
             }
             "engine.ping" => engine_ping(),
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,

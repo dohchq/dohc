@@ -177,6 +177,15 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+function withAuthorContext(params: JsonValue): JsonValue {
+  if (typeof params !== "object" || params === null || Array.isArray(params)) return params;
+  const author = params.author;
+  if (typeof author !== "object" || author === null || Array.isArray(author) ||
+    typeof author.authorContext !== "string") return params;
+  const { authorContext, ...declaration } = author;
+  return { ...params, author: declaration, authorContext: params.authorContext ?? authorContext };
+}
+
 export class VersionedLiveAdapter {
   readonly workspace: WorkspaceHandle;
   readonly workspaceId: string;
@@ -223,7 +232,7 @@ export class VersionedLiveAdapter {
     params: VersionedMethodParamsMap[M],
     options?: { idempotencyKey?: string; deadlineMs?: number },
   ): Promise<VersionedMethodResultMap[M]> {
-    const raw = await this.requester.request(method, params, {
+    const raw = await this.requester.request(method, withAuthorContext(params), {
       workspace: this.workspace,
       ...options,
     });
@@ -252,7 +261,7 @@ export class VersionedLiveAdapter {
         options,
       ) as Promise<WorkspaceMethodResultMap[M]>;
     }
-    const raw = await this.requester.request(method, params as JsonValue, {
+    const raw = await this.requester.request(method, withAuthorContext(params as JsonValue), {
       workspace: this.workspace,
       ...options,
     });
@@ -1591,7 +1600,8 @@ export class VersionedLiveAdapter {
   }
 
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
-    await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
+    await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author,
+      ...(author?.authorContext ? { authorContext: author.authorContext } : {}), });
   }
 
   // Capture records nothing until the hold is released, its lease runs out

@@ -81,3 +81,5 @@ export {
   type LiveObjectBinding,
   type OwnerYDocOutboxEntry,
 } from "./ydoc/ownerYDocOutbox";
+
+export type { LocalAuthorContext } from "./daemon/engineWorkspaceSessions";

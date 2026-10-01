@@ -18,7 +18,7 @@ use std::time::Duration;
 const WORKSPACE_ID: &str = "ws-capture-hold";
 
 async fn open(scratch: &ScratchDir) -> (InProcessTransport<EngineService>, WorkspaceHandle) {
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let params =
         json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID });
     let opened = transport
@@ -178,7 +178,15 @@ async fn check_move_refuses_an_author_history_would_refuse_before_anything_chang
             params.clone(),
         )
         .await;
-        assert_eq!(refused.message, "invalid-metadata", "{params}");
+        assert_eq!(
+            refused.message,
+            if author["onBehalfOf"] == "person\n1" {
+                "author-context-required"
+            } else {
+                "invalid-metadata"
+            },
+            "{params}"
+        );
     }
     let author = json!({ "kind": "agent", "agentId": "Test agent", "onBehalfOf": "person-1" });
     let params = json!({ "versionId": "main", "path": "notes.txt", "author": author });

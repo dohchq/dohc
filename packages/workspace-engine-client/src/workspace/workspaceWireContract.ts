@@ -77,6 +77,7 @@ type WorkspaceJsonObject = {
 export type WorkspaceOpenParams = WorkspaceJsonObject & {
   rootDir: string;
   workspaceId: string;
+  authorContext?: string;
   captureAuthor?:
     | (WorkspaceJsonObject & {
         kind: "agent";
@@ -413,6 +414,7 @@ export type AutomationRunNowResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsRunNow];
 
 type CaptureSetAuthorParams = WorkspaceJsonObject & {
+  authorContext?: string;
   author:
     | (WorkspaceJsonObject & {
         kind: "agent";

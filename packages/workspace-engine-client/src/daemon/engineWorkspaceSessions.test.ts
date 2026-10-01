@@ -3260,3 +3260,38 @@ describe("EngineWorkspaceSessions", () => {
     expect(sleep).toHaveBeenCalledTimes(1);
   });
 });
+
+
+it("caches person contexts and keeps the original context after identity and daemon changes", async () => {
+  const workspace = await tempWorkspace();
+  class AuthorClient extends MockClient {
+    override async sendRequest(request: Request): Promise<Response> {
+      if (request.method !== "authorContext.admit") return super.sendRequest(request);
+      this.requests.push(request);
+      const params = request.params as { hostCredential: string; personId: string };
+      expect(params.hostCredential).toBe("a".repeat(64));
+      return { id: request.id, result: { authorContext: "context-" + params.personId } };
+    }
+  }
+  const first = new AuthorClient("first"), replacement = new AuthorClient("replacement");
+  let client = first;
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {authorContextSecret:"a".repeat(64)});
+  const captured = sessions.admitAuthorContext(workspace,"alice");
+  expect(sessions.admitAuthorContext(workspace,"alice")).toBe(captured);
+  const alice = await captured;
+  expect(Object.isFrozen(alice)).toBe(true);
+  expect(await sessions.admitAuthorContext(workspace,"bob")).toEqual({authorContext:"context-bob"});
+  client = replacement;
+  expect(await sessions.admitAuthorContext(workspace,"alice")).toBe(alice);
+  expect(first.requests.filter(request => request.method === "authorContext.admit")).toHaveLength(2);
+  expect(replacement.requests).toEqual([]);
+  await sessions.closeAll();
+});
+
+it("rejects person admission when the host has no private credential", async () => {
+  const workspace = await tempWorkspace(), client = new MockClient("ordinary");
+  const sessions = new EngineWorkspaceSessions({currentClient:() => client});
+  await expect(sessions.admitAuthorContext(workspace,"forged")).rejects.toThrow("host credential");
+  expect(client.requests).toEqual([]);
+  await sessions.closeAll();
+});

@@ -109,6 +109,16 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
             None => (Arc::new(EngineService::new()), None),
         },
     };
+    if let Ok(secret) = std::env::var("DOHC_ENGINE_AUTHOR_CONTEXT_SECRET") {
+        if secret == auth_token {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "author context credential must differ from transport credential",
+            )
+            .into());
+        }
+        service.provision_author_context_secret(secret)?;
+    }
     let supervisor = Arc::new(Supervisor::new(
         SupervisorConfig::default(),
         service.clone(),

@@ -3,7 +3,7 @@
 use crate::{CollabError, DocKey};
 use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
 use dohc_engine_storage::StorageError;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -128,7 +128,7 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
             "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth) FROM ydoc_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
          AND seq>COALESCE(?4,-1) AND seq<=?5 AND is_seed=0 \
-         AND actor_kind IN ('agent','automation') AND actor_origin_id IS NOT NULL \
+         AND actor_kind IN ('human','agent','automation') AND actor_origin_id IS NOT NULL \
          GROUP BY actor_kind, on_behalf_of, actor_origin_id",
         )
         .map_err(sql)?;
@@ -218,9 +218,6 @@ pub fn check_admission_in(
     actor: Option<&str>,
     attribution: Option<&ChangeAttribution>,
 ) -> Result<bool, CollabError> {
-    if attribution.is_some_and(|value| value.actor_kind == ChangeActorKind::Human) {
-        return Ok(false);
-    }
     let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
         return Ok(false);
     };

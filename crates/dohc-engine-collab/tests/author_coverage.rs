@@ -2,8 +2,8 @@ mod common;
 
 use common::*;
 use dohc_engine_collab::{
-    author_coverage, maybe_compact, record_local_update, CollabError, ContentKind, LocalAppend,
-    MarkerCreation, Regime, WriterDocCache, Ydoc,
+    CollabError, ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+    author_coverage, maybe_compact, record_local_update,
 };
 use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
 use dohc_engine_storage::{FaultPoint, NoFaults, TxnOutcome};
@@ -56,11 +56,12 @@ fn declared_seed_is_not_an_author_and_coverage_tracks_fold_reset_and_consumption
     )
     .expect("declared seed");
     assert_eq!(covered_count(&ts.store, &key), 0);
-    assert!(ts
-        .store
-        .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
-        .expect("seed coverage")
-        .is_empty());
+    assert!(
+        ts.store
+            .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+            .expect("seed coverage")
+            .is_empty()
+    );
     record(
         &mut ts.store,
         &mut ts.cache,
@@ -395,11 +396,12 @@ fn winning_base_replacement_clears_compacted_losing_authors() {
         outcome,
         TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
     ));
-    assert!(ts
-        .store
-        .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
-        .expect("after")
-        .is_empty());
+    assert!(
+        ts.store
+            .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+            .expect("after")
+            .is_empty()
+    );
     assert_eq!(
         dohc_engine_collab::load_persisted(&ts.store, &key)
             .expect("load")
@@ -410,30 +412,31 @@ fn winning_base_replacement_clears_compacted_losing_authors() {
     );
 }
 
-#[test]
-fn human_automation_context_is_not_enabled_as_settlement_authorship() {
-    let mut ts = fresh_store("human-context-coverage");
-    let key = test_key();
-    seed_parents(&mut ts.store, &key, 1);
-    let doc = Ydoc::wire();
+fn record_human(
+    store: &mut dohc_engine_storage::EngineStore,
+    cache: &mut WriterDocCache,
+    key: &dohc_engine_collab::DocKey,
+    update: &[u8],
+    person: &str,
+) -> Result<TxnOutcome<dohc_engine_collab::AppendOutcome>, CollabError> {
     let attribution = ChangeAttribution {
         actor_kind: ChangeActorKind::Human,
-        on_behalf_of: Some("person".into()),
+        on_behalf_of: Some(person.into()),
         depth: 0,
         run: None,
     };
-    let admitted = record_local_update(
-        &mut ts.store,
-        &mut ts.cache,
-        &key,
-        &doc.plaintext_insert(0, "human edit"),
+    record_local_update(
+        store,
+        cache,
+        key,
+        update,
         LocalAppend {
             marker: Some(MarkerCreation {
                 path: Some("authors.txt"),
                 content_kind: ContentKind::Plaintext,
                 regime: Regime::LocalOnly,
             }),
-            actor_origin_id: Some("device"),
+            actor_origin_id: Some(person),
             attribution: Some(&attribution),
             ..LocalAppend::default()
         },
@@ -441,14 +444,152 @@ fn human_automation_context_is_not_enabled_as_settlement_authorship() {
         2,
         |_, _, _| Ok(()),
     )
-    .expect("main automation context remains admissible");
-    assert!(matches!(admitted, TxnOutcome::Committed(outcome) if !outcome.settlement_requested));
+}
+
+#[test]
+fn human_coverage_survives_compaction_and_is_consumed_only_by_settlement() {
+    let mut ts = fresh_store("human-context-coverage");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    let original = doc.plaintext_insert(0, "human edit");
+    record_human(&mut ts.store, &mut ts.cache, &key, &original, "alice").expect("alice");
+    let duplicate = record_human(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &original,
+        "not-an-editor",
+    )
+    .expect("duplicate bytes");
+    assert!(matches!(duplicate, TxnOutcome::Committed(outcome) if outcome.deduped));
+    assert_eq!(
+        covered_count(&ts.store, &key),
+        1,
+        "a no-op cannot claim authorship"
+    );
+    record_human(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(10, " next"),
+        "bob",
+    )
+    .expect("bob");
+    let expected = serde_json::json!([
+        {"kind":"human","humanId":"alice","onBehalfOf":"alice"},
+        {"kind":"human","humanId":"bob","onBehalfOf":"bob"},
+    ])
+    .to_string();
+    assert_eq!(
+        ts.store
+            .read_with(|conn| author_coverage::reserved_in(conn, &key))
+            .expect("unfolded")
+            .json(),
+        expected
+    );
     maybe_compact(&mut ts.store, &key, 0, &NoFaults, 3).expect("fold");
-    assert!(ts
+    assert_eq!(
+        ts.store
+            .read_with(|conn| author_coverage::reserved_in(conn, &key))
+            .expect("folded")
+            .json(),
+        expected
+    );
+    ts.store
+        .write_with(&NoFaults, |tx| author_coverage::advance_in(tx, &key, false))
+        .expect("settlement consumes interval");
+    assert_eq!(covered_count(&ts.store, &key), 0);
+    record_human(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(15, " again"),
+        "alice",
+    )
+    .expect("next interval");
+    let next = ts
         .store
         .read_with(|conn| author_coverage::reserved_in(conn, &key))
-        .expect("coverage")
-        .is_empty());
+        .expect("new coverage");
+    assert_eq!(next.len(), 1);
+    assert!(!next.json().contains("bob"));
+}
+
+#[test]
+fn compacted_human_coverage_enforces_capacity_without_refusing_known_authors_or_retries() {
+    let mut ts = fresh_store("human-author-capacity");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &NoFaults,
+        1,
+    )
+    .expect("marker");
+    let folded: Vec<_> = (0..author_coverage::MAX_INTERVAL_AUTHORS)
+        .map(|index| {
+            let person = format!("person-{index}");
+            serde_json::json!({"kind":"human","humanId":person,"onBehalfOf":person})
+        })
+        .collect();
+    let json = serde_json::to_string(&folded).unwrap();
+    ts.store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_docs SET pending_authors_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![key.workspace_id,key.version_id,key.object_id,json]).map_err(dohc_engine_storage::StorageError::persist_public)?;
+        Ok::<_, CollabError>(())
+    }).expect("coverage retained by compaction");
+    let doc = Ydoc::wire();
+    let first = doc.plaintext_insert(0, "x");
+    let admitted = record_human(&mut ts.store, &mut ts.cache, &key, &first, "person-0")
+        .expect("known person enters");
+    assert!(matches!(admitted, TxnOutcome::Committed(outcome) if outcome.settlement_requested));
+    let before = dohc_engine_collab::read_marker(&ts.store, &key)
+        .unwrap()
+        .unwrap();
+    let refused = record_human(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(1, "y"),
+        "new-person",
+    );
+    assert!(matches!(refused, Err(CollabError::AuthorCapacity)));
+    assert_eq!(
+        dohc_engine_collab::read_marker(&ts.store, &key)
+            .unwrap()
+            .unwrap()
+            .head_update_seq,
+        before.head_update_seq
+    );
+    let duplicate = record_human(&mut ts.store, &mut ts.cache, &key, &first, "another-person")
+        .expect("retry at capacity");
+    assert!(matches!(duplicate, TxnOutcome::Committed(outcome) if outcome.deduped));
+    let peer = dohc_engine_collab::load_persisted(&ts.store, &key)
+        .unwrap()
+        .unwrap()
+        .doc;
+    assert_eq!(
+        peer.plaintext_string(),
+        "x",
+        "the refused update did not reach the document"
+    );
+    record_human(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &peer.plaintext_insert(1, "z"),
+        "person-0",
+    )
+    .expect("known person still enters");
+    maybe_compact(&mut ts.store, &key, 0, &NoFaults, 3).expect("fold at capacity");
+    assert_eq!(
+        covered_count(&ts.store, &key),
+        author_coverage::MAX_INTERVAL_AUTHORS
+    );
 }
 
 #[test]
@@ -642,7 +783,11 @@ fn every_author_field_at_its_maximum_fits_one_entry() {
         .store
         .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
         .expect("coverage");
-    assert_eq!(authors.len(), 2, "human edits are not settlement authors");
+    assert_eq!(
+        authors.len(),
+        3,
+        "human, agent, and automation edits retain coverage"
+    );
     let entries: Vec<serde_json::Value> =
         serde_json::from_str(&authors.json()).expect("author list");
     assert_eq!(
@@ -826,9 +971,11 @@ fn control_character_author_fields_are_refused_before_admission() {
             Err(CollabError::InvalidIdentifier { .. })
         ));
     }
-    assert!(dohc_engine_collab::read_marker(&ts.store, &key)
-        .expect("marker query")
-        .is_none());
+    assert!(
+        dohc_engine_collab::read_marker(&ts.store, &key)
+            .expect("marker query")
+            .is_none()
+    );
 }
 
 #[test]

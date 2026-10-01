@@ -11,7 +11,7 @@ import {
 } from "../versioned/engineTextLimits";
 import {
   VERSIONED_METHOD,
-  type AgentAuthor,
+  type WriteAuthor,
   type MomentRecord,
   type MomentsListResult,
   type SecretMomentRecord,
@@ -984,6 +984,34 @@ function mergeMarkdown(base: string, local: string, remote: string): MarkdownMer
 
 export class VersionedLoopbackEngine implements EngineTransport {
   readonly requests: Request[] = [];
+  private readonly authorContextsForTest = new Map<string, string>();
+
+  // Test fixtures declare host admission explicitly. Native RPC tests prove its authority.
+  admitAuthorContextForTest(authorContext: string, personId: string): void {
+    this.authorContextsForTest.set(authorContext, personId);
+  }
+
+  private stampAuthorContextForTest(params: JsonObject): JsonObject {
+    const { authorContext, ...stamped } = params;
+    if (authorContext === undefined) {
+      const author = params.author;
+      if (author && typeof author === "object" && !Array.isArray(author) && author.kind === "human") {
+        throw new Error("author-context-required");
+      }
+      return params;
+    }
+    const personId = typeof authorContext === "string" ? this.authorContextsForTest.get(authorContext) : undefined;
+    if (personId === undefined) throw new Error("author-context-required");
+    const author = stamped.author;
+    if (author === undefined || author === null) {
+      stamped.author = {kind: "human", humanId: personId};
+    } else if (typeof author === "object" && !Array.isArray(author)) {
+      stamped.author = author.kind === "human"
+        ? {kind: "human", humanId: personId}
+        : {...author, onBehalfOf: personId};
+    }
+    return stamped;
+  }
   readonly responses: Response[] = [];
 
   private readonly workspaces = new Map<string, WorkspaceState>();
@@ -1114,7 +1142,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     this.requests.push(request);
     let result: JsonValue;
     try {
-      const params = asObject(request.params, `${request.method} params`);
+      const params = this.stampAuthorContextForTest(asObject(request.params, `${request.method} params`));
       const parsed = parseTextWriteFields(params, request);
       const workspace = this.requireWorkspaceHandle(request);
       this.validateWorkspaceParam(params, workspace);
@@ -1128,7 +1156,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private handleRequest(request: Request): JsonValue {
-    const params = asObject(request.params, `${request.method} params`);
+    const params = this.stampAuthorContextForTest(asObject(request.params, `${request.method} params`));
     validateVersionedParams(request.method, params, request);
     validatePreWorkspaceSemantics(request.method, params);
     let parsedTextWrite: ParsedTextWriteFields | undefined;
@@ -3017,7 +3045,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
   // Mirrors the daemon's `validated_author` (lib.rs): a malformed author is
   // refused with `invalid-metadata` before any mutation, and only the
   // recognized fields are stored. `agentRunId` is omitted, never nulled.
-  private validatedAuthorValue(params: JsonObject): AgentAuthor | undefined {
+  private validatedAuthorValue(params: JsonObject): WriteAuthor | undefined {
     const value = params.author;
     if (value === undefined || value === null) return undefined;
     if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-metadata");
@@ -3028,6 +3056,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
       throw new Error("invalid-metadata");
     }
     const { kind, agentId, onBehalfOf, agentRunId, depth } = value;
+    if (kind === "human") {
+      if (typeof value.humanId !== "string" || value.humanId.length === 0 || Object.keys(value).length !== 2) {
+        throw new Error("invalid-metadata");
+      }
+      return {kind: "human", humanId: value.humanId};
+    }
     if (
       kind !== "agent" ||
       typeof agentId !== "string" ||

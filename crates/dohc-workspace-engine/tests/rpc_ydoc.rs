@@ -269,7 +269,7 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
         artifact.as_bytes(),
     );
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-seed", 1).await;
     let (opened, initial) = call_ydoc_with_blob(
@@ -396,7 +396,7 @@ async fn scene_open_claims_a_whitespace_only_artifact_after_capture_wins() {
     const PATH: &str = "drawings/untitled.excalidraw";
     write_file(scratch.path(), PATH, b" \n\t");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-empty-scene", 31).await;
     let captured = call(
@@ -488,7 +488,7 @@ async fn scene_open_still_refuses_a_nonempty_invalid_artifact() {
     const PATH: &str = "drawings/invalid.excalidraw";
     write_file(scratch.path(), PATH, b"not JSON");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-invalid-scene", 41).await;
     let refused = call_error(
@@ -531,7 +531,7 @@ async fn scene_open_seeds_legacy_elements_and_repairs_a_dangling_image() {
         artifact.as_bytes(),
     );
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-legacy-scene", 1).await;
     let (opened, initial) = call_ydoc_with_blob(
@@ -618,7 +618,7 @@ async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit()
         scene(1, "#ffffff").as_bytes(),
     );
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-close", 71).await;
     let opened = call(
@@ -717,7 +717,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_rollback_restores_th
         write_file(scratch.path(), path, artifact.as_bytes());
     }
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-scene-asset-delete", 1).await;
     call(&transport, &handle, 2, "capture.flush", json!({})).await;
@@ -818,7 +818,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_rollback_restores_th
 
     call(&transport, &handle, 9, "workspace.close", json!({})).await;
     drop(transport);
-    let restarted = InProcessTransport::new(Arc::new(EngineService::new()));
+    let restarted = InProcessTransport::new(Arc::new(authored_service()));
     let restarted_handle = open_workspace(&restarted, &scratch, "ws-scene-asset-delete", 10).await;
     assert!(!scratch.path().join(&deleted_asset).exists());
     call(
@@ -882,7 +882,7 @@ async fn scene_delete_rollback_stays_closed_over_foreign_disk_bytes_then_recover
     const PATH: &str = "drawings/conflict.excalidraw";
     write_file(scratch.path(), PATH, artifact.as_bytes());
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, WORKSPACE, 1).await;
     call(&transport, &handle, 2, "capture.flush", json!({})).await;
     let object_id = dohc_engine_domain::derive_capture_object_id(WORKSPACE, "main", PATH);
@@ -1002,7 +1002,7 @@ async fn capture_retire_of_a_scene_removes_its_owned_asset_sidecar() {
     const PATH: &str = "drawings/capture-delete.excalidraw";
     write_file(scratch.path(), PATH, artifact.as_bytes());
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, "ws-scene-capture-delete", 1).await;
     let opened = call(
         &transport,
@@ -1072,7 +1072,7 @@ async fn retired_scene_asset_sidecar_still_supports_open_settle_and_close() {
     const PATH: &str = "drawings/retired-sidecar.excalidraw";
     write_file(scratch.path(), PATH, artifact.as_bytes());
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, "ws-scene-retired-sidecar", 1).await;
     let opened = call(
         &transport,
@@ -1217,7 +1217,7 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
         artifact.as_bytes(),
     );
     let workspace_id = "ws-scene-fork-delete";
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
     let opened = call(
         &transport,
@@ -1356,7 +1356,7 @@ async fn a_seeded_drawing_reopens_with_nothing_to_settle() {
         "drawings/seeded.excalidraw",
         artifact.as_bytes(),
     );
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-reopen", 90).await;
     let open = |id: u64| {
@@ -1455,7 +1455,7 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
         artifact.as_bytes(),
     );
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-order", 77).await;
     let open = |id: u64| {
@@ -1569,7 +1569,7 @@ async fn scene_rebind_with_seed_disabled_never_resurrects_the_portable_artifact(
         "replacement.excalidraw",
         artifact.as_bytes(),
     );
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-no-reseed", 81).await;
 
@@ -1628,7 +1628,7 @@ async fn scene_open_defers_missing_authoritative_asset_then_recovers_and_survive
         "drawings/missing.excalidraw",
         artifact.as_bytes(),
     );
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-missing", 101).await;
     let opened = call(
@@ -1783,7 +1783,7 @@ async fn scene_open_rejects_forged_asset_namespace_without_a_writable_fallback()
     }))
     .expect("portable scene");
     write_file(scratch.path(), "forged.excalidraw", artifact.as_bytes());
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-forged", 121).await;
     let opened = call(
@@ -1856,7 +1856,7 @@ async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
     }))
     .expect("portable scene");
     write_file(scratch.path(), "undo.excalidraw", artifact.as_bytes());
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-undo", 201).await;
     let first = call(
@@ -1982,7 +1982,7 @@ async fn scene_open_rejects_text_sha_and_mime_asset_authority_without_a_writable
             &drawing_path,
             br#"{"type":"excalidraw","elements":[],"appState":{},"files":{}}"#,
         );
-        let service = Arc::new(EngineService::new());
+        let service = Arc::new(authored_service());
         let transport = InProcessTransport::new(service);
         let workspace_id = format!("ws-rpc-scene-{case}");
         let handle = open_workspace(&transport, &scratch, &workspace_id, 160).await;
@@ -2096,7 +2096,7 @@ async fn scene_seed_omits_deleted_and_unused_native_files() {
     }))
     .expect("portable scene");
     write_file(scratch.path(), "privacy.excalidraw", artifact.as_bytes());
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-privacy", 131).await;
     let opened = call(
@@ -2144,7 +2144,7 @@ async fn scene_seed_refuses_a_preexisting_different_asset_at_its_owned_ref() {
     .expect("portable scene");
     let drawing_path = "collision.excalidraw";
     write_file(scratch.path(), drawing_path, artifact.as_bytes());
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let workspace_id = "ws-rpc-scene-collision";
     let handle = open_workspace(&transport, &scratch, workspace_id, 141).await;
@@ -2209,7 +2209,7 @@ async fn scene_seed_names_the_existing_binary_ceiling_before_commit() {
         "over-binary.excalidraw",
         artifact.as_bytes(),
     );
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-binary-cap", 151).await;
     let refused = call_error(
@@ -2449,7 +2449,7 @@ async fn ydoc_open_rejects_secret_paths() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), ".env.local", b"TOKEN=secret\n");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-secret", 1).await;
 
@@ -2482,7 +2482,7 @@ async fn ydoc_blob_egress_roundtrips_a_state_above_the_old_json_cap() {
     const OLD_STATE_WIRE_CAP: usize = 6 * MIB;
 
     let scratch = ScratchDir::new().expect("scratch");
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-large-egress", 1).await;
 
@@ -2616,7 +2616,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         &[0x89, 0x50, 0x4e, 0x47, 0x00, 0xff],
     );
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc", 1).await;
 
@@ -3064,7 +3064,7 @@ async fn settle_without_a_seeded_lineage_refuses_and_leaves_the_file_intact() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/precious.md", b"precious content");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-noseed", 1).await;
 
@@ -3132,7 +3132,7 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-owner", 1).await;
 
@@ -3215,7 +3215,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
     // holds, so the file must land and the response must say `content: null`.
     let scratch = ScratchDir::new().expect("scratch");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-overcap", 1).await;
 
@@ -3333,7 +3333,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     // Rebuilding the manifest would seed the settled head and skip its ingest.
     let scratch = ScratchDir::new().expect("scratch");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-capture", 1).await;
 
@@ -3462,7 +3462,7 @@ async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "baseline/alpha.md", b"");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-zero", 1).await;
 
@@ -3542,7 +3542,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     // rather than by hoping the scheduler interleaves.
     let scratch = ScratchDir::new().expect("scratch");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-newfile", 1).await;
 
@@ -3662,7 +3662,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     // destroying the ingested content.
     let scratch = ScratchDir::new().expect("scratch");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-rival", 1).await;
 
@@ -3812,7 +3812,7 @@ async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-create", 1).await;
 
@@ -3888,7 +3888,7 @@ async fn opening_an_absent_path_whose_derived_object_lives_elsewhere_refuses() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-alias", 1).await;
 
@@ -3958,7 +3958,7 @@ async fn settle_recovers_after_a_transient_replace_failure() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-transient", 1).await;
 
@@ -4099,7 +4099,7 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-changed", 1).await;
 
@@ -4213,7 +4213,7 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let workspace_id = "ws-rpc-ydoc-delete-cancels-pending";
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
 
@@ -4321,7 +4321,7 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
 
     // Simulate a daemon restart against the same on-disk database: a fresh
     // service, a fresh transport, reopening the same workspace root.
-    let restarted_service = Arc::new(EngineService::new());
+    let restarted_service = Arc::new(authored_service());
     let restarted_transport = InProcessTransport::new(restarted_service);
     let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
 
@@ -4364,7 +4364,7 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let workspace_id = "ws-rpc-ydoc-inactive-delete-preserves-active";
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
 
@@ -4494,7 +4494,7 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
     call(&transport, &handle, 11, "workspace.close", json!({})).await;
     drop(transport);
 
-    let restarted_service = Arc::new(EngineService::new());
+    let restarted_service = Arc::new(authored_service());
     let restarted_transport = InProcessTransport::new(restarted_service);
     let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
 
@@ -4536,7 +4536,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     let scratch = ScratchDir::new().expect("scratch");
 
     let workspace_id = "ws-rpc-ydoc-rename-pair-not-stranded";
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     // Capture could re-import old.bin while its paired delete is pending.
     let handle =
@@ -4609,7 +4609,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
     drop(transport);
 
-    let restarted_service = Arc::new(EngineService::new());
+    let restarted_service = Arc::new(authored_service());
     let restarted_transport = InProcessTransport::new(restarted_service);
     let restarted_handle = open_workspace_with_capture_mode(
         &restarted_transport,
@@ -4697,7 +4697,7 @@ async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), PATH, b"base");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-665-a", 1).await;
 
@@ -4828,7 +4828,7 @@ async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), PATH, b"base");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-665-b", 1).await;
     wait_for_captured_head(&transport, &handle, PATH, "base", 1_000).await;
@@ -4963,7 +4963,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
     const PATH: &str = "notes/lineage.md";
 
     let scratch = ScratchDir::new().expect("scratch");
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
     let db_path = engine_db_path(&scratch).expect("engine database path");
@@ -5182,7 +5182,7 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
     const PATH: &str = "notes/shared.md";
 
     let scratch = ScratchDir::new().expect("scratch");
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
     let db_path = engine_db_path(&scratch).expect("engine database path");
@@ -5406,7 +5406,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
     write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n");
     write_file(scratch.path(), "notes/crlf.md", b"cr line\r\n");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-seed-only", 1).await;
 
@@ -5512,7 +5512,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-seed-edit", 1).await;
 
@@ -5577,7 +5577,7 @@ async fn an_edited_document_can_reseed_and_close_without_another_edit() {
     let scratch = ScratchDir::new().expect("scratch");
     let path = "notes/reopen.md";
     write_file(scratch.path(), path, b"Original paragraph.\n");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-edited-reseed", 1).await;
     let opened = call(
         &transport,
@@ -5699,7 +5699,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
         let scratch = ScratchDir::new().expect("scratch");
         let path = "notes/reopen.md";
         write_file(scratch.path(), path, b"Original paragraph.\n");
-        let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+        let transport = InProcessTransport::new(Arc::new(authored_service()));
         let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-reseed-proof", 1).await;
         let opened = call(
             &transport,
@@ -5843,7 +5843,7 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/replay.md", b"Original body.\n");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-seed-replay", 1).await;
 
@@ -5941,7 +5941,7 @@ async fn a_seed_declared_after_the_first_update_refuses() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/late-seed.md", b"Body.\n");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-late-seed", 1).await;
 
@@ -5990,7 +5990,7 @@ async fn a_seed_declared_after_the_first_update_refuses() {
 async fn author_threshold_queues_settlement_after_admission_without_explicit_settle() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle =
         open_workspace_with_capture_mode(&transport, &scratch, "queued-authors", 1, Some("none"))
@@ -6051,10 +6051,10 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn record_update_preserves_existing_human_automation_context() {
+async fn record_update_rejects_client_human_claims() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace_with_capture_mode(
         &transport,
@@ -6076,7 +6076,7 @@ async fn record_update_preserves_existing_human_automation_context() {
     )
     .await;
     let doc = Ydoc::wire();
-    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+    let refused = call_error(&transport, &handle, 3, "ydoc.recordUpdate", json!({
         "sessionId": opened["sessionId"],
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "forged")),
         "actorOriginId": "someone-else",
@@ -6087,15 +6087,8 @@ async fn record_update_preserves_existing_human_automation_context() {
     let updates: i64 = raw
         .query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
         .expect("update count");
-    assert_eq!(updates, 1);
-    let person: String = raw
-        .query_row(
-            "SELECT on_behalf_of FROM ydoc_updates WHERE actor_kind='human'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("automation person");
-    assert_eq!(person, "someone-else");
+    assert_eq!(updates, 0);
+    assert_eq!(refused.message, "author-context-required");
     call(
         &transport,
         &handle,
@@ -6111,7 +6104,7 @@ async fn record_update_preserves_existing_human_automation_context() {
 async fn attributed_declared_seed_does_not_credit_opening() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle =
         open_workspace_with_capture_mode(&transport, &scratch, "seed-authors", 1, Some("none"))
             .await;

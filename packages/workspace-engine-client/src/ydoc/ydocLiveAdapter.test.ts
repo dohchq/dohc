@@ -5596,7 +5596,7 @@ describe("immutable original-record recovery", () => {
       run: { claimId: "run-a", automationName: "Original name" } };
     loseAck = true;
     const deleting = session.applyLocalTextEdit({ root: "plainText", index: 0, deleteLength: 1 },
-      { actorOriginId: "automation-a", attribution });
+      { actorOriginId: "automation-a", attribution, authorContext: "original-alice-context" });
     attribution.onBehalfOf = "bob";
     attribution.depth = 9;
     attribution.run.automationName = "Renamed";
@@ -5604,7 +5604,7 @@ describe("immutable original-record recovery", () => {
     expect(attempts).toHaveLength(2);
     expect(attempts[1]?.params).toEqual(attempts[0]?.params);
     expect(attempts[1]?.idempotencyKey).toBe(attempts[0]?.idempotencyKey);
-    expect(attempts[0]?.params).toMatchObject({ actorOriginId: "automation-a",
+    expect(attempts[0]?.params).toMatchObject({ authorContext: "original-alice-context", actorOriginId: "automation-a",
       attribution: { onBehalfOf: "alice", depth: 2, run: { automationName: "Original name" } } });
     expect(engine.recordedUpdates.length - before).toBe(1);
     expect(session.missingLocalState).toBe(false);
@@ -5634,14 +5634,15 @@ describe("immutable original-record recovery", () => {
     accepted.length = 0;
     busy = true;
     const first = session.applyLocalTextEdit({ root: "plainText", index: 0, deleteLength: 1 },
-      { actorOriginId: "alice-agent", attribution: { actorKind: "agent", onBehalfOf: "alice", depth: 1 } });
+      { authorContext: "alice-context", actorOriginId: "alice-agent", attribution: { actorKind: "agent", onBehalfOf: "alice", depth: 1 } });
     const second = session.applyLocalTextEdit({ root: "plainText", index: 2, insert: "d" },
-      { actorOriginId: "bob-agent", attribution: { actorKind: "agent", onBehalfOf: "bob", depth: 3 } });
+      { authorContext: "bob-context", actorOriginId: "bob-agent", attribution: { actorKind: "agent", onBehalfOf: "bob", depth: 3 } });
     await expect(first).rejects.toBeInstanceOf(DaemonRefusalError);
     await expect(second).rejects.toBeInstanceOf(DaemonRefusalError);
     busy = false;
     await session.resendMissingState();
     expect(accepted).toHaveLength(2);
+    expect(accepted.map(request => (request.params as { authorContext: string }).authorContext)).toEqual(["alice-context", "bob-context"]);
     expect(accepted.map(request => request.params)).toEqual([refused[0]?.params, refused[2]?.params]);
     expect(accepted.map(request => request.idempotencyKey)).toEqual([refused[0]?.idempotencyKey, refused[2]?.idempotencyKey]);
     const deletion = Y.decodeUpdate(Buffer.from((accepted[0]?.params as { updateBase64: string }).updateBase64, "base64"));

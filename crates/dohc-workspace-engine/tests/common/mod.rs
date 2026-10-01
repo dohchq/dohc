@@ -14,6 +14,56 @@ use std::time::Duration;
 
 pub const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+pub const AUTHOR_CONTEXT_SECRET: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+pub fn authored_service() -> EngineService {
+    let service = EngineService::new();
+    service
+        .provision_author_context_secret(AUTHOR_CONTEXT_SECRET.into())
+        .unwrap();
+    service
+}
+
+// Success-path fixtures declare their person through the private host seam.
+// Spoofing tests call the transport directly and do not use this helper.
+pub async fn trusted_fixture_params(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    mut params: Value,
+) -> Value {
+    if params.get("authorContext").is_some() {
+        return params;
+    }
+    let person = params
+        .get("author")
+        .or_else(|| params.get("attribution"))
+        .and_then(|author| author.get("onBehalfOf"))
+        .and_then(Value::as_str)
+        .filter(|person| {
+            !person.is_empty()
+                && person.len() <= dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES
+                && !person.chars().any(char::is_control)
+        })
+        .map(str::to_owned);
+    if let Some(person) = person {
+        let admitted = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    u64::MAX - 1,
+                    "authorContext.admit",
+                    Some(handle.clone()),
+                    json!({"hostCredential":AUTHOR_CONTEXT_SECRET,"personId":person}),
+                ),
+            )
+            .await
+            .expect("trusted fixture admission");
+        params["authorContext"] = admitted.result["authorContext"].clone();
+    }
+    params
+}
+
 pub fn request(
     id: u64,
     method: &str,
@@ -38,6 +88,7 @@ pub async fn call(
     method: &str,
     params: Value,
 ) -> Value {
+    let params = trusted_fixture_params(transport, handle, params).await;
     transport
         .call(
             RequestContext::unbounded(),
@@ -55,6 +106,7 @@ pub async fn call_error(
     method: &str,
     params: Value,
 ) -> WireError {
+    let params = trusted_fixture_params(transport, handle, params).await;
     transport
         .call(
             RequestContext::unbounded(),

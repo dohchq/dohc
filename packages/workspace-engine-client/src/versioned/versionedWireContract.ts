@@ -59,6 +59,7 @@ export type VersionedOrigin =
   | "unknown";
 
 export type AgentAuthor = JsonObject & {
+  authorContext?: string;
   kind: "agent";
   agentId: string;
   onBehalfOf: string;
@@ -72,13 +73,15 @@ export type AgentAuthor = JsonObject & {
  * its chain depth, so the claims the write causes carry the automation on.
  */
 export type WriteAuthor =
+  | (JsonObject & { kind: "human"; humanId: string; authorContext?: string })
   | AgentAuthor
-  | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf?: string; depth: number });
+  | (JsonObject & { kind: "automation"; automationId: string; authorContext?: string; onBehalfOf?: string; depth: number });
 
 type MutationMetadata = JsonObject & {
   workspaceId?: string;
   origin?: VersionedOrigin;
   author?: WriteAuthor;
+  authorContext?: string;
   requestId?: string;
   nowMs?: number;
   summary?: string;

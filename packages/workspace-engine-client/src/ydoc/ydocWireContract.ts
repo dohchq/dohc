@@ -50,6 +50,7 @@ export type ChangeAttributionWire = JsonObject & {
 };
 
 export type YdocRecordUpdateParams = JsonObject & {
+  authorContext?: string;
   sessionId: string;
   updateBase64: string;
   actorOriginId?: string;

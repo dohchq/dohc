@@ -267,6 +267,7 @@ export interface OpenYdocAdapterSessionInput {
 }
 
 export interface ApplyLocalUpdateOptions {
+  authorContext?: string;
   actorOriginId?: string;
   /** Declared write provenance the engine records beside the actor origin. */
   attribution?: ChangeAttributionWire;
@@ -580,6 +581,7 @@ interface LocalRecordCapture {
 interface LocalUpdateRecord {
   readonly updateBase64: string;
   readonly idempotencyKey: string;
+  readonly authorContext?: string;
   readonly actorOriginId?: string;
   readonly attribution?: ChangeAttributionWire;
   readonly seed: boolean;
@@ -809,11 +811,13 @@ export class YdocAdapterSession {
     const record: LocalUpdateRecord = {
       updateBase64: bytesToBase64(update),
       idempotencyKey: options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`,
+      ...(options?.authorContext ? { authorContext: options.authorContext } : {}),
       ...(options?.actorOriginId ? { actorOriginId: options.actorOriginId } : {}),
       ...(options?.attribution ? { attribution: structuredClone(options.attribution) } : {}),
       seed: seedUpdate,
     };
     const retainedBytes = record.updateBase64.length * 2 +
+      (record.authorContext?.length ?? 0) * 2 +
       (record.actorOriginId?.length ?? 0) * 2 +
       (record.attribution ? JSON.stringify(record.attribution).length * 2 : 0);
     if (this.pendingRecords.size >= YDOC_PENDING_MAX_RECORDS ||
@@ -947,6 +951,7 @@ export class YdocAdapterSession {
     const params: YdocRecordUpdateParams = {
       sessionId: this.sessionId,
       updateBase64: record.updateBase64,
+      ...(record.authorContext ? { authorContext: record.authorContext } : {}),
       ...(record.actorOriginId ? { actorOriginId: record.actorOriginId } : {}),
       ...(record.attribution ? { attribution: structuredClone(record.attribution) } : {}),
       ...(record.seed ? { seed: true } : {}),
@@ -996,6 +1001,7 @@ export class YdocAdapterSession {
   private removePendingRecord(record: LocalUpdateRecord): void {
     if (!this.pendingRecords.delete(record)) return;
     this.pendingRecordBytes -= record.updateBase64.length * 2 +
+      (record.authorContext?.length ?? 0) * 2 +
       (record.actorOriginId?.length ?? 0) * 2 +
       (record.attribution ? JSON.stringify(record.attribution).length * 2 : 0);
   }

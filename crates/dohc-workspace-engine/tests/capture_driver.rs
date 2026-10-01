@@ -159,7 +159,7 @@ async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     drop(store);
     write_file(scratch.path(), "must-stay-on-disk.md", b"typescript-owned");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -211,7 +211,7 @@ async fn autonomous_capture_notices_external_disk_changes() {
     // Pre-existing content: the startup baseline scan must capture it.
     write_file(scratch.path(), "pre-existing.md", b"before open");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
 
     wait_for_text(&transport, &handle, "pre-existing.md", Some("before open")).await;
@@ -316,7 +316,7 @@ async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() 
     write_file(scratch.path(), "offline-a.md", b"edited while closed a");
     write_file(scratch.path(), "offline-b.md", b"edited while closed b");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let mut events = service.events().subscribe();
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, 1).await;
@@ -412,7 +412,7 @@ async fn a_live_capture_emits_an_event_and_keeps_ts_live_labels() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let mut events = service.events().subscribe();
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, 1).await;
@@ -454,7 +454,27 @@ async fn open_capture_author_stamps_the_startup_baseline() {
         "agentRunId": "run",
     });
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let bootstrap = transport.call(RequestContext::unbounded(), request(0, "workspace.open", None,
+        json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WORKSPACE_ID,"captureMode":"none"}))).await.unwrap();
+    let bootstrap_handle: WorkspaceHandle =
+        serde_json::from_value(bootstrap.result["workspace"].clone()).unwrap();
+    let context = call(
+        &transport,
+        &bootstrap_handle,
+        0,
+        "authorContext.admit",
+        json!({"hostCredential":AUTHOR_CONTEXT_SECRET,"personId":"local"}),
+    )
+    .await;
+    call(
+        &transport,
+        &bootstrap_handle,
+        0,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -466,6 +486,7 @@ async fn open_capture_author_stamps_the_startup_baseline() {
                     "rootDir": scratch.path().to_string_lossy(),
                     "workspaceId": WORKSPACE_ID,
                     "captureAuthor": author,
+                    "authorContext": context["authorContext"],
                 }),
             ),
         )
@@ -513,7 +534,7 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "private/journal.md", b"personal");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
 
@@ -645,7 +666,7 @@ async fn a_policy_retire_pass_emits_a_moment_event() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "private/journal.md", b"personal");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let mut events = service.events().subscribe();
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, 1).await;
@@ -701,7 +722,7 @@ async fn an_over_cap_policy_retire_keeps_the_pass_provenance_and_emits() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "big.md", b"small enough to capture");
 
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(authored_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_for_text(
@@ -766,7 +787,7 @@ async fn binary_and_secret_content_capture_autonomously() {
     write_file(scratch.path(), ".env", b"TOKEN=alpha");
     write_file(scratch.path(), "witness.md", b"same scan");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
     // The text witness proves the baseline scan cycle completed.
     wait_for_text(&transport, &handle, "witness.md", Some("same scan")).await;
@@ -820,7 +841,7 @@ async fn immediate_close_after_write_drains_cleanly_and_reopen_converges() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
 
     // Race a disk write against an immediate close: the close must drain the
@@ -858,7 +879,7 @@ async fn files_deleted_while_closed_retire_on_reopen() {
     );
     write_file(scratch.path(), "survivor.md", b"stays");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_for_text(
         &transport,
@@ -898,7 +919,7 @@ async fn policy_narrowed_while_closed_retires_on_reopen() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "private/journal.md", b"personal");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
     transport
@@ -935,7 +956,7 @@ async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
     // A real captured file anchors the version and proves capture is live.
     write_file(scratch.path(), "on-disk.md", b"captured from disk");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_for_text(
         &transport,
@@ -1022,7 +1043,7 @@ async fn offline_delete_and_narrow_in_the_same_window_still_retires() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "private/journal.md", b"personal");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
     transport
@@ -1069,7 +1090,7 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
     // Establish the workspace first (open binds the store to the root),
     // then inject the foreign tip — the realistic sequence for an
     // API/replication write into a live workspace.
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_for_text(&transport, &handle, "witness.md", Some("anchor")).await;
     transport
@@ -1164,7 +1185,7 @@ async fn watcher_status_reports_a_live_driver_and_flush_settles() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "seed.md", b"seeded before open");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
 
     // A fresh store may open while its all-Added baseline is importing. Wait
@@ -2064,7 +2085,7 @@ async fn capture_flush_turns_external_writes_into_read_your_writes() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
 
     // An external write with no RPC involved. The only nondeterminism left
@@ -2115,7 +2136,7 @@ async fn capture_flush_turns_external_writes_into_read_your_writes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e_rpcs_on_a_closed_handle_fail_cleanly() {
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     // On a CLOSED handle both RPCs fail cleanly (no hang, no panic, no
     // stale driver reached).
     let handle = open_workspace(&transport, &scratch, 2).await;
@@ -2159,7 +2180,7 @@ async fn a_quarantined_path_keeps_capture_flush_unsettled() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "healthy.md", b"captured fine");
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(authored_service()));
     let handle = open_workspace(&transport, &scratch, 1).await;
 
     // The baseline must settle first, so the locked file below is the only

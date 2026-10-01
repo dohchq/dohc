@@ -391,32 +391,6 @@ impl ActorHandle {
     }
 }
 
-fn capture_agent_origin_id(author_json: Option<&str>) -> Option<String> {
-    let entries = dohc_engine_domain::moment_author_entries(author_json);
-    let [author] = entries.as_slice() else {
-        return None;
-    };
-    let object = author.as_object()?;
-    if object.get("kind").and_then(serde_json::Value::as_str) != Some("agent") {
-        return None;
-    }
-    let agent_id = object
-        .get("agentId")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())?;
-    object
-        .get("onBehalfOf")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())?;
-    if object
-        .get("agentRunId")
-        .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
-    {
-        return None;
-    }
-    Some(agent_id.to_owned())
-}
-
 fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
@@ -460,11 +434,8 @@ fn capture_ingest_in_tx(
     leases: &LeaseRegistry,
     mut batch: Option<&mut CaptureBatchSharedContext>,
 ) -> Result<WriteResult, RuntimeError> {
-    let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
-    // A captured agent run declares itself as an agent at its run's depth.
-    let attribution = actor_origin_id.as_ref().and_then(|_| {
-        dohc_engine_domain::moment_author_attribution(input.author_json.as_deref()).1
-    });
+    let (actor_origin_id, attribution) =
+        dohc_engine_domain::moment_author_attribution(input.author_json.as_deref());
     let mut admitted = false;
     let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(

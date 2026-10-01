@@ -132,6 +132,7 @@ export interface EngineDaemonClient extends MinimalDaemonClient {
 }
 
 export interface EngineDaemonLifecycleOptions {
+  authorContextSecret?: string;
   privateOwnerHost?: {configPath: string; client: NonNullable<EngineClientSpawnOptions["privateLiveApplication"]>};
   command: string;
   launch?: (options: EngineClientSpawnOptions) => Promise<EngineDaemonClient>;
@@ -823,6 +824,7 @@ export class EngineDaemonLifecycle {
         command: this.options.command,
         cwd: dirname(this.options.command),
         authToken,
+        authorContextSecret: this.options.authorContextSecret,
         protocolVersion: ENGINE_PROTOCOL_VERSION,
         capabilities: ["blobs"],
         signal,

@@ -2980,7 +2980,11 @@ fn author_entry_attribution(author: &Value) -> (Option<String>, Option<ChangeAtt
     };
     let attribution = ChangeAttribution {
         actor_kind,
-        on_behalf_of: text("onBehalfOf"),
+        on_behalf_of: if actor_kind == ChangeActorKind::Human {
+            Some(actor.clone())
+        } else {
+            text("onBehalfOf")
+        },
         depth,
         run: None,
     };
