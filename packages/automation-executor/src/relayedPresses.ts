@@ -7,6 +7,8 @@ import type {
 import { AutomationRunWait } from "./automationRunWait";
 import { SHARED_BUTTON_DENIED, SHARED_BUTTON_FAILED } from "./buttonPresser";
 import type { CollectionAutomationPress, PressSettled } from "./collectionAutomations";
+import * as Effect from "effect/Effect";
+import type * as Fiber from "effect/Fiber";
 
 // Button presses from shared views (ADR 0012). A recipient's computer sends
 // the press to the relay; the automation host, one of the owner's computers
@@ -97,16 +99,6 @@ export interface RelayedPressHostOptions {
   delay?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
-function wait(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener("abort", () => {
-      clearTimeout(timer);
-      resolve();
-    }, { once: true });
-  });
-}
-
 /**
  * The host's side for one open workspace. It runs only while the host module
  * says this host runs the workspace's automations. A press is accepted
@@ -116,9 +108,8 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
  * grant again before it runs.
  */
 export function createRelayedPressHost(options: RelayedPressHostOptions) {
-  const { host } = options;
-  const delay = options.delay ?? wait;
-  let running: AbortController | null = null;
+  const { host, delay } = options;
+  let running: Fiber.Fiber<void, unknown> | null = null;
   // Presses this host has pressed, by claim, until their runs settle.
   const byClaim = new Map<string, { press: RelayAutomationPress; field: string | null }>();
   // Presses taken this session, so a list naming them again does not press twice.
@@ -227,45 +218,62 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
     }
   }
 
-  async function loop(signal: AbortSignal): Promise<void> {
+  const loop = Effect.gen(function* () {
     let retryMs = RETRY_FIRST_MS;
-    while (!signal.aborted) {
-      try {
-        if (!(await host.runsHere())) return;
-        const relay = await options.transport();
-        if (relay === null) return;
-        for (const input of [...unsent.values()]) await settle(relay, input);
-        const presses = await relay.list(signal);
-        for (const request of relay.inspections()) {
-          const generation = host.generation();
-          if (signal.aborted || generation === null || !host.stillRuns()) break;
-          try {
-            const result = await options.inspect(request.inspectionId);
-            await relay.answerInspection(generation, request.inspectionId, result);
-          } catch (error) { options.onError("answer a shared Button inspection", error); }
-        }
-        for (const press of presses) {
-          if (signal.aborted) return;
-          await take(relay, press);
+    while (true) {
+      const proceed = yield* Effect.gen(function* () {
+        const listed = yield* Effect.tryPromise({
+          try: async (signal) => {
+            if (!(await host.runsHere()) || signal.aborted) return null;
+            const relay = await options.transport();
+            if (relay === null || signal.aborted) return null;
+            for (const input of [...unsent.values()]) {
+              if (signal.aborted) return null;
+              await settle(relay, input);
+            }
+            const presses = await relay.list(signal);
+            for (const request of relay.inspections()) {
+              const generation = host.generation();
+              if (signal.aborted || generation === null || !host.stillRuns()) break;
+              try {
+                const result = await options.inspect(request.inspectionId);
+                await relay.answerInspection(generation, request.inspectionId, result);
+              } catch (error) { options.onError("answer a shared Button inspection", error); }
+            }
+            return { relay, presses };
+          },
+          catch: (error) => error,
+        });
+        if (listed === null) return false;
+        for (const press of listed.presses) {
+          // An admitted press finishes under its host hold even when the workspace closes.
+          yield* Effect.uninterruptible(Effect.tryPromise({
+            try: () => take(listed.relay, press),
+            catch: (error) => error,
+          }));
         }
         retryMs = RETRY_FIRST_MS;
-      } catch (error) {
-        if (signal.aborted) return;
+        return true;
+      }).pipe(Effect.catch((error) => Effect.gen(function* () {
         options.onError("take relayed Button presses", error);
-        await delay(retryMs, signal);
+        yield* delay
+          ? Effect.tryPromise({ try: (signal) => delay(retryMs, signal), catch: (error) => error })
+          : Effect.sleep(retryMs);
         retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
-      }
+        return true;
+      })));
+      if (!proceed) return;
     }
-  }
+  });
 
   return {
     /** Starts the loop when it is not running. Safe to call at every open and reconnect. */
     start(): void {
       if (running !== null) return;
-      const controller = new AbortController();
-      running = controller;
-      void loop(controller.signal).finally(() => {
-        if (running === controller) running = null;
+      const fiber = Effect.runFork(loop);
+      running = fiber;
+      fiber.addObserver(() => {
+        if (running === fiber) running = null;
       });
     },
 
@@ -285,7 +293,7 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
 
     /** The workspace closed. A later open finds each press again through its engine claim. */
     stop(): void {
-      running?.abort();
+      running?.interruptUnsafe();
       running = null;
       byClaim.clear();
       taken.clear();

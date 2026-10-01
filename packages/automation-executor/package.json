@@ -41,6 +41,7 @@
     "@dohc/workspace-engine-client": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
     "acorn": "^8.18.0",
+    "effect": "4.0.0",
     "yjs": "13.6.30",
     "zod": "^4.4.3"
   },
