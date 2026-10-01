@@ -645,6 +645,11 @@ function datasetAgent(
   return depth > 0 || actor === "agent" ? { depth } : null;
 }
 
+// A person edits documents and records in the app. Through this socket, an
+// edit or a creation is an agent's, refused in the same words for both.
+const EDIT_AS_AGENT_REFUSAL = "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"";
+const CREATE_AS_AGENT_REFUSAL = "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"";
+
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
 // local owner, recorded under its handshake name or the unnamed agent label,
@@ -2526,6 +2531,7 @@ async function dispatchWorkspace(
     case "collectionSetFields": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
+      if (request.args.actor !== "agent") return { ok: false as const, reason: EDIT_AS_AGENT_REFUSAL };
       // A write-mode check: the seam opens the record's live session, so
       // the path must clear the same floor every other CLI write clears.
       const validated = validateUserWritePath(request.args.recordPath);
@@ -2550,6 +2556,7 @@ async function dispatchWorkspace(
     case "collectionCreateRecord": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
+      if (request.args.actor !== "agent") return { ok: false as const, reason: CREATE_AS_AGENT_REFUSAL };
       const collectionValidated = validateUserReadPath(
         request.args.collectionPath,
         { platform: process.platform },
@@ -2765,12 +2772,7 @@ async function dispatchWorkspace(
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
       const { actor, agent, find, replacement } = request.args;
-      if (actor !== "agent") {
-        return {
-          ok: false as const,
-          reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
-        };
-      }
+      if (actor !== "agent") return { ok: false as const, reason: EDIT_AS_AGENT_REFUSAL };
       const resolvedPath = request.args.path;
       const validated = validateUserWritePath(resolvedPath);
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
@@ -2801,12 +2803,7 @@ async function dispatchWorkspace(
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
       const { actor, agent, markdown } = request.args;
-      if (actor !== "agent") {
-        return {
-          ok: false as const,
-          reason: "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"",
-        };
-      }
+      if (actor !== "agent") return { ok: false as const, reason: CREATE_AS_AGENT_REFUSAL };
       // A new file, so the stricter materialization rules apply.
       const path = request.args.path;
       const validated = validateUserMaterializePath(path, { platform: process.platform });
