@@ -6,6 +6,8 @@
 // OOM-crashed by five lanes at default jobs. So a lane takes one of a fixed
 // set of slots before any cargo runs and caps its compiler and test
 // parallelism to an even share of the cores while it holds it.
+// Waiters publish heartbeat tickets in a queue per kind. Queue position
+// reserves free capacity for older waiters, with handoff checks each second.
 //
 // A slot is a directory because directory creation is atomic. The owner
 // heartbeats by touching its `owner.json`; reclamation requires a stale
@@ -21,6 +23,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -89,6 +92,34 @@ function slotDir(root, i, kind) {
   return join(root, `${kind}-${i}`);
 }
 
+const defaultHeartbeatMs = 60_000;
+
+function checkQueueAccess(root, kind) {
+  for (const directory of [root, join(root, `${kind}-queue`)]) {
+    try {
+      readdirSync(directory);
+    } catch (error) {
+      if (directory !== root && error.code === "ENOENT") continue;
+      throw error;
+    }
+    const probe = join(directory, `.access-probe-${process.pid}-${randomBytes(4).toString("hex")}`);
+    if (directory === root) mkdirSync(probe);
+    else writeFileSync(probe, "", { flag: "wx" });
+    try {
+      rmSync(probe, { recursive: true });
+    } catch {
+      logEvent(root, `access probe cleanup failed: ${probe}`);
+    }
+  }
+}
+
+function transientFilesystemError(error, root, kind) {
+  if (!["EPERM", "EBUSY", "EACCES", "ENOENT"].includes(error.code)) return false;
+  // Retry a busy child; unreadable or unwritable queue directories are faults.
+  if (["EPERM", "EACCES"].includes(error.code)) checkQueueAccess(root, kind);
+  return true;
+}
+
 /** The held slots, as `<kind>-N: pid P since T` lines. */
 function holders(root, slots, kind) {
   const held = [];
@@ -104,23 +135,7 @@ function holders(root, slots, kind) {
   return held.join("; ");
 }
 
-/**
- * Reclaim dead slots. The owner file's mtime IS the heartbeat: a live owner
- * refreshes it every minute whatever its content, so a slot is a candidate
- * only when that heartbeat is more than `staleMs` old. A readable owner must
- * ALSO be provably dead — a wedged-but-alive lane stops heartbeating and
- * still owns its slot. A slot whose owner file is missing or unreadable for
- * that long has no working heartbeat by construction (a crash between mkdir
- * and the owner write, or a torn write) and is reclaimed too — refusing
- * those permanently eats a lane on every interrupted acquisition.
- *
- * Sweeps are serialized through a `reclaim.lock` directory: two concurrent
- * sweepers could otherwise both judge one slot dead, and the slower rename
- * would steal the directory the faster sweeper's waiter had already
- * re-claimed. The lock is held for milliseconds; one left by a dead sweeper
- * is removed after 5 minutes. Returns how many slots were freed.
- */
-export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot" }) {
+function withSweepLock(root, sweep) {
   const sweepLock = join(root, "reclaim.lock");
   try {
     mkdirSync(sweepLock);
@@ -144,9 +159,9 @@ export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot" })
     try {
       observedMtime = statSync(sweepLock).mtimeMs;
     } catch {
-      return 0; // The lock vanished: its sweeper just finished.
+      return null; // The lock vanished: its sweeper just finished.
     }
-    if (Date.now() - observedMtime < 5 * 60_000) return 0;
+    if (Date.now() - observedMtime < 5 * 60_000) return null;
     const bucket = Math.floor(Date.now() / (5 * 60_000));
     try {
       writeFileSync(
@@ -155,112 +170,234 @@ export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot" })
         { flag: "wx" },
       );
     } catch (claimError) {
-      if (claimError.code === "EEXIST") return 0; // Lost the takeover.
+      if (claimError.code === "EEXIST") return null; // Lost the takeover.
       throw claimError;
     }
     try {
-      if (statSync(sweepLock).mtimeMs !== observedMtime) return 0;
+      if (statSync(sweepLock).mtimeMs !== observedMtime) return null;
     } catch {
-      return 0; // Vanished after the claim: nothing left to take over.
+      return null; // Vanished after the claim: nothing left to take over.
     }
     rmSync(sweepLock, { recursive: true, force: true });
     try {
       mkdirSync(sweepLock);
     } catch (retakeError) {
-      if (retakeError.code === "EEXIST") return 0; // Another sweeper owns it.
+      if (retakeError.code === "EEXIST") return null; // Another sweeper owns it.
       throw retakeError;
     }
   }
   try {
-    let reclaimed = 0;
-    for (let i = 1; i <= slots; i += 1) {
-      const dir = slotDir(root, i, kind);
-      const ownerPath = join(dir, "owner.json");
-      let heartbeatAt;
-      let why;
-      try {
-        heartbeatAt = statSync(ownerPath).mtimeMs;
-      } catch {
-        try {
-          heartbeatAt = statSync(dir).mtimeMs;
-          why = "no owner file";
-        } catch {
-          continue; // Slot is free.
-        }
-      }
-      if (Date.now() - heartbeatAt <= staleMs) continue;
-      let inspectedOwner = null;
-      try {
-        inspectedOwner = readFileSync(ownerPath, "utf8");
-      } catch {
-        // A missing owner file is judged by `why` below.
-      }
-      if (why === undefined) {
-        let pid;
-        try {
-          pid = JSON.parse(inspectedOwner).pid;
-        } catch {
-          pid = null;
-        }
-        if (pid === null) {
-          why = "owner unreadable";
-        } else if (!Number.isInteger(pid) || pid <= 0) {
-          why = `owner pid invalid (${pid})`;
-        } else if (pidAlive(pid)) {
-          continue;
-        } else {
-          why = `pid ${pid} dead`;
-        }
-      }
-      const tomb = `${dir}.tomb-${randomBytes(4).toString("hex")}`;
-      try {
-        renameSync(dir, tomb);
-      } catch {
-        continue; // A racing owner touched it first; its slot, not ours.
-      }
-      // This sweep may have been suspended between its checks and that
-      // rename while the slot was reclaimed and RE-CLAIMED by a live lane —
-      // the rename moves whatever is at the path now. The tombstone still
-      // holds the owner it actually moved; if that is not the owner this
-      // sweep inspected, put it back.
-      let movedOwner = null;
-      try {
-        movedOwner = readFileSync(join(tomb, "owner.json"), "utf8");
-      } catch {
-        // Both null when neither had an owner file: identical claims.
-      }
-      if (movedOwner !== inspectedOwner) {
-        try {
-          renameSync(tomb, dir);
-        } catch {
-          logEvent(
-            root,
-            `RECLAIM FAULT: ${kind}-${i} was renamed away from a new ` +
-              `owner and could not be restored; its lane runs unaccounted ` +
-              `(${tomb})`,
-          );
-        }
-        continue;
-      }
-      try {
-        rmSync(tomb, { recursive: true, force: true });
-      } catch {
-        // The rename already freed the slot name; the tombstone is debris.
-      }
-      logEvent(
-        root,
-        `reclaimed ${kind}-${i}: ${why}, heartbeat ` +
-          `${Math.round((Date.now() - heartbeatAt) / 60_000)} min stale`,
-      );
-      reclaimed += 1;
-    }
-    return reclaimed;
+    return sweep();
   } finally {
     rmSync(sweepLock, { recursive: true, force: true });
   }
 }
 
-function claimSlot(dir, name, heartbeatMs, cooperativeCancellation) {
+/**
+ * Reclaim dead slots. The owner file's mtime IS the heartbeat: a live owner
+ * refreshes it every minute whatever its content, so a slot is a candidate
+ * only when that heartbeat is more than `staleMs` old. A readable owner must
+ * ALSO be provably dead — a wedged-but-alive lane stops heartbeating and
+ * still owns its slot. A slot whose owner file is missing or unreadable for
+ * that long has no working heartbeat by construction (a crash between mkdir
+ * and the owner write, or a torn write) and is reclaimed too — refusing
+ * those permanently eats a lane on every interrupted acquisition.
+ *
+ * Sweeps are serialized through a `reclaim.lock` directory: two concurrent
+ * sweepers could otherwise both judge one slot dead, and the slower rename
+ * would steal the directory the faster sweeper's waiter had already
+ * re-claimed. The lock is held for milliseconds; one left by a dead sweeper
+ * is removed after 5 minutes. Returns how many slots were freed.
+ */
+export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot" }) {
+  try {
+    return withSweepLock(root, () => {
+      reclaimStaleTickets({ root, kind });
+      return reclaimSlots({ root, slots, kind, staleMs });
+    }) ?? 0;
+  } catch (error) {
+    if (!transientFilesystemError(error, root, kind)) throw error;
+    return 0;
+  }
+}
+
+function reclaimSlots({ root, slots, staleMs, kind }) {
+  let reclaimed = 0;
+  for (let i = 1; i <= slots; i += 1) {
+    const dir = slotDir(root, i, kind);
+    const ownerPath = join(dir, "owner.json");
+    let heartbeatAt;
+    let why;
+    try {
+      heartbeatAt = statSync(ownerPath).mtimeMs;
+    } catch {
+      try {
+        heartbeatAt = statSync(dir).mtimeMs;
+        why = "no owner file";
+      } catch {
+        continue; // Slot is free.
+      }
+    }
+    if (Date.now() - heartbeatAt <= staleMs) continue;
+    let inspectedOwner = null;
+    try {
+      inspectedOwner = readFileSync(ownerPath, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT" && transientFilesystemError(error, root, kind)) continue;
+      // A missing owner file is judged by `why` below.
+    }
+    if (why === undefined) {
+      let pid;
+      try {
+        pid = JSON.parse(inspectedOwner).pid;
+      } catch {
+        pid = null;
+      }
+      if (pid === null) {
+        why = "owner unreadable";
+      } else if (!Number.isInteger(pid) || pid <= 0) {
+        why = `owner pid invalid (${pid})`;
+      } else if (pidAlive(pid)) {
+        continue;
+      } else {
+        why = `pid ${pid} dead`;
+      }
+    }
+    const tomb = `${dir}.tomb-${randomBytes(4).toString("hex")}`;
+    try {
+      renameSync(dir, tomb);
+    } catch {
+      continue; // A racing owner touched it first; its slot, not ours.
+    }
+    // This sweep may have been suspended between its checks and that
+    // rename while the slot was reclaimed and RE-CLAIMED by a live lane —
+    // the rename moves whatever is at the path now. The tombstone still
+    // holds the owner it actually moved; if that is not the owner this
+    // sweep inspected, put it back.
+    let movedOwner = null;
+    try {
+      movedOwner = readFileSync(join(tomb, "owner.json"), "utf8");
+    } catch {
+      // Both null when neither had an owner file: identical claims.
+    }
+    if (movedOwner !== inspectedOwner) {
+      try {
+        renameSync(tomb, dir);
+      } catch {
+        logEvent(
+          root,
+          `RECLAIM FAULT: ${kind}-${i} was renamed away from a new ` +
+            `owner and could not be restored; its lane runs unaccounted ` +
+            `(${tomb})`,
+        );
+      }
+      continue;
+    }
+    try {
+      rmSync(tomb, { recursive: true, force: true });
+    } catch {
+      // The rename already freed the slot name; the tombstone is debris.
+    }
+    logEvent(
+      root,
+      `reclaimed ${kind}-${i}: ${why}, heartbeat ` +
+        `${Math.round((Date.now() - heartbeatAt) / 60_000)} min stale`,
+    );
+    reclaimed += 1;
+  }
+  return reclaimed;
+}
+
+function queueEntries(root, kind) {
+  try {
+    return readdirSync(join(root, `${kind}-queue`));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+function queueTickets(root, kind) {
+  return queueEntries(root, kind).filter((name) => name.endsWith(".json")).sort();
+}
+
+// Waiters have no running build to protect. A dead pid or stale heartbeat
+// frees their place. Unreadable records get two heartbeats of grace; readable
+// tickets expire after three, even if the OS reused their dead waiter's pid.
+// Each record supplies its heartbeat interval. Temporary records get two
+// heartbeats of grace, with the default interval for missing or torn records.
+// The caller holds reclaim.lock.
+function reclaimStaleTickets({ root, kind }) {
+  for (const name of queueEntries(root, kind)) {
+    const temporary = name.endsWith(".json.tmp");
+    if (!temporary && !name.endsWith(".json")) continue;
+    const path = join(root, `${kind}-queue`, name);
+    try {
+      const age = Date.now() - statSync(path).mtimeMs;
+      let pid;
+      let heartbeatMs = defaultHeartbeatMs;
+      try {
+        const record = JSON.parse(readFileSync(path, "utf8"));
+        pid = record?.pid;
+        if (Number.isFinite(record?.heartbeatMs) && record.heartbeatMs > 0) heartbeatMs = record.heartbeatMs;
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        // A torn ticket has no readable owner.
+      }
+      const readable = Number.isInteger(pid) && pid > 0;
+      const stale = age > (readable && !temporary ? 3 : 2) * heartbeatMs;
+      const dead = !temporary && readable && !pidAlive(pid);
+      if (!dead && !stale) continue;
+      rmSync(path, { force: true });
+      logEvent(root, `reclaimed ${kind} ticket ${name}: ${dead ? `pid ${pid} dead` : "heartbeat stale"}`);
+    } catch (error) {
+      if (!transientFilesystemError(error, root, kind)) throw error;
+      if (error.code !== "ENOENT") logEvent(root, `ticket reclaim failed: ${name}: ${error.code}`);
+    }
+  }
+}
+
+function createTicket(root, kind, heartbeatMs) {
+  const queueDir = join(root, `${kind}-queue`);
+  mkdirSync(queueDir, { recursive: true });
+  // hrtime uses the host's monotonic clock, shared across its processes.
+  const order = process.hrtime.bigint();
+  const name = `${String(order).padStart(24, "0")}-${process.pid}-${randomBytes(4).toString("hex")}.json`;
+  const path = join(queueDir, name);
+  const temporary = `${path}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify({ pid: process.pid, start: new Date().toISOString(), heartbeatMs }), { flag: "wx" });
+    renameSync(temporary, path);
+  } finally {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      logEvent(root, `temporary ticket cleanup failed: ${name}`);
+    }
+  }
+  const beat = setInterval(() => {
+    try {
+      const time = new Date();
+      utimesSync(path, time, time);
+    } catch {
+      // Exit cleanup may have removed the ticket.
+    }
+  }, heartbeatMs);
+  beat.unref();
+  const remove = () => {
+    clearInterval(beat);
+    try {
+      rmSync(path, { force: true });
+    } catch {
+      // A failed cleanup must not lose a newly acquired slot's release handle.
+      // With its heartbeat stopped, this ticket expires on the next stale sweep.
+      logEvent(root, `ticket cleanup failed: ${name}`);
+    }
+  };
+  return { name, path, remove };
+}
+
+function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket) {
   const ownerPath = join(dir, "owner.json");
   const ownerRecord = JSON.stringify({
     pid: process.pid,
@@ -292,6 +429,7 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation) {
     process.off("exit", release);
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
+    removeTicket();
     try {
       // Release by identity, never by path: if this claim's own record is
       // no longer at the path — the slot was reclaimed out from under a
@@ -362,54 +500,102 @@ async function acquireSlot({
   waitMs = 90 * 60_000,
   pollMs = 15_000,
   staleMs = 30 * 60_000,
-  heartbeatMs = 60_000,
+  heartbeatMs = defaultHeartbeatMs,
   cooperativeCancellation = false,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
   const deadline = Date.now() + waitMs;
   let denied = false;
+  let nextMessageAt = 0;
+  let lastSweepAt = -Infinity;
+  let ticket;
+  const removeTicket = () => ticket?.remove();
   const cancellation = new AbortController();
   const cancel = (signal, code) => {
     process.exitCode = code;
     cancellation.abort(new Error(`${label[0].toUpperCase()}${label.slice(1)} acquisition cancelled by ${signal}.`));
+    removeTicket();
+    if (!cooperativeCancellation) process.exit(code);
   };
   const onSigint = () => cancel("SIGINT", 130);
   const onSigterm = () => cancel("SIGTERM", 143);
-  if (cooperativeCancellation) {
-    process.on("SIGINT", onSigint);
-    process.on("SIGTERM", onSigterm);
-  }
+  process.on("exit", removeTicket);
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
   try { for (;;) {
     cancellation.signal.throwIfAborted();
-    for (let i = 1; i <= slots; i += 1) {
-      const dir = slotDir(root, i, kind);
-      try {
-        mkdirSync(dir);
-      } catch (error) {
-        if (error.code === "EEXIST") continue; // Held.
-        throw error; // EACCES etc. is a fault, not contention.
+    let ahead = -1;
+    let free = [];
+    const refreshQueue = () => {
+      ahead = queueTickets(root, kind).indexOf(ticket.name);
+      free = [];
+      for (let i = 1; i <= slots; i += 1) {
+        if (!existsSync(slotDir(root, i, kind))) free.push(i);
       }
-      return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation);
+    };
+    try {
+      if (ticket && !existsSync(ticket.path)) {
+        ticket.remove();
+        ticket = undefined;
+      }
+      ticket ??= createTicket(root, kind, heartbeatMs);
+      refreshQueue();
+      const reserved = ahead > 0 && free.length > 0 && ahead >= free.length;
+      const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
+      if (Date.now() - lastSweepAt >= sweepMs) {
+        lastSweepAt = Date.now();
+        reclaimStaleSlots({ root, slots, staleMs, kind });
+        refreshQueue();
+      }
+      if (ahead < 0) {
+        ticket.remove();
+        ticket = undefined;
+      }
+      if (ahead >= 0 && ahead < free.length) {
+        // Reserve one free slot for each ticket ahead. Atomic mkdir arbitrates
+        // changing snapshots and old-code holders without blocking on a sweep.
+        const i = free[ahead];
+        const dir = slotDir(root, i, kind);
+        let created = false;
+        try {
+          mkdirSync(dir);
+          created = true;
+        } catch (error) {
+          if (error.code !== "EEXIST") throw error;
+        }
+        if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket);
+      }
+    } catch (error) {
+      if (!transientFilesystemError(error, root, kind)) throw error;
+      ahead = -1; // This snapshot cannot grant admission; retry after the sleep.
     }
-    if (reclaimStaleSlots({ root, slots, staleMs, kind }) > 0) continue;
     if (!denied) {
       denied = true;
-      logEvent(root, `denied: pid ${process.pid} found all ${slots} slots held`);
+      logEvent(root, free.length === 0
+        ? `denied: pid ${process.pid} found all ${slots} slots held`
+        : `denied: pid ${process.pid} waiting at queue position ${ahead + 1}`);
     }
     if (Date.now() >= deadline) {
       throw new Error(
         `no ${label} freed within ${Math.round(waitMs / 60_000)} minutes: ` +
           `the concurrency budget is ${slots} concurrent ${lanes} ` +
-          `and all ${slots} slots at ${root} ` +
-          `are held — ${holders(root, slots, kind)}. Wait for a lane to finish and ` +
+          `at ${root} ${free.length === 0
+            ? `and all ${slots} slots are held — ${holders(root, slots, kind)}`
+            : `with ${ahead < 0 ? "queue position unavailable" : `queue position ${ahead + 1} behind older waiters`}; ${holders(root, slots, kind) || "no current holder"}`}. Wait for a lane to finish and ` +
           `rerun; a dead lane's slot is reclaimed automatically once its ` +
           `heartbeat is 30 minutes stale.`,
       );
     }
-    console.log(`  waiting for a ${label}: all ${slots} held — ${holders(root, slots, kind)}`);
-    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())), undefined, { signal: cancellation.signal });
+    if (Date.now() >= nextMessageAt) {
+      const position = ahead < 0 ? "unavailable" : ahead + 1;
+      console.log(`  waiting for a ${label}: ${holders(root, slots, kind) || "no current holder"}; queue position ${position}`);
+      nextMessageAt = Date.now() + pollMs;
+    }
+    await sleep(Math.min(pollMs, 1000, Math.max(1, deadline - Date.now())), undefined, { signal: cancellation.signal });
   } } finally {
+    removeTicket();
+    process.off("exit", removeTicket);
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
   }
