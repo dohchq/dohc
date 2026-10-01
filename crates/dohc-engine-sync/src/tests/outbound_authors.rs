@@ -2,23 +2,34 @@ use super::*;
 use dohc_engine_domain::WriteText;
 
 #[test]
-fn outbound_authors_filter_only_people_and_omit_a_human_only_list() {
+fn outbound_authors_omit_people_and_installation_delegation() {
     let human = json!({"kind":"human","humanId":"person","onBehalfOf":"owner"});
     let agent =
         json!({"kind":"agent","agentId":"agent","onBehalfOf":"owner","agentRunId":"run","depth":3});
     let automation =
         json!({"kind":"automation","automationId":"rule","onBehalfOf":"owner","depth":4});
+    let local_agent = json!({"kind":"agent","agentId":"agent","onBehalfOf":"local:123","agentRunId":"run","depth":3});
+    let local_automation =
+        json!({"kind":"automation","automationId":"rule","onBehalfOf":"local:456","depth":4});
+    let bare_agent = json!({"kind":"agent","agentId":"agent","agentRunId":"run","depth":3});
+    let bare_automation = json!({"kind":"automation","automationId":"rule","depth":4});
     for (authors, expected) in [
         (json!([human]), None),
         (json!([human, agent]), Some(json!([agent]))),
         (json!([agent, automation]), Some(json!([agent, automation]))),
+        (json!([local_agent]), Some(json!([bare_agent]))),
+        (json!([local_automation]), Some(json!([bare_automation]))),
+        (
+            json!([human, local_agent, local_automation, agent, automation]),
+            Some(json!([bare_agent, bare_automation, agent, automation])),
+        ),
     ] {
         let mut payload = json!({"authors": authors, "momentId":"moment"});
-        crate::outbound::omit_human_authors(&mut payload);
+        crate::outbound::omit_local_person_authors(&mut payload);
         assert_eq!(payload.get("authors"), expected.as_ref());
         assert_eq!(payload["momentId"], "moment");
         let repaired = payload.clone();
-        assert!(!crate::outbound::omit_human_authors(&mut payload));
+        assert!(!crate::outbound::omit_local_person_authors(&mut payload));
         assert_eq!(payload, repaired);
     }
 }
@@ -65,13 +76,15 @@ fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> 
 #[test]
 fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
     for authors in [
+        json!([{"kind":"agent","agentId":"agent","onBehalfOf":"local:123"}]),
+        json!([{"kind":"automation","automationId":"rule","onBehalfOf":"local:456","depth":1}]),
         json!([{"kind":"human","humanId":"person"}]),
         json!([{"kind":"human","humanId":"person"},{"kind":"agent","agentId":"agent","onBehalfOf":"owner"}]),
     ] {
         let (_scratch, path, mut engine) = open_store();
         let original_authors = authors.clone();
         let mut expected = queue_legacy_moment(&mut engine, authors);
-        crate::outbound::omit_human_authors(&mut expected);
+        crate::outbound::omit_local_person_authors(&mut expected);
         let client = RelaySyncClient::new(FakeRelay::default());
         let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
         assert_eq!(
@@ -154,7 +167,7 @@ fn queued_author_repair_leaves_imported_and_other_operation_payloads_unchanged()
 #[test]
 fn a_crashed_queued_author_repair_sends_nothing_and_recovers_on_retry() {
     let (_scratch, path, mut engine) = open_store();
-    queue_legacy_moment(&mut engine, json!([{"kind":"human","humanId":"person"}]));
+    let legacy = queue_legacy_moment(&mut engine, json!([{"kind":"human","humanId":"person"}]));
     let client = RelaySyncClient::new(FakeRelay::default());
     let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     assert!(
@@ -165,6 +178,10 @@ fn a_crashed_queued_author_repair_sends_nothing_and_recovers_on_retry() {
     assert!(client.transport().pushes.lock().unwrap().is_empty());
     drop(engine);
     let mut engine = EngineStore::open(&path, 2002).unwrap();
+    assert_eq!(
+        list_replication_ops(&engine, "ws", "local", 0, 10).unwrap()[0].payload,
+        legacy
+    );
     client
         .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2003, 0)
         .unwrap();
@@ -173,5 +190,40 @@ fn a_crashed_queued_author_repair_sends_nothing_and_recovers_on_retry() {
             .payload
             .get("authors")
             .is_none()
+    );
+}
+
+#[test]
+fn new_moment_payload_omits_installation_delegation_without_changing_history() {
+    let (_scratch, _path, mut engine) = open_store();
+    let authors = json!([
+        {"kind":"human","humanId":"local:123"},
+        {"kind":"agent","agentId":"agent","onBehalfOf":"local:123","depth":2},
+        {"kind":"automation","automationId":"rule","onBehalfOf":"local:123","depth":3},
+        {"kind":"agent","agentId":"account-agent","onBehalfOf":"account"}
+    ]);
+    queue_legacy_moment(&mut engine, authors.clone());
+    engine
+        .write_with(&NoFaults, |tx| {
+            let (payload, _) =
+                crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+            assert_eq!(
+                payload["authors"],
+                json!([
+                    {"kind":"agent","agentId":"agent","depth":2},
+                    {"kind":"automation","automationId":"rule","depth":3},
+                    {"kind":"agent","agentId":"account-agent","onBehalfOf":"account"}
+                ])
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let history = VersionedTextStore::new(&mut engine)
+        .get_moment("ws", "record-moment")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap()).unwrap(),
+        authors
     );
 }
