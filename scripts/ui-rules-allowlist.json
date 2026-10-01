@@ -1,8 +1,4 @@
 {
-  "overlayDim": {
-    "class": "bg-black/20",
-    "files": {}
-  },
   "violations": {
     "apps/desktop/src/renderer/Overlay.tsx": {
       "backdrop": 1

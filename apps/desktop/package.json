@@ -74,6 +74,7 @@
     "remark-gfm": "^4.0.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
+    "typescript-parser": "npm:typescript@6.0.3",
     "vite": "^7.3.6",
     "vitest": "^4.1.11",
     "@types/ws": "8.18.1"
