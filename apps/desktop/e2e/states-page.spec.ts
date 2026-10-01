@@ -1,4 +1,7 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { PNG } from "pngjs";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspace";
 
@@ -9,12 +12,17 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 // pixel difference in that part's pair and no other. Update a pair with
 // `--update-snapshots` when the change is the point of the PR.
 //
-// The captures are made deterministic by construction: software rendering,
-// a viewport as tall as the page so nothing scrolls, a pinned color scheme,
-// reduced motion and disabled animations, states forced through the browser
-// instead of pointer events, a paused clock so acknowledged copies hold, and
-// a check that Inter and IBM Plex Mono are in before comparing. The
-// baselines were taken on Windows; Playwright names them per platform.
+// Every pixel must equal its baseline, compared here from the decoded
+// images: Playwright's comparator skips pixels it takes for antialiasing
+// and tolerates a per-pixel distance, and either let a one-step token
+// change pass. The captures are made deterministic by construction:
+// software rendering, no animations or backdrop filters, a viewport as tall
+// as the page so nothing scrolls, a pinned color scheme, states forced
+// through the browser instead of pointer events, a paused clock so
+// acknowledged copies hold, fonts checked, and a whole-page capture
+// repeated until two in a row are equal. So the baselines do not cover a
+// backdrop blur, an animation's end state, or anything only the GPU draws.
+// They were taken on Windows; Playwright names them per platform.
 
 const STATES_PAGE_HASH = "#/dev/states";
 const WIDTH = 1440;
@@ -35,24 +43,62 @@ const PARTS = [
 // pausing can never put the pause in the clock's past.
 const CLOCK_START = Date.UTC(2026, 6, 8, 9, 0, 0);
 const HOUR_MS = 60 * 60 * 1000;
-// Every pixel must match its baseline: Playwright's default per-pixel
-// threshold of 0.2 let a one-step change to the dark surface and hover
-// tokens pass against the old baselines. Measured on 2026-10-01: with the
-// GPU, an unchanged tree differed by 2 to 416 pixels in 4 of 19 runs; with
-// software rendering alone, by 57 pixels in 1 of 8; with no animations
-// either, by 274 pixels in 1 of 7; with no backdrop filter either, every
-// compared run matched exactly (seven of eight; the eighth timed out
-// taking its first capture and compared nothing). A one-unit
-// change to the light success token, the smallest token effect found,
-// counted 15 pixels in steps-light and 38 in chips-light; one unit on the
-// dark panel-2 fill counted 876 or more.
-const EXACT = { threshold: 0, maxDiffPixels: 0 } as const;
 
-// The GPU rasterizes and composites with run-to-run noise: an icon's edge
-// pixels, the ring of a focused row that a finished entrance animation left
-// on its own layer, a dialog shadow's edge. Software rendering is the same
-// every run.
+// The GPU rasterizes and composites with run-to-run noise at edges; software
+// rendering is the same every run.
 const SWITCHES = ["--disable-gpu"];
+
+type Pixels = Pick<PNG, "width" | "height" | "data">;
+
+function decode(png: Buffer): Pixels {
+  return PNG.sync.read(png);
+}
+
+// What differs between two images, or null when nothing does.
+function mismatch(expected: Pixels, actual: Pixels): string | null {
+  if (expected.width !== actual.width || expected.height !== actual.height) {
+    return `is ${actual.width}x${actual.height}, the baseline ${expected.width}x${expected.height}`;
+  }
+  let differing = 0;
+  for (let offset = 0; offset < expected.data.length; offset += 4) {
+    if (expected.data.compare(actual.data, offset, offset + 4, offset, offset + 4) !== 0) differing += 1;
+  }
+  return differing === 0 ? null : `differs in ${differing} pixels`;
+}
+
+// Captures the whole page until two captures in a row are equal, so no part
+// is compared while the page is still settling. Bounded by the test timeout.
+async function waitForStillPage(page: Page): Promise<void> {
+  let previous = decode(await page.screenshot());
+  for (;;) {
+    const next = decode(await page.screenshot());
+    if (mismatch(previous, next) === null) return;
+    previous = next;
+  }
+}
+
+// Compares a capture with its baseline and honors --update-snapshots the
+// way Playwright does: `missing` writes an absent baseline and still fails,
+// `changed` rewrites a differing one, `all` rewrites every one. A failed
+// comparison leaves the capture beside the test output as `<name>-actual.png`.
+async function compareWithBaseline(name: string, actual: Buffer): Promise<string | null> {
+  const info = test.info();
+  const path = info.snapshotPath(`${name}.png`);
+  const mode = info.config.updateSnapshots;
+  const baseline = existsSync(path) ? readFileSync(path) : null;
+  const difference = baseline ? mismatch(decode(baseline), decode(actual)) : null;
+  const update = mode === "all" || (mode === "changed" && difference !== null) || (baseline === null && mode !== "none");
+  if (update) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, actual);
+  }
+  if (baseline === null) return `${name} has no baseline${update ? "; one was written, run again" : ""}`;
+  if (difference === null || update) return null;
+  const actualPath = info.outputPath(`${name}-actual.png`);
+  writeFileSync(actualPath, actual);
+  await info.attach(`${name}-actual`, { path: actualPath, contentType: "image/png" });
+  return `${name} ${difference}; the capture is at ${actualPath}`;
+}
 
 async function withDesktop(
   env: NodeJS.ProcessEnv,
@@ -122,16 +168,13 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     await page.setViewportSize({ width: WIDTH, height: 900 });
     await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
     // Until the viewport grows to the page, a scrollbar would narrow the
-    // layout, and the height measured from it would be the wrong one.
-    // No part keeps an entrance animation: reduced motion only shortens
-    // one, and a finished animation that holds its last keyframe keeps the
-    // element on its own compositor layer, whose edges blend differently
-    // from run to run (the focused notice row's ring, with or without the
-    // GPU). No backdrop filter either: a backdrop blur reads what the
-    // compositor last drew beneath it, so its edge column depended on the
-    // frames before the capture (the dialog's scrim, one unit, 1 run in 7).
-    // Appended directly: addStyleTag waits for the sheet to load, and that
-    // wait fails when any font in the page is still refusing to load.
+    // layout, and the height measured from it would be the wrong one. No
+    // animation: reduced motion only shortens one, and a finished animation
+    // that holds its last keyframe keeps its element on a compositor layer
+    // whose edges blend differently from run to run. No backdrop filter: a
+    // blur reads what the compositor last drew beneath it. Appended
+    // directly: addStyleTag waits for the sheet to load, and that wait
+    // fails when any font in the page is still refusing to load.
     await page.evaluate(() => {
       const style = document.createElement("style");
       style.textContent =
@@ -200,8 +243,10 @@ test("@states-page @states-baselines every shared part matches its baseline in b
 
     // After the menus exist, so their rows can be marked.
     await forceMarkedStates(page);
+    await waitForStillPage(page);
 
     const seen = new Set<string>();
+    const failures: string[] = [];
     for (const theme of THEMES) {
       const pane = page.getByTestId(`states-${theme}`);
       for (const part of await pane.locator("[data-part]").all()) {
@@ -210,12 +255,14 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         if (!name || !box) throw new Error("every part needs a data-part name and a box on the page");
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
-        await expect(page).toHaveScreenshot(`${name}-${theme}.png`, {
+        const capture = await page.screenshot({
           clip: { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: box.height + 2 * BLEED },
-          ...EXACT,
         });
+        const failure = await compareWithBaseline(`${name}-${theme}`, capture);
+        if (failure) failures.push(failure);
       }
     }
+    expect(failures, "every part must equal its baseline").toEqual([]);
     expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
   });
 });

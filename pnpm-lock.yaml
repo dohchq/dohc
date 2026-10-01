@@ -267,6 +267,9 @@ importers:
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3
+      '@types/pngjs':
+        specifier: ^6.0.5
+        version: 6.0.5
       '@types/react':
         specifier: ^19.2.18
         version: 19.2.18
@@ -312,6 +315,9 @@ importers:
       playwright:
         specifier: ^1.62.1
         version: 1.62.1
+      pngjs:
+        specifier: ^7.0.0
+        version: 7.0.0
       pnpm:
         specifier: 11.20.0
         version: 11.20.0
@@ -3532,6 +3538,9 @@ packages:
   '@types/pg@8.20.4':
     resolution: {integrity: sha512-Jz7UDOlIiFJuacC0TlBoLyNtmwlA/wpIyPDd3tvUqlRM+HzkWy2xUgpFpaXtbfTAFF6sIGq5lsCDBdJnhky1Xg==}
 
+  '@types/pngjs@6.0.5':
+    resolution: {integrity: sha512-0k5eKfrA83JOZPppLtS2C7OUtyNAl2wKNxfyYl9Q5g9lPkgBl/9hNyAu6HuEH2J4XmIv2znEpkDd0SaZVxW6iQ==}
+
   '@types/prop-types@15.7.15':
     resolution: {integrity: sha512-F6bEyamV9jKGAFBEmlQnesRPGOQqS2+Uwi0Em15xenOxHaf2hv6L8YCVn3rPdPJOiJfPiCnLIRyvwVaqMY3MIw==}
 
@@ -6004,6 +6013,10 @@ packages:
 
   png-chunks-extract@1.0.0:
     resolution: {integrity: sha512-ZiVwF5EJ0DNZyzAqld8BP1qyJBaGOFaq9zl579qfbkcmOwWLLO4I9L8i2O4j3HkI6/35i0nKG2n+dZplxiT89Q==}
+
+  pngjs@7.0.0:
+    resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
+    engines: {node: '>=14.19.0'}
 
   pnpm@11.20.0:
     resolution: {integrity: sha512-mm8zCpW2ZEbqCI+vFSFAWooB8H/ecSTMmVjf7VLUu0NnN+ZbCPhfN7Rvy6N1CSVYrFEmK4FoRLIvY0Bu0Wa/7g==}
@@ -9509,6 +9522,10 @@ snapshots:
       pg-protocol: 1.15.0
       pg-types: 2.2.0
 
+  '@types/pngjs@6.0.5':
+    dependencies:
+      '@types/node': 24.13.3
+
   '@types/prop-types@15.7.15': {}
 
   '@types/react-big-calendar@1.16.3':
@@ -12209,6 +12226,8 @@ snapshots:
   png-chunks-extract@1.0.0:
     dependencies:
       crc-32: 0.3.0
+
+  pngjs@7.0.0: {}
 
   pnpm@11.20.0: {}
 

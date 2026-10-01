@@ -71,9 +71,6 @@ export const IconButton = forwardRef<HTMLButtonElement, NativeButtonProps>(
   },
 );
 
-// The tone is a prop rather than a `text-*` class in `className`: both
-// colors would apply, and the stylesheet's order, not the caller, would
-// pick the one that shows.
 const pillToneClass = {
   muted: "text-muted",
   success: "text-success",
@@ -85,21 +82,13 @@ const pillToneClass = {
 /** Quiet count/status pill. A tone changes the TEXT color, never the fill. */
 export function Pill({
   tone = "muted",
-  className,
   children,
 }: {
   tone?: keyof typeof pillToneClass;
-  className?: string;
   children: ReactNode;
 }) {
   return (
-    <span
-      className={cx(
-        "rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px]",
-        pillToneClass[tone],
-        className,
-      )}
-    >
+    <span className={cx("rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px]", pillToneClass[tone])}>
       {children}
     </span>
   );

@@ -53,8 +53,10 @@
     "@tiptap/react": "3.30.5",
     "@tiptap/y-tiptap": "3.0.8",
     "@types/node": "^24.13.3",
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
+    "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "43.3.0",
     "electron-builder": "^26.15.3",
@@ -67,6 +69,7 @@
     "lucide-react": "^1.30.0",
     "mermaid": "^11.16.1",
     "playwright": "^1.62.1",
+    "pngjs": "^7.0.0",
     "pnpm": "11.20.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -75,18 +78,18 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
-    "vitest": "^4.1.11",
-    "@types/ws": "8.18.1"
+    "vitest": "^4.1.11"
   },
   "dependencies": {
-    "@dohc/app-browser": "workspace:*",
     "@dohc/app-backend-runtime": "workspace:*",
+    "@dohc/app-browser": "workspace:*",
     "@dohc/automation-executor": "workspace:*",
     "@dohc/cli": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
-    "@dohc/sync-relay": "workspace:*",
     "@dohc/security-contract": "workspace:*",
+    "@dohc/service-http": "workspace:*",
     "@dohc/sqlite-worker": "workspace:*",
+    "@dohc/sync-relay": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-engine-client": "workspace:*",
@@ -109,11 +112,10 @@
     "esbuild": "0.28.1",
     "marked": "17.0.6",
     "parse5": "8.0.1",
+    "ws": "8.21.3",
     "y-prosemirror": "^1.3.7",
     "y-protocols": "^1.0.7",
     "yjs": "13.6.30",
-    "zod": "^4.4.3",
-    "ws": "8.21.3",
-    "@dohc/service-http": "workspace:*"
+    "zod": "^4.4.3"
   }
 }
