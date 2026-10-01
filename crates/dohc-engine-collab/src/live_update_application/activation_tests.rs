@@ -176,6 +176,163 @@ fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
     assert_eq!(captured.source.source_digest, hex_sha256(NESTED.as_bytes()));
 }
 
+/// A host settles over the projection of its adopted activation state, which
+/// differs from the file the adoption names. Publishing that settlement's
+/// before-image needs the activation state itself accepted, not merely adopted.
+#[test]
+fn adopted_activation_projection_publishes_only_once_accepted_state_contains_it() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    const NESTED: &str = "# Shared\n\n- parent\n  - nested\n";
+    let mut f = imported_fixture();
+    f.doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, NESTED)
+        .unwrap();
+    let update = f.doc.encode_full_state();
+    let TxnOutcome::Committed(recorded) = f
+        .store
+        .write_with(&NoFaults, |tx| {
+            durable::record_update_in_tx(tx, &f.key, &update, None, None, 4)
+        })
+        .unwrap()
+    else {
+        panic!("local edit interrupted")
+    };
+    f.cut.expected_local_sequence = recorded.seq;
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "owner.md".into(),
+                text: NESTED.into(),
+                moment_id: "imported-nested".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    f.cut.adoption_id = captured.activation_id.clone();
+    f.cut.source_moment_id = captured.source.source_moment_id.clone();
+    f.cut.source_digest = captured.source.source_digest.clone();
+    f.cut.source_byte_length = captured.source.source_byte_length;
+    f.adopt().unwrap();
+    let activated = Ydoc::wire();
+    activated.apply(&captured.full_state).unwrap();
+    let activation_projection = hex_sha256(
+        activated
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .as_bytes(),
+    );
+    assert_ne!(activation_projection, captured.source.source_digest);
+    let proof = |f: &Fixture, digest: &str| {
+        f.store
+            .read_with(|conn| {
+                contains_in(
+                    conn,
+                    &f.key,
+                    "owner.md",
+                    None,
+                    PublicationContentKind::Projection,
+                    digest,
+                    &mut 1_000_000,
+                )
+            })
+            .unwrap()
+    };
+    // The pre-adoption edit is still a private local preimage.
+    assert_eq!(proof(&f, &activation_projection), PublicationProof::NotContained);
+    let (outbox_id, delivery_id, digest): (String, String, String) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap();
+    let accept = |f: &mut Fixture, delivery_id: String, digest: String, cursor, bytes| {
+        let applied = apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            AdmittedLiveUpdate {
+                metadata: AdmittedLiveUpdateMetadata {
+                    accepted: RelayAcceptedLiveUpdate {
+                        receipt: LiveUpdateReceipt {
+                            delivery_id,
+                            update_digest: digest,
+                            journal_cursor: cursor,
+                            accepting_host_epoch: 1,
+                        },
+                        binding: f.binding.clone(),
+                        authority: ServerDerivedLiveUpdateAuthority::Owner {
+                            principal_id: "owner".into(),
+                        },
+                        received_at_ms: 5,
+                    },
+                    first_seen: vec![],
+                },
+                update_bytes: bytes,
+            },
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+        assert!(matches!(applied, ApplicationResult::Applied(..)));
+    };
+    accept(&mut f, delivery_id.clone(), digest.clone(), 1, captured.full_state.clone());
+    owner_outbox::acknowledge(
+        &mut f.store,
+        "workspace",
+        &outbox_id,
+        &[owner_outbox::OwnerDeliveryReceipt {
+            delivery_id,
+            update_digest: digest,
+            journal_cursor: 1,
+            accepting_host_epoch: 1,
+        }],
+    )
+    .unwrap();
+    activated
+        .rewrite_content_to_markdown(ContentKind::Richdoc, "accepted later")
+        .unwrap();
+    let later = activated.encode_full_state();
+    accept(&mut f, "later".into(), hex_sha256(&later), 2, later);
+    let current = hex_sha256(
+        activated
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .as_bytes(),
+    );
+    assert_ne!(current, activation_projection);
+    for accepted in [&activation_projection, &captured.source.source_digest, &current] {
+        assert_eq!(proof(&f, accepted), PublicationProof::Contained);
+    }
+    activated
+        .rewrite_content_to_markdown(ContentKind::Richdoc, "private draft")
+        .unwrap();
+    let private = hex_sha256(
+        activated
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .as_bytes(),
+    );
+    assert_eq!(proof(&f, &private), PublicationProof::NotContained);
+}
+
 #[test]
 fn owner_adoption_publication_failure_rolls_back_and_replay_skips_publication() {
     let mut f = Fixture::new();
