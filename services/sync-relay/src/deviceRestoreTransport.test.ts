@@ -55,7 +55,8 @@ it.each(["prepare","apply","settle","resume"] as const)("forwards bounded privat
   try {
     const bytes=f.encode(f.header(operation));
     const response=await f.peer.sendLiveRestore({id:1,workspace:"handle",deadlineMs:30_000},operation,bytes,1_000_000);
-    expect(response.bytes).toEqual(f.output);
+    expect(response.bytes.byteLength).toBe(f.output.byteLength);
+    expect(response.bytes.equals(f.output)).toBe(true);
     expect(response.response.result).toMatchObject({status:({prepare:"prepared",apply:"applied",settle:"settled",resume:"resumed"} as const)[operation]});
     expect(f.native.sendLiveRestore).toHaveBeenCalledOnce();
     const [request,method,forwarded,bound,signal]=f.native.sendLiveRestore.mock.calls[0]!;
@@ -97,7 +98,9 @@ it("uses the caller's smaller output reservation without retiring the connection
     const request={id:1,workspace:"handle",deadlineMs:30_000},bytes=f.encode(f.header("prepare"));
     await expect(f.peer.sendLiveRestore(request,"prepare",bytes,600_000)).rejects.toThrow("owner-device-operation-refused");
     expect(f.native.sendLiveRestore.mock.calls[0]![3]).toBe(600_000);
-    await expect(f.peer.sendLiveRestore({...request,id:2},"prepare",bytes,600_001)).resolves.toHaveProperty("bytes",f.output);
+    const response=await f.peer.sendLiveRestore({...request,id:2},"prepare",bytes,600_001);
+    expect(response.bytes.byteLength).toBe(f.output.byteLength);
+    expect(response.bytes.equals(f.output)).toBe(true);
     expect(f.stop).not.toHaveBeenCalled();
   }finally{await f.close();}
 });
@@ -107,7 +110,8 @@ it.each([0,1_000_000])("streams a native output of exactly %s bytes",async lengt
   try{
     const output=Buffer.alloc(length,13);f.native.sendLiveRestore.mockResolvedValueOnce({response:{result:{}},bytes:output});
     const result=await f.peer.sendLiveRestore({id:1,workspace:"handle",deadlineMs:30_000},"prepare",f.encode(f.header("prepare")),1_000_000);
-    expect(result.bytes).toEqual(output);expect(f.stop).not.toHaveBeenCalled();
+    expect(result.bytes.byteLength).toBe(output.byteLength);
+    expect(result.bytes.equals(output)).toBe(true);expect(f.stop).not.toHaveBeenCalled();
   }finally{await f.close();}
 });
 
