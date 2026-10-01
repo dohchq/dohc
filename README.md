@@ -16,12 +16,6 @@ Agents now write much of the software people run, and few people read it. The mo
 
 Our bet is that keeping the app's source, data, and discussion together makes the work easier to use, change, and hand over. A workspace should be useful alone and let another person or agent continue the same work when you share it.
 
-### Intended example: a fundraiser
-
-Your agent builds a signup app. Participants register from their phones through a share link. Organizers manage registrations, discuss changes, and edit the app in the same event workspace.
-
-The app's source and registration data stay with the project so another organizer and their agent can continue it.
-
 ## Agents and workspace apps
 
 dohc is agent agnostic. It does not provide an agent or prescribe how agents should work. A human, agent, or script can change the same workspace through the access each user configures.
@@ -34,7 +28,7 @@ Apps can use approved Collection data through the operations their owner grants.
 
 ## Where it is today
 
-dohc is pre-launch and under active development. We have not proved these workflow benefits with users yet. Expect missing pieces, rough edges, and breaking changes.
+dohc is pre-launch and under active development. We are in the process of proving these workflow benefits with users. Expect missing pieces, rough edges, and breaking changes.
 
 The desktop app currently includes:
 
