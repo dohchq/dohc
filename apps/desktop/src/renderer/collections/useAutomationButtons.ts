@@ -10,7 +10,7 @@ import { bridge } from "../bridge";
 //
 // The window keeps one store per workspace and Collection for as long as it
 // runs, so a run started in the table still reports when it ends after the
-// person opens another tab, and a failure's Try again still works. Each
+// person opens another tab, and a Try again still works. Each
 // button subscribes to its own field and record, so a press re-renders only
 // that button, and a table's cells keep their elements and focus.
 
@@ -42,7 +42,6 @@ export interface PressedRecord {
 interface Run {
   field: string;
   label: string;
-  automationId: string | null;
   /** Null while main has not answered the press. */
   claimId: string | null;
   waiting: string | null;
@@ -122,34 +121,13 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
   function settle(key: string, run: Run, outcome: Outcome): void {
     finish(key);
     for (const listener of [...settledListeners]) listener();
-    const { onError, onNotice } = report();
+    const { onNotice } = report();
     if (outcome.outcome === "done") onNotice(`Ran ${run.field} on ${run.label}`);
     else if (outcome.outcome === "skipped") onNotice(`${run.field} made no changes to ${run.label}`);
     // A press sent again after its run record was trimmed: it ended, and dohc cannot say how.
     else if (outcome.outcome === "ended") onNotice(`${run.field} finished on ${run.label}`);
-    else {
-      const { automationId, claimId } = run;
-      const retry = automationId === null || claimId === null ? null : () => void live()?.runAgain(key, { ...run, automationId, claimId });
-      onError(`${run.field} did not finish.`, new Error(outcome.error ?? ""), retry);
-    }
-  }
-
-  /** Try again on a failed run: the same claim runs again, for the person who pressed it. */
-  async function runAgain(key: string, run: Run & { automationId: string; claimId: string }): Promise<void> {
-    if (closed || runs.has(key)) return;
-    runs.set(key, { ...run, waiting: null });
-    changed(key);
-    try {
-      const result = await bridge().retryCollectionAutomation({ workspaceId, automationId: run.automationId, claimId: run.claimId, startOver: false, onServer: false });
-      if (closed || result.status === "queued") return;
-      finish(key);
-      const reason = result.status === "refused" ? result.reason : `${run.field} changed since it ran. Run it again from Automations.`;
-      report().onError(`${run.field} did not run again.`, new Error(reason), null);
-    } catch (error) {
-      if (closed) return;
-      finish(key);
-      report().onError(`${run.field} did not run again.`, error, () => void live()?.runAgain(key, run));
-    }
+    // A failed run is main's to report, as every automation's is: its notice reaches
+    // this person with Try again, and main takes it back once the run succeeds.
   }
 
   const find = (claimId: string) => [...runs].find(([, run]) => run.claimId === claimId);
@@ -172,7 +150,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
 
   return {
     workspaceId,
-    runAgain,
 
     /** Follows one field on one record, or every button's state with no key. */
     subscribe(key: string, listener: () => void): () => void {
@@ -230,8 +207,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     async press(field: string, record: PressedRecord, pressId: string = crypto.randomUUID(), confirmed: readonly string[] = []): Promise<void> {
       const key = runKey(field, record.id);
       if (closed || runs.has(key)) return;
-      const state = states?.get(field);
-      const run: Run = { field, label: record.label, automationId: state?.kind === "ready" ? state.automationId : null, claimId: null, waiting: null };
+      const run: Run = { field, label: record.label, claimId: null, waiting: null };
       runs.set(key, run);
       notes.delete(key);
       changed(key);
