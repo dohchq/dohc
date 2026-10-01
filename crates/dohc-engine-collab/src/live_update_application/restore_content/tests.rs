@@ -1566,6 +1566,24 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
     let prep = f.freeze(f.baseline_point.clone());
     let input = admitted_restore(&mut f, prep);
     apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+    // An applied but unresumed restore keeps every generation unpublishable.
+    let document = DocKey::new("workspace", "main", "object").unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            for binding in [&f.binding, &input.admitted.accepted.binding] {
+                assert!(
+                    crate::live_update_application::require_restore_registration(
+                        conn,
+                        &document,
+                        "namespace",
+                        binding
+                    )
+                    .is_err()
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
     let missing = NativeRestoreResume {
         application: input.clone(),
         settlement_id: "missing".into(),
@@ -1680,6 +1698,48 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
             Ok(())
         })
         .unwrap();
+    // The resumed generation publishes the restore's accepted update; the one it replaced does not.
+    {
+        use crate::owner_outbox::publication::{
+            contains_in, PublicationContentKind, PublicationProof,
+        };
+        let restored = input.admitted.accepted.receipt.update_digest.clone();
+        let mut stale = f.binding.clone();
+        stale.restore_fence_generation -= 1;
+        f.store
+            .read_with(|conn| -> Result<(), ApplicationError> {
+                crate::live_update_application::require_restore_registration(
+                    conn,
+                    &key,
+                    "namespace",
+                    &f.binding,
+                )?;
+                assert!(
+                    crate::live_update_application::require_restore_registration(
+                        conn,
+                        &key,
+                        "namespace",
+                        &stale
+                    )
+                    .is_err()
+                );
+                assert_eq!(
+                    contains_in(
+                        conn,
+                        &key,
+                        &f.binding.current_path,
+                        Some(&f.binding.lineage_claim_id),
+                        PublicationContentKind::Ydoc,
+                        &restored,
+                        &mut 4_000_000,
+                    )
+                    .unwrap(),
+                    PublicationProof::Contained
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
     let second_prep = f.freeze(f.baseline_point.clone());
     assert_eq!(
         first,

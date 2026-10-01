@@ -63,7 +63,8 @@ pub fn require_generation(
     }
 }
 
-pub(super) fn require_registration(
+/// No restore fence is active, and a resumed one names exactly this binding and namespace.
+pub(crate) fn require_registration(
     conn: &Connection,
     key: &DocKey,
     namespace: &str,

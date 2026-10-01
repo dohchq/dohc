@@ -55,6 +55,7 @@ pub use restore_content::{
     NativeRestoreSource,
 };
 pub use restore_fence::require_open as require_restore_open;
+pub(crate) use restore_fence::require_registration as require_restore_registration;
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };

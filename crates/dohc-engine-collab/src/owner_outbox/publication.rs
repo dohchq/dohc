@@ -62,7 +62,11 @@ pub fn contains_in(
         {
             return Ok(false);
         }
-        crate::live_update_application::require_restore_open(conn, key).map_err(collab)?;
+        // An active restore fence refuses; a resumed one publishes only its own generation.
+        crate::live_update_application::require_restore_registration(
+            conn, key, &namespace, &binding,
+        )
+        .map_err(|_| OwnerOutboxError::Frozen)?;
         match kind {
             PublicationContentKind::Ydoc => {
                 let update = read_blob(conn, digest, remaining, &mut budget_exhausted)?;
@@ -167,7 +171,13 @@ pub fn contains_observed_update_in(
     }
     let observed = super::accepted::current(conn, &draft.binding)?;
     let checkpoint = super::draft::bounded_blob(conn, &observed.checkpoint_digest)?;
-    crate::live_update_application::require_restore_open(conn, key).map_err(collab)?;
+    crate::live_update_application::require_restore_registration(
+        conn,
+        key,
+        &observed.relay_database_namespace,
+        &observed.binding,
+    )
+    .map_err(|_| OwnerOutboxError::Frozen)?;
     if update == checkpoint {
         return Ok(Some(true));
     }
