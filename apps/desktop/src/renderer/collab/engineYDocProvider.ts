@@ -16,7 +16,9 @@
 // carries the editor's own (non-ENGINE) origin and IS shipped.
 
 import * as Y from "yjs";
+import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
+import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 
 // Applied to the mirror doc for every update that originated in the engine
@@ -78,6 +80,7 @@ export interface EngineYDocTransport {
     update: Uint8Array,
     sequence: number,
     lineageGeneration: number,
+    requestId: string,
   ): void | Promise<void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
   // through the engine). Returns an unsubscribe function.
@@ -131,6 +134,19 @@ export class EngineYDocDeliveryRefusedError extends Error {
   }
 }
 
+export class EngineYDocPendingLimitError extends Error {
+  constructor(
+    readonly observedBytes: number,
+    readonly observedRecords: number,
+  ) {
+    super(
+      "dohc could not save this edit while earlier edits await delivery. " +
+        "Copy the set-aside edit below.",
+    );
+    this.name = "EngineYDocPendingLimitError";
+  }
+}
+
 function isPermanentDeliveryError(error: unknown): boolean {
   return (
     error instanceof EngineYDocUpdateTooLargeError ||
@@ -162,7 +178,8 @@ interface EngineYDocBindOptions {
   onLineageReplacementFailure?: (error: unknown, retired: Y.Doc) => void;
 }
 
-const LOCAL_UPDATE_BATCH_MS = 32;
+// Text ships on the next turn. Drawing updates share a 32 ms batching window.
+const SCENE_UPDATE_FLUSH_DELAY_MS = 32;
 // Local IPC normally answers in one turn. A quarter-second retry avoids a hot
 // loop during an outage while recovering a brief renderer/main handoff quickly.
 const LOCAL_UPDATE_RETRY_MS = 250;
@@ -174,41 +191,6 @@ const timeoutBatchScheduler: EngineYDocBatchScheduler = {
     globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>);
   },
 };
-
-export function mergeYDocUpdatesForTransport(
-  stagedUpdates: ReadonlyArray<{
-    update: Uint8Array;
-    sequence: number;
-  }>,
-  maxBytes: number = ENGINE_YDOC_UPDATE_MAX_BYTES,
-): Array<{ update: Uint8Array; sequence: number }> {
-  if (stagedUpdates.length === 0) return [];
-
-  const mergeRange = (
-    start: number,
-    end: number,
-  ): Array<{ update: Uint8Array; sequence: number }> => {
-    const range = stagedUpdates.slice(start, end);
-    const merged =
-      range.length === 1
-        ? range[0]!.update
-        : Y.mergeUpdates(range.map(({ update }) => update));
-    const sequence = range.at(-1)!.sequence;
-    if (merged.byteLength <= maxBytes || range.length === 1) {
-      // Keep a single oversized update intact. This provider must not invent a
-      // new rejection; the existing transport boundary owns that refusal.
-      return [{ update: merged, sequence }];
-    }
-
-    const middle = start + Math.ceil(range.length / 2);
-    return [...mergeRange(start, middle), ...mergeRange(middle, end)];
-  };
-
-  // The normal path parses any number of pending updates once. If a throttled
-  // background timer accumulated enough work to cross the existing transport
-  // boundary, balanced splitting avoids repeatedly merging a growing prefix.
-  return mergeRange(0, stagedUpdates.length);
-}
 
 export interface EngineYDocBinding {
   // The mirror Y.Doc the editor binds to, or null when the doc is not
@@ -345,6 +327,8 @@ export async function bindEngineYDoc(
   }> = [];
   let sendChain = Promise.resolve();
   let unacknowledgedBatches = 0;
+  let retainedBytes = 0;
+  let retainedRecords = 0;
   let deliveryPending = false;
   let localUpdatesRefused = false;
   let replacementInProgress = false;
@@ -365,10 +349,22 @@ export async function bindEngineYDoc(
     }
   };
 
+  const discardPendingUpdates = (): void => {
+    for (const { update } of pendingLocalUpdates) {
+      retainedBytes -= update.byteLength;
+      retainedRecords -= 1;
+    }
+    pendingLocalUpdates = [];
+  };
+
   const refuseLocalUpdates = (error: unknown): void => {
     if (localUpdatesRefused) return;
     localUpdatesRefused = true;
-    pendingLocalUpdates = [];
+    if (scheduledFlush !== null) {
+      batchScheduler.cancel(scheduledFlush);
+      scheduledFlush = null;
+    }
+    discardPendingUpdates();
     const refusedDoc = doc;
     try {
       // The full state, not the failed delta: it also covers every edit made
@@ -395,10 +391,13 @@ export async function bindEngineYDoc(
   const applyLocalUpdateUntilAcknowledged = async (batch: {
     update: Uint8Array;
     sequence: number;
+    requestId: string;
   }, batchGeneration: number): Promise<void> => {
     try {
       await deliverBatchUntilAcknowledged(batch, batchGeneration);
     } finally {
+      retainedBytes -= batch.update.byteLength;
+      retainedRecords -= 1;
       unacknowledgedBatches -= 1;
       finishDeliveryIfSafe();
     }
@@ -407,6 +406,7 @@ export async function bindEngineYDoc(
   const deliverBatchUntilAcknowledged = async (batch: {
     update: Uint8Array;
     sequence: number;
+    requestId: string;
   }, batchGeneration: number): Promise<void> => {
     if (localUpdatesRefused) return;
     if (batch.update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) {
@@ -416,12 +416,14 @@ export async function bindEngineYDoc(
       return;
     }
     for (;;) {
+      if (localUpdatesRefused) return;
       if (replacementInProgress || batchGeneration !== lineageGeneration) return;
       try {
         await transport.applyLocalUpdate(
-          batch.update,
+          new Uint8Array(batch.update),
           batch.sequence,
           batchGeneration,
+          batch.requestId,
         );
         return;
       } catch (error) {
@@ -468,17 +470,28 @@ export async function bindEngineYDoc(
     }
     const updates = pendingLocalUpdates;
     pendingLocalUpdates = [];
+    // These edits belong to the same renderer owner. Assign an immutable
+    // delivery identity only after merging; retries retain its bytes and id.
+    const batch = {
+      update: updates.length === 1
+        ? updates[0]!.update
+        : Y.mergeUpdates(updates.map(({ update }) => update)),
+      sequence: updates.at(-1)!.sequence,
+      requestId: crypto.randomUUID(),
+    };
+    retainedBytes += batch.update.byteLength - updates.reduce(
+      (total, { update }) => total + update.byteLength, 0,
+    );
+    retainedRecords += 1 - updates.length;
     const batchGeneration = lineageGeneration;
     // Preserve batch order even when the transport is asynchronous. A failed
     // head stays ahead of every later batch until main acknowledges it. The
     // chain remains pending during retries, so teardown cannot settle and
     // close a session that still has renderer-only edits.
-    for (const batch of mergeYDocUpdatesForTransport(updates)) {
-      unacknowledgedBatches += 1;
-      sendChain = sendChain.then(() =>
-        applyLocalUpdateUntilAcknowledged(batch, batchGeneration),
-      );
-    }
+    unacknowledgedBatches += 1;
+    sendChain = sendChain.then(() =>
+      applyLocalUpdateUntilAcknowledged(batch, batchGeneration),
+    );
     return sendChain;
   };
 
@@ -487,20 +500,30 @@ export async function bindEngineYDoc(
     scheduledFlush = batchScheduler.schedule(() => {
       scheduledFlush = null;
       void flushPendingLocalUpdates();
-    }, LOCAL_UPDATE_BATCH_MS);
+    }, doc.share.has(EXCALIDRAW_SCENE_ROOTS.revisions)
+      ? SCENE_UPDATE_FLUSH_DELAY_MS
+      : 0);
   };
 
-  // Coalesce consecutive LOCAL editor edits before shipping them to main. An
+  // Retain each original editor update before scheduling transport. An
   // editor edit carries a non-ENGINE origin; an engine-sourced apply carries
   // ENGINE_SOURCED_ORIGIN and is skipped (no echo back to main).
   const onUpdate = (update: Uint8Array, origin: unknown): void => {
     if (destroyed) return;
     if (origin === ENGINE_SOURCED_ORIGIN) return;
     if (localUpdatesRefused) return;
+    const nextBytes = retainedBytes + update.byteLength;
+    const nextRecords = retainedRecords + 1;
+    if (nextBytes > YDOC_PENDING_MAX_BYTES || nextRecords > YDOC_PENDING_MAX_RECORDS) {
+      refuseLocalUpdates(new EngineYDocPendingLimitError(nextBytes, nextRecords));
+      return;
+    }
     const sequence = transport.stageLocalUpdate();
     if (sequence === null) return;
     setDeliveryPending(true);
-    pendingLocalUpdates.push({ update, sequence });
+    retainedBytes = nextBytes;
+    retainedRecords = nextRecords;
+    pendingLocalUpdates.push({ update: new Uint8Array(update), sequence });
     scheduleLocalUpdateFlush();
   };
   doc.on("update", onUpdate);
@@ -534,7 +557,7 @@ export async function bindEngineYDoc(
         batchScheduler.cancel(scheduledFlush);
         scheduledFlush = null;
       }
-      pendingLocalUpdates = [];
+      discardPendingUpdates();
       // Wait out any delivery already in flight before preserving and
       // acknowledging: the winner must not install while the loser's last
       // batch is still being answered. In-queue batches abandon themselves

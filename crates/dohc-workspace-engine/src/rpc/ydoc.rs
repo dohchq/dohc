@@ -1081,12 +1081,14 @@ impl EngineService {
         {
             return Err(WireError::new(ErrorCode::InvalidParams, reason));
         }
-        let require_empty = session.lineage_absent && session.first_update_pending;
+        let require_empty = params.seed || (session.lineage_absent && session.first_update_pending);
         // A declared seed on anything but the first update of a
         // lineage-absent session is a client bug: accepting it would record a
         // false seed source and let a later settle skip a write that carried
         // real edits. Refuse instead — a seed can only be the first update.
-        if params.seed && !require_empty {
+        // The durable request ledger permits an exact lost-ack retry before
+        // checking the empty-lineage guard. A new seed still fails that guard.
+        if params.seed && !session.lineage_absent {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "seed-not-first-update",

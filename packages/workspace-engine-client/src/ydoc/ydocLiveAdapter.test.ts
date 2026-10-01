@@ -1562,7 +1562,7 @@ describe("YdocLiveAdapter", () => {
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate && foreign) {
-          throw new Error("ydoc-lineage-stale");
+          throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "ydoc-lineage-stale", retry: "no" }, undefined);
         }
         if (request.method === YDOC_METHOD.resync && foreign) {
           const response = await engine.sendRequest(request);
@@ -3149,7 +3149,9 @@ describe("YdocLiveAdapter", () => {
     expect(engine.requests.map((request) => request.method)).not.toContain(
       YDOC_METHOD.settle,
     );
-    await expect(provider.close({ settle: false })).resolves.toBeUndefined();
+    await expect(provider.close({ settle: false })).rejects.toMatchObject({
+      name: "YdocReleasedWithSettleFailureError",
+    });
     expect(methods.at(-1)).toBe(YDOC_METHOD.close);
   });
 
@@ -5310,4 +5312,369 @@ it("notifies durable owner observers only after commit and preserves lost-respon
     await session.applyLocalTextEdit({root: "plainText", index: 7, insert: "!"});
     expect(changed).toHaveBeenCalledTimes(1);
   } finally {release(); await session.close(); adapter.dispose();}
+});
+
+
+describe("immutable original-record recovery", () => {
+  it.each(["CANCELLED", "INTERNAL"] as const)("keeps a committed %s record pending until its keyed retry dedupes", async code => {
+    const engine = seedPlaintextEngine("abc");
+    const resyncEntered = Promise.withResolvers<void>();
+    const releaseResync = Promise.withResolvers<void>();
+    const attempts: Request[] = [];
+    const refused = vi.fn();
+    let fail = false;
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.resync) {
+          resyncEntered.resolve();
+          await releaseResync.promise;
+        }
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          attempts.push(structuredClone(request));
+          const response = await engine.sendRequest(request);
+          if (fail) {
+            fail = false;
+            throw new DaemonRefusalError({ code, retry: "no", message: "answer lost after commit" }, undefined);
+          }
+          return response;
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    session.onLocalUpdateRefused(refused);
+    const before = engine.recordedUpdates.length;
+    attempts.length = 0;
+    fail = true;
+    try {
+      const editing = session.applyLocalTextEdit({ root: "plainText", index: 3, insert: "d" },
+        { idempotencyKey: "uncertain-original" });
+      await resyncEntered.promise;
+      expect(session.missingLocalState).toBe(true);
+      expect(session.doc.getText("plainText").toString()).toBe("abcd");
+      expect(refused).not.toHaveBeenCalled();
+      releaseResync.resolve();
+      await editing;
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]?.idempotencyKey).toBe(attempts[0]?.idempotencyKey);
+      expect(attempts[1]?.params).toEqual(attempts[0]?.params);
+      expect(engine.recordedUpdates.length - before).toBe(1);
+      expect(session.missingLocalState).toBe(false);
+      expect(refused).not.toHaveBeenCalled();
+      await expect(session.settle()).resolves.toMatchObject({ content: "abcd" });
+    } finally { releaseResync.resolve(); await session.evict(); adapter.dispose(); }
+  });
+
+  it("retires a refused client's causal tail and records an independent keyed client", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const refusal = new DaemonRefusalError({ code: "INVALID_PARAMS", message: "future-refusal", retry: "no" }, undefined);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const refused = vi.fn();
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.idempotencyKey === "refused") {
+          entered.resolve(); await release.promise; throw refusal;
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    session.onLocalUpdateRefused(refused);
+    const client = new Y.Doc();
+    Y.applyUpdate(client, session.initialUpdate);
+    const firstVector = Y.encodeStateVector(client);
+    client.getText("plainText").insert(3, " refused");
+    const first = session.applyLocalUpdate(Y.encodeStateAsUpdate(client, firstVector), { idempotencyKey: "refused" });
+    await entered.promise;
+    const secondVector = Y.encodeStateVector(client);
+    client.getText("plainText").insert(client.getText("plainText").length, " dependent");
+    const dependent = session.applyLocalUpdate(Y.encodeStateAsUpdate(client, secondVector), { idempotencyKey: "dependent" });
+    const independent = session.applyLocalUpdate(plaintextUpdate(session.initialUpdate, text => text.insert(3, " independent")),
+      { idempotencyKey: "independent", actorOriginId: "other-agent" });
+    release.resolve();
+    await expect(first).rejects.toBe(refusal);
+    await expect(dependent).rejects.toBe(refusal);
+    await independent;
+    expect(refused.mock.calls.map(([id]) => id)).toEqual(["refused", "dependent"]);
+    expect(session.missingLocalState).toBe(false);
+    await expect(session.settle()).resolves.toMatchObject({ content: "abc independent" });
+    client.destroy(); await session.evict(); adapter.dispose();
+  });
+
+  it("reestablishes a neutral base and replays originals without arming settlement or scanning the full document", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const scheduler = settleScheduler();
+    const provider = await openEngineYdocProviderSession({
+      transport: engine, workspace: WORKSPACE, versionId: VERSION, path: PATH,
+      seedAbsentLineage: false, scheduleSettle: scheduler.schedule, onRemoteUpdate() {},
+    });
+    const source = new Y.Doc();
+    source.getText("plainText").insert(0, "abc");
+    const baseline = Y.encodeStateAsUpdate(source);
+    await provider.reestablishAcknowledgedState!(baseline);
+    const before = Y.encodeStateVector(source);
+    source.getText("plainText").delete(0, 1);
+    const original = Y.encodeStateAsUpdate(source, before);
+    const scan = vi.spyOn(provider.doc.getText("plainText"), "toDelta");
+    try {
+      await provider.replayLocalUpdate!(original, { idempotencyKey: "deletion-original", actorOriginId: "alice-agent" });
+      expect(scan).not.toHaveBeenCalled();
+      expect(scheduler.armed).toHaveLength(0);
+      const recorded = engine.requests.filter(request => request.method === YDOC_METHOD.recordUpdate);
+      expect(recorded[0]?.params).toMatchObject({ seed: true });
+      expect(recorded[1]).toMatchObject({ idempotencyKey: "deletion-original",
+        params: { actorOriginId: "alice-agent", updateBase64: Buffer.from(original).toString("base64") } });
+      await expect(provider.settleNow()).resolves.toMatchObject({ content: "bc" });
+    } finally {
+      scan.mockRestore(); source.destroy(); await provider.close({ settle: false });
+    }
+  });
+
+  it.each(["recovery", "resend"] as const)("restores an acknowledged base as a neutral seed before originals during %s", async mode => {
+    const engine = seedPlaintextEngine("abc");
+    let fail = false;
+    const attempts: Request[] = [];
+    const busy = new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined);
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          attempts.push(structuredClone(request));
+          if (fail) {
+            if (mode === "recovery") fail = false;
+            throw mode === "resend" ? busy : new Error("lost native state");
+          }
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, deleteLength: 1 });
+    engine.discardSessionState(session.sessionId);
+    attempts.length = 0;
+    fail = true;
+    const edit = session.applyLocalTextEdit({ root: "plainText", index: 2, insert: "d" },
+      { idempotencyKey: "bob-original", actorOriginId: "bob-agent",
+        attribution: { actorKind: "agent", onBehalfOf: "bob", depth: 1 } });
+    if (mode === "resend") {
+      await expect(edit).rejects.toBe(busy);
+      fail = false;
+      attempts.length = 0;
+      await session.resendMissingState();
+    } else await edit;
+    const delivered = mode === "resend" ? attempts : attempts.slice(1);
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]?.params).toMatchObject({ seed: true });
+    expect(delivered[0]?.params).not.toHaveProperty("actorOriginId");
+    expect(delivered[0]?.params).not.toHaveProperty("attribution");
+    expect(delivered[1]).toMatchObject({ idempotencyKey: "bob-original",
+      params: { actorOriginId: "bob-agent", attribution: { onBehalfOf: "bob" } } });
+    const base = new Y.Doc();
+    Y.applyUpdate(base, Buffer.from((delivered[0]?.params as { updateBase64: string }).updateBase64, "base64"));
+    expect(base.getText("plainText").toString()).toBe("bc");
+    expect(session.missingLocalState).toBe(false);
+    await expect(session.settle()).resolves.toMatchObject({ content: "bcd" });
+    base.destroy(); await session.close({ settle: false }); adapter.dispose();
+  });
+
+  it("refuses an incomplete existing lineage before resending an attributed original", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    session.lineage = "existing";
+    engine.discardSessionState(session.sessionId);
+    const request = vi.spyOn(adapter, "request");
+    request.mockRejectedValueOnce(new Error("record interrupted"));
+    await expect(session.applyLocalTextEdit({ root: "plainText", index: 3, insert: "d" },
+      { actorOriginId: "bob-agent" })).rejects.toMatchObject({ code: "acknowledged-state-missing" });
+    expect(request.mock.calls.filter(([, method]) => method === YDOC_METHOD.recordUpdate)).toHaveLength(1);
+    expect(engine.sessionText(session.sessionId)).toBe("");
+    expect(session.doc.getText("plainText").toString()).toBe("abcd");
+    await session.evict(); adapter.dispose();
+  });
+
+  it.each([
+    { code: "LIMIT_EXCEEDED" as const, message: "update-too-large" },
+    { code: "INVALID_PARAMS" as const, message: "content-kind-mismatch" },
+    { code: "INVALID_PARAMS" as const, message: "future-update-refusal" },
+    { code: "SHARE_READ_ONLY" as const, message: "share-read-only" },
+  ])("removes a definitive $message refusal and saves later typing", async ({ code, message }) => {
+    const engine = seedPlaintextEngine("abc");
+    const refusal = new DaemonRefusalError({ code, message, retry: "no" }, undefined);
+    let refuse = false;
+    const refused = vi.fn();
+    const replacing = vi.fn();
+    const scheduler = settleScheduler();
+    const provider = await openEngineYdocProviderSession({
+      transport: { ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+        async sendRequest(request) {
+          if (refuse && request.method === YDOC_METHOD.recordUpdate) { refuse = false; throw refusal; }
+          return engine.sendRequest(request);
+        } },
+      workspace: WORKSPACE, versionId: VERSION, path: PATH,
+      onRemoteUpdate() {}, onLocalUpdateRefused: refused, onLineageReplaced: replacing,
+      scheduleSettle: scheduler.schedule,
+    });
+    const oldDoc = provider.doc;
+    refuse = true;
+    const first = provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(3, " refused")),
+      { idempotencyKey: "refused-original" });
+    const dependent = provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc),
+      text => text.insert(text.length, " dependent")), { idempotencyKey: "dependent-original" });
+    await expect(first).rejects.toBe(refusal);
+    await expect(dependent).rejects.toBe(refusal);
+    expect(refused).toHaveBeenCalledWith("refused-original", refusal);
+    expect(refused).toHaveBeenCalledWith("dependent-original", refusal);
+    expect(refused).toHaveBeenCalledTimes(2);
+    expect(replacing).toHaveBeenCalledWith(provider.doc, []);
+    expect(refused.mock.invocationCallOrder[0]).toBeLessThan(replacing.mock.invocationCallOrder[0]!);
+    expect(provider.doc).not.toBe(oldDoc);
+    expect(provider.doc.getText("plainText").toString()).toBe("abc");
+    await provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), text => text.insert(3, " later")));
+    await expect(provider.settleNow()).resolves.toMatchObject({ content: "abc later" });
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(0);
+    await provider.close({ settle: false });
+  });
+
+  it("does not pull a later queued original ahead of its own send during resend", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const methods: string[] = [];
+    let holdFirst = false;
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        methods.push(request.method);
+        if (request.method === YDOC_METHOD.recordUpdate && holdFirst) {
+          holdFirst = false;
+          entered.resolve();
+          await release.promise;
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    methods.length = 0;
+    holdFirst = true;
+    const first = session.applyLocalTextEdit({ root: "plainText", index: 3, insert: "d" });
+    await entered.promise;
+    const resend = session.resendMissingState();
+    const later = session.applyLocalTextEdit({ root: "plainText", index: 4, insert: "e" });
+    release.resolve();
+    await Promise.all([first, resend, later]);
+    expect(methods.filter(method => method === YDOC_METHOD.recordUpdate)).toHaveLength(2);
+    expect(methods).not.toContain(YDOC_METHOD.resync);
+    expect(session.doc.getText("plainText").toString()).toBe("abcde");
+    await session.close();
+    adapter.dispose();
+  });
+
+  it("retries a lost acknowledgement with the same bytes, ID and author snapshot", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const attempts: Request[] = [];
+    let loseAck = false;
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine),
+      onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate && loseAck) {
+          attempts.push(structuredClone(request));
+          const response = await engine.sendRequest(request);
+          if (attempts.length === 1) throw new Error("acknowledgement lost");
+          return response;
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    const before = engine.recordedUpdates.length;
+    const attribution = { actorKind: "automation" as const, onBehalfOf: "alice", depth: 2,
+      run: { claimId: "run-a", automationName: "Original name" } };
+    loseAck = true;
+    const deleting = session.applyLocalTextEdit({ root: "plainText", index: 0, deleteLength: 1 },
+      { actorOriginId: "automation-a", attribution });
+    attribution.onBehalfOf = "bob";
+    attribution.depth = 9;
+    attribution.run.automationName = "Renamed";
+    await deleting;
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.params).toEqual(attempts[0]?.params);
+    expect(attempts[1]?.idempotencyKey).toBe(attempts[0]?.idempotencyKey);
+    expect(attempts[0]?.params).toMatchObject({ actorOriginId: "automation-a",
+      attribution: { onBehalfOf: "alice", depth: 2, run: { automationName: "Original name" } } });
+    expect(engine.recordedUpdates.length - before).toBe(1);
+    expect(session.missingLocalState).toBe(false);
+    await session.close();
+    adapter.dispose();
+  });
+
+  it("replays mixed pending authors separately, including an original deletion-only record", async () => {
+    const engine = seedPlaintextEngine("abc");
+    let busy = false;
+    const accepted: Request[] = [];
+    const refused: Request[] = [];
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          if (busy) {
+            refused.push(structuredClone(request));
+            throw new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined);
+          }
+          accepted.push(structuredClone(request));
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    accepted.length = 0;
+    busy = true;
+    const first = session.applyLocalTextEdit({ root: "plainText", index: 0, deleteLength: 1 },
+      { actorOriginId: "alice-agent", attribution: { actorKind: "agent", onBehalfOf: "alice", depth: 1 } });
+    const second = session.applyLocalTextEdit({ root: "plainText", index: 2, insert: "d" },
+      { actorOriginId: "bob-agent", attribution: { actorKind: "agent", onBehalfOf: "bob", depth: 3 } });
+    await expect(first).rejects.toBeInstanceOf(DaemonRefusalError);
+    await expect(second).rejects.toBeInstanceOf(DaemonRefusalError);
+    busy = false;
+    await session.resendMissingState();
+    expect(accepted).toHaveLength(2);
+    expect(accepted.map(request => request.params)).toEqual([refused[0]?.params, refused[2]?.params]);
+    expect(accepted.map(request => request.idempotencyKey)).toEqual([refused[0]?.idempotencyKey, refused[2]?.idempotencyKey]);
+    const deletion = Y.decodeUpdate(Buffer.from((accepted[0]?.params as { updateBase64: string }).updateBase64, "base64"));
+    expect(deletion.structs).toHaveLength(0);
+    expect(deletion.ds.clients.size).toBeGreaterThan(0);
+    await expect(session.settle()).resolves.toMatchObject({ content: "bcd" });
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it.each(["author", "bytes", "run name", "run claim"])("refuses changed %s reuse even when the local document already holds the update", async change => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH });
+    const source = new Y.Doc();
+    const update = (() => { source.getText("plainText").insert(0, "a"); return Y.encodeStateAsUpdate(source); })();
+    const options = { idempotencyKey: "fixed-id", actorOriginId: "automation-a",
+      attribution: { actorKind: "automation" as const, onBehalfOf: "alice", depth: 2,
+        run: { claimId: "run-a", automationName: "Original name" } } };
+    await session.applyLocalUpdate(update, options);
+    const before = engine.recordedUpdates.length;
+    await session.applyLocalUpdate(update, options);
+    expect(engine.recordedUpdates).toHaveLength(before);
+    const changed = structuredClone(options);
+    if (change === "author") changed.actorOriginId = "automation-b";
+    if (change === "run name") changed.attribution.run.automationName = "New name";
+    if (change === "run claim") changed.attribution.run.claimId = "run-b";
+    if (change === "bytes") source.getText("plainText").insert(1, "b");
+    await expect(session.applyLocalUpdate(change === "bytes" ? Y.encodeStateAsUpdate(source) : update, changed))
+      .rejects.toThrow("idempotency-key-reuse-mismatch");
+    expect(engine.recordedUpdates).toHaveLength(before);
+    await session.evict();
+    adapter.dispose();
+    source.destroy();
+  });
 });

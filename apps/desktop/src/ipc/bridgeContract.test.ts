@@ -3958,7 +3958,7 @@ describe("engine Y.Doc update IPC contract", () => {
     const parsed = ApplyEngineYDocUpdatePayload.parse({
       sessionId: "shared-view-bypass",
       update: new Uint8Array([1, 2, 3]),
-      lineageGeneration: 1,
+      lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
     });
     expect(parsed.seq).toBe(0);
     expect(() =>
@@ -3973,6 +3973,7 @@ describe("engine Y.Doc update IPC contract", () => {
     expect(
       ApplyEngineYDocUpdatePayload.parse({
         sessionId: "s",
+        requestId: "11111111-1111-4111-8111-111111111111",
         update: new Uint8Array([1]),
         seq: 7,
         lineageGeneration: 2,
@@ -3981,6 +3982,7 @@ describe("engine Y.Doc update IPC contract", () => {
     expect(() =>
       ApplyEngineYDocUpdatePayload.parse({
         sessionId: "s",
+        requestId: "11111111-1111-4111-8111-111111111111",
         update: new Uint8Array([1]),
         seq: -1,
         lineageGeneration: 2,
@@ -3989,6 +3991,7 @@ describe("engine Y.Doc update IPC contract", () => {
     expect(() =>
       ApplyEngineYDocUpdatePayload.parse({
         sessionId: "s",
+        requestId: "11111111-1111-4111-8111-111111111111",
         update: new Uint8Array([1]),
         lineageGeneration: 0,
       }),

@@ -514,6 +514,8 @@ where
     // original row survives compaction — a retry after the fold would
     // re-append the edit (and re-journal an outbound op on a replicated
     // lineage) instead of replaying the original result.
+    // The session guard can change when admission promotes this lineage.
+    // Validate it separately; it is not part of the immutable request.
     let request_hash = request_id.map(|_| {
         let path_identity = match path {
             Some(path) => format!("some:{}", crate::hex_sha256(path.as_bytes())),
@@ -521,17 +523,12 @@ where
         };
         crate::hex_sha256(
             format!(
-                "ydoc-record-v5{sep}{restore_generation:?}{sep}{is_seed}{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}{sep}{}",
+                "ydoc-record-v6{sep}{restore_generation:?}{sep}{is_seed}{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
                 update_sha,
-                match lineage_guard {
-                    LineageGuard::Unchecked => "unguarded".to_owned(),
-                    LineageGuard::Expect(None) => "unclaimed".to_owned(),
-                    LineageGuard::Expect(Some(claim)) => format!("claim:{claim}"),
-                },
-                dohc_engine_domain::moment_author_json(actor_origin_id, attribution).unwrap_or_default(),
+                serde_json::json!([actor_origin_id, attribution]),
                 sep = char::from(0),
             )
             .as_bytes(),
@@ -542,6 +539,15 @@ where
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
         crate::live_update_application::require_restore_generation(tx, key, restore_generation)?;
+        if let LineageGuard::Expect(expected) = lineage_guard {
+            let observed = read_marker_in(tx, key)?.and_then(|marker| marker.lineage_claim_id);
+            if observed.as_deref() != expected {
+                return Err(CollabError::LineageWriteStale {
+                    expected: expected.map(ToOwned::to_owned),
+                    observed,
+                });
+            }
+        }
         if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
             let recorded: Option<(String, i64)> = tx
                 .query_row(
@@ -562,15 +568,6 @@ where
                     deduped: true,
                     emit_outbound: false,
                     record_facts: None,
-                });
-            }
-        }
-        if let LineageGuard::Expect(expected) = lineage_guard {
-            let observed = read_marker_in(tx, key)?.and_then(|marker| marker.lineage_claim_id);
-            if observed.as_deref() != expected {
-                return Err(CollabError::LineageWriteStale {
-                    expected: expected.map(ToOwned::to_owned),
-                    observed,
                 });
             }
         }

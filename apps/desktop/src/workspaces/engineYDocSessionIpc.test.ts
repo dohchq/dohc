@@ -185,13 +185,26 @@ const openPayload = {
 };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("sends a definitive edit refusal through the scoped save event", async () => {
+    const h = harness(providerSession());
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+    const message = 'dohc could not save an edit to "notes/a.md". Copy it from recovery.';
+    h.capturedOpen()?.onEditRefused?.("request-1", message);
+    expect(sender.sent).toContainEqual({
+      channel: CHANNELS.engineYDocSaveState,
+      payload: { sessionId: openPayload.sessionId, state: "error", seq: 0,
+        editRefusal: { workspaceId: "workspace-1", path: "notes/a.md", requestId: "request-1", message } },
+    });
+    await h.ipc.shutdown();
+  });
   it("keeps the person attribution used by renderer record automations", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
     await h.ipc.open(sender, openPayload);
     const update = new Uint8Array([0, 0]);
-    expect(h.ipc.applyUpdate(sender, {sessionId: openPayload.sessionId, update, seq: 1, lineageGeneration: 1})).toEqual({accepted: true});
-    expect(h.session.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), {attribution: {actorKind: "human", onBehalfOf: "person-local"}});
+    expect(h.ipc.applyUpdate(sender, {sessionId: openPayload.sessionId, update, seq: 1, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111"})).toEqual({accepted: true});
+    expect(h.session.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), {idempotencyKey: "11111111-1111-4111-8111-111111111111", attribution: {actorKind: "human", onBehalfOf: "person-local"}});
     await h.ipc.shutdown();
   });
 
@@ -217,7 +230,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const opened = await h.ipc.open(sender, openPayload);
     expect(opened.available).toBe(true);
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
-    const update = {sessionId: openPayload.sessionId, update: new Uint8Array([0, 0]), seq: 1, lineageGeneration: 1};
+    const update = {sessionId: openPayload.sessionId, update: new Uint8Array([0, 0]), seq: 1, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111"};
     expect(h.ipc.applyUpdate(sender, update)).toEqual({accepted: true});
     expect(shared.applyLocalUpdate).toHaveBeenCalledOnce();
     live = false;
@@ -402,7 +415,7 @@ describe("engine Y.Doc IPC adapter", () => {
       h.ipc.applyUpdate(sender, {
         sessionId: openPayload.sessionId,
         update: new Uint8Array([1]),
-        lineageGeneration: 1,
+        lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
         seq: 4,
       }),
     ).toEqual({ accepted: true });
@@ -421,7 +434,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const edit = (seq: number) => h.ipc.applyUpdate(sender, {
       sessionId: openPayload.sessionId,
       update: new Uint8Array([seq]),
-      lineageGeneration: 1,
+      lineageGeneration: 1, requestId: `11111111-1111-4111-8111-${seq.toString().padStart(12, "0")}`,
       seq,
     });
     edit(4);
@@ -450,7 +463,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.ipc.applyUpdate(sender, {
       sessionId: openPayload.sessionId,
       update: new Uint8Array([1]),
-      lineageGeneration: 1,
+      lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
       seq: 4,
     });
     h.capturedOpen()?.onSaveState?.("settling", 9, "start");
@@ -1013,7 +1026,7 @@ describe("engine Y.Doc IPC adapter", () => {
       h.ipc.applyUpdate(sender, {
         sessionId: openPayload.sessionId,
         update: new Uint8Array([1]),
-        lineageGeneration: 1,
+        lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
         seq: 5,
       }),
     ).toEqual({ accepted: false, reason: "read-only" });
@@ -1036,7 +1049,7 @@ describe("engine Y.Doc IPC adapter", () => {
       h.ipc.applyUpdate(sender, {
         sessionId: openPayload.sessionId,
         update: new Uint8Array([2]),
-        lineageGeneration: 1,
+        lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
         seq: 6,
       }),
     ).toEqual({ accepted: false, reason: "deleted" });
@@ -1058,7 +1071,7 @@ describe("engine Y.Doc IPC adapter", () => {
       h.ipc.applyUpdate(sender, {
         sessionId: openPayload.sessionId,
         update: new Uint8Array([2]),
-        lineageGeneration: 1,
+        lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
         seq: 6,
       }),
     ).toEqual({ accepted: false, reason: "object-changed" });
@@ -1428,7 +1441,7 @@ describe("engine Y.Doc IPC adapter", () => {
       h.ipc.applyUpdate(sender, {
         sessionId: openPayload.sessionId,
         update: new Uint8Array([3]),
-        lineageGeneration: 1,
+        lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
         seq: 1,
       }),
     ).toEqual({ accepted: false, reason: "session-unavailable" });

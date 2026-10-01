@@ -43,7 +43,8 @@ import {
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
-  isIdempotencyKeyReuseRefusal,
+  isYdocUpdateAdmissionRefusal,
+  ydocUpdateDependsOn,
   isTransientEngineRefusal,
   isYdocAuthorCapacityRefusal,
   isYdocRemoteUpdatesPendingRefusal,
@@ -52,6 +53,8 @@ import {
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
   YdocOwnerDraftPendingError,
+  YDOC_PENDING_MAX_BYTES,
+  YDOC_PENDING_MAX_RECORDS,
   type EngineStoreRefusal,
   type CollectionPendingAdoptionCursor,
   type CollectionPendingAdoptionsPage,
@@ -86,6 +89,8 @@ import {
 } from "./workspaceEnginePolicyFile";
 import {
   EngineDaemonUnavailableError,
+  EngineClientError,
+  EngineRequestDeadlineError,
   EngineWorkspaceSessionsClosedError,
   EngineWorkspaceShuttingDownError,
   isEngineSessionReconnectError,
@@ -187,6 +192,7 @@ export async function probeEngineStoreRefusal(
 // caller so the UI can surface the failure.
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
+export const YDOC_UNCERTAIN_FAILURE_BACKOFF_MS = TRANSPORT_REBIND_MAX_BACKOFF_MS;
 
 // How long one document-open TASK may keep retrying transport errors
 // while it holds the capture chain. The task is more than the provider open —
@@ -419,9 +425,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // under (an agent's id from the CLI/MCP write seam), and
   // `options.attribution` is the declared provenance recorded beside it
   // (actor kind, `onBehalfOf`, chain depth). Both ride the primary journal
-  // call; a dead-generation revive or recovery replay re-journals canonical
-  // state without them, falling back to device attribution — the same
-  // attribution every human edit carries. `options.idempotencyKey` replaces
+  // call and every retry of the original record. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
   // claim id, attempt, and write ordinal), so a retried request of the same
   // write dedupes engine-side. A keyed update's failure goes to the error
@@ -441,8 +445,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // the same state, which a caller comparing against `initialUpdate` cannot
   // promise. Resolves whether an update was journaled; rejects when the
   // session closed before its turn or `decide` threw. With
-  // `options.idempotencyKey`, the update must insert content (one that only
-  // deletes is refused before it is sent), and the promise also rejects when
+  // `options.idempotencyKey`, the promise also rejects when
   // the engine did not record it: with the engine's refusal when the key
   // already recorded other content, and otherwise with an error that says
   // whether the update may have been recorded. A rejected update does not
@@ -544,6 +547,7 @@ export interface WorkspaceEngineCapture {
     path: string;
     onRemoteUpdate: (update: Uint8Array) => void;
     onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
+    onEditRefused?: (requestId: string, message: string) => void;
     // A reopen found another object at this path: this document was moved,
     // or deleted and replaced. The session stops reopening and saves nothing
     // more, so the caller sets the editor's text aside.
@@ -838,14 +842,30 @@ function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
 }
 
-// Whether the update carries any new item, rather than only deletions: some
-// client's struct range in it is not empty.
-function insertsContent(update: Uint8Array): boolean {
-  const { from, to } = Y.parseUpdateMeta(update);
-  for (const [client, end] of to) {
-    if (end > (from.get(client) ?? 0)) return true;
+function isUpdateBackoffCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, candidate => {
+    if (candidate instanceof EngineRequestDeadlineError) return true;
+    if (candidate instanceof EngineClientError && candidate.code === "connect-timeout") return true;
+    const wire = candidate instanceof DaemonRefusalError
+      ? { code: candidate.wireCode, retry: candidate.retry }
+      : (candidate as { wireError?: { code?: string; retry?: string } } | null)?.wireError;
+    return wire?.retry === "afterBackoff" || wire?.code === "DEADLINE_EXCEEDED" || wire?.code === "OVERLOADED";
+  });
+}
+
+// A provider's live doc can contain unrecorded edits. Only its fresh open
+// snapshot proves admission, including deletions that a state vector omits.
+function durableUpdateCovers(durable: Uint8Array, update: Uint8Array): boolean {
+  if (Y.decodeUpdate(Y.diffUpdate(update, Y.encodeStateVectorFromUpdate(durable))).structs.length > 0) return false;
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, durable);
+    const before = Y.snapshot(doc);
+    Y.applyUpdate(doc, update);
+    return Y.equalSnapshots(before, Y.snapshot(doc));
+  } finally {
+    doc.destroy();
   }
-  return false;
 }
 
 function isLineageChangedCause(error: unknown): boolean {
@@ -947,21 +967,6 @@ function isExactYDocClaimPromotion(doc: Y.Doc, claimId: string): boolean {
   // then fork. The exact base hash proves that this unclaimed document is the
   // lineage that received the claim.
   return sha256Bytes(Y.encodeStateAsUpdate(doc)) === claimId;
-}
-
-// Whether applying `replay` would change `target`: an item it lacks, or a
-// deletion it has not applied. The probe keeps deleted content so a deletion
-// the target already holds compares equal.
-function replacementLacks(target: Y.Doc, replay: Uint8Array): boolean {
-  const probe = new Y.Doc({ gc: false });
-  Y.applyUpdate(probe, Y.encodeStateAsUpdate(target));
-  const before = Y.snapshot(probe);
-  Y.applyUpdate(probe, replay);
-  return (
-    probe.store.pendingStructs !== null ||
-    probe.store.pendingDs !== null ||
-    !Y.equalSnapshots(before, Y.snapshot(probe))
-  );
 }
 
 // Whether a claimed lineage holds every item of the history this session
@@ -2063,6 +2068,7 @@ export function createWorkspaceEngineCapture(
     onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
+    onEditRefused?: (requestId: string, message: string) => void;
     onSettled: (
       result: {
         sha256: string;
@@ -2103,6 +2109,99 @@ export function createWorkspaceEngineCapture(
     // under it.
     let sessionObjectId: string | undefined;
     let recordedStateVector: Uint8Array | null = null;
+    // This document contains only admitted work. Pending originals must never
+    // enter a neutral recovery base, which would erase their authorship.
+    let recordedDoc = new Y.Doc();
+    type PendingRecord = {
+      readonly update: Uint8Array;
+      readonly options: NonNullable<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]>;
+      readonly editorVisible: boolean;
+      acknowledged: boolean;
+      sent: boolean;
+      uncertainFailures: number;
+      lastUncertainFailureAt: number | null;
+      unanswered: { error: unknown } | null;
+      refusal: { error: unknown; editorVisible: boolean } | null;
+    };
+    const pendingRecords = new Set<PendingRecord>();
+    let pendingUpdateBytes = 0;
+    const removePendingRecord = (record: PendingRecord): void => {
+      if (pendingRecords.delete(record)) pendingUpdateBytes -= record.update.byteLength;
+    };
+    const clearPendingRecords = (): void => {
+      pendingRecords.clear();
+      pendingUpdateBytes = 0;
+    };
+    let queuedUpdateBytes = 0;
+    let queuedUpdateCount = 0;
+    let localGeneration = 0;
+    const announceReplacement = (update: Uint8Array, recoveredPaths: string[]): void => {
+      localGeneration += 1;
+      input.onLineageReplaced(update, recoveredPaths);
+    };
+    // Across IPC, renderer and main need separate ownership. Main retains at
+    // most 32 MiB and 4096 originals, including queued IPC calls.
+    // Main owns originals across provider generations; the adapter needs wire
+    // strings for its standalone retry ladder. Sharing ownership would couple
+    // these lifetimes. Both queues are bounded independently.
+    const refuseRecord = (record: PendingRecord, error: unknown, unanswered = false): boolean => {
+      if (record.refusal !== null) return record.refusal.editorVisible;
+      record.refusal = { error, editorVisible: record.editorVisible };
+      const refusedUpdates = [record.update];
+      const refusedEditorRecords = record.editorVisible ? [record] : [];
+      let later = false;
+      for (const pending of pendingRecords) {
+        if (pending === record) { later = true; continue; }
+        if (!later || !refusedUpdates.some(update => ydocUpdateDependsOn(pending.update, update))) continue;
+        pending.refusal = { error, editorVisible: pending.editorVisible };
+        refusedUpdates.push(pending.update);
+        if (pending.editorVisible) refusedEditorRecords.push(pending);
+        removePendingRecord(pending);
+      }
+      removePendingRecord(record);
+      // Caller-confirmed writes report their own refusal. Only lost editor
+      // content, including dependent typing, needs a notice and recovery copy.
+      if (refusedEditorRecords.length === 0) return false;
+      record.refusal.editorVisible = true;
+      const reason = error instanceof Error ? error.message : "";
+      const explanation = reason.includes("pending-edits-limit")
+        ? "Too many edits are waiting to save."
+        : reason.includes("update-too-large")
+        ? "The edit is too large."
+        : reason.includes("content-kind-mismatch")
+          ? "The edit does not match this file's format."
+          : reason.includes("share-read-only")
+            ? "This file is read-only."
+            : unanswered
+              ? "No answer after three attempts."
+              : "dohc refused this edit.";
+      const what = refusedEditorRecords.length > 1 ? "edits" : "an edit";
+      const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices. Use Save copy on this file's recovery row.`;
+      onError(`Y.Doc local update of ${input.path}`, new Error(message, { cause: error }));
+      input.onEditRefused?.(refusedEditorRecords[0]!.options.idempotencyKey ?? "", message);
+      return true;
+    };
+    const recordUpdateFailure = (record: PendingRecord, error: unknown): boolean => {
+      if (isTransientEngineCause(error) || isUpdateBackoffCause(error)) {
+        record.uncertainFailures = 0;
+        record.lastUncertainFailureAt = null;
+        return false;
+      }
+      if (hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal)) return true;
+      if (isLineageChangedCause(error) ||
+          hasRefusalInCauseChain(error, isEngineSessionReconnectError)) return false;
+      // Keep the count with the original, so replacing its provider cannot
+      // let one unanswered write block all later independent work forever.
+      const now = performance.now();
+      if (record.lastUncertainFailureAt === null ||
+          now - record.lastUncertainFailureAt >= YDOC_UNCERTAIN_FAILURE_BACKOFF_MS) {
+        record.uncertainFailures += 1;
+        record.lastUncertainFailureAt = now;
+      }
+      if (record.uncertainFailures < 3) return false;
+      record.unanswered = { error };
+      return true;
+    };
     // Set when a reopen found another object at this path. Terminal: the
     // session stops reopening, since every reopen would meet the same
     // refusal.
@@ -2175,7 +2274,8 @@ export function createWorkspaceEngineCapture(
     // then seed a fresh doc from the .md — a new client id whose state does not
     // overlap the canonical doc, so merging it would append a second copy of
     // the file. The canonical doc is the renderer's truth; the replacement
-    // starts empty and the replay re-establishes it.
+    // starts empty. Recovery restores the admitted base without author credit,
+    // then replays each pending original under its own author and request ID.
     // Settle tokens are minted PER GENERATION and every generation starts at 1,
     // so a token alone does not identify a settle across a daemon restart. The
     // generation is stamped here, where it is known, and travels with every
@@ -2215,6 +2315,7 @@ export function createWorkspaceEngineCapture(
             );
           }
           let opened: EngineYdocProviderSession | null = null;
+          let refusedEditorVisible: boolean | null = null;
           const opening = { updates: [] as Uint8Array[], installed: false };
           const requestReconnect = (error: unknown): void => {
             if (
@@ -2253,21 +2354,52 @@ export function createWorkspaceEngineCapture(
                 return;
               }
               Y.applyUpdate(canonicalDoc, update);
+              Y.applyUpdate(recordedDoc, update);
+              recordedStateVector = Y.encodeStateVector(recordedDoc);
               updatesCounted += 1;
               input.onRemoteUpdate(update);
             },
             onLineageReplaced: (replacement, recoveredPaths) => {
+              const editorVisible = refusedEditorVisible;
+              refusedEditorVisible = null;
               if (current !== opened || canonicalDoc === null) return;
               const retired = canonicalDoc;
               canonicalDoc = replacement;
+              if ((opened?.lineageClaimId ?? null) !== canonicalLineageClaimId) {
+                clearPendingRecords();
+                recordedDoc.destroy();
+                recordedDoc = new Y.Doc();
+                Y.applyUpdate(recordedDoc, Y.encodeStateAsUpdate(replacement));
+                recordedStateVector = Y.encodeStateVector(recordedDoc);
+              }
               canonicalLineageClaimId = opened?.lineageClaimId ?? null;
-              input.onLineageReplaced?.(
-                Y.encodeStateAsUpdate(replacement),
-                recoveredPaths,
-              );
+              if (editorVisible !== false) {
+                announceReplacement(
+                  Y.encodeStateAsUpdate(replacement),
+                  recoveredPaths,
+                );
+              }
               retired.destroy();
             },
             onLocalEditError: requestReconnect,
+            onLocalUpdateAcknowledged: (id) => {
+              for (const record of pendingRecords) {
+                if (record.options.idempotencyKey === id) {
+                  record.acknowledged = true;
+                  Y.applyUpdate(recordedDoc, record.update);
+                  recordedStateVector = Y.encodeStateVector(recordedDoc);
+                  removePendingRecord(record);
+                }
+              }
+            },
+            onLocalUpdateRefused: (id, error) => {
+              for (const record of pendingRecords) {
+                if (record.options.idempotencyKey === id) {
+                  const editorVisible = refuseRecord(record, error);
+                  refusedEditorVisible = (refusedEditorVisible ?? false) || editorVisible;
+                }
+              }
+            },
             // requestReconnect returns early for anything that is not a
             // reconnect error, so it is not an error sink: every settle
             // failure also goes to onSettleError, which reports it.
@@ -2327,6 +2459,7 @@ export function createWorkspaceEngineCapture(
       onReplayArmed?: () => void,
     ): Promise<void> => {
       let replayArmed = false;
+      let handedOff = false;
       try {
         let replacementClaimId = replacement.lineageClaimId ?? null;
         const claimChanged = replacementClaimId !== canonicalLineageClaimId;
@@ -2345,12 +2478,21 @@ export function createWorkspaceEngineCapture(
               replacement.objectId === sessionObjectId &&
               claimCoversRecordedHistory(replacement.doc, recordedStateVector)));
         if (claimChanged && !promotedSameLineage) {
+          if (replacement.lineage === "absent" &&
+              !claimCoversRecordedHistory(replacement.doc, recordedStateVector)) {
+            throw new YdocAdapterError("acknowledged-state-missing",
+              "dohc could not restore all saved edits. Keep this editor open and restart dohc.");
+          }
           openingRemoteUpdates.delete(replacement);
+          clearPendingRecords();
           canonicalDoc = replacement.doc;
           canonicalLineageClaimId = replacementClaimId;
           recordedStateVector = Y.encodeStateVector(replacement.doc);
+          recordedDoc.destroy();
+          recordedDoc = new Y.Doc();
+          Y.applyUpdate(recordedDoc, Y.encodeStateAsUpdate(replacement.doc));
           current = replacement;
-          input.onLineageReplaced?.(
+          announceReplacement(
             Y.encodeStateAsUpdate(replacement.doc),
             [],
           );
@@ -2367,28 +2509,91 @@ export function createWorkspaceEngineCapture(
         );
         if (remoteDelta.byteLength > 2) {
           Y.applyUpdate(doc, remoteDelta);
+          Y.applyUpdate(recordedDoc, remoteDelta);
           input.onRemoteUpdate(remoteDelta);
         }
-        const replay = Y.encodeStateAsUpdate(
-          doc,
-          Y.encodeStateVector(replacement.doc),
-        );
-        // A diff against a state vector still carries the whole delete set,
-        // so its size cannot say whether the replacement lacks anything.
-        if (replacementLacks(replacement.doc, replay)) {
-          replayArmed = !settleForgiven;
-          const journaled = replacement.applyLocalUpdate(replay, {
-            armSettle: replayArmed,
-          });
-          onReplayArmed?.();
-          await journaled;
-          replacementClaimId =
-            replacement.lineageClaimId ?? replacementClaimId;
-        } else {
-          // Nothing to replay: the replacement already holds this text, so
-          // every settle it runs carries it.
-          onReplayArmed?.();
+        if (!claimCoversRecordedHistory(replacement.doc, recordedStateVector)) {
+          // The daemon only admits a neutral seed into an absent lineage.
+          // Refuse an incomplete existing lineage rather than crediting old
+          // work to a new author or projecting an incomplete document.
+          if (replacement.lineage !== "absent" || !replacement.reestablishAcknowledgedState) {
+            throw new YdocAdapterError("acknowledged-state-missing",
+              "dohc could not restore all saved edits. Keep this editor open and restart dohc.");
+          }
+          await replacement.reestablishAcknowledgedState(
+            Y.encodeStateAsUpdate(recordedDoc, Y.encodeStateVector(replacement.doc)),
+          );
+          replacementClaimId = replacement.lineageClaimId ?? replacementClaimId;
         }
+        // Replay only unacknowledged originals. State-vector diffs include the
+        // full delete set and cannot preserve each operation's author.
+        for (const record of [...pendingRecords]) {
+          if (!pendingRecords.has(record)) continue;
+          if (record.unanswered !== null) {
+            if (durableUpdateCovers(replacement.initialUpdate, record.update)) {
+              record.acknowledged = true;
+              removePendingRecord(record);
+              Y.applyUpdate(doc, record.update);
+              Y.applyUpdate(recordedDoc, record.update);
+            } else {
+              const editorVisible = refuseRecord(record, record.unanswered.error, true);
+              const restored = new Y.Doc();
+              Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
+              for (const pending of pendingRecords) Y.applyUpdate(restored, pending.update);
+              canonicalDoc = restored;
+              if (editorVisible) announceReplacement(Y.encodeStateAsUpdate(restored), []);
+              doc.destroy();
+              doc = restored;
+            }
+            continue;
+          }
+          replayArmed = !settleForgiven;
+          try {
+            record.sent = true;
+            const replay = replacement.replayLocalUpdate?.bind(replacement) ?? replacement.applyLocalUpdate.bind(replacement);
+            const journaled = replay(record.update, {
+              ...record.options,
+              armSettle: replayArmed,
+            });
+            onReplayArmed?.();
+            await journaled;
+          } catch (error) {
+            if (!recordUpdateFailure(record, error)) throw error;
+            if (record.unanswered === null) {
+              const editorVisible = refuseRecord(record, error);
+              const restored = new Y.Doc();
+              Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
+              for (const pending of pendingRecords) Y.applyUpdate(restored, pending.update);
+              canonicalDoc = restored;
+              if (editorVisible) announceReplacement(Y.encodeStateAsUpdate(restored), []);
+              doc.destroy();
+              doc = restored;
+            }
+            // Reopen from durable state before deciding an unanswered write
+            // or replaying work after a definitive refusal.
+            openingRemoteUpdates.delete(replacement);
+            await replacement.evict();
+            handedOff = true;
+            current = null;
+            canonicalLineageClaimId = replacementClaimId;
+            recordedStateVector = Y.encodeStateVector(recordedDoc);
+            let clean: EngineYdocProviderSession;
+            try {
+              clean = await openGeneration(false, { retryTransportErrors: false });
+            } catch (openError) {
+              markDead(null);
+              throw openError;
+            }
+            await adoptGeneration(doc, clean, onReplayArmed);
+            return;
+          }
+          record.acknowledged = true;
+          removePendingRecord(record);
+          Y.applyUpdate(doc, record.update);
+          Y.applyUpdate(recordedDoc, record.update);
+          replacementClaimId = replacement.lineageClaimId ?? replacementClaimId;
+        }
+        onReplayArmed?.();
         current = replacement;
         if (opening) {
           opening.installed = true;
@@ -2397,15 +2602,17 @@ export function createWorkspaceEngineCapture(
             updatesIncludedInRemoteDelta,
           )) {
             Y.applyUpdate(doc, update);
+            Y.applyUpdate(recordedDoc, update);
             input.onRemoteUpdate(update);
           }
         }
         canonicalLineageClaimId = replacementClaimId;
-        recordedStateVector = Y.encodeStateVector(doc);
+        recordedStateVector = Y.encodeStateVector(recordedDoc);
       } catch (error) {
+        if (handedOff) throw error;
         openingRemoteUpdates.delete(replacement);
         try {
-          await releaseGeneration(replacement);
+          await replacement.evict();
           markDead(null);
         } catch {
           markDead(replacement);
@@ -2443,7 +2650,9 @@ export function createWorkspaceEngineCapture(
       const doc = canonicalDoc;
       if (options?.releaseBeforeOpen) {
         try {
-          await releaseGeneration(failed);
+          // Recovery must retain acknowledged originals in the durable lineage.
+          // A prune-close would leave only the artifact and lose their CRDT IDs.
+          await failed.evict();
         } catch (error) {
           markDead(failed);
           throw error;
@@ -2511,49 +2720,53 @@ export function createWorkspaceEngineCapture(
       return true;
     };
 
-    // A recovery replay carries no idempotency key, so it must never carry a
-    // keyed update. A failed send therefore restores the canonical doc to
-    // its state before the update, when the generation shares that doc,
-    // rebuilds the generation, and resends the update under its key. The
-    // key ledger answers that resend: other content is the key's refusal,
-    // and a fresh record is a success. One resend gets no ledger answer:
-    // when the rebuilt generation already holds the update, applying it
-    // changes nothing and the client sends nothing. That is a success too,
-    // because only the engine recording this write can have put its
-    // inserted items there, which is why a keyed update must insert. Once a
-    // send has gone out, a failure nobody answered may have recorded the
-    // update, and the caller hears exactly that.
+    // A keyed refusal restores the caller's document. A lost answer retains
+    // the original record so a replacement can ask the ledger for its result.
     const applyKeyedUpdate = async (
       update: Uint8Array,
       applyOptions: Parameters<
         WorkspaceEngineYDocProviderSession["applyLocalUpdate"]
       >[2],
       armed: () => void,
+      record: PendingRecord,
     ): Promise<void> => {
       let sent = false;
       const unanswered = (error: unknown): Error =>
-        sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
+        sent || record.sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
       for (let attempt = 0; ; attempt += 1) {
         if (canonicalDoc === null || closed) throw unanswered(closedError());
         const doc = canonicalDoc;
         try {
-          if (current === null) await reviveDeadSession(doc);
+          if (current === null) {
+            await reviveDeadSession(doc, armed);
+          }
         } catch (error) {
+          if (record.acknowledged) return;
+          if (record.refusal !== null) throw record.refusal.error;
+          if (!sent && !record.sent) removePendingRecord(record);
           throw unanswered(error);
+        }
+        if (record.acknowledged) return;
+        if (record.refusal !== null) throw record.refusal.error;
+        if (!pendingRecords.has(record)) {
+          throw new YdocAdapterError("lineage-changed",
+            "The document lineage changed before the write was acknowledged.");
         }
         if (current === null) throw unanswered(closedError());
         const generation = current;
         // The first generation's doc is the canonical doc, and it takes the
         // update before the journal answers. Keep the state to return to.
-        const before =
-          generation.doc === doc ? Y.encodeStateAsUpdate(doc) : null;
+        const restoreOnFailure = generation.doc === doc;
         try {
           sent = true;
+          record.sent = true;
           const journaled = generation.applyLocalUpdate(update, applyOptions);
           armed();
           await journaled;
+          removePendingRecord(record);
           Y.applyUpdate(doc, update);
-          recordedStateVector = Y.encodeStateVector(doc);
+          Y.applyUpdate(recordedDoc, update);
+          recordedStateVector = Y.encodeStateVector(recordedDoc);
           if (
             canonicalLineageClaimId === null &&
             generation.lineageClaimId != null
@@ -2562,15 +2775,20 @@ export function createWorkspaceEngineCapture(
           }
           return;
         } catch (error) {
-          if (before !== null && canonicalDoc === doc) {
+          if (restoreOnFailure && canonicalDoc === doc) {
             const restored = new Y.Doc();
-            Y.applyUpdate(restored, before);
+            Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
             canonicalDoc = restored;
           }
           // The failed generation still holds this doc, and keeps it until
           // something replaces the generation.
           if (isLineageChangedCause(error)) throw error;
-          const refused = isIdempotencyKeyReuseRefusal(error);
+          const refused = recordUpdateFailure(record, error);
+          if (refused && record.unanswered === null) {
+            const editorVisible = refuseRecord(record, error);
+            if (canonicalDoc !== doc && generation.doc === canonicalDoc) throw error;
+            if (editorVisible && canonicalDoc !== null) announceReplacement(Y.encodeStateAsUpdate(canonicalDoc), []);
+          }
           const retired = canonicalDoc === doc ? null : doc;
           try {
             await rebind(generation, {
@@ -2580,11 +2798,20 @@ export function createWorkspaceEngineCapture(
             // The session's own failure, reported as one. The write's result
             // is still the engine's answer when it gave one.
             onError(`Y.Doc rebind of ${input.path}`, rebindError);
-            throw refused ? error : keyedWriteUncertain(error);
+            if (record.acknowledged) return;
+            const refusal = (record as PendingRecord).refusal;
+            if (refusal !== null) throw refusal.error;
+            throw keyedWriteUncertain(error);
           }
           // Its generation was replaced, so nothing reads this doc now.
           retired?.destroy();
-          if (refused) throw error;
+          const refusal = (record as PendingRecord).refusal;
+          if (refusal !== null) throw refusal.error;
+          if (record.acknowledged) return;
+          if (!pendingRecords.has(record)) {
+            throw new YdocAdapterError("lineage-changed",
+              "The document lineage changed before the write was acknowledged.");
+          }
           if (attempt > 0) throw keyedWriteUncertain(error);
         }
       }
@@ -2645,6 +2872,7 @@ export function createWorkspaceEngineCapture(
     // outside that budget, and keep the full ladder.
     current = await openGeneration(true);
     canonicalDoc = current.doc;
+    Y.applyUpdate(recordedDoc, Y.encodeStateAsUpdate(canonicalDoc));
     canonicalLineageClaimId = current.lineageClaimId ?? null;
     sessionObjectId = current.objectId;
     recordedStateVector = Y.encodeStateVector(canonicalDoc);
@@ -2680,6 +2908,7 @@ export function createWorkspaceEngineCapture(
       decide: (doc: Y.Doc) => Uint8Array | null,
       onArmed: (() => void) | undefined,
       applyOptions: Parameters<WorkspaceEngineYDocProviderSession["applyLocalUpdate"]>[2],
+      confirmRecording = true,
     ): Promise<boolean> => {
       // One announcement per update, at the first provider call that arms a
       // settle carrying it. Three calls can be that first one — the live
@@ -2692,25 +2921,44 @@ export function createWorkspaceEngineCapture(
       // it, leaving the document on "Saving…" with nothing left to arm
       // another settle). #514, and its two review rounds.
       const armed = announceOnce(onArmed);
-      const keyed = applyOptions?.idempotencyKey !== undefined;
+      const keyed = confirmRecording && applyOptions?.idempotencyKey !== undefined;
+      const capturedOptions = {
+        ...structuredClone(applyOptions ?? {}),
+        idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
+      };
       let decided = false;
       return append(async () => {
         if (canonicalDoc === null || closed) throw closedError();
         const doc = canonicalDoc;
-        const update = decide(doc);
+        const decidedUpdate = decide(doc);
         decided = true;
-        if (update === null) return false;
-        if (keyed && !insertsContent(update)) {
-          throw new Error(
-            `A write with an idempotency key must insert content; this update to ${input.path} only deletes.`,
-          );
+        if (decidedUpdate === null) return false;
+        // Renderer input was copied before it entered this chain. Keep that
+        // immutable original as the only main-side retained byte array.
+        const update = confirmRecording ? new Uint8Array(decidedUpdate) : decidedUpdate;
+        const record: PendingRecord = {
+          update, options: capturedOptions, editorVisible: !keyed,
+          acknowledged: false, sent: false, uncertainFailures: 0,
+          lastUncertainFailureAt: null, unanswered: null, refusal: null,
+        };
+        if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
+            pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
+          if (refuseRecord(record, new Error("pending-edits-limit"))) {
+            announceReplacement(Y.encodeStateAsUpdate(doc), []);
+          }
+          if (keyed) throw record.refusal?.error;
+          return false;
         }
+
         // Counted before any generation arms a settle for it, so a settle
         // that starts afterwards covers it and one that started before
         // does not.
         updatesCounted += 1;
+        pendingRecords.add(record);
+        pendingUpdateBytes += update.byteLength;
         if (keyed) {
-          await applyKeyedUpdate(update, applyOptions, armed);
+          await applyKeyedUpdate(update, capturedOptions, armed, record);
+          removePendingRecord(record);
           return true;
         }
         // The renderer has already accepted this update, so the canonical doc
@@ -2720,9 +2968,8 @@ export function createWorkspaceEngineCapture(
         // once a generation died.
         if (current === null) {
           Y.applyUpdate(doc, update);
-          // The revive replays the canonical doc — this update included —
-          // into the new generation. It announces the update when that
-          // replay is ARMED, not when its journal RPC returns.
+          // Revival replays pending originals, including this update.
+          // Announce it when replay arms settlement.
           await reviveDeadSession(doc, armed);
           return true;
         }
@@ -2732,11 +2979,14 @@ export function createWorkspaceEngineCapture(
           // this call, so the update is covered from here. Announce it before
           // awaiting the journal round trip: the settle it just armed may
           // start before that round trip returns.
-          const journaled = generation.applyLocalUpdate(update, applyOptions);
+          const journaled = generation.applyLocalUpdate(update, capturedOptions);
           armed();
           await journaled;
+          record.acknowledged = true;
+          removePendingRecord(record);
           Y.applyUpdate(doc, update);
-          recordedStateVector = Y.encodeStateVector(doc);
+          Y.applyUpdate(recordedDoc, update);
+          recordedStateVector = Y.encodeStateVector(recordedDoc);
           // A successful record can promote a local-only lineage. Retain
           // the durable claim now; later deltas change the full-state hash.
           if (
@@ -2746,6 +2996,18 @@ export function createWorkspaceEngineCapture(
             canonicalLineageClaimId = generation.lineageClaimId;
           }
         } catch (error) {
+          if (recordUpdateFailure(record, error) && record.unanswered === null) {
+            refuseRecord(record, error);
+            // Production providers already restore admitted state and announce
+            // its replacement. Injected providers may need a clean reopen.
+            if (generation.doc === canonicalDoc && canonicalDoc !== doc) return false;
+            const restored = new Y.Doc();
+            Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
+            canonicalDoc = restored;
+            announceReplacement(Y.encodeStateAsUpdate(restored), []);
+            await rebind(generation, { releaseBeforeOpen: true });
+            return false;
+          }
           // A live refusal still owns its lease and must close first; a
           // transport restart opens first because the old daemon is gone.
           //
@@ -2836,9 +3098,39 @@ export function createWorkspaceEngineCapture(
         );
       },
       applyLocalUpdate(update, onArmed, applyOptions) {
-        void journalLocalUpdate(() => update, onArmed, applyOptions).catch((error: unknown) => {
+        if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
+            pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
+          const record: PendingRecord = {
+            update, options: { ...structuredClone(applyOptions ?? {}),
+              idempotencyKey: applyOptions?.idempotencyKey ?? createId() },
+            editorVisible: true,
+            acknowledged: false, sent: false, uncertainFailures: 0,
+            lastUncertainFailureAt: null, unanswered: null, refusal: null,
+          };
+          refuseRecord(record, new Error("pending-edits-limit"));
+          // Wait for already admitted calls so the replacement contains them.
+          void append(async () => {
+            if (!closed && canonicalDoc) announceReplacement(Y.encodeStateAsUpdate(canonicalDoc), []);
+          }).catch(error => onError(`Y.Doc recovery of ${input.path}`, error));
+          return;
+        }
+        queuedUpdateBytes += update.byteLength;
+        queuedUpdateCount += 1;
+        const submittedGeneration = localGeneration;
+        const capturedUpdate = new Uint8Array(update);
+        let queued = true;
+        const releaseQueued = (): void => {
+          if (!queued) return;
+          queued = false;
+          queuedUpdateBytes -= capturedUpdate.byteLength;
+          queuedUpdateCount -= 1;
+        };
+        void journalLocalUpdate(() => {
+          releaseQueued();
+          return submittedGeneration === localGeneration ? capturedUpdate : null;
+        }, onArmed, applyOptions, false).catch((error: unknown) => {
           onError(`Y.Doc local update of ${input.path}`, error);
-        });
+        }).finally(releaseQueued);
       },
       applyDecidedLocalUpdate(decide, onArmed, applyOptions) {
         return journalLocalUpdate(decide, onArmed, applyOptions);
@@ -2877,6 +3169,7 @@ export function createWorkspaceEngineCapture(
             releaseObligation = null;
           }
           closed = true;
+          recordedDoc.destroy();
           current = null;
           clearDeadYDocSession(deadSessionToken);
         });
@@ -2904,6 +3197,7 @@ export function createWorkspaceEngineCapture(
               releaseObligation = null;
             }
             closed = true;
+            recordedDoc.destroy();
             clearDeadYDocSession(deadSessionToken);
             return;
           }
@@ -2928,12 +3222,14 @@ export function createWorkspaceEngineCapture(
             // layer above would treat the path as still-reserved forever.
             if (error instanceof YdocReleasedWithSettleFailureError) {
               closed = true;
+              recordedDoc.destroy();
               current = null;
               clearDeadYDocSession(deadSessionToken);
             }
             throw error;
           }
           closed = true;
+          recordedDoc.destroy();
           current = null;
           clearDeadYDocSession(deadSessionToken);
         });
@@ -4050,6 +4346,7 @@ export function createWorkspaceEngineCapture(
             noteUpdate();
             input.onLineageReplaced?.(update, recoveredPaths);
           },
+          onEditRefused: input.onEditRefused,
           onSettled,
           onSettleStart,
           onSettleError,

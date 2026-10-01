@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
+import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "./ydocPendingLimits";
+import { ydocUpdateDependsOn } from "./ydocUpdateDependencies";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import {
@@ -9,7 +11,7 @@ import {
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
-  isIdempotencyKeyReuseRefusal,
+  isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
@@ -38,16 +40,19 @@ import {
 const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol(
   "dohc.workspaceEngineClient.localEditorOrigin",
 );
+const ORIGINAL_REPLAY_ORIGIN = Symbol("dohc.workspaceEngineClient.originalReplayOrigin");
 
 export const ENGINE_DELIVERED_ORIGIN: unique symbol = Symbol(
   "dohc.workspaceEngineClient.engineDeliveredOrigin",
 );
+
 
 export interface EngineTransport extends DaemonRequesterClient {
   onEvent(handler: (event: Event) => void): () => void;
 }
 
 export type YdocAdapterErrorCode =
+  | "acknowledged-state-missing"
   | "invalid-update"
   | "lineage-changed"
   | "missing-response-blob"
@@ -291,7 +296,7 @@ export function isWellFormedUtf16(value: string): boolean {
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("base64");
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
 }
 
 function base64ToBytes(value: string): Uint8Array {
@@ -303,7 +308,7 @@ function base64ToBytes(value: string): Uint8Array {
   ) {
     throw new YdocAdapterError("invalid-update", "Invalid base64 Y.Doc update.");
   }
-  return new Uint8Array(Buffer.from(value, "base64"));
+  return Buffer.from(value, "base64");
 }
 
 function declareDohcRootSchema(
@@ -567,8 +572,18 @@ interface LocalRecordCapture {
   readonly before: DocUtf16Snapshot;
   readonly beforeState: Uint8Array;
   readonly seedUpdate: boolean;
+  readonly originalUpdate?: Uint8Array;
   operation?: Promise<YdocRecordUpdateResult | undefined>;
   rejection?: Error;
+}
+
+interface LocalUpdateRecord {
+  readonly updateBase64: string;
+  readonly idempotencyKey: string;
+  readonly actorOriginId?: string;
+  readonly attribution?: ChangeAttributionWire;
+  readonly seed: boolean;
+  refusal?: unknown;
 }
 
 export class YdocAdapterSession {
@@ -615,15 +630,19 @@ export class YdocAdapterSession {
   // Whether a transient refusal left the engine behind this document. Owned
   // by the session because the session is what the engine refused, and read
   // by close() to decide whether releasing would discard the only copy.
-  private engineMissingLocalState = false;
   private quarantinedError: YdocSessionQuarantinedError | null = null;
   private staleError: YdocResyncNeededError | null = null;
   private resyncPending: Promise<Uint8Array> | null = null;
   private droppedWhileStale = false;
   private nextLocalUpdateSeq = 1;
+  private readonly pendingRecords = new Set<LocalUpdateRecord>();
+  private acknowledgedDoc = new Y.Doc();
+  private pendingRecordBytes = 0;
   ownerDraft: YdocOwnerDraft | undefined;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
   private readonly durableLocalChangeListeners = new Set<() => void>();
+  private readonly localUpdateAcknowledgedListeners = new Set<(id: string) => void>();
+  private readonly localUpdateRefusedListeners = new Set<(id: string, error: unknown) => void>();
   private readonly ownerDraftChangedListeners = new Set<() => void>();
   private readonly remoteApplyErrorListeners = new Set<
     (error: RemoteYdocApplyError) => void
@@ -666,6 +685,8 @@ export class YdocAdapterSession {
     this.activeDoc = new Y.Doc();
     declareDohcRootSchema(this.activeDoc, this.contentKind);
     Y.applyUpdate(this.activeDoc, this.initialUpdate, ENGINE_DELIVERED_ORIGIN);
+    declareDohcRootSchema(this.acknowledgedDoc, this.contentKind);
+    Y.applyUpdate(this.acknowledgedDoc, this.initialUpdate);
     this.activeDoc.on("update", this.handleDocUpdate);
   }
 
@@ -677,10 +698,50 @@ export class YdocAdapterSession {
     update: Uint8Array,
     options?: ApplyLocalUpdateOptions,
   ): Promise<YdocRecordUpdateResult | undefined> {
+    const original = new Uint8Array(update);
     return this.runLocalMutation(
-      () => Y.applyUpdate(this.doc, update, LOCAL_EDITOR_ORIGIN),
+      () => Y.applyUpdate(this.doc, original, LOCAL_EDITOR_ORIGIN),
       options,
+      false,
+      original,
     );
+  }
+
+  // Only the owner may replay originals already validated in its prior session.
+  replayLocalUpdate(
+    update: Uint8Array,
+    options?: ApplyLocalUpdateOptions,
+  ): Promise<YdocRecordUpdateResult | undefined> {
+    this.assertRecordable();
+    Y.applyUpdate(this.doc, update, ORIGINAL_REPLAY_ORIGIN);
+    return this.enqueueRecordUpdate(update, options);
+  }
+
+  async reestablishAcknowledgedState(update: Uint8Array): Promise<void> {
+    this.assertRecordable();
+    const vector = Y.decodeStateVector(Y.encodeStateVector(this.acknowledgedDoc));
+    const required = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(update));
+    if ([...required].every(([client, clock]) => (vector.get(client) ?? 0) >= clock)) return;
+    await this.requestRecoveryBase(update);
+    Y.applyUpdate(this.doc, update, ORIGINAL_REPLAY_ORIGIN);
+  }
+
+  private async requestRecoveryBase(update: Uint8Array): Promise<void> {
+    if (this.lineage !== "absent") {
+      throw new YdocAdapterError("acknowledged-state-missing",
+        "The engine is missing acknowledged document state. Recovery cannot replace an existing lineage.");
+    }
+    try {
+      await this.requestRecordUpdate({
+        updateBase64: bytesToBase64(update),
+        idempotencyKey: `${this.sessionId}:recovery-base:${this.nextLocalUpdateSeq++}`,
+        seed: true,
+      });
+    } catch (error) {
+      if (!isYdocUpdateAdmissionRefusal(error)) throw error;
+      throw new YdocAdapterError("acknowledged-state-missing",
+        "The engine refused to restore acknowledged document state. Reopen the file to recover your edits.");
+    }
   }
 
   applySeedUpdate(update: Uint8Array): Promise<YdocRecordUpdateResult | undefined> {
@@ -745,25 +806,49 @@ export class YdocAdapterSession {
     options?: ApplyLocalUpdateOptions,
     seedUpdate = false,
   ): Promise<YdocRecordUpdateResult | undefined> {
+    const record: LocalUpdateRecord = {
+      updateBase64: bytesToBase64(update),
+      idempotencyKey: options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`,
+      ...(options?.actorOriginId ? { actorOriginId: options.actorOriginId } : {}),
+      ...(options?.attribution ? { attribution: structuredClone(options.attribution) } : {}),
+      seed: seedUpdate,
+    };
+    const retainedBytes = record.updateBase64.length * 2 +
+      (record.actorOriginId?.length ?? 0) * 2 +
+      (record.attribution ? JSON.stringify(record.attribution).length * 2 : 0);
+    if (this.pendingRecords.size >= YDOC_PENDING_MAX_RECORDS ||
+      retainedBytes > YDOC_PENDING_MAX_BYTES - this.pendingRecordBytes) {
+      const error = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", retry: "no",
+        message: "pending-edits-limit" }, undefined);
+      for (const listener of this.localUpdateRefusedListeners) {
+        try { listener(record.idempotencyKey, error); }
+        catch (cause) { this.surfaceSessionError(cause); }
+      }
+      this.restoreAcknowledgedDocument();
+      throw error;
+    }
+    this.pendingRecords.add(record);
+    this.pendingRecordBytes += retainedBytes;
     const operation = this.recordChain.then(async () => {
       this.assertRecordable();
+      if (record.refusal !== undefined) throw record.refusal;
       try {
-        return await this.requestRecordUpdate(update, options, seedUpdate);
+        return await this.requestRecordUpdate(record);
       } catch (refusal) {
-        // Recovery would resend this content under the same key, which the
-        // engine refuses again. The caller must hear the refusal itself.
-        if (isIdempotencyKeyReuseRefusal(refusal)) throw refusal;
+        // Recovery cannot repair a definite refusal of this original input.
+        if (isYdocUpdateAdmissionRefusal(refusal)) throw refusal;
         try {
-          return await this.recoverCanonicalState(update, options);
+          return await this.recoverCanonicalState(record);
         } catch (recoveryFailure) {
           // Recovery resent under the caller's key and the engine found the
           // key already used. That answer outranks whatever sent us here.
-          if (isIdempotencyKeyReuseRefusal(recoveryFailure)) {
+          if (isYdocUpdateAdmissionRefusal(recoveryFailure)) {
             throw recoveryFailure;
           }
           if (
             recoveryFailure instanceof YdocAdapterError &&
-            recoveryFailure.code === "lineage-changed"
+            (recoveryFailure.code === "lineage-changed" ||
+              recoveryFailure.code === "acknowledged-state-missing")
           ) {
             throw recoveryFailure;
           }
@@ -793,11 +878,7 @@ export class YdocAdapterSession {
         }
       }
     });
-    return this.trackRecordOperation(
-      operation,
-      false,
-      options?.idempotencyKey !== undefined,
-    );
+    return this.trackRecordOperation(operation);
   }
 
   /**
@@ -817,31 +898,17 @@ export class YdocAdapterSession {
    */
   private trackRecordOperation<T>(
     operation: Promise<T>,
-    // Only a resend can clear the debt. An ordinary record carries the delta
-    // one transaction observed, so its success says nothing about an earlier
-    // update the engine still has not seen.
-    levelsTheEngine = false,
-    // A resend carries no idempotency key, so it may never carry a keyed
-    // update: the engine would record it even when the key refuses it. A
-    // keyed failure quarantines the session instead of owing a resend.
-    keyed = false,
   ): Promise<T> {
     const guarded = operation.then(
       (value) => {
-        if (levelsTheEngine) this.engineMissingLocalState = false;
         if (!this.closed && this.staleError === null && this.quarantinedError === null) {
           this.notifyListeners(this.durableLocalChangeListeners, undefined);
         }
         return value;
       },
       (error: unknown) => {
-        // The engine refused this write cleanly, so it does not hold what
-        // this doc holds. Recorded here because this is the one place that
-        // sees both halves — the refusal and the resend that repairs it — and
-        // a caller tracking it separately can only ever be a stale copy.
-        if (isTransientEngineRefusal(error) && !keyed) {
-          this.engineMissingLocalState = true;
-        } else this.quarantine(error);
+        // Transient refusals leave the originals queued for another attempt.
+        if (!isTransientEngineRefusal(error) && !isYdocUpdateAdmissionRefusal(error)) this.quarantine(error);
         this.surfaceSessionError(error);
         throw error;
       },
@@ -854,95 +921,70 @@ export class YdocAdapterSession {
     return guarded;
   }
 
-  /**
-   * Send the engine everything this document holds that its durable state
-   * does not.
-   *
-   * The resend for a journal write a transient refusal turned away. Replaying
-   * the refused update's bytes cannot do it: `applyLocalUpdate` records what a
-   * Yjs transaction observes, and applying an update the doc already holds
-   * observes nothing — the engine would receive an empty delta and the settle
-   * behind it would commit a projection missing the user's text and report it
-   * saved.
-   *
-   * So the question is not "which bytes were refused" but "what is the engine
-   * missing", which durable state answers directly. That also makes one call
-   * enough however many updates were refused.
-   */
-  /**
-   * Whether a transient refusal left the engine behind this document.
-   *
-   * Read by a teardown, which must not release a session holding text the
-   * engine never received — the doc is where that text lives.
-   */
+  // Unacknowledged records have the same lifetime as the in-memory content.
   get missingLocalState(): boolean {
-    return this.engineMissingLocalState;
+    return this.pendingRecords.size > 0;
   }
 
   resendMissingState(): Promise<void> {
-    // Cheap and exact: the debt is recorded where record operations are
-    // tracked, so a caller never has to know whether one is owed.
-    if (!this.engineMissingLocalState) return Promise.resolve();
+    if (!this.missingLocalState) return Promise.resolve();
+    const originals = [...this.pendingRecords];
     const operation = this.recordChain.then(async () => {
       this.assertRecordable();
-      const durableState = await this.requestResyncState();
-      if (!this.continuesLineage(durableState)) {
-        throw new YdocAdapterError(
-          "lineage-changed",
-          "The document lineage changed before missing local state could be resent. The edit remains in this editor and was not applied to the winning lineage.",
-        );
+      const records = originals.filter(record => this.pendingRecords.has(record));
+      if (records.length === 0) return;
+      await this.mergeRecoveryState();
+      for (const record of records) {
+        await this.requestRecordUpdate(record);
       }
-      const durableUpdate = durableState.update;
-      const durableDoc = new Y.Doc();
-      declareDohcRootSchema(durableDoc, this.contentKind);
-      Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
-      // Take the durable state first, exactly as recovery does, so the delta
-      // below is measured against what the engine actually holds.
-      Y.applyUpdate(this.doc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
-      const missing = Y.encodeStateAsUpdate(
-        this.doc,
-        Y.encodeStateVector(durableDoc),
-      );
-      // The same empty-delta floor `recoverCanonicalState` uses: a two-byte
-      // encoding is "nothing to send", which is what a resend finds when the
-      // refused write had in fact committed and only its response was lost.
-      if (missing.byteLength <= 2) return;
-      await this.requestRecordUpdate(missing);
     });
-    return this.trackRecordOperation(operation, true);
+    return this.trackRecordOperation(operation);
   }
 
   private async requestRecordUpdate(
-    update: Uint8Array,
-    options?: ApplyLocalUpdateOptions,
-    seedUpdate = false,
+    record: LocalUpdateRecord,
   ): Promise<YdocRecordUpdateResult> {
     const params: YdocRecordUpdateParams = {
       sessionId: this.sessionId,
-      updateBase64: bytesToBase64(update),
-      ...(options?.actorOriginId
-        ? { actorOriginId: options.actorOriginId }
-        : {}),
-      ...(options?.attribution ? { attribution: options.attribution } : {}),
-      // Declared only for the update `applySeedUpdate` constructs from the
-      // open's seedContent, before any consumer sees the session. Recovery
-      // resends and every other record stay undeclared, so the engine's
-      // no-edit settle skip can never mistake replayed prior state
-      // for a seed — an undeclared seed costs one redundant write, a false
-      // declaration would cost the user's edits.
-      ...(seedUpdate ? { seed: true } : {}),
+      updateBase64: record.updateBase64,
+      ...(record.actorOriginId ? { actorOriginId: record.actorOriginId } : {}),
+      ...(record.attribution ? { attribution: structuredClone(record.attribution) } : {}),
+      ...(record.seed ? { seed: true } : {}),
     };
-    const idempotencyKey =
-      options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
-    const result = decodeYdocResult(
-      YDOC_METHOD.recordUpdate,
-      await this.adapter.request(
+    let result: YdocRecordUpdateResult;
+    try {
+      result = decodeYdocResult(YDOC_METHOD.recordUpdate, await this.adapter.request(
         this.workspace,
         YDOC_METHOD.recordUpdate,
         params,
-        { idempotencyKey },
-      ),
-    );
+        { idempotencyKey: record.idempotencyKey },
+      ));
+    } catch (error) {
+      if (isYdocUpdateAdmissionRefusal(error) && this.pendingRecords.has(record)) {
+        // Retire causal dependents before replacement so observers can retain
+        // a recovery copy. Independent clients keep their queued writes.
+        const refusedUpdates = [base64ToBytes(record.updateBase64)];
+        let tail = false;
+        for (const pending of this.pendingRecords) {
+          if (pending === record) tail = true;
+          if (!tail) continue;
+          const update = base64ToBytes(pending.updateBase64);
+          if (pending !== record && !refusedUpdates.some(refused => ydocUpdateDependsOn(update, refused))) continue;
+          if (pending !== record) refusedUpdates.push(update);
+          pending.refusal = error;
+          this.removePendingRecord(pending);
+          for (const listener of this.localUpdateRefusedListeners) {
+            try { listener(pending.idempotencyKey, error); }
+            catch (cause) { this.surfaceSessionError(cause); }
+          }
+        }
+        this.restoreAcknowledgedDocument();
+      }
+      throw error;
+    }
+    Y.applyUpdate(this.acknowledgedDoc, base64ToBytes(record.updateBase64));
+    this.removePendingRecord(record);
+    if (!record.seed) this.notifyListeners(this.localUpdateAcknowledgedListeners, record.idempotencyKey);
     this.lineageClaimId = result.lineageClaimId;
     if ("ownerDraft" in result && this.ownerDraft) {
       this.ownerDraft = { ...this.ownerDraft, outboxId: result.ownerDraft.outboxId,
@@ -951,12 +993,31 @@ export class YdocAdapterSession {
     return result;
   }
 
-  private async recoverCanonicalState(
-    refusedUpdate: Uint8Array,
-    options?: ApplyLocalUpdateOptions,
-  ): Promise<
-    YdocRecordUpdateResult | undefined
-  > {
+  private removePendingRecord(record: LocalUpdateRecord): void {
+    if (!this.pendingRecords.delete(record)) return;
+    this.pendingRecordBytes -= record.updateBase64.length * 2 +
+      (record.actorOriginId?.length ?? 0) * 2 +
+      (record.attribution ? JSON.stringify(record.attribution).length * 2 : 0);
+  }
+
+  private restoreAcknowledgedDocument(): void {
+    const replacement = new Y.Doc();
+    declareDohcRootSchema(replacement, this.contentKind);
+    Y.applyUpdate(replacement, Y.encodeStateAsUpdate(this.acknowledgedDoc));
+    for (const record of this.pendingRecords) Y.applyUpdate(replacement, base64ToBytes(record.updateBase64));
+    const refusedDoc = this.activeDoc;
+    refusedDoc.off("update", this.handleDocUpdate);
+    this.activeDoc = replacement;
+    replacement.on("update", this.handleDocUpdate);
+    this.initialUpdate = Y.encodeStateAsUpdate(replacement);
+    for (const listener of this.lineageReplacementListeners) {
+      try { listener(replacement, []); }
+      catch (error) { this.surfaceSessionError(error); }
+    }
+    refusedDoc.destroy();
+  }
+
+  private async mergeRecoveryState(): Promise<void> {
     const durableState = await this.requestResyncState();
     if (!this.continuesLineage(durableState)) {
       throw new YdocAdapterError(
@@ -964,27 +1025,20 @@ export class YdocAdapterSession {
         "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.",
       );
     }
-    const durableUpdate = durableState.update;
-    const durableDoc = new Y.Doc();
-    declareDohcRootSchema(durableDoc, this.contentKind);
-    Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
-    const recoveryDoc = new Y.Doc();
-    declareDohcRootSchema(recoveryDoc, this.contentKind);
-    Y.applyUpdate(recoveryDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
-    Y.applyUpdate(recoveryDoc, refusedUpdate, LOCAL_EDITOR_ORIGIN);
+    const durableVector = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(durableState.update));
+    const acknowledgedVector = Y.decodeStateVector(Y.encodeStateVector(this.acknowledgedDoc));
+    if ([...acknowledgedVector].some(([client, clock]) => (durableVector.get(client) ?? 0) < clock)) {
+      await this.requestRecoveryBase(Y.encodeStateAsUpdate(this.acknowledgedDoc));
+    }
+    Y.applyUpdate(this.acknowledgedDoc, durableState.update);
+    Y.applyUpdate(this.doc, durableState.update, ENGINE_DELIVERED_ORIGIN);
+  }
 
-    // Pull any durable daemon-side state first, then replay exactly the
-    // refused transaction it is missing, re-encoded against that durable
-    // state. Later queued editor updates remain ordered behind this recovery
-    // and retain their own actor provenance. If the original request committed
-    // but its response was lost, the resync contains it and no replay remains.
-    Y.applyUpdate(this.doc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
-    const replay = Y.encodeStateAsUpdate(
-      recoveryDoc,
-      Y.encodeStateVector(durableDoc),
-    );
-    if (replay.byteLength <= 2) return undefined;
-    return await this.requestRecordUpdate(replay, options);
+  private async recoverCanonicalState(
+    record: LocalUpdateRecord,
+  ): Promise<YdocRecordUpdateResult> {
+    await this.mergeRecoveryState();
+    return this.requestRecordUpdate(record);
   }
 
   async settle(options?: { summary?: string }): Promise<YdocSettleResult> {
@@ -1043,6 +1097,16 @@ export class YdocAdapterSession {
     return () => this.durableLocalChangeListeners.delete(handler);
   }
 
+  onLocalUpdateAcknowledged(handler: (id: string) => void): () => void {
+    this.localUpdateAcknowledgedListeners.add(handler);
+    return () => this.localUpdateAcknowledgedListeners.delete(handler);
+  }
+
+  onLocalUpdateRefused(handler: (id: string, error: unknown) => void): () => void {
+    this.localUpdateRefusedListeners.add(handler);
+    return () => this.localUpdateRefusedListeners.delete(handler);
+  }
+
   onOwnerDraftChanged(handler: () => void): () => void {
     this.ownerDraftChangedListeners.add(handler);
     return () => this.ownerDraftChangedListeners.delete(handler);
@@ -1086,6 +1150,7 @@ export class YdocAdapterSession {
     }
     try {
       Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
+      Y.applyUpdate(this.acknowledgedDoc, update);
     } catch (cause) {
       const error = new RemoteYdocApplyError({
         attemptedUpdate: update,
@@ -1139,8 +1204,19 @@ export class YdocAdapterSession {
         if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
         const update = result.update;
         if (!this.continuesLineage(result)) {
+          const refusal = new YdocAdapterError("lineage-changed",
+            "The document lineage changed. The earlier edits cannot enter this lineage.");
+          for (const record of this.pendingRecords) {
+            record.refusal = refusal;
+            this.removePendingRecord(record);
+          }
+          // The new lineage replaces the acknowledged baseline as well.
+          this.acknowledgedDoc.destroy();
+          this.acknowledgedDoc = new Y.Doc();
+          declareDohcRootSchema(this.acknowledgedDoc, this.contentKind);
+          Y.applyUpdate(this.acknowledgedDoc, update);
           const replacement = new Y.Doc();
-          declareDohcRootSchema(replacement);
+          declareDohcRootSchema(replacement, this.contentKind);
           Y.applyUpdate(replacement, update, ENGINE_DELIVERED_ORIGIN);
           replacement.on("update", this.handleDocUpdate);
           this.activeDoc.off("update", this.handleDocUpdate);
@@ -1154,6 +1230,7 @@ export class YdocAdapterSession {
             listener(replacement, result.recoveredPaths);
           }
         } else {
+          Y.applyUpdate(this.acknowledgedDoc, update);
           Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
         }
         // The event baseline is preserved across resync: transport event seqs
@@ -1249,6 +1326,9 @@ export class YdocAdapterSession {
     }
     this.closed = true;
     this.durableLocalChangeListeners.clear();
+    this.localUpdateAcknowledgedListeners.clear();
+    this.localUpdateRefusedListeners.clear();
+    this.acknowledgedDoc.destroy();
     this.ownerDraftChangedListeners.clear();
     this.doc.off("update", this.handleDocUpdate);
     for (const retired of this.retiredDocs) retired.destroy();
@@ -1273,6 +1353,9 @@ export class YdocAdapterSession {
     }
     this.closed = true;
     this.durableLocalChangeListeners.clear();
+    this.localUpdateAcknowledgedListeners.clear();
+    this.localUpdateRefusedListeners.clear();
+    this.acknowledgedDoc.destroy();
     this.ownerDraftChangedListeners.clear();
     this.doc.off("update", this.handleDocUpdate);
     for (const retired of this.retiredDocs) retired.destroy();
@@ -1302,6 +1385,7 @@ export class YdocAdapterSession {
             : new Map<string, number>(),
         capture?.seedUpdate ?? false,
       );
+      if (capture?.originalUpdate !== undefined) return;
       const operation = this.enqueueRecordUpdate(
         update,
         capture?.options,
@@ -1315,7 +1399,7 @@ export class YdocAdapterSession {
         if (this.activeLocalRecordCapture !== null) {
           this.activeLocalRecordCapture.rejection = rejection;
         }
-        this.quarantine(rejection);
+        if (!isYdocUpdateAdmissionRefusal(rejection)) this.quarantine(rejection);
         this.surfaceSessionError(rejection);
       } else {
         this.surfaceSessionError(error);
@@ -1327,10 +1411,12 @@ export class YdocAdapterSession {
     mutation: () => void,
     options?: ApplyLocalUpdateOptions,
     seedUpdate = false,
+    originalUpdate?: Uint8Array,
   ): Promise<YdocRecordUpdateResult | undefined> {
     this.assertRecordable();
     const capture: LocalRecordCapture = {
-      options,
+      options: options === undefined ? undefined : structuredClone(options),
+      originalUpdate,
       before: snapshotDocUtf16(this.doc),
       beforeState: Y.encodeStateAsUpdate(this.doc),
       seedUpdate,
@@ -1342,7 +1428,9 @@ export class YdocAdapterSession {
       this.activeLocalRecordCapture = null;
     }
     if (capture.rejection !== undefined) throw capture.rejection;
-    return capture.operation ?? Promise.resolve(undefined);
+    return originalUpdate === undefined
+      ? capture.operation ?? Promise.resolve(undefined)
+      : this.enqueueRecordUpdate(originalUpdate, capture.options, seedUpdate);
   }
 
   private quarantine(cause: unknown): void {

@@ -233,6 +233,25 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error);
 }
 
+// Retryability does not prove non-admission: cancellation or an internal
+// failure can answer after the spawned record task commits. Only input and
+// permission refusals prove that this original did not land.
+export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
+  const wire = error instanceof DaemonRefusalError
+    ? { code: error.wireCode, retry: error.retry }
+    : wireErrorFrom(error);
+  return wire?.retry === "no" &&
+    ["INVALID_PARAMS", "LIMIT_EXCEEDED", "FORBIDDEN", "SHARE_READ_ONLY",
+      "PAYLOAD_TOO_LARGE", "AUTHORSHIP_MISMATCH"].includes(wire.code) &&
+    !isTransientEngineRefusal(error) &&
+    !isDaemonReconnectError(error) &&
+    !isYdocSessionNotFoundRefusal(error) &&
+    !isConflictStaleTargetRefusal(error) &&
+    !["ydoc-lineage-stale", "lineage-changed", "lineage-write-stale", "lineage-epoch-changed", "lineage-predecessor-mismatch",
+      "lineage-state-vector-mismatch"].includes(refusalMessageOf(error) ?? "") &&
+    !isYdocRemoteUpdatesPendingRefusal(error);
+}
+
 // The store refusals the desktop names and recovers from. Each is the
 // storage crate's `code()` for the variant.
 const ENGINE_STORE_REFUSALS = [

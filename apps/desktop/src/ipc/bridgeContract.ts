@@ -5965,6 +5965,7 @@ export type ReadEngineYDocArtifactAssetResult = z.infer<
 
 export const ApplyEngineYDocUpdatePayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
+  requestId: z.string().uuid(),
   update: ENGINE_YDOC_UPDATE,
   lineageGeneration: z.number().int().positive(),
   // Monotonic per-session local-edit counter. Main echoes the seq a settle
@@ -6052,6 +6053,12 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 // never carried.
 export const EngineYDocSaveStateEvent = z.object({
   authorCapacity: z.boolean().optional(),
+  editRefusal: z.object({
+    workspaceId: WORKSPACE_ID,
+    path: z.string(),
+    requestId: z.string(),
+    message: z.string(),
+  }).optional(),
   sessionId: ENGINE_YDOC_SESSION_ID,
   state: z.enum(ENGINE_YDOC_SAVE_STATES),
   seq: z.number().int().nonnegative(),

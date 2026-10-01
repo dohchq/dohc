@@ -817,6 +817,18 @@ export function DesktopWorkspaceShell(props: {
     (message: string, cause?: unknown) => reportShellFailure({ message, cause }),
     [reportShellFailure],
   );
+  useEffect(() => {
+    const owner = workspaceId;
+    return bridge().onEngineYDocSaveState((event) => {
+      const refusal = event.editRefusal;
+      if (!refusal || refusal.workspaceId !== owner || workspaceIdRef.current !== owner) return;
+      reportShellFailure({
+        message: refusal.message,
+        cause: new Error(refusal.message),
+        kind: "live-edit-refused",
+      });
+    });
+  }, [workspaceId, reportShellFailure]);
   // The workspace's Button runs report through this shell's toasts, so they go with it.
   useEffect(() => () => disposeAutomationButtons(workspaceId), [workspaceId]);
   const onWorkspaceSettingsRead = useSettingsFileNotices({

@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./daemon": "./src/daemon/index.ts",
     "./limits": "./src/versioned/engineTextLimits.ts",
+    "./ydoc-limits": "./src/ydoc/ydocPendingLimits.ts",
     "./testing": "./src/testing/index.ts"
   },
   "scripts": {

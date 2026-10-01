@@ -455,6 +455,16 @@ export class YdocLoopbackEngine implements EngineTransport {
     return project(this.requireSession(sessionId));
   }
 
+  // Inject loss of a generation's native state while the adapter still owns
+  // acknowledged history. Recovery must establish that base before originals.
+  discardSessionState(sessionId: string): void {
+    const session = this.requireSession(sessionId);
+    session.doc.destroy();
+    session.doc = declaredDoc(session.contentKind);
+    this.lineages.delete(this.lineageKeyFor(session));
+    session.firstUpdatePending = true;
+  }
+
   applyRemoteUpdate(
     sessionId: string,
     update: Uint8Array,
@@ -642,14 +652,15 @@ export class YdocLoopbackEngine implements EngineTransport {
     const seed = optionalBoolean(params, "seed") ?? false;
     // A seed can only be the first update of a lineage-absent session —
     // mirrors the daemon refusal in crates/dohc-workspace-engine/src/lib.rs.
-    if (seed && !(session.lineageAbsentAtOpen && session.firstUpdatePending)) {
-      throw seedNotFirstUpdateRefusal();
-    }
-    const payload = `${this.lineageKeyFor(session)}\0${sha256(update)}`;
+    const payload = JSON.stringify([this.lineageKeyFor(session), sha256(update),
+      params.actorOriginId ?? null, params.attribution ?? null, seed]);
     const recorded = this.recordRequests.get(request.idempotencyKey);
     if (recorded !== undefined) {
       if (recorded.payload !== payload) throw idempotencyKeyReuseRefusal();
       return recorded.result;
+    }
+    if (seed && !(session.lineageAbsentAtOpen && session.firstUpdatePending)) {
+      throw seedNotFirstUpdateRefusal();
     }
     const validationDoc = declaredDoc(session.contentKind);
     Y.applyUpdate(validationDoc, Y.encodeStateAsUpdate(session.doc));

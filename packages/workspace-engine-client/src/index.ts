@@ -12,6 +12,7 @@ export {
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
   isIdempotencyKeyReuseRefusal,
+  isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocAuthorCapacityRefusal,
   isWorkspaceUpdatingRefusal,
@@ -33,6 +34,8 @@ export {
   YdocOpenTimedOutError,
   type EngineTransport,
 } from "./ydoc/ydocLiveAdapter";
+export { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "./ydoc/ydocPendingLimits";
+export { ydocUpdateDependsOn } from "./ydoc/ydocUpdateDependencies";
 export {
   YdocReleasedWithSettleFailureError,
   openEngineYdocProviderSession,

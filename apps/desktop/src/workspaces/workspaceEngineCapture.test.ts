@@ -4051,3 +4051,86 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     await engine.stop();
   });
 });
+
+
+it.each(["agent", "typing"])("reopens after a daemon crash by replaying original pending authors instead of a mixed delta (%s)", async mode => {
+  const root = await createTestScratch("dohc-authored-replay-");
+  const loopback = new VersionedLoopbackEngine();
+  const path = "notes/originals.txt";
+  loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, text: "abc" });
+  const seed = new Y.Doc();
+  seed.getText("plainText").insert(0, "abc");
+  const initial = Y.encodeStateAsUpdate(seed);
+  const source = new Y.Doc();
+  Y.applyUpdate(source, initial);
+  const originals: Uint8Array[] = [];
+  source.on("update", update => originals.push(new Uint8Array(update)));
+  source.getText("plainText").delete(0, 1);
+  source.getText("plainText").insert(2, "d");
+  let opens = 0;
+  let available = false;
+  const replayed: Array<{ update: Uint8Array; options: Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1] }> = [];
+  const attempted: typeof replayed = [];
+  const engine = capture(root, {
+    rustEngineSessions: mockLiveSessions(loopback),
+    openRustYDocProviderSession: async options => {
+      opens += 1;
+      if (opens > 1 && !available) throw new Error("daemon is restarting");
+      const first = opens === 1;
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, initial);
+      return {
+        doc, initialUpdate: initial, contentKind: "plaintext", path: options.path,
+        head: "present", lineage: "existing", unsettled: false,
+        async applyLocalUpdate(update, applyOptions) {
+          const captured = { update: new Uint8Array(update), options: structuredClone(applyOptions) };
+          Y.applyUpdate(doc, update);
+          if (first) {
+            attempted.push(captured);
+            throw Object.assign(new Error("daemon exited"), { code: "transport-error" });
+          }
+          replayed.push(captured);
+          options.onLocalUpdateAcknowledged?.(applyOptions?.idempotencyKey ?? "");
+        },
+        settleNow: async () => ({ momentId: "moment-a", path: options.path, sha256: "a".repeat(64), content: doc.getText("plainText").toString(), materialized: true,
+          projection: { contentKind: "plaintext", sourceStateVectorSha256: "b".repeat(64), destructive: false } }),
+        close: async () => undefined, evict: async () => undefined,
+      } satisfies EngineYdocProviderSession;
+    },
+  });
+  const session = await engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
+  const alice = { actorOriginId: "alice-agent", attribution: { actorKind: "agent" as const, onBehalfOf: "alice", depth: 1 } };
+  if (mode === "typing") {
+    session.applyLocalUpdate(originals[0]!, undefined, { ...alice, idempotencyKey: "renderer-alice" });
+    await session.applyDecidedLocalUpdate(() => null);
+  } else {
+    await session.applyDecidedLocalUpdate(() => originals[0]!, undefined, alice);
+  }
+  const attribution = { actorKind: "automation" as const, onBehalfOf: "bob", depth: 3,
+    run: { claimId: "run-b", automationName: "Original name" } };
+  const bob = { actorOriginId: "bob-automation", attribution };
+  let second: Promise<boolean>;
+  if (mode === "typing") {
+    session.applyLocalUpdate(originals[1]!, undefined, { ...bob, idempotencyKey: "renderer-bob" });
+    second = session.applyDecidedLocalUpdate(() => null);
+  } else {
+    second = session.applyDecidedLocalUpdate(() => originals[1]!, undefined, bob);
+  }
+  attribution.run.automationName = "Renamed";
+  attribution.depth = 8;
+  await second;
+  available = true;
+  await expect(session.settleNow()).resolves.toMatchObject({ content: "bcd" });
+  expect(replayed).toHaveLength(2);
+  expect(replayed.map(record => record.update)).toEqual(originals);
+  expect(replayed[0]?.options).toMatchObject(attempted[0]?.options ?? {});
+  expect(replayed[1]?.options).toMatchObject({ actorOriginId: "bob-automation",
+    attribution: { onBehalfOf: "bob", depth: 3, run: { claimId: "run-b", automationName: "Original name" } } });
+  expect(replayed.every(record => typeof record.options?.idempotencyKey === "string")).toBe(true);
+  const replayCount = replayed.length;
+  await session.settleNow();
+  expect(replayed).toHaveLength(replayCount);
+  await session.close({ settle: false });
+  await engine.stop();
+  seed.destroy(); source.destroy();
+});

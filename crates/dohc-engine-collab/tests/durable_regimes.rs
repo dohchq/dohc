@@ -275,7 +275,7 @@ fn local_append_defaults_validate_before_transaction_and_require_a_marker() {
 }
 
 #[test]
-fn local_append_request_replay_distinguishes_all_lineage_guards() {
+fn local_append_request_replay_validates_the_current_lineage_guard() {
     let mut ts = fresh_store("local-append-guard-identity");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -335,7 +335,7 @@ fn local_append_request_replay_distinguishes_all_lineage_guards() {
         );
         let before = record_update_transaction_fingerprint(&ts.store, &key);
         for guard in other_guards {
-            let error = record_local_update(
+            let replay = record_local_update(
                 &mut ts.store,
                 &mut ts.cache,
                 &key,
@@ -349,9 +349,12 @@ fn local_append_request_replay_distinguishes_all_lineage_guards() {
                 &NoFaults,
                 1_200,
                 |_, _, _| panic!("a changed guard must not reach post-append"),
-            )
-            .expect_err("request replay binds the original lineage guard");
-            assert!(matches!(error, CollabError::IdempotencyKeyReused));
+            );
+            if matches!(guard, LineageGuard::Expect(None)) {
+                assert!(matches!(replay, Err(CollabError::LineageWriteStale { .. })));
+            } else {
+                assert!(committed(replay.expect("current guard permits exact replay")).deduped);
+            }
         }
         let error = record_local_update(
             &mut ts.store,
@@ -4272,4 +4275,212 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("an empty onBehalfOf is refused");
+}
+
+#[test]
+fn original_record_replay_after_compaction_and_restart_binds_complete_attribution() {
+    use dohc_engine_domain::{AutomationRunAttribution, ChangeActorKind, ChangeAttribution};
+
+    let dir = unique_dir("original-record-replay");
+    let mut store = open_at(dir.path(), 1_000);
+    let mut cache = WriterDocCache::new();
+    let key = test_key();
+    seed_parents(&mut store, &key, 1_000);
+    let doc = Ydoc::wire();
+    let update = doc.plaintext_insert(0, "original");
+    let attribution = ChangeAttribution {
+        actor_kind: ChangeActorKind::Automation,
+        on_behalf_of: Some("alice".into()),
+        depth: 2,
+        run: Some(AutomationRunAttribution {
+            claim_id: "run-a".into(),
+            automation_name: "Original name".into(),
+        }),
+    };
+    let marker = Some(MarkerCreation {
+        path: Some("notes/original.txt"),
+        content_kind: ContentKind::Plaintext,
+        regime: Regime::LocalOnly,
+    });
+    let append = LocalAppend {
+        marker,
+        actor_origin_id: Some("automation-a"),
+        attribution: Some(&attribution),
+        request_id: Some("original-request"),
+        lineage_guard: LineageGuard::Expect(None),
+        ..Default::default()
+    };
+    let first = committed(
+        record_local_update(
+            &mut store,
+            &mut cache,
+            &key,
+            &update,
+            append,
+            &NoFaults,
+            1_100,
+            |tx, _, _| {
+                dohc_engine_collab::claim_base_in_tx(
+                    tx,
+                    &key,
+                    ContentKind::Plaintext,
+                    &doc.encode_full_state(),
+                    &doc.encode_state_vector(),
+                    1_100,
+                )?;
+                Ok(())
+            },
+        )
+        .expect("original append"),
+    );
+    let claim = read_marker(&store, &key)
+        .unwrap()
+        .unwrap()
+        .lineage_claim_id
+        .unwrap();
+    let deletion = doc.plaintext_delete(0, 1);
+    let delete_attribution = ChangeAttribution {
+        actor_kind: ChangeActorKind::Agent,
+        on_behalf_of: Some("bob".into()),
+        depth: 1,
+        run: None,
+    };
+    let delete_append = LocalAppend {
+        marker,
+        actor_origin_id: Some("deleting-agent"),
+        attribution: Some(&delete_attribution),
+        request_id: Some("original-deletion"),
+        lineage_guard: LineageGuard::Expect(Some(&claim)),
+        ..Default::default()
+    };
+    let deleted = committed(
+        record_local_update(
+            &mut store,
+            &mut cache,
+            &key,
+            &deletion,
+            delete_append,
+            &NoFaults,
+            1_150,
+            |_, _, _| Ok(()),
+        )
+        .expect("original deletion"),
+    );
+    committed(maybe_compact(&mut store, &key, 0, &NoFaults, 1_200).expect("compact originals"));
+    drop(store);
+    let mut store = reopen(dir.path());
+    let mut cache = WriterDocCache::new();
+    let before = record_update_transaction_fingerprint(&store, &key);
+    let replay = committed(
+        record_local_update(
+            &mut store,
+            &mut cache,
+            &key,
+            &update,
+            LocalAppend {
+                marker,
+                actor_origin_id: Some("automation-a"),
+                attribution: Some(&attribution),
+                request_id: Some("original-request"),
+                lineage_guard: LineageGuard::Expect(Some(&claim)),
+                ..Default::default()
+            },
+            &NoFaults,
+            2_100,
+            |_, _, _| Ok(()),
+        )
+        .expect("lost acknowledgement retry"),
+    );
+    assert!(replay.deduped);
+    assert_eq!(replay.seq, first.seq);
+    assert_eq!(record_update_transaction_fingerprint(&store, &key), before);
+
+    let delete_replay = committed(
+        record_local_update(
+            &mut store,
+            &mut cache,
+            &key,
+            &deletion,
+            delete_append,
+            &NoFaults,
+            2_150,
+            |_, _, _| panic!("replay must not append"),
+        )
+        .expect("deletion lost-ack replay after compaction and restart"),
+    );
+    assert!(delete_replay.deduped);
+    assert_eq!(delete_replay.seq, deleted.seq);
+    assert_eq!(record_update_transaction_fingerprint(&store, &key), before);
+    assert_eq!(
+        load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .plaintext_string(),
+        "riginal"
+    );
+
+    let changed_bytes = doc.plaintext_insert(7, " changed");
+    for change in [
+        "actor",
+        "kind",
+        "delegation",
+        "depth",
+        "run",
+        "name",
+        "bytes",
+        "missing attribution",
+    ] {
+        let mut changed = attribution.clone();
+        match change {
+            "kind" => {
+                changed.actor_kind = ChangeActorKind::Agent;
+                changed.run = None;
+            }
+            "delegation" => changed.on_behalf_of = Some("bob".into()),
+            "depth" => changed.depth = 3,
+            "run" => changed.run.as_mut().expect("run").claim_id = "run-b".into(),
+            "name" => changed.run.as_mut().expect("run").automation_name = "New name".into(),
+            _ => {}
+        }
+        let error = record_local_update(
+            &mut store,
+            &mut cache,
+            &key,
+            if change == "bytes" {
+                &changed_bytes
+            } else {
+                &update
+            },
+            LocalAppend {
+                marker,
+                actor_origin_id: Some(if change == "actor" {
+                    "automation-b"
+                } else {
+                    "automation-a"
+                }),
+                attribution: if change == "missing attribution" {
+                    None
+                } else {
+                    Some(&changed)
+                },
+                request_id: Some("original-request"),
+                lineage_guard: LineageGuard::Expect(Some(&claim)),
+                ..Default::default()
+            },
+            &NoFaults,
+            2_200,
+            |_, _, _| panic!("changed reuse must not admit a record"),
+        )
+        .expect_err(change);
+        assert!(
+            matches!(error, CollabError::IdempotencyKeyReused),
+            "{change}"
+        );
+        assert_eq!(
+            record_update_transaction_fingerprint(&store, &key),
+            before,
+            "{change}"
+        );
+    }
 }

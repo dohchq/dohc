@@ -69,6 +69,8 @@ let closeRefusal: unknown = null;
 // Refuses the next journal write once, the way the daemon refuses it on the
 // wire, then lets later writes (the adapter's recovery included) through.
 let nextRecordRefusal: unknown = null;
+let nextOpenRefusal: unknown = null;
+let busyRecordAttempts = 0;
 // Records the next journal write, then loses its answer with the connection;
 // the resync that recovery sends next is lost the same way.
 let loseNextRecordAnswer = false;
@@ -116,6 +118,15 @@ function daemonSessions(): EngineWorkspaceSessions {
       }
       if (request.method === "ydoc.close" && closeRefusal !== null) {
         throw closeRefusal;
+      }
+      if (request.method === YDOC_METHOD.open && nextOpenRefusal !== null) {
+        const refusal = nextOpenRefusal;
+        nextOpenRefusal = null;
+        throw refusal;
+      }
+      if (request.method === YDOC_METHOD.recordUpdate && busyRecordAttempts > 0) {
+        busyRecordAttempts -= 1;
+        throw wireRefusal("engine-store-busy", "OVERLOADED");
       }
       if (
         request.method === YDOC_METHOD.recordUpdate &&
@@ -218,6 +229,8 @@ beforeEach(async () => {
   settleRefusal = null;
   closeRefusal = null;
   nextRecordRefusal = null;
+  nextOpenRefusal = null;
+  busyRecordAttempts = 0;
   loseNextRecordAnswer = false;
   loseNextResync = false;
   captureErrors = [];
@@ -1219,7 +1232,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
   })).resolves.toEqual({ path: PATH, changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
 
   // Now the editor sends its typing and takes the agent's edit.
-  expect(ipc.applyUpdate(sender, { sessionId: "editor", update: typed!, seq: 1, lineageGeneration: 1 }))
+  expect(ipc.applyUpdate(sender, { sessionId: "editor", update: typed!, seq: 1, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111" }))
     .toEqual({ accepted: true });
   for (const { channel, payload } of sent) {
     if (channel === CHANNELS.engineYDocRemoteUpdate) {
@@ -1244,6 +1257,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
 function keyedWrite(
   session: Awaited<ReturnType<typeof capture.openYDocSession>>,
   text: string,
+  idempotencyKey = "claim/1/0",
 ): Promise<boolean> {
   return session.applyDecidedLocalUpdate(
     (doc) => {
@@ -1254,7 +1268,7 @@ function keyedWrite(
       return Y.encodeStateAsUpdate(scratch, before);
     },
     undefined,
-    { idempotencyKey: "claim/1/0" },
+    { idempotencyKey },
   );
 }
 
@@ -1265,23 +1279,30 @@ function journalMarkdown(): string {
 }
 
 it("refuses a reused idempotency key with other content, and none of that content lands", async () => {
+  const notices = vi.fn();
+  const replacements = vi.fn();
   const session = await capture.openYDocSession({
     path: PATH,
     onRemoteUpdate: () => undefined,
+    onEditRefused: notices,
+    onLineageReplaced: replacements,
   });
   await keyedWrite(session, "First attempt.");
   await session.settleNow();
 
-  const refused = expect(keyedWrite(session, "Changed retry.")).rejects.toThrow(
-    "idempotency-key-reuse-mismatch",
-  );
-  await session.settleNow();
-  await refused;
+  await Promise.all([
+    expect(keyedWrite(session, "Changed retry.")).rejects.toThrow(
+      "idempotency-key-reuse-mismatch",
+    ),
+    session.settleNow(),
+  ]);
 
   expect(await readFile(join(root, PATH), "utf8")).not.toContain("Changed retry.");
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Changed retry.");
   expect(journalMarkdown()).not.toContain("Changed retry.");
   expect(captureErrors).toEqual([]);
+  expect(notices).not.toHaveBeenCalled();
+  expect(replacements).not.toHaveBeenCalled();
 
   // The session still takes ordinary writes, and they land beside the first.
   session.applyLocalUpdate((() => {
@@ -1297,6 +1318,87 @@ it("refuses a reused idempotency key with other content, and none of that conten
   expect(settled).toContain("Next edit.");
   expect(settled).not.toContain("Changed retry.");
   await session.close({ settle: false });
+});
+
+it("reports exactly one notice when local typing reuses a key with other content", async () => {
+  const notices = vi.fn();
+  const replacements = vi.fn();
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onEditRefused: notices,
+    onLineageReplaced: replacements,
+  });
+  await keyedWrite(session, "First attempt.");
+  await session.settleNow();
+
+  const editor = new Y.Doc();
+  Y.applyUpdate(editor, Y.encodeStateAsUpdate(session.doc));
+  const before = Y.encodeStateVector(editor);
+  typeIntoBody(editor, "Refused typing.");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+  await session.settleNow();
+
+  expect(captureErrors).toEqual([`Y.Doc local update of ${PATH}`]);
+  expect(notices).toHaveBeenCalledTimes(1);
+  expect(notices).toHaveBeenCalledWith("claim/1/0", expect.stringContaining("Use Save copy"));
+  expect(replacements).toHaveBeenCalledTimes(1);
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused typing.");
+  expect(journalMarkdown()).not.toContain("Refused typing.");
+  expect(await readFile(join(root, PATH), "utf8")).not.toContain("Refused typing.");
+  await session.settleNow();
+  await session.close({ settle: false });
+  expect(captureErrors).toHaveLength(1);
+  expect(notices).toHaveBeenCalledTimes(1);
+  editor.destroy();
+});
+
+it("keeps typing queued in main when a keyed caller write is refused", async () => {
+  const notices = vi.fn();
+  const remoteOrigin = Symbol("renderer-remote");
+  let editor = new Y.Doc();
+  const replacements = vi.fn((update: Uint8Array) => {
+    editor.destroy();
+    editor = new Y.Doc();
+    Y.applyUpdate(editor, update, remoteOrigin);
+  });
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: update => Y.applyUpdate(editor, update, remoteOrigin),
+    onEditRefused: notices,
+    onLineageReplaced: replacements,
+  });
+  Y.applyUpdate(editor, session.initialUpdate, remoteOrigin);
+  editor.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin !== remoteOrigin) session.applyLocalUpdate(update);
+  });
+
+  nextRecordRefusal = wireRefusal("attribution depth exceeds the supported chain bound");
+  const refusedWrite = expect(keyedWrite(session, "Refused write.")).rejects.toThrow(
+    "attribution depth exceeds the supported chain bound",
+  );
+  // The keyed write owns the next turn. Typing enters main's queue before
+  // the refusal is answered, without depending on the caller's scratch doc.
+  typeIntoBody(editor, "Queued typing.");
+  await refusedWrite;
+  await session.settleNow();
+
+  for (const content of [
+    documentMarkdown(Y.encodeStateAsUpdate(editor)),
+    documentMarkdown(Y.encodeStateAsUpdate(session.doc)),
+    journalMarkdown(),
+    await readFile(join(root, PATH), "utf8"),
+  ]) {
+    expect(content).toContain("Queued typing.");
+    expect(content).not.toContain("Refused write.");
+  }
+  expect(captureErrors).toEqual([]);
+  expect(notices).not.toHaveBeenCalled();
+  expect(replacements).not.toHaveBeenCalled();
+  await session.close({ settle: false });
+  editor.destroy();
 });
 
 it("refuses a reused key that a busy store first turned away, and never resends it without the key", async () => {
@@ -1321,7 +1423,7 @@ it("refuses a reused key that a busy store first turned away, and never resends 
   expect(await readFile(join(root, PATH), "utf8")).not.toContain("Changed retry.");
 });
 
-it("answers success when a recorded keyed write's answer is lost, without resending what the engine holds", async () => {
+it("retries a lost keyed acknowledgement with the original record and no second admission", async () => {
   const session = await capture.openYDocSession({
     path: PATH,
     onRemoteUpdate: () => undefined,
@@ -1331,23 +1433,74 @@ it("answers success when a recorded keyed write's answer is lost, without resend
   loseNextResync = true;
   await keyedWrite(session, "Recorded once.");
 
-  // Recovery lost its resync too, so the session was rebuilt. The rebuilt
-  // session already holds the write, so the client's resend changes nothing
-  // and sends nothing: the one keyed request is the first.
+  // The replacement asks the durable ledger about the original record.
   expect(methodCount(YDOC_METHOD.open)).toBe(opensBefore + 1);
   const keyed = requests.filter(
     (request) =>
       request.method === YDOC_METHOD.recordUpdate &&
       request.idempotencyKey === "claim/1/0",
   );
-  expect(keyed).toHaveLength(1);
+  expect(keyed).toHaveLength(2);
+  expect(keyed[1]?.params).toMatchObject({ ...(keyed[0]?.params as Record<string, JsonValue>), sessionId: expect.any(String) });
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Recorded once.");
   await session.settleNow();
   expect(await readFile(join(root, PATH), "utf8")).toContain("Recorded once.");
   await session.close({ settle: false });
 });
 
-it("refuses a keyed update that only deletes, before sending it", async () => {
+it("drops a definitively refused caller-confirmed original so later typing can settle", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  nextRecordRefusal = wireRefusal("attribution depth exceeds the supported chain bound");
+  await expect(keyedWrite(session, "Refused write.")).rejects.toThrow("attribution depth exceeds the supported chain bound");
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused write.");
+  expect(requests.filter(request => request.idempotencyKey === "claim/1/0")).toHaveLength(1);
+
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Later typing.");
+  await session.settleNow();
+  const content = await readFile(join(root, PATH), "utf8");
+  expect(content).toContain("Later typing.");
+  expect(content).not.toContain("Refused write.");
+  await session.close({ settle: false });
+  editor.destroy();
+});
+
+it.each(["confirmed write", "typing"])("drops only the refused original during recovery triggered by %s", async trigger => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  // No answer proves whether the original reached the engine. A failed reopen
+  // leaves it pending until a later operation revives the session.
+  nextRecordRefusal = transportLost();
+  loseNextResync = true;
+  nextOpenRefusal = new Error("replacement unavailable");
+  await expect(keyedWrite(session, "Uncertain original.", "uncertain-original"))
+    .rejects.toThrow("may have been recorded");
+  nextRecordRefusal = wireRefusal("attribution depth exceeds the supported chain bound");
+
+  if (trigger === "confirmed write") {
+    await expect(keyedWrite(session, "Later write.", "later-original")).resolves.toBe(true);
+    expect(requests.filter(request => request.idempotencyKey === "later-original")).toHaveLength(1);
+  } else {
+    const editor = mirrorEditor(session);
+    typeIntoBody(editor, "Later write.");
+    await session.applyDecidedLocalUpdate(() => null);
+    editor.destroy();
+  }
+  await session.settleNow();
+  const original = requests.filter(request => request.idempotencyKey === "uncertain-original");
+  expect(original).toHaveLength(2);
+  expect(original[1]!.params).toEqual({
+    ...(original[0]!.params as Record<string, JsonValue>), sessionId: expect.any(String),
+  });
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Later write.");
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Uncertain original.");
+  expect(journalMarkdown()).not.toContain("Uncertain original.");
+  const content = await readFile(join(root, PATH), "utf8");
+  expect(content).toContain("Later write.");
+  expect(content).not.toContain("Uncertain original.");
+  await session.close({ settle: false });
+});
+
+it("records a keyed deletion with its original ID", async () => {
   const session = await capture.openYDocSession({
     path: PATH,
     onRemoteUpdate: () => undefined,
@@ -1363,8 +1516,66 @@ it("refuses a keyed update that only deletes, before sending it", async () => {
     session.applyDecidedLocalUpdate(() => Y.encodeStateAsUpdate(scratch, before), undefined, {
       idempotencyKey: "claim/1/0",
     }),
-  ).rejects.toThrow("must insert content");
-  expect(methodCount(YDOC_METHOD.recordUpdate)).toBe(recordsBefore);
-  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Start here.");
+  ).resolves.toBe(true);
+  expect(methodCount(YDOC_METHOD.recordUpdate)).toBe(recordsBefore + 1);
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Start here.");
   await session.close({ settle: false });
+});
+
+it("keeps typing records pending through a busy store without reopening or relabeling", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  const scratch = new Y.Doc();
+  Y.applyUpdate(scratch, session.initialUpdate);
+  let original: Uint8Array | undefined;
+  scratch.once("update", (update: Uint8Array) => { original = new Uint8Array(update); });
+  typeIntoBody(scratch, "Busy typing.");
+  const opens = methodCount(YDOC_METHOD.open);
+  busyRecordAttempts = 2;
+  const attribution = { actorKind: "human" as const, onBehalfOf: "alice", depth: 0 };
+  session.applyLocalUpdate(original!, undefined, { idempotencyKey: "renderer-busy", attribution });
+  attribution.onBehalfOf = "bob";
+  // Drain main's queue. The provider still holds the two refused attempts.
+  await session.applyDecidedLocalUpdate(() => null);
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Busy typing.");
+  await session.settleNow();
+  const records = requests.filter(request => request.idempotencyKey === "renderer-busy");
+  expect(records).toHaveLength(3);
+  expect(records.map(request => request.params)).toEqual([records[0]!.params, records[0]!.params, records[0]!.params]);
+  expect(records[0]!.params).toMatchObject({ attribution: { onBehalfOf: "alice" } });
+  expect(methodCount(YDOC_METHOD.open)).toBe(opens);
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Busy typing.");
+  await session.close({ settle: false });
+  scratch.destroy();
+});
+
+it("does not replay acknowledged agent originals when a later original loses its answer", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  const scratch = new Y.Doc();
+  Y.applyUpdate(scratch, session.initialUpdate);
+  const originals: Uint8Array[] = [];
+  scratch.on("update", (update: Uint8Array) => { originals.push(new Uint8Array(update)); });
+  typeIntoBody(scratch, "Acknowledged agent.");
+  await session.applyDecidedLocalUpdate(() => originals[0]!, undefined,
+    { actorOriginId: "alice-agent", attribution: { actorKind: "agent", onBehalfOf: "alice", depth: 1 } });
+  const admitted = ydoc.recordedUpdates.length;
+  const opens = methodCount(YDOC_METHOD.open);
+  typeIntoBody(scratch, "Lost answer.");
+  loseNextRecordAnswer = true;
+  loseNextResync = true;
+  await session.applyDecidedLocalUpdate(() => originals[1]!, undefined,
+    { actorOriginId: "bob-agent", attribution: { actorKind: "agent", onBehalfOf: "bob", depth: 3 } });
+  const alice = requests.filter(request => request.method === YDOC_METHOD.recordUpdate &&
+    (request.params as { actorOriginId?: string }).actorOriginId === "alice-agent");
+  const bob = requests.filter(request => request.method === YDOC_METHOD.recordUpdate &&
+    (request.params as { actorOriginId?: string }).actorOriginId === "bob-agent");
+  expect(alice).toHaveLength(1);
+  expect(bob).toHaveLength(2);
+  expect(bob[1]!.idempotencyKey).toBe(bob[0]!.idempotencyKey);
+  expect(bob[1]!.params).toEqual({ ...(bob[0]!.params as Record<string, JsonValue>), sessionId: expect.any(String) });
+  expect(ydoc.recordedUpdates).toHaveLength(admitted + 1);
+  expect(methodCount(YDOC_METHOD.open)).toBe(opens + 1);
+  await session.settleNow();
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Lost answer.");
+  await session.close({ settle: false });
+  scratch.destroy();
 });

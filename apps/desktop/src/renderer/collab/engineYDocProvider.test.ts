@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
+import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import {
   bindEngineYDoc,
   EngineYDocDeliveryRefusedError,
+  EngineYDocPendingLimitError,
   EngineYDocUpdateTooLargeError,
-  mergeYDocUpdatesForTransport,
   type EngineYDocBatchScheduler,
   type EngineYDocTransport,
 } from "./engineYDocProvider";
@@ -248,34 +249,86 @@ function bodyText(doc: Y.Doc): string {
   return doc.getXmlFragment("body").toString();
 }
 
-function pointerDragUpdates(frameCount: number): {
-  seed: Uint8Array;
-  updates: Uint8Array[];
-} {
-  const doc = new Y.Doc();
-  // Keep byte evidence stable across runs. Yjs otherwise assigns a random
-  // client id whose variable-width encoding changes the measurement.
-  doc.clientID = 1;
-  const element = new Y.Map<number>();
-  doc.getMap<Y.Map<number>>("elements").set("dragged", element);
-  const seed = Y.encodeStateAsUpdate(doc);
-  const updates: Uint8Array[] = [];
-  doc.on("update", (update) => updates.push(update));
-  for (let frame = 1; frame <= frameCount; frame += 1) {
-    doc.transact(() => {
-      element.set("x", frame);
-      element.set("y", frame * 2);
-    });
+async function measureProviderDelivery(kind: "text" | "scene"): Promise<{
+  requests: number;
+  p95Ms: number;
+  p99Ms: number;
+}> {
+  let now = 0;
+  let nextHandle = 0;
+  const callbacks = new Map<number, { at: number; callback: () => void }>();
+  const scheduler: EngineYDocBatchScheduler = {
+    schedule(callback, delayMs) {
+      const handle = ++nextHandle;
+      // Model one millisecond for next-turn dispatch, without IPC jitter.
+      callbacks.set(handle, { at: now + Math.max(1, delayMs), callback });
+      return handle;
+    },
+    cancel(handle) { callbacks.delete(handle as number); },
+  };
+  async function advanceTo(target: number): Promise<void> {
+    for (;;) {
+      const next = [...callbacks.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next || next[1].at > target) break;
+      now = next[1].at;
+      callbacks.delete(next[0]);
+      next[1].callback();
+      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    }
+    now = target;
   }
-  doc.destroy();
-  return { seed, updates };
-}
-
-function chunks<T>(values: T[], size: number): T[][] {
-  const result: T[][] = [];
-  for (let index = 0; index < values.length; index += size) {
-    result.push(values.slice(index, index + size));
+  const main = new Y.Doc();
+  main.clientID = 1;
+  const initializeDoc = (doc: Y.Doc): void => {
+    if (kind === "scene") doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions);
+    else doc.getText("plainText");
+  };
+  initializeDoc(main);
+  const stagedAt: number[] = [];
+  const latencies: number[] = [];
+  let acknowledged = 0;
+  let requests = 0;
+  const binding = await bindEngineYDoc({
+    initializeDoc,
+    async open() {
+      return { available: true, initialUpdate: Y.encodeStateAsUpdate(main), lineageGeneration: 1 };
+    },
+    stageLocalUpdate() { stagedAt.push(now); return stagedAt.length; },
+    applyLocalUpdate(update, sequence) {
+      requests += 1;
+      Y.applyUpdate(main, update);
+      while (acknowledged < sequence) latencies.push(now - stagedAt[acknowledged++]!);
+    },
+    onRemoteUpdate() { return () => undefined; },
+    onLineageReplacement() { return () => undefined; },
+    async acknowledgeLineageReplacement() { return []; },
+    async close() {},
+  }, scheduler);
+  binding.doc!.clientID = 2;
+  const count = kind === "scene" ? 120 : 100;
+  const interval = kind === "scene" ? 1000 / 60 : 137;
+  for (let index = 0; index < count; index += 1) {
+    await advanceTo(index * interval);
+    if (kind === "scene") {
+      binding.doc!.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).set("dragged", { x: index, y: index * 2 });
+    } else {
+      const text = binding.doc!.getText("plainText");
+      text.insert(text.length, "x");
+    }
   }
+  await advanceTo(count * interval);
+  await binding.flushPendingLocalUpdates();
+  expect([...Y.encodeStateVector(main)]).toEqual([...Y.encodeStateVector(binding.doc!)]);
+  expect([...Y.encodeStateAsUpdate(main)]).toEqual([...Y.encodeStateAsUpdate(binding.doc!)]);
+  expect(latencies).toHaveLength(count);
+  latencies.sort((a, b) => a - b);
+  const result = {
+    requests,
+    p95Ms: latencies[Math.ceil(count * 0.95) - 1]!,
+    p99Ms: latencies[Math.ceil(count * 0.99) - 1]!,
+  };
+  await binding.destroy();
+  main.destroy();
   return result;
 }
 
@@ -383,98 +436,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
-  it("measures two- and three-frame batching for a drawing-rate pointer drag", () => {
-    // Excalidraw throttles drag mutation to one call per animation frame. At
-    // 60 Hz, 120 updates model a two-second drag. Two updates span about 32 ms;
-    // three span about 48 ms. Excalidraw sends durable scene changes from each
-    // onChange, so we do not take the extra frame. The two-frame window halves
-    // transport calls and matches Excalidraw's 33 ms cursor-sync cadence.
-    // Source: https://github.com/excalidraw/excalidraw/tree/a2ec2889babf7d2295469c6d90ebe77fae57df84
-    const { seed, updates } = pointerDragUpdates(120);
-    const mergedTwoFrames = chunks(updates, 2).map((batch) =>
-      Y.mergeUpdates(batch),
-    );
-    const mergedThreeFrames = chunks(updates, 3).map((batch) =>
-      Y.mergeUpdates(batch),
-    );
-    const rawBytes = updates.reduce((sum, update) => sum + update.byteLength, 0);
-    const mergedTwoFrameBytes = mergedTwoFrames.reduce(
-      (sum, update) => sum + update.byteLength,
-      0,
-    );
-    const mergedThreeFrameBytes = mergedThreeFrames.reduce(
-      (sum, update) => sum + update.byteLength,
-      0,
-    );
-
-    const rawReceiver = new Y.Doc();
-    const twoFrameReceiver = new Y.Doc();
-    const threeFrameReceiver = new Y.Doc();
-    Y.applyUpdate(rawReceiver, seed);
-    Y.applyUpdate(twoFrameReceiver, seed);
-    Y.applyUpdate(threeFrameReceiver, seed);
-    updates.forEach((update) => Y.applyUpdate(rawReceiver, update));
-    mergedTwoFrames.forEach((update) =>
-      Y.applyUpdate(twoFrameReceiver, update),
-    );
-    mergedThreeFrames.forEach((update) =>
-      Y.applyUpdate(threeFrameReceiver, update),
-    );
-
-    expect({
-      rawCalls: updates.length,
-      rawBytes,
-      twoFrameCalls: mergedTwoFrames.length,
-      twoFrameBytes: mergedTwoFrameBytes,
-      threeFrameCalls: mergedThreeFrames.length,
-      threeFrameBytes: mergedThreeFrameBytes,
-    }).toEqual({
-      rawCalls: 120,
-      rawBytes: 2_890,
-      twoFrameCalls: 60,
-      twoFrameBytes: 2_298,
-      threeFrameCalls: 40,
-      threeFrameBytes: 2_099,
-    });
-    expect(Array.from(Y.encodeStateVector(twoFrameReceiver))).toEqual(
-      Array.from(Y.encodeStateVector(rawReceiver)),
-    );
-    expect(Array.from(Y.encodeStateAsUpdate(twoFrameReceiver))).toEqual(
-      Array.from(Y.encodeStateAsUpdate(rawReceiver)),
-    );
-    expect(Array.from(Y.encodeStateAsUpdate(threeFrameReceiver))).toEqual(
-      Array.from(Y.encodeStateAsUpdate(rawReceiver)),
-    );
-    rawReceiver.destroy();
-    twoFrameReceiver.destroy();
-    threeFrameReceiver.destroy();
-  });
-
-  it("splits a merged batch before it exceeds the existing transport byte contract", () => {
-    const { seed, updates } = pointerDragUpdates(6);
-    const maxBytes = Y.mergeUpdates(updates.slice(0, 2)).byteLength;
-    const batches = mergeYDocUpdatesForTransport(
-      updates.map((update, index) => ({ update, sequence: index + 1 })),
-      maxBytes,
-    );
-
-    expect(batches.length).toBeGreaterThan(1);
-    expect(batches.every((batch) => batch.update.byteLength <= maxBytes)).toBe(
-      true,
-    );
-    expect(batches.at(-1)?.sequence).toBe(6);
-
-    const rawReceiver = new Y.Doc();
-    const batchedReceiver = new Y.Doc();
-    Y.applyUpdate(rawReceiver, seed);
-    Y.applyUpdate(batchedReceiver, seed);
-    updates.forEach((update) => Y.applyUpdate(rawReceiver, update));
-    batches.forEach(({ update }) => Y.applyUpdate(batchedReceiver, update));
-    expect(Array.from(Y.encodeStateAsUpdate(batchedReceiver))).toEqual(
-      Array.from(Y.encodeStateAsUpdate(rawReceiver)),
-    );
-    rawReceiver.destroy();
-    batchedReceiver.destroy();
+  it("keeps text delivery on the next turn and batches a two-second 60 Hz drawing drag", async () => {
+    // This runs real provider scheduling, merging and transport delivery with
+    // a deterministic clock and an immediate main Y.Doc. It excludes IPC,
+    // disk, rendering and event-loop load from the latency measurement.
+    expect(await measureProviderDelivery("text")).toEqual({ requests: 100, p95Ms: 1, p99Ms: 1 });
+    expect((await measureProviderDelivery("scene")).requests).toBe(60);
   });
 
   it("does not lose a lineage replacement announced while open is in flight", async () => {
@@ -592,7 +559,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
-  it("coalesces consecutive local transactions and sends the newest staged sequence", async () => {
+  it("merges same-owner transactions at flush using the newest staged sequence", async () => {
     const mock = mockTransport();
     const batches = manualBatchScheduler();
     const binding = await bindEngineYDoc(mock.transport, batches.scheduler);
@@ -604,10 +571,11 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     expect(mock.staged()).toBe(3);
     expect(mock.shipped).toHaveLength(0);
-    expect(batches.delays).toEqual([32]);
+    expect(batches.delays).toEqual([0]);
     expect(batches.pendingCount()).toBe(1);
 
     await batches.runNext();
+    await binding.flushPendingLocalUpdates();
 
     expect(mock.shipped).toHaveLength(1);
     expect(mock.shippedSequences).toEqual([3]);
@@ -621,6 +589,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const mainDoc = new Y.Doc();
     mainDoc.getText("plainText").insert(0, "seed");
     const attempts: number[] = [];
+    const records: Array<{ update: Uint8Array; id: string }> = [];
     const accepted: number[] = [];
     let staged = 0;
     let rejectFirstAttempt = true;
@@ -636,10 +605,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
         staged += 1;
         return staged;
       },
-      async applyLocalUpdate(update, sequence) {
+      async applyLocalUpdate(update, sequence, _generation, requestId) {
+        records.push({ update: new Uint8Array(update), id: requestId });
         attempts.push(sequence);
         if (rejectFirstAttempt) {
           rejectFirstAttempt = false;
+          update.fill(0);
           throw new Error("IPC request rejected");
         }
         Y.applyUpdate(mainDoc, update);
@@ -661,23 +632,26 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const mirror = binding.doc!;
 
     mirror.getText("plainText").insert(4, "-one");
+    mirror.getText("plainText").insert(8, "-extra");
     await batches.runNext();
-    expect(attempts).toEqual([1]);
+    expect(attempts).toEqual([2]);
     expect(accepted).toEqual([]);
-    expect(batches.delays).toEqual([32, 250]);
+    expect(batches.delays).toEqual([0, 250]);
 
     // This delta advances the same Yjs client clock and depends on the batch
     // that just failed. It is staged while that batch is awaiting retry.
-    mirror.getText("plainText").insert(8, "-two");
-    expect(staged).toBe(2);
+    mirror.getText("plainText").insert(14, "-two");
+    expect(staged).toBe(3);
 
     await batches.runNext();
-    expect(attempts).toEqual([1, 1]);
-    expect(accepted).toEqual([1]);
+    expect(attempts).toEqual([2, 2]);
+    expect(accepted).toEqual([2]);
     await batches.runNext();
-    expect(attempts).toEqual([1, 1, 2]);
-    expect(accepted).toEqual([1, 2]);
-    expect(mainDoc.getText("plainText").toString()).toBe("seed-one-two");
+    expect(attempts).toEqual([2, 2, 3]);
+    expect(accepted).toEqual([2, 3]);
+    expect(records[1]).toEqual(records[0]);
+    expect(records[2]?.id).not.toBe(records[0]?.id);
+    expect(mainDoc.getText("plainText").toString()).toBe("seed-one-extra-two");
     expect(Array.from(Y.encodeStateVector(mainDoc))).toEqual(
       Array.from(Y.encodeStateVector(mirror)),
     );
@@ -687,6 +661,70 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     await binding.destroy();
     mainDoc.destroy();
+  });
+  it("bounds edits retained behind an in-flight batch and preserves the full mirror on refusal", async () => {
+    const fixture = mockTransport([]);
+    const scheduler = manualBatchScheduler();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let attempts = 0;
+    fixture.transport.applyLocalUpdate = async () => { attempts += 1; await gate; };
+    let recoveredText = "";
+    let refused: unknown;
+    const binding = await bindEngineYDoc(fixture.transport, scheduler.scheduler, {
+      onDeliveryFailure(snapshot, error) {
+        const recovered = new Y.Doc();
+        Y.applyUpdate(recovered, snapshot);
+        recoveredText = recovered.getText("plainText").toString();
+        recovered.destroy();
+        refused = error;
+      },
+    });
+    const text = binding.doc!.getText("plainText");
+    text.insert(0, "x");
+    await scheduler.runNext();
+    expect(attempts).toBe(1);
+    for (let index = 1; index < YDOC_PENDING_MAX_RECORDS; index += 1) text.insert(text.length, "x");
+    expect(refused).toBeUndefined();
+    text.insert(text.length, "x");
+    expect(refused).toBeInstanceOf(EngineYDocPendingLimitError);
+    expect(recoveredText).toBe("x".repeat(YDOC_PENDING_MAX_RECORDS + 1));
+    expect(fixture.staged()).toBe(YDOC_PENDING_MAX_RECORDS);
+    text.insert(text.length, "refused");
+    expect(fixture.staged()).toBe(YDOC_PENDING_MAX_RECORDS);
+    release();
+    await binding.destroy();
+    expect(attempts).toBe(1);
+    fixture.mainDoc.destroy();
+  });
+
+  it("bounds staged bytes before the record limit and recovers the latest full state", async () => {
+    const fixture = mockTransport([]);
+    const scheduler = manualBatchScheduler();
+    const payload = "x".repeat(1024 * 1024);
+    let refused: unknown;
+    let recoveredValue: unknown;
+    const binding = await bindEngineYDoc(fixture.transport, scheduler.scheduler, {
+      onDeliveryFailure(snapshot, error) {
+        const recovered = new Y.Doc();
+        Y.applyUpdate(recovered, snapshot);
+        recoveredValue = recovered.getMap("values").get("latest");
+        recovered.destroy();
+        refused = error;
+      },
+    });
+    for (let index = 0; index < 32; index += 1) {
+      binding.doc!.getMap("values").set("latest", payload + index);
+    }
+    expect(refused).toBeInstanceOf(EngineYDocPendingLimitError);
+    expect((refused as EngineYDocPendingLimitError).observedBytes).toBeGreaterThan(YDOC_PENDING_MAX_BYTES);
+    expect((refused as EngineYDocPendingLimitError).observedRecords).toBeLessThan(YDOC_PENDING_MAX_RECORDS);
+    expect(recoveredValue).toBe(payload + 31);
+    expect(fixture.staged()).toBe(31);
+    expect(scheduler.pendingCount()).toBe(0);
+    await binding.destroy();
+    expect(fixture.shipped).toHaveLength(0);
+    fixture.mainDoc.destroy();
   });
 
   it("sets aside one oversized update and lets teardown complete", async () => {
@@ -762,14 +800,14 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const binding = await bindEngineYDoc(
       {
         ...mock.transport,
-        async applyLocalUpdate(update, sequence, generation) {
+        async applyLocalUpdate(update, sequence, generation, requestId) {
           if (refuseNext) {
             refuseNext = false;
             throw new EngineYDocUpdateTooLargeError(
               ENGINE_YDOC_UPDATE_MAX_BYTES + 1,
             );
           }
-          await baseApply(update, sequence, generation);
+          await baseApply(update, sequence, generation, requestId);
         },
       },
       batches.scheduler,

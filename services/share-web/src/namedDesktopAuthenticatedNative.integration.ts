@@ -176,8 +176,8 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
       const mirror = await bindEngineYDoc({initializeDoc(doc) {getDohcYDocBodyFragment(doc); doc.getMap("frontmatter");},
         open: () => ipc.open(sender, {workspaceId: localWorkspaceId, sessionId, path: "docs/a.md"}),
         stageLocalUpdate: () => current ? ++sequence : null,
-        applyLocalUpdate(update, seq, lineageGeneration) {
-          const result = ipc.applyUpdate(sender, {sessionId, update, seq, lineageGeneration});
+        applyLocalUpdate(update, seq, lineageGeneration, requestId) {
+          const result = ipc.applyUpdate(sender, {sessionId, update, seq, lineageGeneration, requestId});
           if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
         },
         onRemoteUpdate(listener) {
