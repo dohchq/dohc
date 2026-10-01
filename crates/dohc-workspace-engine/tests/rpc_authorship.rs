@@ -157,7 +157,7 @@ async fn hand_made_creation_and_deletion_name_the_person_as_local_file_edits() {
     assert_eq!(moments.len(), 2);
     for moment in moments {
         assert_eq!(moment["authors"], json!([person]));
-        assert_eq!(moment["origin"], "local-file");
+        assert_eq!(moment["metadataOrigin"], "local-file");
     }
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
