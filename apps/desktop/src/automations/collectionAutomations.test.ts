@@ -2064,6 +2064,7 @@ describe("Collection automations", () => {
       claimId: claim.claimId,
       state: "failed",
       error: "The record is open in a live session elsewhere.",
+      findMs: expect.any(Number), planMs: expect.any(Number), writeMs: expect.any(Number), writeCount: 1,
       trigger: { kind: "changed", recordId: task.id, by: "agent", sharedAuthor: null, depth: 0 },
       steps: [{ step: 1, writes: [{ kind: "field", recordId: task.id, path: task.path, field: "Count", before: 0, after: 1 }] }],
       failedStep: 2,

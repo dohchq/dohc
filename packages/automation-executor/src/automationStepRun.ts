@@ -234,6 +234,15 @@ async function walkSteps(
 
   const prepare = async (entry: OrderedStep): Promise<{ step: StoredStep } | { outcome: CollectionAutomationRunOutcome }> => {
     const { ordinal, step } = entry;
+    const timing = { findMs: 0, planMs: 0 };
+    let stage: keyof typeof timing = "findMs";
+    let since = dependencies.nowMs();
+    const enter = (next: keyof typeof timing) => {
+      const now = dependencies.nowMs();
+      timing[stage] += Math.max(0, now - since);
+      stage = next;
+      since = now;
+    };
     // A code file is read when its step starts; a saved step never reads it again.
     let source: string | undefined;
     if (step.kind === "run-file") {
@@ -241,10 +250,12 @@ async function walkSteps(
       if (typeof read !== "string") return { outcome: failed(read.problem) };
       source = read;
     }
+    enter("planMs");
     const names = namesUsed(step);
     // A result the step cannot read yet stops it with why when it reads it.
     const unavailable = unavailableTo(ordinal, bindings, new Set(done.keys()), names);
     for (let rereads = 0; ; rereads += 1) {
+      enter("findMs");
       const result = await backend.step(async (reads): Promise<{ step: StoredStep } | { outcome: CollectionAutomationRunOutcome }> => {
         const record = await reads.trigger();
         const bound = new Map<string, Bound>();
@@ -254,6 +265,7 @@ async function walkSteps(
           else if (result.kind === "find") bound.set(name, { kind: "find", records: await reads.bound(result.ordinal, result.refs) });
           else bound.set(name, { kind: "add", record: result.ref === null ? null : ((await reads.bound(result.ordinal, [result.ref]))[0] ?? null) });
         }
+        enter("planMs");
         const inputs = { record, bound, unavailable };
         if (step.kind === "find") {
           const values = reads.findValues(ordinal);
@@ -262,7 +274,10 @@ async function walkSteps(
           if (results === "busy") return { outcome: { kind: "wait", reason: "busy" } };
           const answers = answersOf(request, results);
           if ("error" in answers) return { outcome: failed(answers.error, answers.timedOut) };
-          const found = await reads.find(ordinal, filterValues(values, record, answers));
+          const filters = filterValues(values, record, answers);
+          enter("findMs");
+          const found = await reads.find(ordinal, filters);
+          enter("planMs");
           if ("problem" in found) return { outcome: failed(found.problem) };
           return { step: { ordinal, ...(reads.destinations ? { destinations: reads.destinations(ordinal) } : {}), effects: [], output: { kind: "find", records: found.map(refOf) } } };
         }
@@ -275,7 +290,9 @@ async function walkSteps(
         if ("problem" in codeChanges) return { outcome: failed(codeChanges.problem) };
         let codeRecords = new Map<string, RunRecord>();
         if (codeChanges.length > 0) {
+          enter("findMs");
           const checked = await reads.codeRecords(codeChanges, inputs);
+          enter("planMs");
           if ("outcome" in checked) return checked;
           codeRecords = checked.records;
         }
@@ -285,7 +302,9 @@ async function walkSteps(
         if (named.length > 0) {
           const needs = chatNeedsOf([automation]);
           for (const userId of named) needs.people.add(userId);
+          enter("findMs");
           chat = await dependencies.chat.directory(input.roster, needs);
+          enter("planMs");
           if (chat === null) return { outcome: { kind: "wait", reason: "engine" } };
         }
         const planned = planStep(ctx, entry, inputs, answers, { chat, codeChanges, codeRecords });
@@ -295,7 +314,11 @@ async function walkSteps(
         return { step: { ordinal, ...(reads.destinations ? { destinations: reads.destinations(ordinal) } : {}), effects, ...(planned.step.output ? { output: planned.step.output } : {}) } };
       });
       if (result === null) return { outcome: { kind: "wait", reason: "engine" } };
-      if (result !== "changed") return result;
+      if (result !== "changed") {
+        enter(stage);
+        if ("step" in result) Object.assign(result.step, timing);
+        return result;
+      }
       if (input.signal.aborted) return { outcome: failed(DEADLINE_ERROR, true) };
       if (rereads >= MAX_REREADS) return { outcome: failed(KEPT_CHANGING_ERROR) };
     }
@@ -316,6 +339,7 @@ async function walkSteps(
       if (input.signal.aborted) return failed(DEADLINE_ERROR, true);
       const mode: EffectMode = fresh ? "fresh" : index === firstUnrecorded ? "may-have-landed" : "resumed";
       let writes: RunWrite[];
+      const writeStarted = dependencies.nowMs();
       try {
         const applied = await backend.apply(run, effect, { index, ordinal: step.ordinal, part, mode }, messages.chat);
         if ("outcome" in applied) return applied.outcome;
@@ -327,7 +351,7 @@ async function walkSteps(
         if (error instanceof AutomationChatSessionWait) return { kind: "wait", reason: "session" };
         return input.signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
       }
-      const landed = { ordinal: step.ordinal, writes };
+      const landed = { ordinal: step.ordinal, writes, writeMs: Math.max(0, dependencies.nowMs() - writeStarted), writeCount: 1 };
       await store.appendEffect(run, landed);
       run.applied.push(landed);
     }

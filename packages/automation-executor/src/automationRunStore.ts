@@ -135,6 +135,8 @@ const CollectionRefSchema = z.object({ collectionId: z.string().min(1), path: z.
 // each Collection it writes that the run had not named before it.
 const StepSchema = z.object({
   ordinal: z.number().int().nonnegative(),
+  findMs: z.number().nonnegative().optional(),
+  planMs: z.number().nonnegative().optional(),
   effects: z.array(EffectSchema),
   output: OutputSchema.optional(),
   collections: z.array(CollectionRefSchema).optional(),
@@ -204,6 +206,14 @@ export const WriteSchema = z.union([
   // A notice the automation sent, and to whom.
   z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string(), supersededBy: z.string().optional() }),
 ]);
+// Effect application time excludes the progress append. The count is per
+// completed effect, including effects whose fields were kept or skipped.
+const AppliedSchema = z.object({
+  ordinal: z.number().int().nonnegative(),
+  writes: z.array(WriteSchema),
+  writeMs: z.number().nonnegative().optional(),
+  writeCount: z.number().int().nonnegative().optional(),
+});
 // A record the run created: the id its plan gave it, which finds it again on
 // a retry, and the id and path the engine gave it.
 const CreatedSchema = z.object({ ordinal: z.number().int().nonnegative(), planned: z.string(), recordId: z.string(), path: z.string() });
@@ -268,7 +278,7 @@ const StoredRunSchema = z.object({
   startedAtMs: z.number(),
   finishedAtMs: z.number().nullable(),
   steps: z.array(StepSchema),
-  applied: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
+  applied: z.array(AppliedSchema),
   created: z.array(CreatedSchema),
   replans: z.array(ReplanSchema),
   undoRequests: z.array(UndoRequestSchema),
@@ -324,6 +334,10 @@ export type DatasetUndoRequest = z.infer<typeof UndoRequestSchema>;
 export type DatasetUndoCall = z.infer<typeof UndoCallSchema>;
 /** One planned step: its effects, on document records or on dataset records, and its result. */
 export interface StoredStep {
+  /** Step reads and Finds, excluding planning and formula evaluation. */
+  findMs?: number;
+  /** Planning and formula evaluation, excluding reads. */
+  planMs?: number;
   destinations?: Array<{ path: string; rules: { datasetId: string; revision: number; revisionSha256: string } | null }>;
   ordinal: number;
   effects: Array<PlannedEffect | DatasetEffect>;
@@ -355,7 +369,7 @@ export interface StoredRun {
   /** The steps planned so far, in the order they ran, each saved before its first effect. */
   steps: StoredStep[];
   /** What each effect that landed did, in step order, one entry per effect. */
-  applied: Array<{ ordinal: number; writes: RunWrite[] }>;
+  applied: Array<z.infer<typeof AppliedSchema>>;
   /**
    * Records the run created, each under the id its plan gave it and the id
    * the engine gave it, saved before their fields are written.
@@ -714,7 +728,7 @@ type ProgressLine =
 
 const ProgressLineSchema = z.union([
   StepSchema.extend({ kind: z.literal("step") }),
-  z.object({ kind: z.literal("effect"), ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) }),
+  AppliedSchema.extend({ kind: z.literal("effect") }),
   CreatedSchema.extend({ kind: z.literal("created") }),
   ReplanSchema.extend({ kind: z.literal("replan") }),
   UndoRequestSchema.extend({ kind: z.literal("undo-request") }),
@@ -814,7 +828,10 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         for (const named of step.collections ?? []) {
           if (!run.collections.some((known) => known.collectionId === named.collectionId)) run.collections.push(named);
         }
-      } else if (entry.data.kind === "effect") run.applied.push({ ordinal: entry.data.ordinal, writes: entry.data.writes });
+      } else if (entry.data.kind === "effect") {
+        const { kind: _kind, ...applied } = entry.data;
+        run.applied.push(applied);
+      }
       else if (entry.data.kind === "replan") run.replans.push({ effect: entry.data.effect, replan: entry.data.replan, version: entry.data.version, fields: entry.data.fields, kept: entry.data.kept });
       else if (entry.data.kind === "undo-request") {
         const { kind: _kind, ...request } = entry.data;

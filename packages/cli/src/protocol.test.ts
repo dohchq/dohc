@@ -287,6 +287,9 @@ describe("collection result schemas", () => {
       failedStep: null, startsOver: false,
     };
     expect(parseCliResult("automationRun", { ok: true, run })).toEqual({ ok: true, run });
+    const timed = { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 2 };
+    expect(parseCliResult("automationRun", { ok: true, run: timed })).toEqual({ ok: true, run: timed });
+    expect(() => parseCliResult("automationRun", { ok: true, run: { ...timed, writeCount: -1 } })).toThrow();
   });
 
   it("refuses a result that does not match the verb", () => {
