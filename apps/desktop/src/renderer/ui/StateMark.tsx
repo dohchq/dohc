@@ -142,7 +142,9 @@ export function StateMark(props: {
       data-testid={props.testId}
       data-state={props.state}
       title={props.title ?? presentation.title}
-      className={`inline-flex items-center gap-1.5 font-mono text-[11px] ${MARK_TONE[presentation.mark]} ${props.className ?? ""}`}
+      // A 16px line box: the 11px face's default is 16.5px, and a half-pixel
+      // chip moves everything under it by half a pixel.
+      className={`inline-flex items-center gap-1.5 font-mono text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.className ?? ""}`}
     >
       <Mark kind={presentation.mark} />
       {presentation.label}
